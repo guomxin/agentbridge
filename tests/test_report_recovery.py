@@ -41,9 +41,16 @@ class ReportRecoveryTests(unittest.TestCase):
                             rid,status=db.execute('SELECT id,status FROM reports').fetchone()
                         self.assertEqual(status,'ready' if stage=='ready' else 'running')
                         kill_fixture_process(process)
-                        reports.cleanup()
-                        with closing(sqlite3.connect(reports.path)) as db:
-                            status=db.execute('SELECT status FROM reports').fetchone()[0]
+                        # Windows taskkill can return before the child interpreter
+                        # has released its OS lease. Observe bounded convergence.
+                        deadline = time.monotonic() + 5
+                        while True:
+                            reports.cleanup()
+                            with closing(sqlite3.connect(reports.path)) as db:
+                                status=db.execute('SELECT status FROM reports').fetchone()[0]
+                            if status != 'running' or time.monotonic() >= deadline:
+                                break
+                            time.sleep(.02)
                         self.assertEqual(status,'ready' if stage=='ready' else 'failed')
                         self.assertEqual(reports.payloads.path(rid).exists(),stage=='ready')
                         with patch.object(reports.runtime,'_execute',side_effect=AssertionError('must not replay')):
