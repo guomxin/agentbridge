@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "9301ac6132db"
+    "9932b93849fe"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Clarify explicit Skill selection precedence and separate Skill loading from atomic or durable execution routes. No schema or permission migration."
+  "reason": "Synchronize Skill group selection and remove manual default source input. No schema or permission migration."
 }

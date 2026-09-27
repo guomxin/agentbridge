@@ -689,7 +689,7 @@ async function openSkillConfig(userSubject = null) {
     const selected = config.value[item.id];
     if (!userSubject) return `<label>${escapeHtml(item.name)} · ${escapeHtml(item.version)}<select name="status:${item.id}">${["enabled", "trial", "disabled"].map(status => `<option value="${status}" ${(selected || item.default_status) === status ? "selected" : ""}>${{enabled:"可用",trial:"试用",disabled:"停用"}[status]}</option>`).join("")}</select></label>`;
     const reasons = Object.values(item.profiles).flatMap(p => p.missing);
-    return `<fieldset class="scope-group"><legend><label class="check"><input type="checkbox" name="skill" value="${item.id}" ${selected ? "checked" : ""}>${escapeHtml(item.name)}</label></legend><p>${escapeHtml(item.description)}</p><p class="muted">${escapeHtml(item.status === "trial" ? "试用" : item.status === "disabled" ? "全局已停用" : "可用")} · ${escapeHtml(reasons.join("；") || "执行时再次检查权限与所选来源")}</p><div class="checkbox-grid">${item.profile_choices.map(p => `<label class="check"><input type="checkbox" name="profiles:${item.id}" value="${p}" ${!selected || selected.profiles.includes(p) ? "checked" : ""}>${labels[p] || escapeHtml(p)}</label>`).join("")}</div>${item.requires_source ? `<label>默认数据源（可留空，使用时选择）<input name="source:${item.id}" value="${escapeHtml(selected?.source_id || "")}" maxlength="64"></label>` : ""}<label>输出详细程度<select name="detail:${item.id}">${["brief","standard","detailed"].map(d => `<option value="${d}" ${(selected?.detail || "standard") === d ? "selected" : ""}>${{brief:"简要",standard:"标准",detailed:"详细"}[d]}</option>`).join("")}</select></label></fieldset>`;
+    return `<fieldset class="scope-group"><legend><label class="check"><input type="checkbox" name="skill" value="${item.id}" ${selected ? "checked" : ""}>${escapeHtml(item.name)}</label></legend><p>${escapeHtml(item.description)}</p><p class="muted">${escapeHtml(item.status === "trial" ? "试用" : item.status === "disabled" ? "全局已停用" : "可用")} · ${escapeHtml(reasons.join("；") || "执行时再次检查权限与所选来源")}</p><div class="checkbox-grid">${item.profile_choices.map(p => `<label class="check"><input type="checkbox" name="profiles:${item.id}" value="${p}" ${selected?.profiles.includes(p) ? "checked" : ""}>${labels[p] || escapeHtml(p)}</label>`).join("")}</div>${item.requires_source ? `<p class="muted">执行时从用户已获准的数据源中选择；只有一个适用来源时自动选择。</p>` : ""}<label>输出详细程度<select name="detail:${item.id}">${["brief","standard","detailed"].map(d => `<option value="${d}" ${(selected?.detail || "standard") === d ? "selected" : ""}>${{brief:"简要",standard:"标准",detailed:"详细"}[d]}</option>`).join("")}</select></label></fieldset>`;
   }).join("");
   openModal({title:userSubject ? `业务助手 · ${userSubject}` : "业务助手全局状态", submit:editable ? "保存" : "关闭",
     body:`<p>业务助手不增加业务权限。保存后下次调用生效，无需换发令牌；已提交操作继续核验。</p><fieldset ${editable ? "" : "disabled"}>${rows}</fieldset>${editable ? reasonField() : ""}`,
@@ -698,11 +698,31 @@ async function openSkillConfig(userSubject = null) {
       const value = {};
       for (const item of config.items) {
         if (!userSubject) value[item.id] = form.get(`status:${item.id}`);
-        else if (form.getAll("skill").includes(item.id)) value[item.id] = {profiles:form.getAll(`profiles:${item.id}`),source_id:form.get(`source:${item.id}`) || "",detail:form.get(`detail:${item.id}`)};
+        else {
+          const profiles = form.getAll(`profiles:${item.id}`);
+          if (profiles.length) value[item.id] = {profiles, source_id:"", detail:form.get(`detail:${item.id}`)};
+        }
       }
       await api("/api/skills", {method:"POST",body:JSON.stringify({user_subject:userSubject,value,expected_revision:config.revision,reason:form.get("reason")})});
       closeModal(); toast("业务助手配置已保存");
     }});
+  if (userSubject) {
+    for (const group of $("#modal-body").querySelectorAll(".scope-group")) {
+      const parent = group.querySelector('input[name="skill"]');
+      const children = [...group.querySelectorAll('input[name^="profiles:"]')];
+      const sync = () => {
+        const count = children.filter(child => child.checked).length;
+        parent.checked = count === children.length && count > 0;
+        parent.indeterminate = count > 0 && count < children.length;
+      };
+      parent.addEventListener("change", () => {
+        for (const child of children) child.checked = parent.checked;
+        sync();
+      });
+      for (const child of children) child.addEventListener("change", sync);
+      sync();
+    }
+  }
 }
 
 async function openUserGrants(userSubject) {

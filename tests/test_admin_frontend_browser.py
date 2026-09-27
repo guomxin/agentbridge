@@ -169,7 +169,9 @@ def test_skill_configuration_is_scoped_and_auditor_is_readonly(console):
                     page.get_by_role("button", name="fixture-user用户操作").click()
                     page.locator('[data-skill-user="fixture-user"]').click()
                     expect(page.locator('#modal')).to_be_visible()
-                expect(page.locator('#modal input[name="skill"]:checked')).to_have_count(1)
+                expect(page.locator('#modal input[name="skill"]:checked')).to_have_count(0)
+                assert page.locator('#modal input[name="skill"][value="oa-work-log"]').evaluate("e => e.indeterminate")
+                expect(page.locator('#modal input[name^="source:"]')).to_have_count(0)
                 expect(page.locator('#modal [name="profiles:oa-work-log"][value="fill"]')).not_to_be_checked()
                 if role == "auditor":
                     expect(page.locator('#modal input[name="skill"]:disabled')).to_have_count(5)
