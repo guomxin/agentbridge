@@ -20,7 +20,7 @@ CAPABILITIES = {
     'database.directory': '人员、部门和项目检索（用于消歧及选择查询条件）',
     'database.logs.query': '日志正文检索（日期、人员、当前部门、项目、字面关键词，支持分页与来源）',
     'database.logs.analyze': '日志统计分析（按日、月、人员、部门或项目）',
-    'database.logs.content_analyze': '日志内容分析（总结、主题、进展、问题、经验、协作、变化；返回证据，由当前智能体归纳）',
+    'database.logs.content_analyze': '日志正文证据读取（筛选、分页、段落及来源；不生成总结或业务判断，归纳方法由适用业务助手提供）',
     'database.comments.analyze': '日志评论分析（评论及关联日志正文；反馈、问答与跟进证据）',
     'database.free.read': '高级：自由只读查询分析（此数据源全部开放对象，支持两时间窗口比较）',
     'database.report.export': '导出 CSV 并下载（需同时具备原查询能力，重新执行查询）',

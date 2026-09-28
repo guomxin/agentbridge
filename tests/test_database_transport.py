@@ -83,7 +83,8 @@ class TransportTests(unittest.TestCase):
                     self.assertLessEqual(response_chars({'status':'succeeded',**result}),budget)
                     self.assertNotIn('executed_sql',result)
                     self.assertNotIn('columns',result)
-                    self.assertIn('review_contract',result['analysis'])
+                    self.assertNotIn('review_contract',result['analysis'])
+                    self.assertEqual(result['analysis']['status'], 'evidence_ready')
                     self.assertEqual(len(result['analysis']['coverage_manifest']),result['returned'])
                     self.assertIn('passages',result['rows'][0])
 

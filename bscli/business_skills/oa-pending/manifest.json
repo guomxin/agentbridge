@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "oa-pending",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "name": "OA 待办办理",
   "description": "对已支持的 OA 待办核对处理依据，通过可信卡完成单项或逐项办理，并核验处理结果。",
   "executionMode": "controlled_action",
@@ -51,5 +51,14 @@
         "oa.resignation.approve"
       ]
     }
+  },
+  "selection": {
+    "use_when": "办理或审批 OA 待办中的具体事项，或批量推进一类待办。",
+    "not_for": "仅查看待办列表、事项详情、已办或会议室申请；没有办理意图的查询。",
+    "output": "已核对业务依据的办理确认卡，授权后按受控流程执行与验证。"
+  },
+  "required_resources": {
+    "single": [],
+    "batch": []
   }
 }

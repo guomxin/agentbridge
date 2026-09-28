@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "similar-cases",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "name": "相似案例检索",
   "description": "从日志中检索类似问题，核对相关性并归并同一事件及后续记录，输出处理措施、明确结果、适用条件、差异和出处。",
   "executionMode": "read_exploration",
@@ -22,5 +22,15 @@
         ]
       }
     }
+  },
+  "selection": {
+    "use_when": "为某类问题寻找可参考的历史处理案例、措施、结果及适用条件。",
+    "not_for": "仅查原始日志或关键词匹配数量；跟进一个指定事项；概括人员全部工作。",
+    "output": "按事件归并的相关案例、处理办法、明确结果、差异与来源。"
+  },
+  "required_resources": {
+    "search": [
+      "references/evidence.md"
+    ]
   }
 }

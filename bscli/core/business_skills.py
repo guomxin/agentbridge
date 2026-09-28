@@ -27,6 +27,19 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def skill_bundle(binding):
+    """Load the pinned entrypoint and profile requirements, never a caller path."""
+    snapshot = binding["snapshot"]
+    manifest = snapshot["manifest"]
+    # Historical v1 snapshots predate the declaration; their references were mandatory.
+    required = manifest.get("required_resources", {}).get(binding["profile"], manifest.get("resources", []))
+    names = [manifest["entrypoint"], *required]
+    if any(name not in snapshot["resources"] for name in names):
+        raise SkillRejected("SKILL_VERSION_UNAVAILABLE", "业务助手必读资料不完整，请联系管理员")
+    return {"loaded_resources": names,
+            "content": "\n\n".join(f"## {name}\n\n{snapshot['resources'][name]}" for name in names)}
+
+
 class SkillRegistry:
     def __init__(self, root=None):
         root = root or files("bscli.business_skills")
@@ -62,6 +75,19 @@ class SkillRegistry:
                 raise ValueError("Skill resource budget exceeded")
             if not manifest.get("profiles") or manifest.get("executionMode") not in {"read_exploration", "durable_plan", "controlled_action"}:
                 raise ValueError("invalid Skill execution contract")
+            selection = manifest.get("selection")
+            if not isinstance(selection, dict) or set(selection) != {"use_when", "not_for", "output"} or any(
+                not isinstance(v, str) or not v.strip() or len(v) > 500 for v in selection.values()
+            ):
+                raise ValueError("invalid Skill selection contract")
+            required = manifest.get("required_resources")
+            if not isinstance(required, dict) or set(required) != set(manifest["profiles"]):
+                raise ValueError("invalid Skill required resources by profile")
+            for names in required.values():
+                if not isinstance(names, list) or any(not isinstance(n, str) for n in names) or len(names) != len(set(names)) or any(
+                    n == "SKILL.md" or n not in resources for n in names
+                ):
+                    raise ValueError("invalid Skill required resource")
             from bscli.core.user_grants import PERMISSIONS
             for profile, requirements in manifest["profiles"].items():
                 if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", profile) or not isinstance(requirements, dict) or set(requirements) - {"all", "any", "database"}:
@@ -131,6 +157,7 @@ class SkillStore:
         payload = {"skill_id": sid[:80], "name": item["manifest"]["name"] if item else "未知业务助手",
                    "profile": profile[:80], "status": result.get("status"),
                    "version": result.get("version"), "error_code": (result.get("error") or {}).get("code"),
+                   "loaded_resources": result.get("loaded_resources", []),
                    "message": (result.get("error") or {}).get("message")}
         event_id = str(uuid4())
         dedupe = result.get("binding_id") or event_id
@@ -299,6 +326,7 @@ def skill_catalog(service, subject, *, include_all=False):
         manifest = item["manifest"]
         profiles = settings["profiles"] if settings else list(manifest["profiles"])
         items.append({"id": sid, "name": manifest["name"], "description": manifest["description"],
+                      "selection": manifest["selection"],
                       "version": manifest["version"], "content_hash": item["content_hash"],
                       "status": global_config["value"].get(sid, manifest.get("status", "trial")),
                       "assigned": bool(settings), "settings": settings,

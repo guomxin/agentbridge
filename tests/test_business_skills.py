@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.business_skills import SkillRegistry, SkillRejected, SkillStore, skill_catalog, dependency_state, validate_binding
+from bscli.core.business_skills import SkillRegistry, SkillRejected, SkillStore, skill_catalog, dependency_state, validate_binding, skill_bundle
 from bscli.core.central_service import CentralCapabilityService
 from bscli.core.user_grants import UserGrantConflict
 
@@ -146,6 +146,42 @@ class BusinessSkillsTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 5)
         self.assertNotIn("resources", result["items"][0])
         self.assertTrue(all("SKILL.md" in item["resources"] for item in self.store.registry.items.values()))
+        self.assertTrue(all(set(item["selection"]) == {"use_when", "not_for", "output"} for item in result["items"]))
+
+    def test_bundle_is_profile_scoped_and_historical_snapshot_is_pinned(self):
+        item = copy.deepcopy(self.store.registry.get("log-review"))
+        binding = {"snapshot": item, "profile": "review"}
+        bundled = skill_bundle(binding)
+        self.assertEqual(bundled["loaded_resources"], ["SKILL.md", "references/evidence.md"])
+        self.assertIn(item["resources"]["references/evidence.md"], bundled["content"])
+        item["resources"]["optional.md"] = "not required"
+        self.assertNotIn("not required", skill_bundle(binding)["content"])
+        item["manifest"]["required_resources"]["preview"] = []
+        self.assertEqual(skill_bundle({**binding, "profile": "preview"})["loaded_resources"], ["SKILL.md"])
+        del item["manifest"]["required_resources"]
+        self.assertEqual(skill_bundle(binding)["loaded_resources"], bundled["loaded_resources"])
+        del item["resources"]["references/evidence.md"]
+        with self.assertRaisesRegex(SkillRejected, "必读资料"):
+            skill_bundle(binding)
+
+    def test_invalid_required_resources_and_selection_fail_at_registry_load(self):
+        root = Path(self.temp.name) / "packages"
+        shutil.copytree(Path("bscli/business_skills"), root)
+        path = root / "log-review/manifest.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for required in ({}, {"review": ["missing.md"]}, {"review": ["SKILL.md"]},
+                         {"review": ["references/evidence.md"] * 2}, {"review": "references/evidence.md"}):
+            with self.subTest(required=required):
+                path.write_text(json.dumps({**original, "required_resources": required}), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "required resource"):
+                    SkillRegistry(root)
+        path.write_text(json.dumps({**original, "selection": {"use_when": "anything"}}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "selection"):
+            SkillRegistry(root)
+        path.write_text(json.dumps(original), encoding="utf-8")
+        (root / "log-review/references/evidence.md").unlink()
+        with self.assertRaises(FileNotFoundError):
+            SkillRegistry(root)
 
     def test_load_cards_are_deduplicated_and_scoped_to_user(self):
         result = {"status": "succeeded", "binding_id": "binding", "version": "1.0.0"}
@@ -180,6 +216,19 @@ class BusinessSkillsTests(unittest.TestCase):
             result = call("agentbridge_skill_get", {"skill_id":"oa-work-log", "profile":"preview", "expected_version":self.store.registry.get("oa-work-log")["manifest"]["version"]})
             self.assertFalse(result.get("isError"), result)
             binding = result["structuredContent"]["binding_id"]
+            self.assertEqual(result["structuredContent"]["loaded_resources"], ["SKILL.md"])
+            self.assertNotIn("resource", result["structuredContent"])
+            mismatch = call("agentbridge_skill_get", {"skill_id":"oa-work-log", "profile":"preview", "expected_version":"0.0.1"}, binding=binding)
+            self.assertEqual(mismatch["structuredContent"]["error"]["code"], "SKILL_VERSION_CHANGED")
+            self.assertEqual(self.store.load_history("alice")[0]["status"], "rejected")
+            # Real host load includes references without allowing the host to select a file.
+            self.assign({"oa-work-log": {"profiles": ["preview", "fill"]}, "log-review": {"profiles": ["review"]}}, 1)
+            with patch("bscli.database.independent.IndependentDatabase.catalog", return_value={"sources": [
+                {"source_id":"a", "capabilities":[{"name":"database.directory"}, {"name":"database.logs.query"}]}]}):
+                loaded = call("agentbridge_skill_get", {"skill_id":"log-review", "profile":"review", "source_id":"a"})["structuredContent"]
+                self.assertEqual(loaded["loaded_resources"], ["SKILL.md", "references/evidence.md"])
+                self.assertIn("结论核对", loaded["content"])
+            self.assertEqual(self.store.load_history("alice")[0]["loaded_resources"], loaded["loaded_resources"])
             self.assertEqual(self.store.load_history("alice")[0]["status"], "succeeded")
             denied = call("agentbridge_skill_get", {"skill_id":"oa-work-log", "profile":"preview"}, user="bob", binding=binding)
             self.assertEqual(denied["structuredContent"]["error"]["code"], "SKILL_BINDING_INVALID")
@@ -187,7 +236,7 @@ class BusinessSkillsTests(unittest.TestCase):
                 allowed = call("oa_workflow_pending_list", binding=binding)
                 self.assertFalse(allowed.get("isError"), allowed)
                 invoke.assert_called_once()
-                self.assign({}, 1)
+                self.assign({}, 2)
                 blocked = call("oa_workflow_pending_list", binding=binding)
                 self.assertTrue(blocked["isError"])
                 self.assertEqual(invoke.call_count, 1)

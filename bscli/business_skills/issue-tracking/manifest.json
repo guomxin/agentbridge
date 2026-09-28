@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "issue-tracking",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "name": "事项进展追踪",
   "description": "基于同一事项的连续日志关联处理过程，区分建议、实施、复测和复发，输出带来源的时间线、当前证据状态及缺口。",
   "executionMode": "read_exploration",
@@ -22,5 +22,15 @@
         ]
       }
     }
+  },
+  "selection": {
+    "use_when": "围绕一个明确事项或工作主题，关联连续记录判断推进过程、当前状态、后续验证或复发。",
+    "not_for": "汇总一个人或部门的全部工作；仅查看某条记录；检索不同事件的相似处理办法。",
+    "output": "同一事项的来源时间线、当前证据状态与缺口。"
+  },
+  "required_resources": {
+    "track": [
+      "references/evidence.md"
+    ]
   }
 }

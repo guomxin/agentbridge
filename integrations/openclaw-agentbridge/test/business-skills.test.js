@@ -16,10 +16,22 @@ test("business Skill binding is isolated by router, identity, session and run", 
 
 test("directory is fetched fresh and full instructions are not preloaded", async () => {
   let count=0;
-  const identity={client:{callTool:async(name)=>{assert.equal(name,"agentbridge_skill_catalog");count++;return {items:count===1?[{id:"review",name:"复核",description:"复核事项",version:"1",profiles:{},content:"private full instructions"}]:[]};}}};
+  const identity={client:{callTool:async(name)=>{assert.equal(name,"agentbridge_skill_catalog");count++;return {items:count===1?[{id:"review",name:"复核",description:"复核事项",selection:{use_when:"汇总工作",not_for:"原始记录",output:"来源总结"},version:"1",profiles:{},content:"private full instructions"}]:[]};}}};
   const context=await businessSkillContext(identity);
   assert.match(context,/agentbridge_skill_get/);
+  assert.match(context,/"use_when":"汇总工作"/);
+  assert.match(context,/"not_for":"原始记录"/);
+  assert.match(context,/一次返回主说明/);
   assert.ok(!context.includes("private full instructions"));
   assert.equal(await businessSkillContext(identity),null);
   assert.equal(count,2);
+});
+
+test("published Skill load schema does not expose file selection", async () => {
+  const {readFile} = await import("node:fs/promises");
+  const catalog = JSON.parse(await readFile(new URL("../lib/agentbridge-tools.json", import.meta.url),"utf8"));
+  const load = catalog.tools.find(t=>t.name==="agentbridge_skill_get");
+  assert.ok(load);
+  assert.equal(load.inputSchema.properties.resource, undefined);
+  assert.deepEqual(load.inputSchema.required, ["skill_id", "profile"]);
 });

@@ -1572,7 +1572,7 @@ function renderSkillCard(event) {
   status.textContent = event.status === "succeeded" ? "已加载" : "加载失败";
   const description = document.createElement("p");
   description.textContent = event.status === "succeeded"
-    ? `${skillProfileLabel(event.profile)} · 版本 ${event.version}。已加载处理规则，业务执行结果请查看后续任务。`
+    ? `${skillProfileLabel(event.profile)} · 版本 ${event.version}。${event.loaded_resources?.length ? `主说明及必读资料已加载（${event.loaded_resources.length} 个文件）` : "已加载处理规则"}，业务执行结果请查看后续任务。`
     : (event.message || "助手未能加载，本次不能视为已使用该助手。");
   const time = document.createElement("small");
   time.textContent = formatTime(event.created_at);
