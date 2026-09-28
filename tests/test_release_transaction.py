@@ -187,6 +187,24 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(s.state["status"], "confirmed")
         self.assertEqual(s.active_release(), "new")
         self.assertNotIn(("ready", True), s.commands)
+        receipt = json.loads((s.directory / "deployment.json").read_text())
+        self.assertEqual(receipt["completion"]["post_release_backup"]["status"], "failed")
+        recovered = FixtureRelease(s.config, unit_root=s.unit_root)
+        recovered.state = receipt
+        recovered.commands = []
+        recovered.complete()
+        self.assertEqual(recovered.commands, [("systemctl", "start", "agentbridge-backup.service")])
+        recovered.commands.clear()
+        recovered.complete()
+        self.assertEqual(recovered.commands, [])
+
+    def test_completion_rejects_unconfirmed_or_different_current_release(self):
+        s = self.subject
+        for state in ("checking", "confirmed"):
+            s.state["status"] = state
+            with self.assertRaisesRegex(RuntimeError, "exact confirmed"):
+                s.complete()
+        self.assertEqual(s.commands, [])
 
     def test_interrupted_transaction_is_not_silently_replayed(self):
         s = self.subject

@@ -297,6 +297,7 @@ class Release:
     def execute(self):
         try:
             if not self.prepare():
+                self.complete()
                 return
         except Exception as error:
             if self.state["stages"] and self.state["status"] == "preparing":
@@ -311,18 +312,46 @@ class Release:
             except Exception as recovery_error:
                 self.stage("manual_recovery_required", recoveryError=str(recovery_error))
             raise
-        # Once confirmed, ancillary failure must not rewind an accepted service.
-        self.run("systemctl", "enable", "--now", self.service + "-backup.timer")
-        self.run("systemctl", "start", self.service + "-backup.service", timeout=400)
+        self.complete()
+
+    def complete(self):
+        """Resume only confirmed post-switch work; never re-install or rewind data."""
+        if (self.state.get("status") != "confirmed" or self.active_release() != self.release_id
+                or self.current.resolve() != self.directory):
+            raise RuntimeError("Completion requires the exact confirmed current release")
+        progress = self.state.setdefault("completion", {})
+        for phase, args in (
+            ("backup_timer", ("systemctl", "enable", "--now", self.service + "-backup.timer")),
+            ("post_release_backup", ("systemctl", "start", self.service + "-backup.service")),
+        ):
+            if progress.get(phase, {}).get("status") == "succeeded":
+                continue
+            progress[phase] = {"status": "running", "at": time.time()}
+            self.stage("confirmed", completion=progress)
+            try:
+                self.run(*args, timeout=400)
+            except Exception as error:
+                progress[phase] = {"status": "failed", "at": time.time(), "error": str(error)}
+                self.stage("confirmed", completion=progress)
+                raise
+            progress[phase] = {"status": "succeeded", "at": time.time()}
+            self.stage("confirmed", completion=progress)
 
 
 def main():
     import fcntl
     recovering = sys.argv[1] == "--recover"
-    config = json.loads(Path(sys.argv[2] if recovering else sys.argv[1]).read_text())
+    completing = sys.argv[1] == "--complete"
+    config = json.loads(Path(sys.argv[2] if recovering or completing else sys.argv[1]).read_text())
     root = Path(config["root"])
     with (root / ".release.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if completing:
+            transaction = Release(config)
+            transaction.state = json.loads((transaction.directory / "deployment.json").read_text())
+            transaction.complete()
+            transaction.ready()
+            return
         if recovering:
             transaction = Release(config)
             transaction.state = json.loads((transaction.directory / "deployment.json").read_text())

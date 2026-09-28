@@ -101,21 +101,21 @@ class RecoveryBundleTests(unittest.TestCase):
             self.create()
 
     def test_real_concurrent_commit_retries_entire_generation(self):
-        original = bundle._copy_database
+        original = bundle._pin_database
         changed = False
-        def copy(source, target, deadline):
+        def pin(source):
             nonlocal changed
-            original(source, target, deadline)
+            original(source)
             if not changed:
                 changed = True
                 with closing(sqlite3.connect(self.home / "agentbridge.db")) as c, c:
                     c.execute("INSERT INTO agent_tasks VALUES ('t2','bob')")
-        with patch.object(bundle, "_copy_database", side_effect=copy):
+        with patch.object(bundle, "_pin_database", side_effect=pin):
             backup = self.create()
         self.assertEqual(backup["attempts"], 2)
         self.assertEqual(backup["validation"]["rowCounts"]["agentbridge.db"]["agent_tasks"], 2)
 
-    def test_continuous_writes_publish_nothing(self):
+    def test_writes_during_copy_preserve_pinned_generation(self):
         original = bundle._copy_database
         def copy(source, target, deadline):
             original(source, target, deadline)
@@ -123,7 +123,20 @@ class RecoveryBundleTests(unittest.TestCase):
                 c.execute("UPDATE sessions SET state=state")
                 c.execute("INSERT INTO runtime_incidents VALUES (hex(randomblob(8)))")
         with patch.object(bundle, "_copy_database", side_effect=copy):
-            with self.assertRaisesRegex(bundle.RecoveryError, "changed"):
+            backup = self.create(attempts=2)
+        self.assertEqual(backup["attempts"], 1)
+        self.assertEqual(backup["validation"]["rowCounts"]["agentbridge.db"]["runtime_incidents"], 0)
+        with closing(sqlite3.connect(self.home / "agentbridge.db")) as c:
+            self.assertGreater(c.execute("SELECT COUNT(*) FROM runtime_incidents").fetchone()[0], 0)
+
+    def test_continuous_acquisition_conflicts_publish_nothing_with_resource_diagnostics(self):
+        original = bundle._pin_database
+        def pin(source):
+            original(source)
+            with closing(sqlite3.connect(self.home / "agentbridge.db")) as c, c:
+                c.execute("INSERT INTO runtime_incidents VALUES (hex(randomblob(8)))")
+        with patch.object(bundle, "_pin_database", side_effect=pin):
+            with self.assertRaisesRegex(bundle.RecoveryError, "acquisition: agentbridge.db"):
                 self.create(attempts=2)
         self.assertEqual(list((self.root / "backups").iterdir()), [])
 

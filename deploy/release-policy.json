@@ -2,8 +2,9 @@
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
     "fd22bd77c40c",
-    "67fe3e2f8da1"
+    "67fe3e2f8da1",
+    "e980c4664cab"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Bundle pinned Skill instructions and clarify semantic selection. No schema or permission migration; old Skill snapshots remain readable. Central tool schema and OpenClaw plugin are released together."
+  "reason": "Coordinated read snapshots, resumable post-release completion and Skill selection explanation. No schema or permission migration."
 }

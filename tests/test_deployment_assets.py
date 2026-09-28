@@ -129,7 +129,7 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertIn('self.run("systemd-analyze", "verify"', runner)
         self.assertIn('self.run("systemctl", "daemon-reload")', runner)
         self.assertIn('self.stage("confirmed")', runner)
-        self.assertIn('self.run("systemctl", "start", self.service + "-backup.service"', runner)
+        self.assertIn('("systemctl", "start", self.service + "-backup.service")', runner)
 
     def test_local_host_self_heal_and_restore_drill_are_bounded(self) -> None:
         installer = (

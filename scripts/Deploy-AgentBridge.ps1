@@ -16,6 +16,7 @@ param(
     [switch]$ForceRestartOpenClaw,
     [switch]$InstallSystemDependencies,
     [switch]$AllowDirty,
+    [switch]$ResumeCompletion,
     [switch]$PlanOnly
 )
 
@@ -93,7 +94,7 @@ $releaseId = if ($isDirty) { "$commit-dirty" } else { $commit }
 Import-Module (Join-Path $PSScriptRoot "AgentBridgeReleasePreflight.psm1") -Force
 $releasePreflight = Get-AgentBridgeReleasePreflight -HostName $HostName -SshUser $SshUser `
     -RemoteRoot $RemoteRoot -IdentityFile $IdentityFile -KnownHostsFile $KnownHostsFile `
-    -CandidateRelease $commit -PolicyPath (Join-Path $repoRoot 'deploy/release-policy.json')
+    -CandidateRelease $commit -PolicyPath (Join-Path $repoRoot 'deploy/release-policy.json') -ResumeAcceptance:$ResumeCompletion
 
 Import-Module (Join-Path $PSScriptRoot "AgentBridgeOpenClawRestartPolicy.psm1") -Force
 # RestartOpenClaw is retained as a compatible request for conditional restart.
@@ -104,6 +105,7 @@ $gatewayRestartPerformed = $false
 $plan = [ordered]@{
     status = "planned"
     releaseId = $releaseId
+    resumeCompletion = [bool]$ResumeCompletion
     releasePreflight = $releasePreflight
     target = "$SshUser@$HostName"
     remoteRoot = $RemoteRoot
@@ -190,6 +192,7 @@ $releaseConfig = @{
 } | ConvertTo-Json -Compress -Depth 10
 $releaseConfigBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($releaseConfig))
 
+if (-not $ResumeCompletion) {
 & $scp.Source @connectionArguments $wheel.FullName $remoteDestination
 if ($LASTEXITCODE -ne 0) {
     throw "Uploading the AgentBridge wheel failed"
@@ -220,6 +223,14 @@ $remoteScript = $remoteScript.Replace("__RELEASE_RUNNER__", $releaseRunnerBase64
 $remoteScript | & $ssh.Source -T @connectionArguments $target "bash -s"
 if ($LASTEXITCODE -ne 0) {
     throw "Remote AgentBridge deployment failed"
+}
+} else {
+    # The saved runner/config belong to this exact deployed candidate. No upload,
+    # package install, service switch or business replay is permitted on resume.
+    $savedRelease = "$RemoteRoot/releases/$releaseId"
+    $completeCommand = "'$savedRelease/venv/bin/python' -I '$savedRelease/release.py' --complete '$savedRelease/transaction.json'"
+    & $ssh.Source -T @connectionArguments $target $completeCommand
+    if ($LASTEXITCODE -ne 0) { throw "Confirmed release completion failed; inspect its deployment.json receipt" }
 }
 
 if ((Get-AgentBridgeOpenClawInputs -RepoRoot $repoRoot).fingerprint -ne $restartPlan.fingerprint) {

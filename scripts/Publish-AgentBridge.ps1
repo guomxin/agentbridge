@@ -139,11 +139,7 @@ $releasePreflight = Get-AgentBridgeReleasePreflight -HostName '10.10.50.213' -Ss
     -PolicyPath (Join-Path $repoRoot 'deploy/release-policy.json') -ResumeAcceptance:$ResumeAcceptance
 
 Import-Module (Join-Path $PSScriptRoot "AgentBridgeOpenClawRestartPolicy.psm1") -Force
-$restartPlan = if ($ResumeAcceptance) {
-    [pscustomobject]@{ required = $false; reason = "acceptance_only"; changedInputs = @() }
-} else {
-    Get-AgentBridgeOpenClawRestartPlan -RepoRoot $repoRoot -Force:$ForceRestartOpenClaw
-}
+$restartPlan = Get-AgentBridgeOpenClawRestartPlan -RepoRoot $repoRoot -Force:$ForceRestartOpenClaw
 $plan = [ordered]@{
     status = "planned"
     commit = $commit
@@ -174,7 +170,7 @@ if ($isDirty) {
     throw "Tracked files are modified. Commit the tested candidate before publishing."
 }
 if ($ResumeAcceptance -and ($RestartOpenClaw -or $IncludeLoginReuseSmoke)) {
-    throw "ResumeAcceptance only rechecks the existing deployment; it cannot restart or initiate login smoke."
+    throw "ResumeAcceptance resumes confirmed completion using verified input state; explicit restart or login smoke is not allowed."
 }
 if ($ResumeAcceptance -and $ForceRestartOpenClaw) {
     throw "ResumeAcceptance cannot force a Gateway restart."
@@ -225,6 +221,12 @@ if (-not $ResumeAcceptance) {
     & $deployScript @deployParameters
     if ($LASTEXITCODE -ne 0) {
         throw "AgentBridge deployment failed; GitHub push was not attempted"
+    }
+} else {
+    $deployParameters["ResumeCompletion"] = $true
+    & $deployScript @deployParameters
+    if ($LASTEXITCODE -ne 0) {
+        throw "AgentBridge completion failed; GitHub push was not attempted"
     }
 }
 

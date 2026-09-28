@@ -31,6 +31,15 @@ class RecoveryError(RuntimeError):
     pass
 
 
+class SnapshotConflict(RecoveryError):
+    """Only stable resource names/reasons, never source values or credentials."""
+
+
+def _pin_database(connection):
+    connection.execute("BEGIN")
+    connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+
+
 def _hash(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -93,8 +102,18 @@ def _snapshot(home, stage, deadline):
         versions = {name: c.execute("PRAGMA data_version").fetchone()[0]
                     for name, c in connections.items()}
         files = _inventory(home)
+        # Pin all read views within a verified commit-free acquisition interval.
+        # WAL writers may then continue while SQLite copies these fixed views.
+        readers = {name: stack.enter_context(closing(_connect(path)))
+                   for name, path in paths.items()}
+        for c in readers.values():
+            _pin_database(c)
+        changed = [name for name, c in connections.items()
+                   if c.execute("PRAGMA data_version").fetchone()[0] != versions[name]]
+        if changed:
+            raise SnapshotConflict("database commit during snapshot acquisition: " + ", ".join(changed))
         recovery_point_at = datetime.now(timezone.utc).isoformat()
-        for name, c in connections.items():
+        for name, c in readers.items():
             _copy_database(c, stage / name, deadline)
         for name in files:
             target = stage / name
@@ -102,16 +121,17 @@ def _snapshot(home, stage, deadline):
             shutil.copyfile(_safe(home, name), target)
             target.chmod(0o600)
             if _hash(target) != files[name][-1]:
-                return False
-        # All source intervals overlap the entire copy phase. A commit, replacement,
-        # deletion or protected-file change rejects the entire generation.
-        if files != _inventory(home):
-            return False
+                raise SnapshotConflict("protected file changed while copying: " + name)
+        # Files lack SQLite snapshot isolation; retain whole-copy validation.
+        after_files = _inventory(home)
+        if files != after_files:
+            changed_files = sorted(name for name in files.keys() | after_files.keys()
+                                   if files.get(name) != after_files.get(name))
+            raise SnapshotConflict("protected file inventory changed: " + ", ".join(changed_files))
         for name, c in connections.items():
             stat = paths[name].stat()
-            if ((stat.st_dev, stat.st_ino) != identities[name]
-                    or c.execute("PRAGMA data_version").fetchone()[0] != versions[name]):
-                return False
+            if (stat.st_dev, stat.st_ino) != identities[name]:
+                raise SnapshotConflict("database file replaced: " + name)
         return recovery_point_at
 
 
@@ -201,14 +221,24 @@ def create_recovery_bundle(home, output_dir, *, release_id="development", protec
     manifest_path = destination / f"agentbridge-{generation}.manifest.json"
     with tempfile.TemporaryDirectory(prefix=".recovery-", dir=destination) as temporary:
         stage = Path(temporary)
+        deadline = started + timeout_seconds
+        conflicts = []
         for attempt in range(1, attempts + 1):
             candidate = stage / str(attempt)
             candidate.mkdir(mode=0o700)
-            recovery_point_at = _snapshot(home, candidate, time.monotonic() + timeout_seconds)
-            if recovery_point_at:
+            try:
+                recovery_point_at = _snapshot(home, candidate, deadline)
                 break
+            except SnapshotConflict as error:
+                conflicts.append(str(error))
+                if attempt < attempts:
+                    delay = min(0.1 * 2 ** (attempt - 1), 1.0)
+                    if time.monotonic() + delay >= deadline:
+                        raise RecoveryError("recovery snapshot deadline exceeded; " + str(error)) from error
+                    time.sleep(delay)
         else:
-            raise RecoveryError("runtime changed during every snapshot; no recovery point published")
+            raise RecoveryError("runtime changed during every snapshot; no recovery point published; "
+                                + "; ".join(conflicts))
         validation = _validate_home(candidate, protector)
         # Read-only validation of a WAL-mode snapshot may create empty WAL/SHM
         # sidecars. Only the completed SQLite backup files and declared assets
@@ -225,7 +255,8 @@ def create_recovery_bundle(home, output_dir, *, release_id="development", protec
                     "recoveryPointAt": recovery_point_at,
                     "archiveFile": archive.name, "sha256": _hash(temporary_archive),
                     "members": members, "policy": POLICY, "validation": validation,
-                    "consistency": "unchanged-overlapping-copy-intervals", "attempts": attempt,
+                    "consistency": "coordinated-pinned-read-snapshots", "attempts": attempt,
+                    "conflicts": conflicts,
                     "durationSeconds": round(time.monotonic() - started, 3),
                     "keyProof": base64.b64encode(protector.protect(KEY_PROOF, context=KEY_CONTEXT)).decode()}
         temporary_manifest = stage / "manifest.json"
