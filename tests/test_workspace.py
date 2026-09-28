@@ -1599,8 +1599,17 @@ class WorkspaceApplicationTests(unittest.TestCase):
                     timeout_seconds=timeout_seconds,
                 )
 
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, ExitStack() as cleanup:
             service = _service(tmp)
+            clock = MutableClock()
+            clock.value = datetime.now(timezone.utc)
+            service.workspace.clock = clock
+            # This test verifies persisted restart recovery, not thread speed.
+            # Capture scheduling, then execute each claimed attempt synchronously.
+            # The neighboring dispatch tests cover actual background workers.
+            scheduled = cleanup.enter_context(
+                patch.object(WorkspaceApplication, "_ensure_dispatch_worker")
+            )
             account = _create_account(
                 service,
                 user_subject="user-a",
@@ -1611,28 +1620,36 @@ class WorkspaceApplicationTests(unittest.TestCase):
                 service=service,
                 gateway=OfflineGateway(),
             )
+            cleanup.callback(first.close)
             first.send_chat_stream(
                 account,
                 message="survive central restart",
                 idempotency_key="restart-recovery-1",
             )
-            self.assertTrue(
-                _wait_until(
-                    lambda: first.list_chat_dispatches(account)[0]["state"]
-                    == "waiting_host",
-                    timeout=3,
-                )
+            claimed = service.workspace.claim_next_host_dispatch(
+                account_id=account["account_id"],
+                claim_owner=first._dispatch_instance_id,
             )
+            self.assertIsNotNone(claimed)
+            first._process_host_dispatch(claimed)
+            waiting = service.workspace.list_host_dispatches(user_subject="user-a")[0]
+            self.assertEqual(waiting["state"], "waiting_host")
             first.close()
 
+            clock.value = datetime.fromisoformat(waiting["next_attempt_at"])
+            scheduled.reset_mock()
             gateway = FakeGateway()
             second = WorkspaceApplication(service=service, gateway=gateway)
-            self.assertTrue(
-                _wait_until(
-                    lambda: not second.list_chat_dispatches(account),
-                    timeout=5,
-                )
+            cleanup.callback(second.close)
+            scheduled.assert_called_once_with(account["account_id"])
+            resumed = service.workspace.claim_next_host_dispatch(
+                account_id=account["account_id"],
+                claim_owner=second._dispatch_instance_id,
             )
+            self.assertIsNotNone(resumed)
+            self.assertEqual(resumed["dispatch_id"], claimed["dispatch_id"])
+            second._process_host_dispatch(resumed)
+            self.assertEqual(second.list_chat_dispatches(account), [])
             dispatch = service.workspace.list_host_dispatches(
                 user_subject="user-a"
             )[0]
