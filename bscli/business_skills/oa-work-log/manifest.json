@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "oa-work-log",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "OA 事项生成工作日志",
   "description": "将 OA 已办和已发事项按来源合并、转换为工作日志草稿，校验来源完整性，提供预览或可信卡核对后提交。",
   "executionMode": "durable_plan",
@@ -22,7 +22,7 @@
     }
   },
   "selection": {
-    "use_when": "将 OA 已办、已发事项整理成工作日志草稿，或据此准备填写工作日志。",
+    "use_when": "将 OA 已办、已发事项整理成工作日志草稿，或据此准备填写工作日志。只要草稿文字时选 preview；要求填写、填单或核对填写表单时选 fill。填单仍停在可信卡核对和独立授权之前，先核对或暂不提交不等于只预览。",
     "not_for": "仅查看 OA 事项；总结已有工作日志；不基于 OA 事项的普通日志填写。",
     "output": "来源可核对的日志草稿，或等待用户核对和授权的填写卡。"
   },

@@ -3,7 +3,8 @@
   "compatibleFrom": [
     "fd22bd77c40c",
     "67fe3e2f8da1",
-    "e980c4664cab"
+    "e980c4664cab",
+    "cf36051d2e3a"
   ],
   "dataCompatibility": "no-migration",
   "reason": "Coordinated read snapshots, resumable post-release completion and Skill selection explanation. No schema or permission migration."
