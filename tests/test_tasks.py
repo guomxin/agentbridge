@@ -1186,6 +1186,59 @@ class TaskHubStoreTests(unittest.TestCase):
         self.assertEqual(reclaimed[0]["state"], "delivering")
         self.assertEqual(reclaimed[0]["attempt_count"], 1)
 
+    def test_pending_outbox_respects_retry_and_activity_delays(self):
+        for deferred in (False, True):
+            with self.subTest(deferred=deferred):
+                self.store = TaskHubStore(Path(self.temp.name) / f"delay-{deferred}.db")
+                endpoint, _ = self._endpoint()
+                self._task(endpoint["endpoint_id"])
+                args = dict(user_subject="user-a", endpoint_id=endpoint["endpoint_id"])
+                with patch("bscli.core.tasks._utc_now", return_value="2099-01-01T00:00:00+00:00"):
+                    claimed = self.store.claim_outbox(**args, limit=1)
+                self.assertEqual(len(claimed), 1)
+                delivery_id = claimed[0]["delivery_id"]
+                with patch("bscli.core.tasks._utc_after", return_value="2099-01-01T00:01:00+00:00"):
+                    self.store.acknowledge_outbox(
+                        **args, delivery_id=delivery_id, succeeded=False,
+                        retry_after_seconds=60, defer_until_activity=deferred,
+                    )
+                    if deferred:
+                        self.store.reactivate_deferred_outbox(**args, delay_seconds=60)
+                with patch("bscli.core.tasks._utc_now", return_value="2099-01-01T00:00:59+00:00"):
+                    self.assertEqual(self.store.claim_outbox(**args), [])
+                with patch("bscli.core.tasks._utc_now", return_value="2099-01-01T00:01:00+00:00"):
+                    reclaimed = self.store.claim_outbox(**args)
+                self.assertEqual([row["delivery_id"] for row in reclaimed], [delivery_id])
+                self.store.acknowledge_outbox(**args, delivery_id=delivery_id, succeeded=True)
+
+    def test_wechat_activity_suppresses_closed_task_status_but_preserves_live_work(self):
+        for status, event, expected in [
+            ("failed", "task.operation.failed", "archived"),
+            ("active", "task.operation.failed", "pending"),
+            ("succeeded", "task.artifact.ready", "pending"),
+            ("succeeded", "plan.result.ready", "pending"),
+        ]:
+            with self.subTest(status=status, event=event):
+                self.store = TaskHubStore(Path(self.temp.name) / f"{status}-{event}.db")
+                endpoint, _ = self._endpoint()
+                task, _ = self._task(endpoint["endpoint_id"])
+                args = dict(user_subject="user-a", endpoint_id=endpoint["endpoint_id"])
+                claimed = self.store.claim_outbox(**args, limit=1)[0]
+                self.store.acknowledge_outbox(
+                    **args, delivery_id=claimed["delivery_id"], succeeded=False,
+                    defer_until_activity=True,
+                )
+                with sqlite3.connect(self.store.db_path) as connection:
+                    connection.execute("UPDATE client_endpoints SET client_type = 'openclaw-weixin'")
+                    connection.execute("UPDATE agent_tasks SET status = ? WHERE task_id = ?", (status, task["task_id"]))
+                    connection.execute(
+                        "UPDATE notification_outbox SET payload_json = json_set(payload_json, '$.eventType', ?) WHERE delivery_id = ?",
+                        (event, claimed["delivery_id"]),
+                    )
+                count = self.store.reactivate_deferred_outbox(**args, delay_seconds=0)
+                self.assertEqual(count, int(expected == "pending"))
+                self.assertEqual(self.store.get_delivery(claimed["delivery_id"])["state"], expected)
+
     def test_outbox_ack_rejects_successful_activity_deferral(self):
         endpoint, _ = self._endpoint()
         self._task(endpoint["endpoint_id"])
@@ -2816,7 +2869,7 @@ class TaskHubStoreTests(unittest.TestCase):
             "Agent Workspace",
         )
 
-    def test_wechat_user_activity_reactivates_only_its_deferred_deliveries(self):
+    def test_wechat_user_activity_archives_missed_chats_without_replaying_history(self):
         service = authorized_service(
             home=Path(self.temp.name),
             base_url="http://oa.example.test/seeyon/main.do?method=main",
@@ -2896,7 +2949,7 @@ class TaskHubStoreTests(unittest.TestCase):
             label="WeChat",
         )
 
-        self.assertEqual(user["reactivatedDeliveries"], 1)
+        self.assertEqual(user["reactivatedDeliveries"], 0)
         deliveries = service.tasks.list_outbox(
             user_subject="user-a",
             endpoint_id=wechat["endpoint_id"],
@@ -2907,8 +2960,35 @@ class TaskHubStoreTests(unittest.TestCase):
             for item in deliveries
             if item["delivery_id"] == claimed["notifications"][0]["deliveryId"]
         )
-        self.assertEqual(reactivated["state"], "pending")
-        self.assertEqual(reactivated["attempt_count"], 0)
+        self.assertEqual(reactivated["state"], "archived")
+        self.assertEqual(reactivated["attempt_count"], 1)
+        self.assertEqual(service.tasks.get_timeline_message(
+            message_key="workspace-message-for-wechat",
+            user_subject="user-a",
+        )["text"], "Read OA pending workflows")
+        self.assertEqual(service.tasks.claim_outbox(
+            user_subject="user-a", endpoint_id=wechat["endpoint_id"],
+        ), [])
+
+    def test_wechat_duplicate_ingress_does_not_wake_delivery_queue(self):
+        service = authorized_service(
+            home=Path(self.temp.name),
+            base_url="http://oa.example.test/seeyon/main.do?method=main",
+        )
+        args = dict(
+            user_subject="user-a", token_id="wechat-token", agent_host="openclaw",
+            endpoint_key="openclaw-weixin:*:wechat-user-a",
+            client_type="openclaw-weixin", external_subject="wechat-user-a",
+            conversation_ref="agent:main:openclaw-weixin:direct:wechat-user-a",
+            message_key="wechat-inbound-1", role="user", text="Query OA pending items",
+        )
+        first = service.append_host_timeline_message(**args)
+        with patch.object(service.tasks, "reactivate_deferred_outbox") as reactivate:
+            duplicate = service.append_host_timeline_message(**args)
+        self.assertTrue(duplicate["reused"]["entry"])
+        self.assertEqual(duplicate["entry"]["entryId"], first["entry"]["entryId"])
+        self.assertEqual(duplicate["reactivatedDeliveries"], 0)
+        reactivate.assert_not_called()
 
     def test_central_service_returns_only_same_user_other_endpoint_context(self):
         service = authorized_service(

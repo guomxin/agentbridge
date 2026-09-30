@@ -4340,6 +4340,17 @@ test("synchronizes user and assistant text once across duplicate WeChat hooks", 
     context,
   );
   await coordinator.waitForIdle();
+  assert.equal(requests.filter((body) =>
+    body.params?.name === "agentbridge_host_timeline_append").length, 1);
+  const sent = { to: senderId, content: "Please confirm the trusted card.",
+    messageId: "delivered-1", success: false };
+  harness.hooks.message_sent(sent, context);
+  await coordinator.waitForIdle();
+  assert.equal(requests.filter((body) =>
+    body.params?.name === "agentbridge_host_timeline_append").length, 1);
+  harness.hooks.message_sent({ ...sent, success: true }, context);
+  harness.hooks.message_sent({ ...sent, success: true }, context);
+  await coordinator.waitForIdle();
 
   const timelineCalls = requests.filter(
     (body) =>

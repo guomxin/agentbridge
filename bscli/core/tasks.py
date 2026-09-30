@@ -4104,8 +4104,8 @@ class TaskHubStore:
                     (
                       attempt_count < 5
                       AND (
-                        state = 'pending'
-                        OR (state = 'delivering' AND next_attempt_at <= ?)
+                        state IN ('pending', 'delivering')
+                        AND next_attempt_at <= ?
                       )
                     )
                     OR (
@@ -4145,8 +4145,8 @@ class TaskHubStore:
                 WHERE user_subject = ? AND endpoint_id = ?
                   AND attempt_count < 5
                   AND (
-                    state = 'pending'
-                    OR (state = 'delivering' AND next_attempt_at <= ?)
+                    state IN ('pending', 'delivering')
+                    AND next_attempt_at <= ?
                   )
                 ORDER BY created_at, rowid
                 LIMIT ?
@@ -4164,8 +4164,8 @@ class TaskHubStore:
                     WHERE delivery_id = ?
                       AND attempt_count < 5
                       AND (
-                        state = 'pending'
-                        OR (state = 'delivering' AND next_attempt_at <= ?)
+                        state IN ('pending', 'delivering')
+                        AND next_attempt_at <= ?
                       )
                     """,
                     (lease_until, now, row["delivery_id"], now),
@@ -4274,6 +4274,40 @@ class TaskHubStore:
                 or endpoint["state"] != "active"
             ):
                 raise TaskNotFound("client endpoint not found")
+            # Missed chat synchronization remains readable in the timeline.
+            # An inbound WeChat query must not replay a backlog of old chats.
+            if str(endpoint["client_type"]).lower() in {
+                "openclaw-weixin", "wechat", "weixin"
+            }:
+                connection.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET state = 'archived', updated_at = ?
+                    WHERE user_subject = ? AND endpoint_id = ?
+                      AND state = 'deferred' AND payload_type = 'timeline_message'
+                    """,
+                    (now, user_subject, endpoint_id),
+                )
+                # Closed tasks are still available in Task Hub. Do not replay
+                # obsolete status notices when a new conversation starts.
+                statuses = sorted(TERMINAL_TASK_STATUSES)
+                placeholders = ",".join("?" for _ in statuses)
+                connection.execute(
+                    f"""
+                    UPDATE notification_outbox
+                    SET state = 'archived', updated_at = ?
+                    WHERE user_subject = ? AND endpoint_id = ?
+                      AND state = 'deferred' AND payload_type = 'task_event'
+                      AND json_extract(payload_json, '$.eventType') IN
+                        ('task.operation.failed', 'task.operation.succeeded',
+                         'task.completed', 'task.canceled', 'plan.completed')
+                      AND task_id IN (
+                        SELECT task_id FROM agent_tasks
+                        WHERE user_subject = ? AND status IN ({placeholders})
+                      )
+                    """,
+                    (now, user_subject, endpoint_id, user_subject, *statuses),
+                )
             cursor = connection.execute(
                 """
                 UPDATE notification_outbox

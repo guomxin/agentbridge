@@ -23,7 +23,7 @@ import {
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
 
-export const PLUGIN_VERSION = "0.4.104";
+export const PLUGIN_VERSION = "0.4.105";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;
@@ -233,10 +233,13 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     });
   });
 
-  // Telegram tool sends and normal replies both emit this post-delivery hook.
+  // Telegram and WeChat emit this hook after delivery succeeds.
   // Resolve the destination route, never attribute a cross-chat send to its caller.
   api.on("message_sent", (event, context) => {
-    if (context.channelId !== "telegram" || event.success !== true) return;
+    if (
+      !["telegram", "openclaw-weixin"].includes(context.channelId) ||
+      event.success !== true
+    ) return;
     const sessionKey = coordinator.deliverySessionKeyForRoute({
       channel: context.channelId,
       to: event.to || context.conversationId,
@@ -275,14 +278,6 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     ) {
       return undefined;
     }
-    void timelinePublisher?.capture({
-      sessionKey,
-      role: "assistant",
-      text: event.content,
-      event,
-      context,
-      taskId: coordinator.activeTaskForSession(sessionKey),
-    });
     const pending = coordinator.pendingForSession(sessionKey);
     api.logger.info(
       `AgentBridge WeChat message delivery check (private=${isPrivateSessionKey(sessionKey)}, pending=${pending.length})`,
@@ -320,7 +315,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       coordinator.deliveryChannelForSession(sessionKey) ||
       routeChannel ||
       channelFromPrivateSessionKey(sessionKey);
-    if (channel !== "telegram") {
+    if (!["telegram", "openclaw-weixin"].includes(channel)) {
       void timelinePublisher?.capture({
         sessionKey,
         role: "assistant",

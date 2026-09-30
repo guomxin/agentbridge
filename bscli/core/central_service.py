@@ -2300,6 +2300,7 @@ class CentralCapabilityService(ControlledWriteExecutor):
         reactivated_deliveries = 0
         if (
             role == "user"
+            and not entry_reused
             and str(endpoint.get("client_type") or "").lower()
             in ACTIVITY_GATED_CLIENT_TYPES
         ):

@@ -3,7 +3,7 @@ export const HOST_CONTEXT_META_KEY = "io.agentbridge/host-context";
 export const LEGACY_HOST_CONTEXT_META_KEY = "io.agentbridge/host";
 export const HOST_PROFILE_META_KEY = "io.agentbridge/host-profile";
 export const TASK_CONTEXT_META_KEY = "io.agentbridge/task";
-export const OPENCLAW_HOST_VERSION = "0.4.104";
+export const OPENCLAW_HOST_VERSION = "0.4.105";
 export const OPENCLAW_HOST_INSTANCE_ID = "openclaw-gateway";
 
 export const HOST_CAPABILITY_NAMES = Object.freeze([
