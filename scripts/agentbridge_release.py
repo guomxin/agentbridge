@@ -90,7 +90,9 @@ def authorized_schema_transition(policy, before, after):
 class Release:
     def __init__(self, config, *, runner=subprocess.run, unit_root=Path("/etc/systemd/system")):
         self.config = config
-        self.root = Path(config["root"])
+        # macOS /var is an alias of /private/var. Compare canonical paths on
+        # both sides of the confirmed-current gate (also valid on Linux).
+        self.root = Path(config["root"]).resolve()
         self.release_id = config["releaseId"]
         self.directory = self.root / "releases" / self.release_id
         self.current = self.root / "current"

@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python=${AGENTBRIDGE_TEST_PYTHON:-"$repo/.venv/bin/python"}
+if [ ! -x "$python" ]; then
+  echo 'Python environment missing: create .venv with Python 3.12 or set AGENTBRIDGE_TEST_PYTHON.' >&2
+  exit 2
+fi
+exec "$python" "$repo/scripts/native/cli.py" "$@"
