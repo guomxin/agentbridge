@@ -20,9 +20,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 try:
-    from .prepare import json_bytes, new_file, password, private_output
+    from .prepare import MigrationError, json_bytes, new_file, password, private_output
 except ImportError:
-    from prepare import json_bytes, new_file, password, private_output
+    from prepare import MigrationError, json_bytes, new_file, password, private_output
 
 
 def match(certificate, key):
@@ -118,6 +118,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
+        if isinstance(error, MigrationError):
+            print(str(error), file=sys.stderr)
         print(f"CA operation stopped ({type(error).__name__}); inspect local inputs. No server deployment performed.",
               file=sys.stderr)
         sys.exit(1)

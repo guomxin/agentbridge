@@ -53,7 +53,12 @@ def test_tamper_rejected(tmp_path, mutation):
         (root / 'openclaw/.env').unlink()
     elif mutation == 'symlink':
         (root / 'openclaw/.env').unlink()
-        (root / 'openclaw/.env').symlink_to(receipt)
+        try:
+            (root / 'openclaw/.env').symlink_to(receipt)
+        except OSError as error:
+            if getattr(error, 'winerror', None) == 1314:
+                pytest.skip('Windows user lacks symlink privilege; exercised on macOS')
+            raise
     else:
         d=json.loads(receipt.read_text());d['files']=0;receipt.write_text(json.dumps(d))
     with pytest.raises(ValueError):

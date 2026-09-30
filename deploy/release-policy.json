@@ -1,11 +1,12 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
+    "77745343a4ac",
     "fd22bd77c40c",
     "67fe3e2f8da1",
     "e980c4664cab",
     "cf36051d2e3a"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Coordinated read snapshots, resumable post-release completion and Skill selection explanation. No schema or permission migration."
+  "reason": "Reviewed 77745343a4ac to 8a0f8b8f3f5093c244f51fa4df372ccdce772e94: bscli, schemas, integrations, pyproject.toml and server unit definitions unchanged. Adds native macOS maintenance and migration tools; shared release runner canonicalizes its root path. No database, permission or server configuration migration. Prior reviewed predecessors retained."
 }

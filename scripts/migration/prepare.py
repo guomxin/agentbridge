@@ -337,12 +337,12 @@ def final_plan_checks(plan, writers_stopped):
 
 def password(confirm: bool = False) -> bytes:
     if not sys.stdin.isatty():
-        raise ValueError("Use a local interactive terminal for the passphrase; never put it in arguments")
+        raise MigrationError("Use a local interactive terminal for the passphrase; never put it in arguments")
     value = getpass.getpass("Migration passphrase (at least 16 characters): ")
     if len(value) < 16:
-        raise ValueError("Passphrase too short")
+        raise MigrationError("Passphrase too short: use at least 16 characters")
     if confirm and value != getpass.getpass("Repeat passphrase: "):
-        raise ValueError("Passphrases differ")
+        raise MigrationError("Passphrases differ: enter the same passphrase twice")
     return value.encode("utf-8")
 
 
