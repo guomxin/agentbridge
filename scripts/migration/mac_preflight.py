@@ -15,16 +15,23 @@ import sys
 def version(command):
     if not shutil.which(command):
         return None
-    result = subprocess.run([command, "--version"], capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run([command, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if result.returncode:
         return None
     # Keep version only, not command output or plugin/credential diagnostics.
-    match = re.search(r"(?<![\d.])\d+\.\d+\.\d+\b", result.stdout)
-    return match.group(0) if match else None
+    pattern = (r"(?m)^OpenClaw\s+(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\b" if command == "openclaw"
+               else r"(?m)^v?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\s*$")
+    match = re.search(pattern, result.stdout.strip())
+    return match.group(1) if match else None
 
 
 def node_supported(value):
     if value is None:
+        return False
+    if not re.fullmatch(r"\d+\.\d+\.\d+", value):
         return False
     major, minor, patch = map(int, value.split("."))
     return ((major == 22 and (minor, patch) >= (22, 3))
@@ -42,7 +49,7 @@ def main():
               "nodeSupported": node_supported(node), "openclawPinned": openclaw == "2026.7.1"}
     for name in ("git", "ssh", "npm", "pwsh"):
         checks[name] = shutil.which(name) is not None
-    for port in (22, 8780, 8783, 8790):
+    for port in (22, 8780, 8781, 8782, 8783, 8790):
         try:
             with socket.create_connection((args.server, port), timeout=3):
                 checks[f"tcp{port}"] = True

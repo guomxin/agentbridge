@@ -6,6 +6,8 @@ encrypted portable root is for offline issuance, never for the Gateway process.
 from __future__ import annotations
 
 import argparse
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -32,6 +34,9 @@ def match(certificate, key):
         return value.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     if public(certificate.public_key()) != public(key.public_key()):
         raise ValueError("CA key and certificate do not match")
+    certificate.verify_directly_issued_by(certificate)
+    if not certificate.not_valid_before_utc <= datetime.now(timezone.utc) < certificate.not_valid_after_utc:
+        raise ValueError("CA certificate is outside its validity window")
 
 
 def export_ca(source: Path, destination: Path, secret: bytes, protector=None):
@@ -49,6 +54,7 @@ def export_ca(source: Path, destination: Path, secret: bytes, protector=None):
     new_file(destination / "root-ca.crt", certificate.public_bytes(serialization.Encoding.PEM))
     new_file(destination / "root-ca.encrypted.pem", encrypted)
     receipt = {"status": "exported-encrypted", "rootSha256": certificate.fingerprint(hashes.SHA256()).hex(),
+               "encryptedKeySha256": hashlib.sha256(encrypted).hexdigest(),
                "rootNotAfter": certificate.not_valid_after_utc.isoformat(), "newRootCreated": False}
     new_file(destination / "receipt.json", json_bytes(receipt))
     return receipt
@@ -85,6 +91,7 @@ def main():
     export.add_argument("--destination", type=Path, required=True)
     check = sub.add_parser("verify")
     check.add_argument("--root", type=Path, required=True)
+    check.add_argument("--expected-sha256", required=True)
     issue = sub.add_parser("issue")
     issue.add_argument("--root", type=Path, required=True)
     issue.add_argument("--server-ip", required=True)
@@ -97,6 +104,8 @@ def main():
         ca = PortableCA(args.root, password())
         certificate, _ = ca._load_root()
         if args.command == "verify":
+            if certificate.fingerprint(hashes.SHA256()).hex() != args.expected_sha256.lower():
+                raise ValueError("Root fingerprint differs from the source receipt")
             result = {"status": "verified", "rootSha256": certificate.fingerprint(hashes.SHA256()).hex()}
         else:
             private_output(args.output)
