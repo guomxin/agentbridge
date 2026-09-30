@@ -47,7 +47,7 @@ def main():
     node, openclaw = version("node"), version("openclaw")
     checks = {"macOS": platform.system() == "Darwin", "python312": sys.version_info >= (3, 12),
               "nodeSupported": node_supported(node), "openclawPinned": openclaw == "2026.7.1"}
-    for name in ("git", "ssh", "npm", "pwsh"):
+    for name in ("git", "ssh", "npm", "launchctl", "plutil", "zsh"):
         checks[name] = shutil.which(name) is not None
     for port in (22, 8780, 8781, 8782, 8783, 8790):
         try:
