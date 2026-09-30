@@ -123,6 +123,9 @@ class Publisher:
             'test -d /usr/share/novnc',
             "printf '%s' " + shlex.quote(encode((ROOT / 'scripts/agentbridge_release.py').read_bytes())) + ' | base64 --decode > "$tmp/release.py"',
             "printf '%s' " + shlex.quote(encode(json.dumps(transaction).encode())) + ' | base64 --decode > "$tmp/config.json"',
+            # Staged transport files stay private; installed code must be readable
+            # by the fixed service identity, as in the original release runner.
+            'umask 0022',
             shlex.quote(self.args.remote_root + '/venv/bin/python') + ' -I "$tmp/release.py" "$tmp/config.json"',
         ])
         run(['scp', *self.ssh_options, wheel, self.target + ':' + remote_wheel])
