@@ -180,7 +180,8 @@ def observe(config):
     if not match:
         raise ValueError('launchd gateway not running')
     pid = int(match[1])
-    started = run(['/bin/ps', '-p', str(pid), '-o', 'lstart='])
+    started = run(['/bin/ps', '-p', str(pid), '-o', 'lstart='],
+                  env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'})
     listeners = run(['/usr/sbin/lsof', '-nP', '-iTCP:' + str(config['port']), '-sTCP:LISTEN', '-Fpn'])
     owners = {int(line[1:]) for line in listeners.splitlines() if line.startswith('p')}
     addresses = [line[1:] for line in listeners.splitlines() if line.startswith('n')]

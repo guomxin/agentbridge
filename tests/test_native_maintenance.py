@@ -249,3 +249,38 @@ def test_reviewed_profile_and_final_source_binding(host):
         with pytest.raises(ValueError,match='final handoff'): lifecycle.authorize(host,'unused')
         host['sourceManifestSha256']='final';host['profileSha256']='changed'
         with pytest.raises(ValueError,match='reviewed'): lifecycle.authorize(host,'unused')
+
+
+def test_observe_normalizes_localized_process_start(host, monkeypatch):
+    monkeypatch.setenv('LC_ALL', 'zh_CN.UTF-8')
+    monkeypatch.setenv('LANG', 'zh_CN.UTF-8')
+    def execute(args, **kwargs):
+        if args[0] == '/bin/launchctl':
+            return 'pid = 123\n'
+        if args[0] == '/bin/ps':
+            env = kwargs.get('env', {})
+            return ('Wed Sep 30 01:23:25 2026' if env.get('LC_ALL') == env.get('LANG') == 'C'
+                    else '三 9月/30 01:23:25 2026')
+        return 'p123\nn127.0.0.1:18789\n'
+    import io
+    with mock.patch.object(lifecycle, 'run', side_effect=execute), \
+         mock.patch.object(lifecycle.urllib.request, 'urlopen', return_value=io.BytesIO(b'{"ready":true,"failing":[]}')):
+        observed = lifecycle.observe(host)
+    assert observed == {'pid': 123, 'started': 'Wed Sep 30 01:23:25 2026'}
+
+
+def test_runtime_uses_normalized_observation_without_second_ps(host, tmp_path):
+    observed = {'pid': 123, 'started': 'Wed Sep 30 01:23:25 2026'}
+    host['openclawLogDir'] = str(tmp_path)
+    from datetime import datetime, timezone
+    start = datetime(2026, 9, 30, 1, 23, 25).astimezone(timezone.utc).isoformat()
+    version = common.read(common.ROOT / 'integrations/openclaw-agentbridge/package.json')['version']
+    (tmp_path / 'openclaw-test.log').write_text(json.dumps({'time': start,
+        'message': f'AgentBridge interaction plugin registered (version={version}, state=test)'}) + '\n')
+    responses = [{'rpc': {'ok': True}, 'cli': {'version': '2026.7.1'},
+                  'gateway': {'version': '2026.7.1'}, 'pluginVersionDrift': {'drifts': []}},
+                 {'plugin': {'status': 'loaded', 'version': version}}]
+    with mock.patch.object(lifecycle, 'observe', return_value=observed), \
+         mock.patch.object(acceptance, 'host_run', side_effect=responses), \
+         mock.patch.object(acceptance, 'run', side_effect=AssertionError('Unexpected second ps')):
+        assert acceptance.runtime(host)['rpc'] == 'ok'

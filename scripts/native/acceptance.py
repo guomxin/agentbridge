@@ -94,9 +94,13 @@ def runtime(host):
             or plugin.get('plugin', {}).get('version') != expected):
         raise ValueError('Gateway RPC/version/plugin mismatch')
     # CLI plugin inspection alone is insufficient: require current Gateway registration.
-    started = run(['/bin/ps', '-p', str(observed['pid']), '-o', 'lstart='])
     from datetime import datetime
-    started_at = datetime.strptime(started.strip(), '%a %b %d %H:%M:%S %Y').timestamp()
+    # observe pins ps to the C locale; parse numeric fields without depending on
+    # the caller's Python LC_TIME, and reuse the same process observation.
+    _, month, day, clock, year = observed['started'].split()
+    month_number = ('Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split().index(month) + 1)
+    started_at = datetime(int(year), month_number, int(day),
+                          *map(int, clock.split(':'))).timestamp()
     log_dir = Path(host.get('openclawLogDir', '/tmp/openclaw'))
     registered = False
     for path in log_dir.glob('openclaw-*.log'):
