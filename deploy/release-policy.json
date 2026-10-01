@@ -1,6 +1,7 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
+    "e9bc4418d477",
     "77745343a4ac",
     "fd22bd77c40c",
     "67fe3e2f8da1",
@@ -8,5 +9,5 @@
     "cf36051d2e3a"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Reviewed 77745343a4ac to 8a0f8b8f3f5093c244f51fa4df372ccdce772e94: bscli, schemas, integrations, pyproject.toml and server unit definitions unchanged. Adds native macOS maintenance and migration tools; shared release runner canonicalizes its root path. No database, permission or server configuration migration. Prior reviewed predecessors retained."
+  "reason": "Reviewed e9bc4418d477: this update deduplicates WeChat successful delivery callbacks by platform receipt ID. No database schema, business permission, session format or server configuration migration; prior reviewed predecessors retained."
 }

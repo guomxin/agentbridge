@@ -4348,6 +4348,12 @@ test("synchronizes user and assistant text once across duplicate WeChat hooks", 
   await coordinator.waitForIdle();
   assert.equal(requests.filter((body) =>
     body.params?.name === "agentbridge_host_timeline_append").length, 1);
+  // The adapter emits success without an ID before the host emits its receipt.
+  const { messageId, ...adapterSent } = sent;
+  harness.hooks.message_sent({ ...adapterSent, success: true }, context);
+  await coordinator.waitForIdle();
+  assert.equal(requests.filter((body) =>
+    body.params?.name === "agentbridge_host_timeline_append").length, 1);
   harness.hooks.message_sent({ ...sent, success: true }, context);
   harness.hooks.message_sent({ ...sent, success: true }, context);
   await coordinator.waitForIdle();
