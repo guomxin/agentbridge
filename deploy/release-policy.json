@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "b1c03911628b"
+    "61b6eea08826"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "reason": "Reviewed b1c03911628b schema-only snapshot: add private Skill drafts, immutable revisions, sample evidence, approval requests, publication pointer, preferences, events and idempotency tables. Existing tables and business grants unchanged. Approval and publication are atomic. Older code must not serve authored assignments; preserve these tables and revoke authored assignments before a manual code rollback.",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "ad6d416c1583137af019fd1693e2e44075edcc29a6003466fcef495f75339072",
-      "afterSha256": "8c1a26a6f16722a37eff8f48f1fb01299fb948f3e6f18619507a674109b8f1ee"
-    }
-  }
+  "dataCompatibility": "no-migration",
+  "reason": "Reviewed 61b6eea08826: require assignment before exposing authored Skill metadata and improve generation contract hints. No schema, business grant or runtime configuration changes."
 }

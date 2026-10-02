@@ -978,7 +978,7 @@ def create_central_mcp_server(
         return result
 
     @mcp.tool(name="agentbridge_skill_authoring", title="创作业务助手草稿",
-        description="所有用户均可创作私有草稿，无需业务权限。action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(默认use:{}),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
+        description="所有用户均可创作私有草稿，无需业务权限。action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(无依赖必须为{use:{}}；模式对象只允许all/any权限数组和database依赖，不接受name/description/tools),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False), structured_output=True)
     async def agentbridge_skill_authoring(ctx: Context, action: str, data: dict[str, Any]) -> dict[str, Any]:
         identity = _request_identity(identity_store)
@@ -1002,7 +1002,7 @@ def create_central_mcp_server(
                         raise SkillRejected("SKILL_TASK_CONFLICT", "当前任务已绑定另一助手或范围，请在独立任务中使用")
                     binding_id = binding["binding_id"]
                 else:
-                    item = service.skills.current(skill_id)
+                    item = service.skills.available_item(identity["user_subject"], skill_id, profile)
                     settings = service.skills.config("user:" + identity["user_subject"])["value"].get(skill_id, {})
                     if profile not in item["manifest"]["profiles"]:
                         raise SkillRejected("SKILL_PROFILE_INVALID", "业务助手功能不存在")

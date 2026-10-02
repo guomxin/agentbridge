@@ -83,7 +83,7 @@ def validate_skill_bundle(manifest, resources):
     from bscli.core.user_grants import PERMISSIONS
     for profile, requirements in manifest["profiles"].items():
         if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", profile) or not isinstance(requirements, dict) or set(requirements) - {"all", "any", "database"}:
-            raise ValueError("invalid Skill dependency profile")
+            raise ValueError('模式仅允许权限依赖 all、any、database；无需业务权限时使用 {"use":{}}，不要填写 description 或 tools')
         for mode in ("all", "any"):
             deps = requirements.get(mode, [])
             if not isinstance(deps, list) or any(not isinstance(p, str) or p not in PERMISSIONS for p in deps):
@@ -186,7 +186,7 @@ class SkillStore:
     def record_load(self, subject, sid, profile, resource, result):
         if result.get("status") == "succeeded" and resource != "SKILL.md":
             return  # Loading a reference does not trigger another assistant.
-        item = self.all_items().get(sid)
+        item = self.all_items().get(sid) if sid in self.registry.items or sid in self.config("user:" + subject)["value"] else None
         payload = {"skill_id": sid[:80], "name": item["manifest"]["name"] if item else "未知业务助手",
                    "profile": profile[:80], "status": result.get("status"),
                    "version": result.get("version"), "error_code": (result.get("error") or {}).get("code"),
@@ -281,6 +281,15 @@ class SkillStore:
             raise SkillRejected("SKILL_UNAVAILABLE", "业务助手未分配、已停用或所选功能已关闭")
         self._approved_scope(subject, sid, [profile], connection)
         return settings
+
+    def available_item(self, subject, sid, profile):
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            # Check assignment before reading private publication metadata.
+            if sid not in self.config("user:" + subject, db)["value"]:
+                raise SkillRejected("SKILL_UNAVAILABLE", "业务助手未分配或不可访问")
+            self._allowed(subject, sid, profile, db)
+            return self.current(sid, db)
 
     def bind(self, subject, sid, profile, source_id=None, expected_version=None):
         with closing(self.connect()) as db, db:

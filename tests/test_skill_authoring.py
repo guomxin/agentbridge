@@ -139,3 +139,9 @@ class SkillAuthoringTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.a.save('alice',proposal={**self.proposal,'name':'fourth'},provenance={'kind':'automatic'},request_key='fourth')
         self.a.preferences('alice',value={'auto_draft':False},expected_revision=1)
         with self.assertRaises(PermissionError):self.a.save('alice',request_key='auto3',**args)
+
+    def test_private_published_metadata_is_not_visible_to_other_users(self):
+        d=self.draft();self.approve(self.submit(d))
+        with self.assertRaises(SkillRejected):self.s.skills.available_item('bob',d['skill_id'],'use')
+        self.s.skills.record_load('bob',d['skill_id'],'use','SKILL.md',{'status':'rejected'})
+        self.assertEqual(self.s.skills.load_history('bob')[0]['name'],'未知业务助手')
