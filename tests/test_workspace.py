@@ -2803,6 +2803,18 @@ class WorkspaceHttpServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual([x["skill_id"] for x in history["items"]], ["oa-work-log"])
 
+                self.assertEqual(_request(port, "GET", "/api/skill-drafts")[0], 401)
+                proposal={"name":"周报助手","description":"归纳输入","selection":{"use_when":"周报","not_for":"业务写入","output":"摘要"},"instructions":"根据输入归纳，不编造。"}
+                draft_body={"action":"save","data":{"proposal":proposal,"request_key":"http-draft"}}
+                self.assertEqual(_request(port,"POST","/api/skill-drafts",origin=origin,cookies=cookies,body=draft_body)[0],401)
+                status,_,saved=_request(port,"POST","/api/skill-drafts",origin=origin,cookies=cookies,csrf=cookies["agentbridge_workspace_csrf"],body=draft_body)
+                self.assertEqual(status,200)
+                other=service.skill_authoring.save("user-b",proposal=proposal,request_key="other")
+                self.assertEqual(_request(port,"GET","/api/skill-drafts?id="+other["draft_id"],cookies=cookies)[0],404)
+                status,_,drafts=_request(port,"GET","/api/skill-drafts",cookies=cookies)
+                self.assertEqual([d["draft_id"] for d in drafts["items"]],[saved["draft_id"]])
+                self.assertEqual(_request(port,"POST","/api/skill-drafts",origin=origin,cookies=cookies,csrf=cookies["agentbridge_workspace_csrf"],body={"action":"decide","data":{}})[0],400)
+
                 original_path = '/api/database/logs/taihua_primary/123'
                 with patch.object(application, 'database_original', return_value={
                     'author': '测试作者', 'paragraphs': [{'number': 1, 'text': '<img src=x onerror=evil()>'}],

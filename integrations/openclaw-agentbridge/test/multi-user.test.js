@@ -585,7 +585,7 @@ test("workspace and direct sessions expose the same governed capabilities", () =
     .sort();
   assert.deepEqual(
     governedWrites,
-    [...AGENTBRIDGE_GOVERNED_ENTRY_TOOL_NAMES].sort(),
+    [...AGENTBRIDGE_GOVERNED_ENTRY_TOOL_NAMES, "agentbridge_skill_authoring"].sort(),
   );
 });
 
@@ -710,7 +710,7 @@ test("agent-facing catalogs hide internal commit and continuation tools", () => 
   );
   for (const descriptor of AGENTBRIDGE_TOOL_CATALOG) {
     if (
-      descriptor.annotations?.readOnlyHint === true ||
+      descriptor.name === "agentbridge_skill_authoring" || descriptor.annotations?.readOnlyHint === true ||
       governed.has(descriptor.name)
     ) {
       continue;

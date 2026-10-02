@@ -1587,3 +1587,11 @@ td {
 .skill-activity-card p { margin: 10px 0; line-height: 1.6; }
 .skill-activity-status { float: right; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: #e1eee7; }
 .skill-activity-card small { color: #65776f; }
+
+.draft-editor { display: grid; gap: 12px; margin: 20px 0; max-width: 850px; }
+.draft-editor label { display: grid; gap: 6px; }
+.draft-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.draft-auto { display: flex; align-items: center; gap: 8px; margin: 16px 0; }
+.draft-auto input { width: auto; }
+#draft-list { display: flex; flex-wrap: wrap; gap: 8px; }
+#draft-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; }

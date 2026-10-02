@@ -25,6 +25,41 @@
     {
       "annotations": {
         "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "所有用户均可创作私有草稿，无需业务权限。action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(默认use:{}),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "data": {
+            "additionalProperties": true,
+            "title": "Data",
+            "type": "object"
+          }
+        },
+        "required": [
+          "action",
+          "data"
+        ],
+        "title": "agentbridge_skill_authoringArguments",
+        "type": "object"
+      },
+      "name": "agentbridge_skill_authoring",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agentbridge_skill_authoringDictOutput",
+        "type": "object"
+      },
+      "title": "创作业务助手草稿"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": true,
         "readOnlyHint": true

@@ -976,6 +976,16 @@ class AdminHttpServerTests(unittest.TestCase):
                         port, "POST", path, origin=origin, cookies=cookies[role],
                         csrf=cookies[role]["agentbridge_admin_csrf"], body=payload,
                     )
+                proposal={"name":"周报助手","description":"归纳输入","selection":{"use_when":"周报","not_for":"业务写入","output":"摘要"},"instructions":"根据输入归纳，不编造。"}
+                d=service.skill_authoring.save("user-a",proposal=proposal,request_key="http-draft")
+                t=service.skill_authoring.test_start("user-a",draft_id=d["draft_id"],expected_revision=1,profile="use",prompt="合成示例",request_key="http-test")
+                service.skill_authoring.test_result("user-a",test_id=t["test_id"],output="待复核示例")
+                r=service.skill_authoring.submit("user-a",draft_id=d["draft_id"],expected_revision=1,reason="测试",request_key="http-submit")
+                decision={"request_id":r["request_id"],"decision":"approve","reason":"已复核","reviewed_tests":True}
+                self.assertEqual(post("/api/skill-reviews",decision,"auditor")[0],403)
+                self.assertEqual(post("/api/skill-reviews",decision)[0],200)
+                status,_,detail=_request(port,"GET","/api/skill-reviews?id="+r["request_id"],cookies=cookies["auditor"])
+                self.assertEqual(status,200);self.assertEqual(detail["state"],"published")
                 self.assertEqual(post("/api/user-grants", body, "auditor")[0], 403)
                 self.assertEqual(post("/api/user-grants", body)[0], 200)
                 conflict = post("/api/user-grants", body)

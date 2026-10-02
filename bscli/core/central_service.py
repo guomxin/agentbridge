@@ -202,6 +202,8 @@ class CentralCapabilityService(ControlledWriteExecutor):
         self.db_path = self.home / "agentbridge.db"
         self.user_grants = UserGrants(self.db_path)
         self.skills = SkillStore(self.db_path)
+        from bscli.core.skill_authoring import SkillAuthoring
+        self.skill_authoring = SkillAuthoring(self)
         if registry is None:
             self.registry = build_central_capability_registry()
             for spec in build_taihua_capability_registry().list():

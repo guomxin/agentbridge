@@ -40,6 +40,63 @@ def skill_bundle(binding):
             "content": "\n\n".join(f"## {name}\n\n{snapshot['resources'][name]}" for name in names)}
 
 
+def validate_skill_bundle(manifest, resources):
+    """Validate both packaged and authored immutable instruction bundles."""
+    if not isinstance(manifest, dict) or not isinstance(resources, dict):
+        raise ValueError("invalid Skill bundle")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", str(manifest.get("id", ""))):
+        raise ValueError("invalid Skill id")
+    if manifest.get("schemaVersion") != PROTOCOL or not re.fullmatch(r"\d+\.\d+\.\d+", str(manifest.get("version", ""))):
+        raise ValueError("unsupported Skill manifest")
+    if any(not isinstance(manifest.get(key), str) or not manifest[key].strip() or len(manifest[key]) > 500 for key in ("name", "description", "entrypoint")):
+        raise ValueError("invalid Skill metadata")
+    if manifest.get("entrypoint") != "SKILL.md" or manifest.get("status") not in ("enabled", "trial", "disabled"):
+        raise ValueError("invalid Skill entrypoint or status")
+    declared = manifest.get("resources", [])
+    if not isinstance(declared, list) or any(not isinstance(n, str) for n in declared):
+        raise ValueError("invalid Skill resource paths")
+    names = [manifest["entrypoint"], *declared]
+    if len(names) != len(set(names)) or len(names) > 16 or set(names) != set(resources):
+        raise ValueError("invalid Skill resources")
+    for name, content in resources.items():
+        if not isinstance(name, str): raise ValueError("invalid Skill resource path")
+        path = PurePosixPath(name)
+        if path.is_absolute() or ".." in path.parts or "\\" in name or ":" in name or path.suffix != ".md" or not isinstance(content, str):
+            raise ValueError("invalid Skill resource")
+    if sum(len(v) for v in resources.values()) > 48000:
+        raise ValueError("Skill resource budget exceeded")
+    if not isinstance(manifest.get("profiles"), dict) or not manifest["profiles"] or manifest.get("executionMode") not in ("read_exploration", "durable_plan", "controlled_action"):
+        raise ValueError("invalid Skill execution contract")
+    selection = manifest.get("selection")
+    if not isinstance(selection, dict) or set(selection) != {"use_when", "not_for", "output"} or any(
+        not isinstance(v, str) or not v.strip() or len(v) > 500 for v in selection.values()
+    ):
+        raise ValueError("invalid Skill selection contract")
+    required = manifest.get("required_resources")
+    if not isinstance(required, dict) or set(required) != set(manifest["profiles"]):
+        raise ValueError("invalid Skill required resources by profile")
+    for names in required.values():
+        if not isinstance(names, list) or any(not isinstance(n, str) for n in names) or len(names) != len(set(names)) or any(
+            n == "SKILL.md" or n not in resources for n in names
+        ):
+            raise ValueError("invalid Skill required resource")
+    from bscli.core.user_grants import PERMISSIONS
+    for profile, requirements in manifest["profiles"].items():
+        if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", profile) or not isinstance(requirements, dict) or set(requirements) - {"all", "any", "database"}:
+            raise ValueError("invalid Skill dependency profile")
+        for mode in ("all", "any"):
+            deps = requirements.get(mode, [])
+            if not isinstance(deps, list) or any(not isinstance(p, str) or p not in PERMISSIONS for p in deps):
+                raise ValueError("unknown Skill business dependency")
+        if "database" in requirements:
+            from bscli.database.independent import CAPABILITIES
+            deps = requirements["database"]
+            if not isinstance(deps, dict) or set(deps) - {"all", "any"} or any(not isinstance(v, list) or any(not isinstance(c, str) or c not in CAPABILITIES for c in v) for v in deps.values()):
+                raise ValueError("unknown Skill database dependency")
+    payload = {"manifest": manifest, "resources": resources}
+    return {**payload, "content_hash": sha256(_json(payload).encode()).hexdigest()}
+
+
 class SkillRegistry:
     def __init__(self, root=None):
         root = root or files("bscli.business_skills")
@@ -53,17 +110,8 @@ class SkillRegistry:
             sid = manifest.get("id", "")
             if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", sid) or sid != directory.name or sid in self.items:
                 raise ValueError("invalid or duplicate Skill id")
-            if manifest.get("schemaVersion") != PROTOCOL or not re.fullmatch(r"\d+\.\d+\.\d+", manifest.get("version", "")):
-                raise ValueError("unsupported Skill manifest")
-            if any(not isinstance(manifest.get(key), str) or not manifest[key].strip() or len(manifest[key]) > 500 for key in ("name", "description", "entrypoint")):
-                raise ValueError("invalid Skill metadata")
-            if manifest.get("entrypoint") != "SKILL.md" or manifest.get("status") not in {"enabled", "trial", "disabled"}:
-                raise ValueError("invalid Skill entrypoint or status")
             resources = {}
-            names = [manifest["entrypoint"], *manifest.get("resources", [])]
-            if len(names) != len(set(names)) or len(names) > 16:
-                raise ValueError("duplicate or excessive Skill resources")
-            for name in names:
+            for name in [manifest["entrypoint"], *manifest.get("resources", [])]:
                 path = PurePosixPath(name)
                 if path.is_absolute() or ".." in path.parts or "\\" in name or ":" in name or path.suffix != ".md":
                     raise ValueError("invalid Skill resource path")
@@ -71,38 +119,7 @@ class SkillRegistry:
                 if isinstance(resource, Path) and not resource.resolve().is_relative_to(directory.resolve()):
                     raise ValueError("Skill resource escapes package")
                 resources[name] = resource.read_text(encoding="utf-8")
-            if sum(len(v) for v in resources.values()) > 48000:
-                raise ValueError("Skill resource budget exceeded")
-            if not manifest.get("profiles") or manifest.get("executionMode") not in {"read_exploration", "durable_plan", "controlled_action"}:
-                raise ValueError("invalid Skill execution contract")
-            selection = manifest.get("selection")
-            if not isinstance(selection, dict) or set(selection) != {"use_when", "not_for", "output"} or any(
-                not isinstance(v, str) or not v.strip() or len(v) > 500 for v in selection.values()
-            ):
-                raise ValueError("invalid Skill selection contract")
-            required = manifest.get("required_resources")
-            if not isinstance(required, dict) or set(required) != set(manifest["profiles"]):
-                raise ValueError("invalid Skill required resources by profile")
-            for names in required.values():
-                if not isinstance(names, list) or any(not isinstance(n, str) for n in names) or len(names) != len(set(names)) or any(
-                    n == "SKILL.md" or n not in resources for n in names
-                ):
-                    raise ValueError("invalid Skill required resource")
-            from bscli.core.user_grants import PERMISSIONS
-            for profile, requirements in manifest["profiles"].items():
-                if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", profile) or not isinstance(requirements, dict) or set(requirements) - {"all", "any", "database"}:
-                    raise ValueError("invalid Skill dependency profile")
-                for mode in ("all", "any"):
-                    deps = requirements.get(mode, [])
-                    if not isinstance(deps, list) or any(p not in PERMISSIONS for p in deps):
-                        raise ValueError("unknown Skill business dependency")
-                if "database" in requirements:
-                    from bscli.database.independent import CAPABILITIES
-                    deps = requirements["database"]
-                    if not isinstance(deps, dict) or set(deps) - {"all", "any"} or any(not isinstance(v, list) or any(c not in CAPABILITIES for c in v) for v in deps.values()):
-                        raise ValueError("unknown Skill database dependency")
-            payload = {"manifest": manifest, "resources": resources}
-            self.items[sid] = {**payload, "content_hash": sha256(_json(payload).encode()).hexdigest()}
+            self.items[sid] = validate_skill_bundle(manifest, resources)
 
     def get(self, sid):
         if sid not in self.items:
@@ -117,6 +134,9 @@ class SkillStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as db, db:
             db.executescript("""
+                CREATE TABLE IF NOT EXISTS skill_publications (
+                    skill_id TEXT PRIMARY KEY, version TEXT NOT NULL, owner_subject TEXT NOT NULL,
+                    request_id TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS skill_load_events (
                     event_id TEXT PRIMARY KEY, user_subject TEXT NOT NULL, dedupe_key TEXT NOT NULL,
                     payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -150,10 +170,23 @@ class SkillStore:
         db.row_factory = sqlite3.Row
         return db
 
+    def current(self, sid, connection=None):
+        if connection is None:
+            with closing(self.connect()) as db:
+                return self.current(sid, db)
+        row = connection.execute("SELECT v.payload_json FROM skill_publications p JOIN skill_versions v ON v.skill_id=p.skill_id AND v.version=p.version WHERE p.skill_id=?", (sid,)).fetchone()
+        return json.loads(row[0]) if row else self.registry.get(sid)
+
+    def all_items(self):
+        with closing(self.connect()) as db:
+            authored = {r["skill_id"]: json.loads(r["payload_json"]) for r in db.execute(
+                "SELECT p.skill_id,v.payload_json FROM skill_publications p JOIN skill_versions v ON v.skill_id=p.skill_id AND v.version=p.version")}
+        return {**self.registry.items, **authored}
+
     def record_load(self, subject, sid, profile, resource, result):
         if result.get("status") == "succeeded" and resource != "SKILL.md":
             return  # Loading a reference does not trigger another assistant.
-        item = self.registry.items.get(sid)
+        item = self.all_items().get(sid)
         payload = {"skill_id": sid[:80], "name": item["manifest"]["name"] if item else "未知业务助手",
                    "profile": profile[:80], "status": result.get("status"),
                    "version": result.get("version"), "error_code": (result.get("error") or {}).get("code"),
@@ -198,7 +231,7 @@ class SkillStore:
             raise ValueError("invalid revision or reason")
         normalized = {}
         for sid, settings in value.items():
-            manifest = self.registry.get(sid)["manifest"]
+            manifest = self.current(sid)["manifest"]
             if owner == "global":
                 if settings not in ("enabled", "trial", "disabled"):
                     raise ValueError("invalid Skill status")
@@ -216,6 +249,9 @@ class SkillStore:
                 normalized[sid] = {"profiles": profiles, "source_id": source, "detail": detail}
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            if owner.startswith("user:"):
+                for sid, settings in normalized.items():
+                    self._approved_scope(owner[5:], sid, settings["profiles"], db)
             before = self.config(owner, db)
             if before["revision"] != expected_revision:
                 raise UserGrantConflict("Skill 配置已被修改，请重新打开")
@@ -230,20 +266,28 @@ class SkillStore:
                 audit_callback(db, before, after)
             return after
 
+    def _approved_scope(self, subject, sid, profiles, db):
+        if not db.execute("SELECT 1 FROM skill_publications WHERE skill_id=?", (sid,)).fetchone():
+            return
+        row = db.execute("SELECT r.audience_json,r.profiles_json FROM skill_publications p JOIN skill_review_requests r ON r.request_id=p.request_id WHERE p.skill_id=?", (sid,)).fetchone()
+        if row and (subject not in json.loads(row['audience_json']) or not set(profiles) <= set(json.loads(row['profiles_json']))):
+            raise SkillRejected("SKILL_APPROVAL_SCOPE", "超出已审批使用范围，请作者重新提交审批")
+
     def _allowed(self, subject, sid, profile, connection):
         global_config = self.config("global", connection)
-        state = global_config["value"].get(sid, self.registry.get(sid)["manifest"].get("status", "trial"))
+        state = global_config["value"].get(sid, self.current(sid, connection)["manifest"].get("status", "trial"))
         settings = self.config("user:" + subject, connection)["value"].get(sid)
         if state == "disabled" or not settings or profile not in settings["profiles"]:
             raise SkillRejected("SKILL_UNAVAILABLE", "业务助手未分配、已停用或所选功能已关闭")
+        self._approved_scope(subject, sid, [profile], connection)
         return settings
 
     def bind(self, subject, sid, profile, source_id=None, expected_version=None):
-        item = self.registry.get(sid)
-        if expected_version and expected_version != item["manifest"]["version"]:
-            raise SkillRejected("SKILL_VERSION_CHANGED", "业务助手版本已更新，请刷新目录")
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            item = self.current(sid, db)
+            if expected_version and expected_version != item["manifest"]["version"]:
+                raise SkillRejected("SKILL_VERSION_CHANGED", "业务助手版本已更新，请刷新目录")
             settings = self._allowed(subject, sid, profile, db)
             settings = {**settings, "source_id": source_id or settings["source_id"]}
             binding = str(uuid4())
@@ -319,7 +363,7 @@ def skill_catalog(service, subject, *, include_all=False):
     global_config = store.config("global")
     user = store.config("user:" + subject)
     items = []
-    for sid, item in store.registry.items.items():
+    for sid, item in store.all_items().items():
         settings = user["value"].get(sid)
         if not include_all and not settings:
             continue

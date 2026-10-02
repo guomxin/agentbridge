@@ -436,3 +436,5 @@ tr.selected, tr.selected:hover { background: #fff5df; box-shadow: inset 3px 0 va
 .source-fields details { margin:16px 0; }
 .source-fields summary { cursor:pointer; margin-bottom:12px; }
 @media(max-width:600px) { .source-grid { grid-template-columns:1fr; } }
+
+.skill-review-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }

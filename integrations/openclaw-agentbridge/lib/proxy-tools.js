@@ -3,7 +3,7 @@ import {
   AGENTBRIDGE_USER_TURN_SOURCE_TOOLS,
 } from "./tool-catalog.js";
 import { extractToolPayload } from "./mcp-client.js";
-import { skillBindingMeta, rememberSkillBinding, skillRunKey } from "./business-skills.js";
+import { skillBindingMeta, rememberSkillBinding, skillRunKey, draftSampleGuard } from "./business-skills.js";
 import {
   HOST_CONTEXT_META_KEY,
   TASK_CONTEXT_META_KEY,
@@ -91,7 +91,7 @@ const UNREFERENCED_FAILURE_STATUSES = new Set([
 const AGENTBRIDGE_AGENT_FACING_TOOL_CATALOG = Object.freeze(
   AGENTBRIDGE_TOOL_CATALOG.filter(
     (descriptor) =>
-      descriptor.annotations?.readOnlyHint === true ||
+      descriptor.name === "agentbridge_skill_authoring" || descriptor.annotations?.readOnlyHint === true ||
       AGENTBRIDGE_GOVERNED_ENTRY_TOOLS.has(descriptor.name),
   ),
 );
@@ -242,6 +242,8 @@ function createProxyTool({
       const normalizedParams = normalizeParams(rawParams);
       const skillRun = taskRunRefResolver?.(toolCallId, context.sessionKey, "agentbridge_skill_get");
       const skillContext = { ...context, runId: (skillRun && skillRun !== toolCallId ? skillRun : null) || context.runId };
+      const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
+      if (sampleBlocked) return jsonToolResult(sampleBlocked);
       if (descriptor.name === "agentbridge_skill_get" && !skillRunKey(skillContext, identity)) {
         return jsonToolResult({ status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED", message: "当前宿主缺少独立回合上下文，无法安全加载业务助手。" } });
       }

@@ -35,3 +35,18 @@ test("published Skill load schema does not expose file selection", async () => {
   assert.equal(load.inputSchema.properties.resource, undefined);
   assert.deepEqual(load.inputSchema.required, ["skill_id", "profile"]);
 });
+
+test("unassigned users still get authoring and opt-in instructions",async()=>{
+  const ctx=await businessSkillContext({client:{callTool:async()=>({items:[],authoring:{value:{auto_draft:true}}})}});
+  assert.match(ctx,/agentbridge_skill_authoring/);assert.match(ctx,/已开启/);
+});
+
+test("draft sample blocks business calls only in its identity and run",async()=>{
+  const {draftSampleGuard}=await import('../lib/business-skills.js');
+  const r={},c={runId:'r',sessionKey:'s'},i={binding:{key:'alice'}};
+  assert.equal(draftSampleGuard(r,c,i,'agentbridge_skill_authoring',{action:'test'}),null);
+  assert.equal(draftSampleGuard(r,c,i,'database_execute',{}).error.code,'SKILL_SAMPLE_ONLY');
+  assert.equal(draftSampleGuard(r,c,i,'agentbridge_skill_authoring',{action:'test_result'}),null);
+  assert.equal(draftSampleGuard(r,{...c,runId:'other'},i,'database_execute',{}),null);
+  assert.equal(draftSampleGuard(r,c,{binding:{key:'bob'}},'database_execute',{}),null);
+});

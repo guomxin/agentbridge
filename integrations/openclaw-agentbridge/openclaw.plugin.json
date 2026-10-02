@@ -9,6 +9,7 @@
     "tools": [
       "agentbridge_identity_status",
       "agentbridge_skill_catalog",
+      "agentbridge_skill_authoring",
       "agentbridge_skill_get",
       "oa_efficiency_data_approval_prepare",
       "oa_travel_expense_approval_prepare",

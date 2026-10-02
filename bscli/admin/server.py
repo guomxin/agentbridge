@@ -218,6 +218,9 @@ def create_admin_http_server(
                     self._json(200, {"items": control_plane.users()})
                 elif route.path == "/api/database-grants":
                     self._json(200, control_plane.database_grant_config(_query_value(query, "user"),_query_value(query,"source") or 'taihua_primary'))
+                elif route.path == "/api/skill-reviews":
+                    request_id = _query_value(query, "id")
+                    self._json(200, control_plane.service.skill_authoring.review_detail(request_id) if request_id else control_plane.service.skill_authoring.reviews())
                 elif route.path == "/api/skills":
                     self._json(200, control_plane.skill_config(_query_value(query, "user")))
                 elif route.path == "/api/user-grants":
@@ -351,6 +354,9 @@ def create_admin_http_server(
                         user_subject=_required_string(body, 'user_subject'), capabilities=body['capabilities'],
                         expected_revision=body['expected_revision'], reason=_required_string(body, 'reason'), source_id=body.get('source_id','taihua_primary'))
                     self._json(200, result)
+                    return
+                if route.path == "/api/skill-reviews":
+                    self._json(200, control_plane.decide_skill(actor=actor, request_ip=self.client_address[0], body=body))
                     return
                 if route.path == "/api/skills":
                     if set(body) != {"user_subject", "value", "expected_revision", "reason"}:

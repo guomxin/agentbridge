@@ -298,6 +298,7 @@ function switchView(view) {
 }
 
 async function loadSkills() {
+  await loadSkillDrafts();
   const container = $("#skill-list");
   container.replaceChildren();
   try {
@@ -2783,4 +2784,61 @@ function endpointType(type) {
 
 function escapeClass(value) {
   return String(value || "").replace(/[^a-z0-9_-]/gi, "");
+}
+
+
+function draftChat(message) {
+  switchView("chat");
+  const input=$("#chat-form textarea[name='message']"); input.value=message; input.focus();
+}
+const draftAction=(action,data={})=>api("/api/skill-drafts",{method:"POST",csrf:true,body:{action,data}});
+const draftStatus={submitted:"待审批",published:"已发布",changes_requested:"需修改",rejected:"已拒绝",withdrawn:"已撤回",editing:"草稿",archived:"已归档"};
+async function loadSkillDrafts() {
+  const root=$("#skill-authoring"); if (!root) return;
+  try {
+    const data=await api("/api/skill-drafts");
+    root.innerHTML=`<h3>我的草稿</h3><p>从需求或当前对话提炼方法，先试用，再提交管理控制台审批。草稿仅自己可见。</p>
+      <div class="draft-actions"><button id="draft-generate" class="secondary">描述需求生成</button><button id="draft-extract" class="secondary">总结当前对话</button><button id="draft-import" class="secondary">导入草稿</button></div>
+      <label class="draft-auto"><input type="checkbox" id="draft-auto" ${data.preferences.value.auto_draft?"checked":""}> 自动沉淀有价值的交互（仅私有草稿，不自动发布）</label>
+      <p id="draft-error" role="status"></p><div id="draft-list"></div><div id="draft-detail"></div><h3>可用助手</h3>`;
+    $("#draft-generate").onclick=()=>draftChat("帮我做个业务助手：");
+    $("#draft-extract").onclick=()=>draftChat("把刚才的过程做成助手草稿");
+    $("#draft-auto").onchange=async e=>{try { await draftAction("preferences",{value:{auto_draft:e.target.checked},expected_revision:data.preferences.revision}); await loadSkillDrafts(); } catch(err){$("#draft-error").textContent=err.message;e.target.checked=!e.target.checked;} };
+    $("#draft-import").onclick=()=>{
+      const input=document.createElement("input");input.type="file";input.accept="application/json,.json";
+      input.onchange=async()=>{try {const f=input.files[0];if(!f)return;if(f.size>100000)throw new Error("文件不能超过100KB");const v=JSON.parse(await f.text());if(v.format!=="agentbridge.skill-draft.v1")throw new Error("不支持的草稿格式");await draftAction("save",{proposal:v.proposal,request_key:crypto.randomUUID(),provenance:{kind:"import"}});await loadSkillDrafts();}catch(err){$("#draft-error").textContent=err.message;}};input.click();
+    };
+    const list=$("#draft-list");
+    if(!data.items.length)list.textContent="还没有草稿。可以直接在对话中说：做个周报助手。";
+    for(const d of data.items){const b=document.createElement("button");b.className="secondary";b.textContent=`${d.name} · 修订 ${d.revision} · ${draftStatus[d.state]||d.state}`;b.onclick=()=>showSkillDraft(d.draft_id);list.append(b);}
+  } catch(e){root.textContent=e.message;}
+}
+async function showSkillDraft(id) {
+  const root=$("#draft-detail");
+  try {
+    const d=await api("/api/skill-drafts?id="+encodeURIComponent(id));const m=d.bundle.manifest;
+    root.innerHTML=`<form id="draft-editor" class="draft-editor"><h3>${escapeHtml(m.name)}</h3><p>修订 ${d.revision} · 来源：${escapeHtml(d.provenance.kind)} · 仅保存方法，勿包含业务原文或凭据。</p>
+      <label>名称<input name="name" required maxlength="120" value="${escapeHtml(m.name)}"></label>
+      <label>简介<textarea name="description" required maxlength="500">${escapeHtml(m.description)}</textarea></label>
+      ${[["use_when","适用场景"],["not_for","不适用场景"],["output","输出结果"]].map(([k,t])=>`<label>${t}<textarea name="${k}" required maxlength="500">${escapeHtml(m.selection[k])}</textarea></label>`).join("")}
+      <label>处理方法<textarea name="instructions" required maxlength="40000" rows="12">${escapeHtml(d.bundle.resources["SKILL.md"])}</textarea></label>
+      <div class="draft-actions"><button type="submit" ${d.state==="archived"?"disabled":""}>保存新修订</button><button type="button" id="draft-test" class="secondary">对话试用</button><button type="button" id="draft-export" class="secondary">导出</button><button type="button" id="draft-archive" class="secondary">归档</button></div></form>
+      <div class="draft-actions"><label>历史修订<select id="draft-revision">${d.revisions.map(v=>`<option value="${v.revision}">修订 ${v.revision}</option>`).join("")}</select></label><button type="button" id="draft-restore" class="secondary">恢复为新草稿修订</button></div><p>恢复不影响已发布版本；重新试用并审批后才会生效。</p>
+      <h4>样例试运行</h4><p>以下为模型样例，未经独立验证，需人工核对。</p>
+      ${d.tests.map(t=>`<details><summary>修订 ${t.revision} · ${escapeHtml(t.profile)} · ${escapeHtml(t.status)}</summary><pre>${escapeHtml(t.prompt)}\n${escapeHtml(t.output||"等待样例结果")}</pre></details>`).join("")||"暂无样例"}
+      <form id="draft-submit" class="draft-editor"><h4>申请发布当前修订</h4><label>使用范围（默认仅自己；共享填写中央账号，逗号分隔）<input name="audience" placeholder="留空仅自己"></label><label>发布说明<textarea name="reason" required maxlength="1000"></textarea></label><button type="submit">提交审批</button></form>
+      <h4>发布申请</h4><div id="draft-requests"></div><p id="draft-detail-error" role="status"></p>`;
+    const error=e=>{$("#draft-detail-error").textContent=e.message;};
+    $("#draft-editor").onsubmit=async e=>{e.preventDefault();try{const f=new FormData(e.target);const exported=await draftAction("export",{draft_id:id});const proposal={...exported.proposal,name:f.get("name"),description:f.get("description"),instructions:f.get("instructions"),selection:Object.fromEntries(["use_when","not_for","output"].map(k=>[k,f.get(k)]))};await draftAction("save",{draft_id:id,expected_revision:d.revision,request_key:crypto.randomUUID(),proposal,provenance:{kind:"revision"}});await loadSkillDrafts();await showSkillDraft(id);}catch(e){error(e);}};
+    $("#draft-restore").onclick=async()=>{try{await draftAction("restore",{draft_id:id,expected_revision:d.revision,target_revision:Number($("#draft-revision").value),request_key:crypto.randomUUID()});await loadSkillDrafts();await showSkillDraft(id);}catch(e){error(e);}};
+    $("#draft-test").onclick=()=>draftChat(`试用“${m.name}”草稿（${id}），用一个简短的合成例子`);
+    $("#draft-export").onclick=async()=>{try{const result=await draftAction("export",{draft_id:id});const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:"application/json"}));const a=document.createElement("a");a.href=url;a.download="skill-draft.json";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){error(e);}};
+    $("#draft-archive").onclick=async()=>{try{await draftAction("archive",{draft_id:id,expected_revision:d.revision});await loadSkillDrafts();}catch(e){error(e);}};
+    $("#draft-submit").onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const audience=f.get("audience").split(/[,，]/).map(v=>v.trim()).filter(Boolean);try{await draftAction("submit",{draft_id:id,expected_revision:d.revision,request_key:crypto.randomUUID(),reason:f.get("reason"),...(audience.length?{audience}:{})});await showSkillDraft(id);}catch(e){error(e);}};
+    for(const r of d.requests){const p=document.createElement("p");p.textContent=`修订 ${r.draft_revision} · ${draftStatus[r.state]||r.state} ${r.published_version||""} ${r.decision_reason||""}`;if(r.state==="submitted"){const b=document.createElement("button");b.textContent="撤回申请";b.onclick=async()=>{try{await draftAction("withdraw",{request_id:r.request_id});await showSkillDraft(id);}catch(e){error(e);}};p.append(b);}$("#draft-requests").append(p);}
+  } catch(e){root.textContent=e.message;}
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 }

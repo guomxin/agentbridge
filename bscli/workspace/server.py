@@ -259,6 +259,12 @@ def create_workspace_http_server(
             query = parse_qs(route.query)
             try:
                 original_match = re.fullmatch(r'/api/database/logs/([a-z][a-z0-9_-]{0,63})/([0-9]{1,19})', route.path)
+                if route.path == "/api/skill-drafts":
+                    authoring = application.service.skill_authoring
+                    draft_id = query.get("id", [None])[0]
+                    self._json(200, authoring.get(account["user_subject"], draft_id) if draft_id else {
+                        **authoring.list(account["user_subject"]), "preferences": authoring.preferences(account["user_subject"])})
+                    return
                 if route.path == "/api/skills/history":
                     self._json(200, {"items": application.service.skills.load_history(account["user_subject"])})
                     return
@@ -496,6 +502,9 @@ def create_workspace_http_server(
                         else MAX_BODY_BYTES
                     )
                 )
+                if route.path == "/api/skill-drafts":
+                    self._json(200, application.service.skill_authoring.dispatch(account["user_subject"], body.get("action"), body.get("data", {})))
+                    return
                 if route.path == "/api/logout":
                     application.logout(self._cookie(SESSION_COOKIE))
                     self._json(200, {"status": "signed_out"}, clear=True)
@@ -1019,6 +1028,13 @@ def create_workspace_http_server(
                 )
 
         def _handle_error(self, exc: Exception) -> None:
+            from bscli.core.user_grants import UserGrantConflict
+            if isinstance(exc, UserGrantConflict):
+                self._json(409, {"error": {"code": "REVISION_CONFLICT", "message": str(exc)}})
+                return
+            if isinstance(exc, KeyError):
+                self._json(404, {"error": {"code": "NOT_FOUND", "message": "记录不存在或不可访问"}})
+                return
             if isinstance(exc, GatewayRequestError):
                 status = (
                     503

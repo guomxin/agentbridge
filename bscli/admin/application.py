@@ -605,7 +605,17 @@ class AdminControlPlane:
         return {**self.service.skills.config("global"), "items": [
             {"id": sid, "name": item["manifest"]["name"], "version": item["manifest"]["version"],
              "default_status": item["manifest"].get("status", "trial")}
-            for sid, item in self.service.skills.registry.items.items()]}
+            for sid, item in self.service.skills.all_items().items()]}
+
+    def decide_skill(self, *, actor, request_ip, body):
+        _require_admin(actor)
+        if set(body) - {"request_id", "decision", "reason", "reviewed_tests"}:
+            raise ValueError("审批字段无效")
+        return self.service.skill_authoring.decide(actor=actor, **body,
+            audit_callback=lambda connection, before, after: self.audit.append(
+                actor=actor, action="skills.release.review", target_type="skill_review", target_id=body["request_id"],
+                request_ip=request_ip, reason=body["reason"], before=before, after=after,
+                result="succeeded", connection=connection))
 
     def save_skill_config(self, *, actor, request_ip, user_subject, value, expected_revision, reason):
         _require_admin(actor)

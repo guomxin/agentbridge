@@ -3,6 +3,7 @@
 const state = { account: null, view: "overview", modalAction: null, coordinationTab: "tasks", governanceTab: "events", incidents: [], selectedIncident: null, detailRevision: 0, viewRevision: 0, readController: null };
 const titles = {
   overview: ["CONTROL PLANE", "运行总览"],
+  skillReviews: ["SKILL PUBLICATION", "助手发布审批"],
   users: ["IDENTITY", "用户与令牌"],
   databases: ["DATA SOURCES", "数据库"],
   sessions: ["DOWNSTREAM", "系统会话"],
@@ -261,7 +262,7 @@ async function loadView(view) {
   content.innerHTML = '<div class="loading">正在读取中心状态</div>';
   try {
     const renderers = {
-      overview: renderOverview, databases: renderDatabases, users: renderUsers, sessions: renderSessions, capabilities: renderCapabilities,
+      skillReviews: renderSkillReviews, overview: renderOverview, databases: renderDatabases, users: renderUsers, sessions: renderSessions, capabilities: renderCapabilities,
       operations: renderOperations, interactions: renderInteractions, traces: renderTraces,
       incidents: renderIncidents, coordination: renderCoordination, runtime: renderRuntime, audit: renderAudit,
     };
@@ -903,3 +904,23 @@ document.addEventListener("keydown", event => {
   }
 });
 initialize();
+
+
+async function renderSkillReviews() {
+  const result=await api("/api/skill-reviews");
+  const labels={submitted:"待审批",published:"已发布",changes_requested:"需修改",rejected:"已拒绝",withdrawn:"已撤回"};
+  content.innerHTML=`<p>普通用户的个人发布与共享发布均在此审批。通过后立即生效，不授予业务权限。请核对固定修订的方法、范围及样例结果。</p>`+table(["申请人","草稿修订","范围","状态","提交时间","操作"],result.items.map(r=>`<tr><td>${escapeHtml(r.owner_subject)}</td><td>${shortId(r.draft_id)} / ${r.draft_revision}</td><td>${escapeHtml(r.audience.join("、"))}</td><td>${escapeHtml(labels[r.state]||r.state)}</td><td>${fmtTime(r.created_at)}</td><td><button class="button secondary" data-skill-review="${escapeHtml(r.request_id)}">查看申请</button></td></tr>`));
+  content.querySelectorAll("[data-skill-review]").forEach(b=>b.onclick=()=>openSkillReview(b.dataset.skillReview).catch(e=>toast(e.message,true)));
+}
+async function openSkillReview(id) {
+  const r=await api("/api/skill-reviews?id="+encodeURIComponent(id));const m=r.bundle.manifest;
+  const canReview=state.account.role==="admin"&&r.state==="submitted";
+  openModal({title:`${m.name} · 修订 ${r.draft_revision}`,submit:canReview?"提交审批决定":"关闭",body:`
+    <p>${escapeHtml(m.description)}</p><p>申请人：${escapeHtml(r.owner_subject)} · 使用范围：${escapeHtml(r.audience.join("、"))}</p><p>发布说明：${escapeHtml(r.reason)}</p>
+    <p>适用：${escapeHtml(m.selection.use_when)}<br>不适用：${escapeHtml(m.selection.not_for)}<br>输出：${escapeHtml(m.selection.output)}</p>
+    <details open><summary>方法与依赖</summary><pre class="skill-review-text">${escapeHtml(JSON.stringify(m.profiles,null,2))}\n${escapeHtml(r.bundle.resources["SKILL.md"])}</pre></details>
+    ${Object.entries(r.bundle.resources).filter(([k])=>k!=="SKILL.md").map(([k,v])=>`<details><summary>${escapeHtml(k)}</summary><pre class="skill-review-text">${escapeHtml(v)}</pre></details>`).join("")}
+    <h3>样例结果（模型生成，待人工复核）</h3>${r.tests.map(t=>`<details open><summary>${escapeHtml(t.profile)} · ${escapeHtml(t.prompt)}</summary><pre class="skill-review-text">${escapeHtml(t.output)}</pre></details>`).join("")}
+    ${canReview?`<label>决定<select name="decision"><option value="changes_requested">退回修改</option><option value="approve">通过并发布</option><option value="rejected">拒绝</option></select></label><label><input type="checkbox" name="reviewed_tests">我已检查方法、依赖、脱敏、发布范围和全部样例结果</label>${reasonField("审批意见")}`:`<p>${escapeHtml(r.decision_reason||r.state)}</p>`}`,
+    action:async f=>{if(canReview)await api("/api/skill-reviews",{method:"POST",body:JSON.stringify({request_id:id,decision:f.get("decision"),reviewed_tests:f.get("reviewed_tests")==="on",reason:f.get("reason")})});closeModal();await loadView("skillReviews");}});
+}

@@ -207,6 +207,7 @@ _LOGGER = logging.getLogger("uvicorn.error")
 
 AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "agentbridge_skill_catalog": frozenset(),
+    "agentbridge_skill_authoring": frozenset(),
     "agentbridge_skill_get": frozenset(),
     "database_capabilities": frozenset(),
     "database_execute": frozenset(),
@@ -972,7 +973,17 @@ def create_central_mcp_server(
     async def agentbridge_skill_catalog() -> dict[str, Any]:
         from bscli.core.business_skills import skill_catalog
         identity = _request_identity(identity_store)
-        return await asyncio.to_thread(skill_catalog, service, identity["user_subject"])
+        result = await asyncio.to_thread(skill_catalog, service, identity["user_subject"])
+        result["authoring"] = await asyncio.to_thread(service.skill_authoring.preferences, identity["user_subject"])
+        return result
+
+    @mcp.tool(name="agentbridge_skill_authoring", title="创作业务助手草稿",
+        description="所有用户均可创作私有草稿，无需业务权限。action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(默认use:{}),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False), structured_output=True)
+    async def agentbridge_skill_authoring(ctx: Context, action: str, data: dict[str, Any]) -> dict[str, Any]:
+        identity = _request_identity(identity_store)
+        await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
+        return await asyncio.to_thread(service.skill_authoring.dispatch, identity["user_subject"], action, data)
 
     @mcp.tool(name="agentbridge_skill_get", title="加载业务助手",
         description="加载已选定业务 Skill。使用当前目录中的 skill_id、profile 和 version；数据库助手须选择 source_id。系统一次返回主说明及该模式全部必读资料，无需选择或另读文件。返回任务绑定，由宿主为后续调用传递。加载不授予业务权限。",
@@ -991,7 +1002,7 @@ def create_central_mcp_server(
                         raise SkillRejected("SKILL_TASK_CONFLICT", "当前任务已绑定另一助手或范围，请在独立任务中使用")
                     binding_id = binding["binding_id"]
                 else:
-                    item = service.skills.registry.get(skill_id)
+                    item = service.skills.current(skill_id)
                     settings = service.skills.config("user:" + identity["user_subject"])["value"].get(skill_id, {})
                     if profile not in item["manifest"]["profiles"]:
                         raise SkillRejected("SKILL_PROFILE_INVALID", "业务助手功能不存在")
