@@ -145,3 +145,18 @@ class SkillAuthoringTests(unittest.TestCase):
         with self.assertRaises(SkillRejected):self.s.skills.available_item('bob',d['skill_id'],'use')
         self.s.skills.record_load('bob',d['skill_id'],'use','SKILL.md',{'status':'rejected'})
         self.assertEqual(self.s.skills.load_history('bob')[0]['name'],'未知业务助手')
+
+    def test_shared_publication_to_identity_without_grants_and_audience_reduction(self):
+        from bscli.core.mcp_identities import McpIdentityTokenStore
+        McpIdentityTokenStore(self.s.db_path).issue(user_subject='bob',expected_principal_ref='Bob')
+        d=self.draft();self.sample(d)
+        r=self.a.submit('alice',draft_id=d['draft_id'],expected_revision=1,request_key='share',reason='共享方法',audience=['alice','bob'])
+        self.approve(r)
+        binding=self.s.skills.bind('bob',d['skill_id'],'use')
+        self.assertIsNone(self.s.user_grants.get('bob'))
+        self.assertEqual(skill_catalog(self.s,'bob')['items'][0]['id'],d['skill_id'])
+        d2=self.a.save('alice',draft_id=d['draft_id'],expected_revision=1,proposal={**self.proposal,'instructions':'更新的方法'},request_key='revised')
+        self.approve(self.submit(d2))
+        self.assertEqual(skill_catalog(self.s,'bob')['items'],[])
+        with self.assertRaises(SkillRejected):self.s.skills.binding('bob',binding)
+        self.assertIsNone(self.s.user_grants.get('bob'))
