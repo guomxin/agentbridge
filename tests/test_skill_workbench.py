@@ -72,6 +72,39 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.w.run_once(lambda *_: self.fail('disabled job must not invoke model'))
         self.assertEqual(self.w.jobs('alice', j2['job_id'])['state'], 'failed')
 
+    def test_generation_retries_invalid_json_once_without_reusing_model_text(self):
+        j = self.w.generate('alice', material='做个周报助手', request_key='format')
+        calls = []
+        def complete(system, prompt):
+            calls.append((system, prompt))
+            self.assertNotIn('不可信模型附言', system + prompt)
+            return {'text': '不可信模型附言' if len(calls) == 1 else
+                    json.dumps({'kind': 'method', 'proposal': self.p})}
+        self.w.run_once(complete)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertTrue(self.w.jobs('alice', j['job_id'])['result']['saved'])
+        self.assertEqual(len(self.a.list('alice')['items']), 2)
+
+        j = self.w.generate('alice', material='做个助手', request_key='invalid')
+        failures = []
+        self.w.run_once(lambda *_: failures.append(1) or {'text': '```'})
+        self.assertEqual(len(failures), 2)
+        self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'failed')
+        self.assertEqual(len(self.a.list('alice')['items']), 2)
+
+    def test_cancellation_after_invalid_generation_skips_format_retry(self):
+        j = self.w.generate('alice', material='做个助手', request_key='cancel-format')
+        calls = []
+        def complete(*_):
+            calls.append(1)
+            self.w.cancel('alice', j['job_id'])
+            return {'text': 'not json'}
+        self.w.run_once(complete)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'canceled')
+        self.assertEqual(len(self.a.list('alice')['items']), 1)
+
     def test_disable_during_generation_prevents_save(self):
         self.a.preferences('alice', value={'auto_draft': True}, expected_revision=0)
         self.w.scopes('alice', scope='chat', enabled=True)

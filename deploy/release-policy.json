@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "a1676a67610b"
+    "35dcf996a6e8"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "8c1a26a6f16722a37eff8f48f1fb01299fb948f3e6f18619507a674109b8f1ee",
-      "afterSha256": "38a3cc962bfe5ccd74b84aef8786a5e18c6f6586f13f20f513b4d497ff772651"
-    }
-  },
-  "reason": "Reviewed additive Skill workbench tables and indexes only. Existing draft, publication, task and permission tables remain unchanged; rollback preserves new private jobs and review evidence. No business grants or configuration changes."
+  "dataCompatibility": "no-migration",
+  "reason": "Bounded generation-format retry and UI progress wording only. No schema, grant or configuration changes."
 }
