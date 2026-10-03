@@ -75,6 +75,18 @@ class WorkspaceHTTPServer(ThreadedTLSHTTPServer):
         self._stream_lock = threading.Lock()
         super().__init__(*args, **kwargs)
 
+    def serve_forever(self, poll_interval=0.5):
+        self.workbench_application.start_workbench()
+        try:
+            return super().serve_forever(poll_interval=poll_interval)
+        finally:
+            self.workbench_application.close()
+
+    def server_close(self):
+        if hasattr(self, 'workbench_application'):
+            self.workbench_application.close()
+        super().server_close()
+
     def acquire_stream(self, subject: str) -> bool:
         with self._stream_lock:
             if self._stream_counts.get(subject, 0) >= 6:
@@ -1125,6 +1137,7 @@ def create_workspace_http_server(
         (config.host, config.port),
         WorkspaceRequestHandler,
     )
+    server.workbench_application = application
     if config.tls_cert and config.tls_key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2

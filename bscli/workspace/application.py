@@ -84,9 +84,12 @@ class WorkspaceApplication:
         self._readiness_lock = threading.Lock()
         self._readiness_cache: tuple[float, dict] | None = None
         if gateway is not None:
-            self.service.skill_authoring.workbench.start(self._skill_completion, self._capture_skill_method)
             for account_id in self.store.recover_host_dispatches():
                 self._ensure_dispatch_worker(account_id)
+
+    def start_workbench(self):
+        if self.gateway is not None:
+            self.service.skill_authoring.workbench.start(self._skill_completion, self._capture_skill_method)
 
     def _skill_completion(self, system: str, prompt: str) -> dict:
         return self._gateway().call('agentbridge.skills.complete', {'system': system, 'prompt': prompt}, timeout_seconds=100)
