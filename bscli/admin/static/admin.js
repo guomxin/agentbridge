@@ -909,7 +909,8 @@ initialize();
 async function renderSkillReviews() {
   const result=await api("/api/skill-reviews");
   const labels={submitted:"待审批",published:"已发布",changes_requested:"需修改",rejected:"已拒绝",withdrawn:"已撤回"};
-  content.innerHTML=`<p>普通用户的个人发布与共享发布均在此审批。通过后立即生效，不授予业务权限。请核对固定修订的方法、范围及样例结果。</p>`+table(["申请人","草稿修订","范围","状态","提交时间","操作"],result.items.map(r=>`<tr><td>${escapeHtml(r.owner_subject)}</td><td>${shortId(r.draft_id)} / ${r.draft_revision}</td><td>${escapeHtml(r.audience.join("、"))}</td><td>${escapeHtml(labels[r.state]||r.state)}</td><td>${fmtTime(r.created_at)}</td><td><button class="button secondary" data-skill-review="${escapeHtml(r.request_id)}">查看申请</button></td></tr>`));
+  content.innerHTML=`<p>普通用户的个人发布与共享发布均在此审批。通过后立即生效，不授予业务权限。请核对固定修订、版本差异、使用范围及评测报告。</p>`+table(["申请人","助手与修订","范围","状态","提交时间","操作"],result.items.map(r=>`<tr><td>${escapeHtml(r.owner_subject)}</td><td>${escapeHtml(r.name||'历史助手')} / ${r.draft_revision}</td><td>${escapeHtml(r.audience.join("、"))}</td><td>${escapeHtml(labels[r.state]||r.state)}</td><td>${fmtTime(r.created_at)}</td><td><button class="button secondary" data-skill-review="${escapeHtml(r.request_id)}">查看申请</button></td></tr>`));
+  if(result.metrics){const ratings={useful:'有帮助',incorrect:'结果有误',not_applicable:'不适用'};content.insertAdjacentHTML('beforeend',`<details><summary>版本反馈与后台任务</summary><p>用户反馈不等于独立成功率，加载数量不作为质量证明。</p>${result.metrics.feedback.map(r=>`<p>${escapeHtml(r.skill_id)} · ${escapeHtml(r.version)} · ${ratings[r.rating]} ${r.count} 次</p>`).join('')||'<p>暂无版本反馈。</p>'}${result.metrics.jobs.map(r=>`<p>${r.kind==='evaluation'?'评测':'生成'} · ${escapeHtml(r.state)} ${r.count} 项</p>`).join('')}</details>`);}
   content.querySelectorAll("[data-skill-review]").forEach(b=>b.onclick=()=>openSkillReview(b.dataset.skillReview).catch(e=>toast(e.message,true)));
 }
 async function openSkillReview(id) {
@@ -918,9 +919,22 @@ async function openSkillReview(id) {
   openModal({title:`${m.name} · 修订 ${r.draft_revision}`,submit:canReview?"提交审批决定":"关闭",body:`
     <p>${escapeHtml(m.description)}</p><p>申请人：${escapeHtml(r.owner_subject)} · 使用范围：${escapeHtml(r.audience.join("、"))}</p><p>发布说明：${escapeHtml(r.reason)}</p>
     <p>适用：${escapeHtml(m.selection.use_when)}<br>不适用：${escapeHtml(m.selection.not_for)}<br>输出：${escapeHtml(m.selection.output)}</p>
+    ${skillReviewQualityHtml(r.quality)}
     <details open><summary>方法与依赖</summary><pre class="skill-review-text">${escapeHtml(JSON.stringify(m.profiles,null,2))}\n${escapeHtml(r.bundle.resources["SKILL.md"])}</pre></details>
     ${Object.entries(r.bundle.resources).filter(([k])=>k!=="SKILL.md").map(([k,v])=>`<details><summary>${escapeHtml(k)}</summary><pre class="skill-review-text">${escapeHtml(v)}</pre></details>`).join("")}
     <h3>样例结果（模型生成，待人工复核）</h3>${r.tests.map(t=>`<details open><summary>${escapeHtml(t.profile)} · ${escapeHtml(t.prompt)}</summary><pre class="skill-review-text">${escapeHtml(t.output)}</pre></details>`).join("")}
     ${canReview?`<label>决定<select name="decision"><option value="changes_requested">退回修改</option><option value="approve">通过并发布</option><option value="rejected">拒绝</option></select></label><label><input type="checkbox" name="reviewed_tests">我已检查方法、依赖、脱敏、发布范围和全部样例结果</label>${reasonField("审批意见")}`:`<p>${escapeHtml(r.decision_reason||r.state)}</p>`}`,
-    action:async f=>{if(canReview)await api("/api/skill-reviews",{method:"POST",body:JSON.stringify({request_id:id,decision:f.get("decision"),reviewed_tests:f.get("reviewed_tests")==="on",reason:f.get("reason")})});closeModal();await loadView("skillReviews");}});
+    action:async f=>{if(canReview)await api("/api/skill-reviews",{method:"POST",body:JSON.stringify({request_id:id,decision:f.get("decision"),reviewed_tests:f.get("reviewed_tests")==="on",reason:f.get("reason"),manual_quality_reason:f.get("manual_quality_reason")||null})});closeModal();await loadView("skillReviews");}});
+}
+
+function skillReviewQualityHtml(q){
+  if(!q)return '<p>历史申请未记录独立评测及版本差异。</p>';
+  const report=q.evaluation;const labels={candidate:'候选版本',published:'线上版本',without_skill:'不使用助手'};
+  return `<h3>固定修订质量依据</h3><p>${escapeHtml(q.diagnostics.message)}</p>${q.diagnostics.checks.filter(c=>c.level==='warning').map(c=>`<p>待复核：${escapeHtml(c.message)}</p>`).join('')}
+    <details><summary>版本差异（${q.diff.length} 项）</summary>${q.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre class="skill-review-text">${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
+    <p>新增使用用户：${escapeHtml(q.audience_diff.added.join('、')||'无')}；移除：${escapeHtml(q.audience_diff.removed.join('、')||'无')}</p>
+    ${report?`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p><p>${escapeHtml(report.limitations)}</p>
+    ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
+    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p></details>`).join('')}`:
+    `<p>尚无独立评测，仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`}`;
 }

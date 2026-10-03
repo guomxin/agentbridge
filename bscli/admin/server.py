@@ -220,7 +220,9 @@ def create_admin_http_server(
                     self._json(200, control_plane.database_grant_config(_query_value(query, "user"),_query_value(query,"source") or 'taihua_primary'))
                 elif route.path == "/api/skill-reviews":
                     request_id = _query_value(query, "id")
-                    self._json(200, control_plane.service.skill_authoring.review_detail(request_id) if request_id else control_plane.service.skill_authoring.reviews())
+                    self._json(200, control_plane.service.skill_authoring.review_detail(request_id) if request_id else {
+                        **control_plane.service.skill_authoring.reviews(),
+                        'metrics': control_plane.service.skill_authoring.workbench.metrics()})
                 elif route.path == "/api/skills":
                     self._json(200, control_plane.skill_config(_query_value(query, "user")))
                 elif route.path == "/api/user-grants":

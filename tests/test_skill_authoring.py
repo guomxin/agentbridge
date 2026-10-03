@@ -30,7 +30,7 @@ class SkillAuthoringTests(unittest.TestCase):
         return self.a.submit('alice',draft_id=d['draft_id'],expected_revision=d['revision'],request_key=str(uuid4()),reason='个人使用')
 
     def approve(self,r,**kw):
-        return self.a.decide(actor=self.admin,request_id=r['request_id'],decision='approve',reason='已复核',reviewed_tests=True,**kw)
+        return self.a.decide(actor=self.admin,request_id=r['request_id'],decision='approve',reason='已复核',reviewed_tests=True,manual_quality_reason='人工逐句核对合成样例与方法',**kw)
 
     def test_no_grants_user_private_draft_and_publication(self):
         d=self.draft()
@@ -101,9 +101,10 @@ class SkillAuthoringTests(unittest.TestCase):
         self.assertEqual(self.s.skills.config('user:alice')['revision'],1)
 
     def test_automatic_requires_opt_in_and_no_automatic_publication(self):
-        with self.assertRaises(PermissionError):self.a.save('alice',proposal=self.proposal,request_key='auto',provenance={'kind':'automatic'})
+        with self.assertRaises(PermissionError):self.a.save('alice',proposal=self.proposal,request_key='auto',provenance={'kind':'automatic','scope':'test'})
         self.a.preferences('alice',value={'auto_draft':True},expected_revision=0)
-        d=self.a.save('alice',proposal=self.proposal,request_key='auto',provenance={'kind':'automatic'})
+        self.a.workbench.scopes('alice',scope='test',enabled=True)
+        d=self.a.save('alice',proposal=self.proposal,request_key='auto',provenance={'kind':'automatic','scope':'test'})
         self.assertFalse(d['published']);self.assertEqual(self.a.reviews('alice')['items'],[])
         with self.assertRaises(UserGrantConflict):self.a.preferences('alice',value={'auto_draft':False},expected_revision=0)
 
@@ -132,11 +133,12 @@ class SkillAuthoringTests(unittest.TestCase):
 
     def test_auto_dedup_budget_and_disable(self):
         self.a.preferences('alice',value={'auto_draft':True},expected_revision=0)
-        args={'proposal':self.proposal,'provenance':{'kind':'automatic'}}
+        self.a.workbench.scopes('alice',scope='test',enabled=True)
+        args={'proposal':self.proposal,'provenance':{'kind':'automatic','scope':'test'}}
         d=self.a.save('alice',request_key='auto1',**args)
         self.assertEqual(self.a.save('alice',request_key='auto2',**args),d)
-        for i in range(2):self.a.save('alice',proposal={**self.proposal,'name':str(i)},provenance={'kind':'automatic'},request_key=str(i))
-        with self.assertRaises(ValueError):self.a.save('alice',proposal={**self.proposal,'name':'fourth'},provenance={'kind':'automatic'},request_key='fourth')
+        for i in range(2):self.a.save('alice',proposal={**self.proposal,'name':str(i)},provenance={'kind':'automatic','scope':'test'},request_key=str(i))
+        with self.assertRaises(ValueError):self.a.save('alice',proposal={**self.proposal,'name':'fourth'},provenance={'kind':'automatic','scope':'test'},request_key='fourth')
         self.a.preferences('alice',value={'auto_draft':False},expected_revision=1)
         with self.assertRaises(PermissionError):self.a.save('alice',request_key='auto3',**args)
 

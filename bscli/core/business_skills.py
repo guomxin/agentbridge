@@ -36,7 +36,7 @@ def skill_bundle(binding):
     names = [manifest["entrypoint"], *required]
     if any(name not in snapshot["resources"] for name in names):
         raise SkillRejected("SKILL_VERSION_UNAVAILABLE", "业务助手必读资料不完整，请联系管理员")
-    return {"loaded_resources": names,
+    return {"loaded_resources": names, "optional_resources": [n for n in snapshot['resources'] if n not in names],
             "content": "\n\n".join(f"## {name}\n\n{snapshot['resources'][name]}" for name in names)}
 
 

@@ -50,3 +50,22 @@ test("draft sample blocks business calls only in its identity and run",async()=>
   assert.equal(draftSampleGuard(r,{...c,runId:'other'},i,'database_execute',{}),null);
   assert.equal(draftSampleGuard(r,c,{binding:{key:'bob'}},'database_execute',{}),null);
 });
+
+test('completed run releases only its own skill and sample guards',async()=>{
+  const {releaseSkillRun,draftSampleGuard}=await import('../lib/business-skills.js');
+  const router={},identity={binding:{key:'alice'}},one={runId:'one',sessionKey:'s'},two={runId:'two',sessionKey:'s'};
+  rememberSkillBinding(router,one,identity,{status:'succeeded',binding_id:'a'});
+  rememberSkillBinding(router,two,identity,{status:'succeeded',binding_id:'b'});
+  draftSampleGuard(router,one,identity,'agentbridge_skill_authoring',{action:'test'});
+  releaseSkillRun(router,one);
+  assert.deepEqual(skillBindingMeta(router,one,identity),{});
+  assert.equal(skillBindingMeta(router,two,identity)['agentbridge/skill'].bindingId,'b');
+  assert.equal(draftSampleGuard(router,one,identity,'database_execute',{}),null);
+});
+
+test('large catalog uses a bounded shortlist with explicit discovery fallback',async()=>{
+  const items=Array.from({length:30},(_,i)=>({id:'s'+i,name:i===29?'特殊周报':'查询'+i,description:'方法',selection:{use_when:'处理任务'}}));
+  const context=await businessSkillContext({client:{callTool:async()=>({items})}},'特殊周报');
+  assert.match(context,/discover/);assert.match(context,/s29/);
+  assert.equal((context.match(/"id":/g)||[]).length,20);
+});

@@ -1595,3 +1595,14 @@ td {
 .draft-auto input { width: auto; }
 #draft-list { display: flex; flex-wrap: wrap; gap: 8px; }
 #draft-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.draft-editor[hidden] { display: none; }
+.draft-editor fieldset { border: 1px solid #dce3ec; border-radius: 10px; padding: 16px; display: grid; gap: 10px; min-width: 0; }
+.draft-editor fieldset legend { padding: 0 6px; color: #43576b; }
+#skill-recipients label { display: flex; align-items: center; gap: 8px; }
+#skill-recipients input { width: auto; }
+.skill-job { border-bottom: 1px solid #dce3ec; padding: 12px 0; }
+#skill-workbench-home pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#skill-workbench-home, #skill-quality-panel { max-width: 850px; }
+#skill-quality-panel details { margin: 12px 0; }
+.skill-card details { margin-top: 16px; }
+.skill-card details textarea { width: 100%; box-sizing: border-box; margin: 10px 0; }

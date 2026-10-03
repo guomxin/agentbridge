@@ -1,5 +1,6 @@
 import { resolvePluginConfig } from "./config.js";
-import { businessSkillContext } from "./business-skills.js";
+import { businessSkillContext, releaseSkillRun } from "./business-skills.js";
+import { registerSkillCompletion } from "./skill-completion.js";
 import {
   createInteractionSharedState,
   InteractionCoordinator,
@@ -23,7 +24,7 @@ import {
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
 
-export const PLUGIN_VERSION = "0.4.108";
+export const PLUGIN_VERSION = "0.4.109";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;
@@ -45,6 +46,7 @@ const REFERENTIAL_HINT_PATTERN =
   /(?:刚才|刚刚|前面|之前|上一(?:条|步|个)|第\s*\d+\s*条|继续|这个|那个)/iu;
 
 export function registerAgentBridgeInteractions(api, dependencies = {}) {
+  registerSkillCompletion(api, dependencies.skillCompletion);
   const config = resolvePluginConfig(api.pluginConfig);
   const sharedState =
     dependencies.sharedState || createInteractionSharedState();
@@ -232,6 +234,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       syncTimeline: config.syncTimeline,
     });
   });
+
+  api.on('agent_end', (_event, context) => releaseSkillRun(identityRouter, context));
 
   // Telegram and WeChat emit this hook after delivery succeeds.
   // Resolve the destination route, never attribute a cross-chat send to its caller.
@@ -548,6 +552,7 @@ async function taskContinuityPromptContext({
   }
   const contexts = [];
   const planningContext = await composedTaskPlanningContext({
+    prompt,
     context,
     identityRouter,
   });
@@ -592,7 +597,7 @@ async function taskContinuityPromptContext({
     : undefined;
 }
 
-async function composedTaskPlanningContext({ context, identityRouter }) {
+async function composedTaskPlanningContext({ context, identityRouter, prompt }) {
   const sessionKey = safeText(context.sessionKey, 1_024);
   if (!isPrivateSessionKey(sessionKey)) {
     return null;
@@ -617,7 +622,7 @@ async function composedTaskPlanningContext({ context, identityRouter }) {
   const policy = planning?.modelContext || "";
   if (planning?.skillProtocol !== "agentbridge.skills.v1") return policy || null;
   try {
-    return [policy, await businessSkillContext(identity)].filter(Boolean).join("\n\n") || null;
+    return [policy, await businessSkillContext(identity, prompt)].filter(Boolean).join("\n\n") || null;
   } catch {
     return [policy, "当前业务助手目录暂不可用，不使用旧缓存新开 Skill 任务。普通原子工具仍按原权限使用；不可绕过来源派生写入约束。"].filter(Boolean).join("\n\n");
   }

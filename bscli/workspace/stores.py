@@ -1609,6 +1609,13 @@ class WorkspaceStore:
                 event=event,
                 now=now,
             )
+            # Transactional outbox: a crash after completion cannot lose opted-in
+            # method capture. Standalone stores without the workbench stay compatible.
+            if state == 'completed' and event.get('text') and connection.execute("SELECT 1 FROM sqlite_master WHERE name='skill_auto_capture'").fetchone():
+                from bscli.core.skill_workbench import SkillWorkbench
+                if SkillWorkbench._auto_allowed(connection, row['user_subject'], 'workspace:' + row['account_id']):
+                    connection.execute('INSERT OR IGNORE INTO skill_auto_capture VALUES (?,?,?,?,?)',
+                        (dispatch_id, row['user_subject'], str(event['text'])[:12000], 'queued', now))
             updated = connection.execute(
                 "SELECT * FROM agent_host_dispatches WHERE dispatch_id = ?",
                 (dispatch_id,),

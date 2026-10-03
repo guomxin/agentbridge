@@ -69,6 +69,8 @@ class SkillAuthoring:
                     event_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL, kind TEXT NOT NULL,
                     object_id TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
             """)
+        from bscli.core.skill_workbench import SkillWorkbench
+        self.workbench = SkillWorkbench(self)
 
     def _event(self, db, owner, kind, object_id, payload):
         db.execute("INSERT INTO skill_authoring_events VALUES (?,?,?,?,?,?)",
@@ -103,8 +105,17 @@ class SkillAuthoring:
         return row, json.loads(row['payload_json'])
 
     def normalize(self, skill_id, proposal):
-        if not isinstance(proposal, dict) or set(proposal) - {'name', 'description', 'selection', 'profiles', 'executionMode', 'instructions', 'references', 'required_resources'}:
-            raise ValueError("草稿字段无效")
+        from bscli.core.skill_quality import SkillProposal
+        from pydantic import ValidationError
+        try:
+            proposal = SkillProposal.model_validate(proposal).model_dump(exclude_none=True)
+        except ValidationError as exc:
+            fields = ', '.join('.'.join(str(p) for p in e['loc']) for e in exc.errors())
+            raise ValueError('草稿字段无效：' + fields) from exc
+        method = proposal.pop('method', None)
+        if method:
+            sections = [('输入', 'inputs'), ('步骤', 'steps'), ('异常处理', 'exceptions'), ('验收', 'acceptance')]
+            proposal['instructions'] += '\n\n' + '\n\n'.join('## ' + title + '\n' + '\n'.join(f'{i+1}. {v}' for i, v in enumerate(method[key])) for title, key in sections if method[key])
         refs = proposal.get('references', {})
         profiles = proposal.get('profiles', {'use': {}})
         if not isinstance(refs, dict) or not isinstance(profiles, dict) or not profiles or len(profiles) > 8:
@@ -127,7 +138,7 @@ class SkillAuthoring:
         return validate_skill_bundle(manifest, {'SKILL.md': body, **refs})
 
     def _provenance(self, owner, data):
-        if not isinstance(data, dict) or set(data) - {'kind', 'task_ids', 'summary', 'complete'}:
+        if not isinstance(data, dict) or set(data) - {'kind', 'task_ids', 'summary', 'complete', 'scope'}:
             raise ValueError("来源字段无效")
         kind = data.get('kind', 'request')
         if kind not in {'request', 'interaction', 'import', 'revision', 'automatic'}:
@@ -144,18 +155,25 @@ class SkillAuthoring:
                 'completeness': 'host_reported_complete' if data.get('complete') is True else 'partial_or_unknown',
                 'verification': 'task_status_only' if facts else 'host_statement_only'}
 
-    def save(self, owner, *, proposal, request_key, draft_id=None, expected_revision=None, provenance=None):
+    def save(self, owner, *, proposal, request_key, draft_id=None, expected_revision=None, provenance=None, _job=None):
         source_input = provenance or {}
         provenance = self._provenance(owner, source_input)
         automatic = provenance['kind'] == 'automatic'
-        if automatic:
+        if automatic and _job is None:
             request_key = 'automatic:' + sha256(_json({'proposal':proposal,'source':source_input,'draft_id':draft_id,'revision':expected_revision}).encode()).hexdigest()
         with closing(self.store.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
+            if _job is not None:
+                active = db.execute("SELECT 1 FROM skill_jobs WHERE job_id=? AND owner_subject=? AND claim_token=? AND state='running'", (_job['job_id'], owner, _job['claim_token'])).fetchone()
+                if not active: raise UserGrantConflict('后台任务已取消或已被接续')
+                if automatic and not self.workbench._auto_allowed(db, owner, _job['scope']):
+                    raise PermissionError('自动沉淀范围已关闭')
             if automatic:
                 pref = db.execute('SELECT value_json FROM skill_authoring_preferences WHERE owner_subject=?',(owner,)).fetchone()
                 if not pref or not json.loads(pref[0])['auto_draft']:
                     raise PermissionError('请先开启自动沉淀草稿')
+                if _job is None and not self.workbench._auto_allowed(db, owner, source_input.get('scope', '')):
+                    raise PermissionError('自动保存需要已开启的会话范围，请使用后台生成')
             digest, previous = self._command(db, owner, request_key, {'op': 'save', 'proposal': proposal,
                 'draft_id': draft_id, 'revision': expected_revision, 'provenance': source_input})
             if previous:
@@ -181,12 +199,19 @@ class SkillAuthoring:
             db.execute('INSERT INTO skill_draft_revisions VALUES (?,?,?,?,?,?)',
                        (draft_id, rev, _json(bundle), bundle['content_hash'], _json(provenance), now()))
             self._event(db, owner, 'draft.automatic' if automatic else 'draft.saved', draft_id, {'revision': rev, 'content_hash': bundle['content_hash']})
-            return self._receipt(db, owner, request_key, digest, {'draft_id': draft_id, 'skill_id': sid,
+            result = self._receipt(db, owner, request_key, digest, {'draft_id': draft_id, 'skill_id': sid,
                 'revision': rev, 'status': 'draft_saved', 'content_hash': bundle['content_hash'], 'published': False})
+            if _job:
+                # Save and completion are atomic; cancellation cannot race the draft commit.
+                db.execute("UPDATE skill_jobs SET state='succeeded',result_json=?,claim_token=NULL,updated_at=? WHERE job_id=?", (_json({'saved': True, 'classification': 'method', **_job.get('metadata', {}), **result}), now(), _job['job_id']))
+            return result
 
     def list(self, owner):
         with closing(self.store.connect()) as db:
-            rows = db.execute('SELECT d.*,r.payload_json FROM skill_drafts d JOIN skill_draft_revisions r ON r.draft_id=d.draft_id AND r.revision=d.revision WHERE owner_subject=? ORDER BY updated_at DESC LIMIT 100', (owner,)).fetchall()
+            rows = db.execute('''SELECT d.*,r.payload_json,
+                (SELECT version FROM skill_publications p WHERE p.skill_id=d.skill_id) AS published_version,
+                (SELECT state FROM skill_review_requests q WHERE q.draft_id=d.draft_id AND q.draft_revision=d.revision ORDER BY created_at DESC LIMIT 1) AS review_state
+                FROM skill_drafts d JOIN skill_draft_revisions r ON r.draft_id=d.draft_id AND r.revision=d.revision WHERE owner_subject=? ORDER BY updated_at DESC LIMIT 100''', (owner,)).fetchall()
             return {'items': [{**{k:r[k] for k in r.keys() if k != 'payload_json'},
                               'name': json.loads(r['payload_json'])['manifest']['name']} for r in rows]}
 
@@ -255,6 +280,9 @@ class SkillAuthoring:
             if not isinstance(profiles,list) or not profiles or any(not isinstance(p,str) for p in profiles) or len(set(profiles))!=len(profiles) or any(p not in bundle['manifest']['profiles'] for p in profiles):
                 raise ValueError('申请模式无效')
             tested = {r[0] for r in db.execute("SELECT profile FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported'", (draft_id,draft['revision']))}
+            report = self.workbench.latest_report(db, owner, draft_id, draft['revision'])
+            if report and report['passed'] and report['content_hash'] == bundle['content_hash']:
+                tested.update(c['profile'] for c in report['cases'] if c['kind'] == 'output')
             if not set(profiles)<=tested: raise ValueError('请先为每个申请模式完成样例试运行，结果由管理员复核')
             pending=db.execute("SELECT * FROM skill_review_requests WHERE draft_id=? AND state='submitted'",(draft_id,)).fetchone()
             if pending: raise UserGrantConflict('已有待审批申请，请先撤回或等待处理')
@@ -263,6 +291,13 @@ class SkillAuthoring:
             db.execute('INSERT INTO skill_review_requests VALUES (?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,NULL)',
                 (rid,draft_id,draft['revision'],owner,bundle['content_hash'],_json(audience),_json(profiles),current[0] if current else 0,'submitted',reason,now()))
             db.execute("INSERT INTO skill_review_tests SELECT ?,test_id FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported'",(rid,draft_id,draft['revision']))
+            from bscli.core.skill_quality import diagnostics, bundle_diff
+            prior = self.store.current(draft['skill_id'], db) if current else None
+            report = self.workbench.latest_report(db, owner, draft_id, draft['revision'])
+            prior_audience = [x[0][5:] for x in db.execute("SELECT owner FROM skill_config WHERE owner LIKE 'user:%' AND json_type(value_json,?) IS NOT NULL", ('$.' + draft['skill_id'],))]
+            quality = {'diagnostics': diagnostics(bundle), 'diff': bundle_diff(prior, bundle), 'evaluation': report,
+                       'audience_diff': {'added': sorted(set(audience)-set(prior_audience)), 'removed': sorted(set(prior_audience)-set(audience))}}
+            db.execute('INSERT INTO skill_review_quality VALUES (?,?)', (rid, _json(quality)))
             self._event(db,owner,'release.submitted',rid,{'draft_id':draft_id,'revision':draft['revision']})
             return self._receipt(db,owner,request_key,digest,{'request_id':rid,'status':'submitted','message':'已提交，等待管理控制台审批','published':False})
 
@@ -279,17 +314,20 @@ class SkillAuthoring:
     def reviews(self, owner=None):
         with closing(self.store.connect()) as db:
             return {'items':[self._review_public(r) for r in db.execute(
-                'SELECT * FROM skill_review_requests'+(' WHERE owner_subject=?' if owner else '')+' ORDER BY created_at DESC LIMIT 100', (owner,) if owner else ())]}
+                '''SELECT q.*,json_extract(r.payload_json,'$.manifest.name') AS name
+                   FROM skill_review_requests q JOIN skill_draft_revisions r ON q.draft_id=r.draft_id AND q.draft_revision=r.revision'''
+                +(' WHERE q.owner_subject=?' if owner else '')+' ORDER BY q.created_at DESC LIMIT 100', (owner,) if owner else ())]}
 
     def review_detail(self, request_id):
         with closing(self.store.connect()) as db:
             r=db.execute('SELECT * FROM skill_review_requests WHERE request_id=?',(request_id,)).fetchone()
             if not r: raise KeyError('申请不存在')
             _,bundle=self._bundle(db,r['draft_id'],r['draft_revision'])
-            return {**self._review_public(r),'bundle':bundle,'tests':[dict(t) for t in db.execute(
+            quality = db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request_id,)).fetchone()
+            return {**self._review_public(r),'bundle':bundle, 'quality': json.loads(quality[0]) if quality else None, 'tests':[dict(t) for t in db.execute(
                 "SELECT t.profile,t.prompt,t.output,t.status FROM skill_draft_tests t JOIN skill_review_tests e USING(test_id) WHERE e.request_id=?",(request_id,))]}
 
-    def decide(self, *, actor, request_id, decision, reason, reviewed_tests=False, audit_callback=None):
+    def decide(self, *, actor, request_id, decision, reason, reviewed_tests=False, manual_quality_reason=None, audit_callback=None):
         if actor.get('role')!='admin': raise PermissionError('需要管理员审批权限')
         if decision not in {'approve','changes_requested','rejected'}: raise ValueError('审批决定无效')
         reason=text(reason,'审批意见',1000)
@@ -304,6 +342,14 @@ class SkillAuthoring:
             version=None
             if decision=='approve':
                 if reviewed_tests is not True: raise ValueError('请复核草稿、样例结果及使用范围后批准')
+                quality = db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request_id,)).fetchone()
+                report = json.loads(quality[0]).get('evaluation') if quality else None
+                if report and (not report['passed'] or report['content_hash'] != r['content_hash']):
+                    raise ValueError('独立评测未通过或内容不匹配，请退回修改并重新申请')
+                if quality and not report:
+                    text(manual_quality_reason, '无独立评测时的人工验证说明', 1000)
+                    snapshot = json.loads(quality[0]); snapshot['manual_quality_reason'] = manual_quality_reason
+                    db.execute('UPDATE skill_review_quality SET snapshot_json=? WHERE request_id=?', (_json(snapshot), request_id))
                 _,bundle=self._bundle(db,r['draft_id'],r['draft_revision'])
                 if bundle['content_hash']!=r['content_hash']: raise ValueError('申请内容不一致')
                 sid=bundle['manifest']['id']
@@ -401,7 +447,12 @@ class SkillAuthoring:
         methods={'save':self.save,'list':self.list,'get':self.get,'test':self.test_start,
             'test_result':self.test_result,'submit':self.submit,'withdraw':self.withdraw,
             'preferences':self.preferences,'restore':self.restore,'archive':self.archive,'export':self.export,'requests':self.reviews}
-        if action not in methods or not isinstance(data,dict): raise ValueError('草稿操作无效')
+        w = self.workbench
+        methods.update({'inspect':w.inspect, 'generate':w.generate, 'evaluate':w.evaluate, 'jobs':w.jobs,
+            'cancel_job':w.cancel, 'retry_job':w.retry, 'scopes':w.scopes, 'export_standard':w.export,
+            'import_standard':w.import_package, 'feedback':w.feedback, 'metrics':w.metrics, 'recipients':w.recipients,
+            'discover':w.discover, 'resource':w.resource, 'composition':w.composition, 'adopt':w.adopt})
+        if action not in methods or not isinstance(data,dict) or any(k.startswith('_') for k in data): raise ValueError('草稿操作无效')
         import inspect
         method=methods[action]
         try: inspect.signature(method).bind(owner,**data)

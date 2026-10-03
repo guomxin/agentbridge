@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from bscli.core.skill_quality import SkillAuthoringData
+
 import asyncio
 from functools import wraps
 import inspect
@@ -978,12 +980,12 @@ def create_central_mcp_server(
         return result
 
     @mcp.tool(name="agentbridge_skill_authoring", title="创作业务助手草稿",
-        description="所有用户均可创作私有草稿，无需业务权限。action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(无依赖必须为{use:{}}；模式对象只允许all/any权限数组和database依赖，不接受name/description/tools),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
+        description="所有用户均可创作私有草稿，无需业务权限。后台生成 generate(material,request_key,可选draft_id/expected_revision)，查看 jobs(可选job_id)，cancel_job/retry_job(job_id)。inspect(draft_id)返回诊断和版本差异。evaluate(draft_id,expected_revision,cases,request_key,repeats=1)启动无工具独立评测；cases每项prompt/profile/kind(output或trigger)/contains字符串数组/excludes字符串数组，trigger需expected_trigger布尔。scopes(scope,enabled)设置自动提炼范围，preferences仍为总开关。discover(query,limit)按权限检索；resource(binding_id,path)读取固定版本可选参考；composition(steps:[{skill_id,profile,input,output}])预检组合；feedback(skill_id,profile,version,rating:useful|incorrect|not_applicable,comment)反馈；export_standard(draft_id)/import_standard(package,request_key)兼容标准文件包；recipients查看共享用户。原action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(无依赖必须为{use:{}}；模式对象只允许all/any权限数组和database依赖，不接受name/description/tools),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False), structured_output=True)
-    async def agentbridge_skill_authoring(ctx: Context, action: str, data: dict[str, Any]) -> dict[str, Any]:
+    async def agentbridge_skill_authoring(ctx: Context, action: str, data: SkillAuthoringData) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
-        return await asyncio.to_thread(service.skill_authoring.dispatch, identity["user_subject"], action, data)
+        return await asyncio.to_thread(service.skill_authoring.dispatch, identity["user_subject"], action, data.model_dump(exclude_unset=True, exclude_none=True))
 
     @mcp.tool(name="agentbridge_skill_get", title="加载业务助手",
         description="加载已选定业务 Skill。使用当前目录中的 skill_id、profile 和 version；数据库助手须选择 source_id。系统一次返回主说明及该模式全部必读资料，无需选择或另读文件。返回任务绑定，由宿主为后续调用传递。加载不授予业务权限。",

@@ -609,7 +609,7 @@ class AdminControlPlane:
 
     def decide_skill(self, *, actor, request_ip, body):
         _require_admin(actor)
-        if set(body) - {"request_id", "decision", "reason", "reviewed_tests"}:
+        if set(body) - {"request_id", "decision", "reason", "reviewed_tests", "manual_quality_reason"}:
             raise ValueError("审批字段无效")
         return self.service.skill_authoring.decide(actor=actor, **body,
             audit_callback=lambda connection, before, after: self.audit.append(

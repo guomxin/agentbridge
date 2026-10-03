@@ -981,7 +981,7 @@ class AdminHttpServerTests(unittest.TestCase):
                 t=service.skill_authoring.test_start("user-a",draft_id=d["draft_id"],expected_revision=1,profile="use",prompt="合成示例",request_key="http-test")
                 service.skill_authoring.test_result("user-a",test_id=t["test_id"],output="待复核示例")
                 r=service.skill_authoring.submit("user-a",draft_id=d["draft_id"],expected_revision=1,reason="测试",request_key="http-submit")
-                decision={"request_id":r["request_id"],"decision":"approve","reason":"已复核","reviewed_tests":True}
+                decision={"request_id":r["request_id"],"decision":"approve","reason":"已复核","reviewed_tests":True,"manual_quality_reason":"人工核对样例与依据"}
                 self.assertEqual(post("/api/skill-reviews",decision,"auditor")[0],403)
                 self.assertEqual(post("/api/skill-reviews",decision)[0],200)
                 status,_,detail=_request(port,"GET","/api/skill-reviews?id="+r["request_id"],cookies=cookies["auditor"])

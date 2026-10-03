@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -14,6 +15,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from bscli.core.central_service import CentralCapabilityService
+from bscli.core.user_grants import UserGrantConflict
 from bscli.core.task_plans import task_plan_response
 from bscli.core.timeline_attachments import (
     TimelineAttachmentExpired,
@@ -82,8 +84,25 @@ class WorkspaceApplication:
         self._readiness_lock = threading.Lock()
         self._readiness_cache: tuple[float, dict] | None = None
         if gateway is not None:
+            self.service.skill_authoring.workbench.start(self._skill_completion, self._capture_skill_method)
             for account_id in self.store.recover_host_dispatches():
                 self._ensure_dispatch_worker(account_id)
+
+    def _skill_completion(self, system: str, prompt: str) -> dict:
+        return self._gateway().call('agentbridge.skills.complete', {'system': system, 'prompt': prompt}, timeout_seconds=100)
+
+    def _capture_skill_method(self, capture):
+        try:
+            dispatch = self.store.get_host_dispatch(capture['dispatch_id'], user_subject=capture['owner_subject'])
+            account = self.store.get_account(dispatch['account_id'])
+            material, attachments = self._host_dispatch_payload(dispatch)
+            if not attachments and not re.search(r'(创建|做个|发布|审批|评测|试用|沉淀).{0,10}(助手|skill|草稿)|草稿', material, re.I):
+                self.service.skill_authoring.workbench.generate(account['user_subject'],
+                    material=('用户：' + material + '\n助手：' + capture['assistant_text'])[:16000],
+                    request_key='workspace:' + dispatch['dispatch_id'], automatic=True,
+                    scope='workspace:' + account['account_id'])
+        except (PermissionError, ValueError, KeyError, UserGrantConflict):
+            return  # Opt-out, unavailable material and quota cannot affect a completed task.
 
     def start_enrollment(self) -> dict:
         return self.store.start_link()
@@ -628,6 +647,7 @@ class WorkspaceApplication:
         }
 
     def close(self) -> None:
+        self.service.skill_authoring.workbench.close()
         self._dispatch_stop.set()
         with self._dispatch_workers_lock:
             workers = list(self._dispatch_workers.values())
