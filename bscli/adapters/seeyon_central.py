@@ -64,6 +64,7 @@ from bscli.adapters.seeyon_leave_submit import (
 from bscli.adapters.seeyon_meeting import (
     MEETING_CREATE_CAPABILITY,
     MEETING_CREATE_INPUT_SCHEMA,
+    MEETING_CREATE_WORKFLOW,
     MEETING_PREPARE_CAPABILITY,
     MEETING_PREPARE_INPUT_SCHEMA,
 )
@@ -79,8 +80,10 @@ from bscli.adapters.seeyon_meeting_room_application import (
     MEETING_ROOM_APPLICATION_CANCEL_INPUT_SCHEMA,
     MEETING_ROOM_APPLICATION_CANCEL_PREPARE_CAPABILITY,
     MEETING_ROOM_APPLICATION_CANCEL_PREPARE_INPUT_SCHEMA,
+    MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW,
     MEETING_ROOM_APPLICATION_CREATE_CAPABILITY,
     MEETING_ROOM_APPLICATION_CREATE_INPUT_SCHEMA,
+    MEETING_ROOM_APPLICATION_CREATE_WORKFLOW,
     MEETING_ROOM_APPLICATION_PREPARE_CAPABILITY,
     MEETING_ROOM_APPLICATION_PREPARE_INPUT_SCHEMA,
 )
@@ -795,84 +798,9 @@ def build_central_capability_registry() -> CapabilityRegistry:
             adapter="seeyon-central",
             workflow="missed-punch-approval-commit-v1",
         ),
-        CapabilitySpec(
-            name=MEETING_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Collect meeting fields in a trusted card, resolve and validate room "
-                "availability, and create a separate meeting-create authorization."
-            ),
-            input_schema=MEETING_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="meeting-create-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=MEETING_CREATE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one trusted authorization, recheck room availability, create "
-                "and send the meeting, then verify room-list and meeting-view readback."
-            ),
-            input_schema=MEETING_CREATE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="meeting-create-commit-v1",
-        ),
-        CapabilitySpec(
-            name=MEETING_ROOM_APPLICATION_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Collect a standalone room application's purpose, room, and time in a "
-                "trusted card, validate live availability, and create separate authorization."
-            ),
-            input_schema=MEETING_ROOM_APPLICATION_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="meeting-room-application-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=MEETING_ROOM_APPLICATION_CREATE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume trusted authorization, recheck availability, submit one standalone "
-                "room application, and verify it in My Applications."
-            ),
-            input_schema=MEETING_ROOM_APPLICATION_CREATE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="meeting-room-application-commit-v1",
-        ),
-        CapabilitySpec(
-            name=MEETING_ROOM_APPLICATION_CANCEL_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Resolve one exact own standalone room application, collect a cancellation "
-                "reason in a trusted card, and create separate cancellation authorization."
-            ),
-            input_schema=MEETING_ROOM_APPLICATION_CANCEL_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="meeting-room-application-cancel-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=MEETING_ROOM_APPLICATION_CANCEL_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume trusted authorization, cancel one exact own standalone room "
-                "application, and verify its terminal readback."
-            ),
-            input_schema=MEETING_ROOM_APPLICATION_CANCEL_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="meeting-room-application-cancel-commit-v1",
-        ),
+        *MEETING_CREATE_WORKFLOW.capability_specs(),
+        *MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.capability_specs(),
+        *MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.capability_specs(),
     ):
         registry.register(spec)
     for definition in PENDING_ACTION_CAPABILITY_DEFINITIONS:

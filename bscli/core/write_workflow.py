@@ -5,13 +5,14 @@ This module owns no execution, persistence, or authorization transaction.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from bscli.core.capability import CapabilitySpec
 
 
 PrepareHandler = Callable[[object, object, dict], dict]
+FieldSchemaHandler = Callable[[object, object, dict], dict]
 
 
 class CommitHandler(Protocol):
@@ -47,6 +48,7 @@ class WriteWorkflowDefinition:
     outcome_error: type[Exception]
     field_message: str | None
     authorization_message: str
+    field_schema_function: FieldSchemaHandler | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.prepare_spec, CapabilitySpec) or not isinstance(self.commit_spec, CapabilitySpec):
@@ -73,6 +75,8 @@ class WriteWorkflowDefinition:
             raise ValueError("write context fields must be unique declared prepare inputs")
         _binding_name(self.prepare_function)
         _binding_name(self.commit_function)
+        if self.field_schema_function is not None:
+            _binding_name(self.field_schema_function)
         for error in (self.contract_error, self.outcome_error):
             if not isinstance(error, type) or not issubclass(error, Exception):
                 raise TypeError("write errors must be Exception classes")
@@ -96,6 +100,8 @@ class WriteWorkflowDefinition:
         return {
             "commit_capability": self.commit_spec.name,
             "field_schema": deepcopy(self.field_schema),
+            **({"field_schema_function": _binding_name(self.field_schema_function)}
+               if self.field_schema_function is not None else {}),
             "context_fields": self.context_fields,
             "prepare_function": _binding_name(self.prepare_function),
             "commit_function": _binding_name(self.commit_function),

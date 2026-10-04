@@ -1,6 +1,7 @@
 from tests.authorization_fixtures import authorized_service
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,9 +19,10 @@ from bscli.adapters.seeyon_business_trip_submit import (
     BusinessTripSubmissionBlocked,
 )
 from bscli.adapters.seeyon_leave_submit import LeaveBusinessValidationRequired
-from bscli.adapters.seeyon_meeting import MEETING_FIELD_CARD_SCHEMA
+from bscli.adapters.seeyon_meeting import MEETING_FIELD_CARD_SCHEMA, MeetingOutcomeUnknown
 from bscli.adapters.seeyon_meeting_room_application import (
     MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA,
+    MeetingRoomApplicationOutcomeUnknown,
 )
 from bscli.adapters.seeyon_pending_actions import PendingActionContractMismatch
 from bscli.adapters.seeyon_central import (
@@ -2843,18 +2845,36 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "start_time": "2026-07-20 14:00",
                 "end_time": "2026-07-20 16:00",
             }
-            with patch(
+            prepare_before_fields = self.enterContext(patch(
+                "bscli.core.write_catalog.prepare_meeting_create",
+            ))
+            dynamic_schema = deepcopy(MEETING_FIELD_CARD_SCHEMA)
+            room_field = next(field for field in dynamic_schema["fields"] if field["name"] == "room")
+            room_field.update(control="select", value="3号会议室", options=[
+                {"value": "3号会议室", "label": "3号会议室（当前可用）"},
+            ])
+            build_schema = self.enterContext(patch(
                 "bscli.core.write_catalog.build_meeting_field_card_schema",
-                return_value=MEETING_FIELD_CARD_SCHEMA,
-            ) as build_schema:
-                started = service.invoke(
-                    user_subject="user-a",
-                    capability_name="oa.meeting.create.prepare",
-                    arguments=initial_arguments,
-                )
+                return_value=dynamic_schema,
+            ))
+            started = service.invoke(
+                user_subject="user-a",
+                capability_name="oa.meeting.create.prepare",
+                arguments=initial_arguments,
+            )
             build_schema.assert_called_once()
             self.assertEqual(build_schema.call_args.args[2], initial_arguments)
             submission_id = started["nextAction"]["inputSubmissionId"]
+            saved_schema = service.field_submissions.get(submission_id)["form_schema"]
+            self.assertEqual(next(field for field in saved_schema["fields"] if field["name"] == "room"), room_field)
+            build_schema.side_effect = AssertionError("resuming a field card must not rebuild its schema")
+            pending_fields = service.invoke(
+                user_subject="user-a", capability_name="oa.meeting.create.prepare",
+                arguments={"input_submission_id": submission_id},
+            )
+            self.assertEqual(pending_fields["nextAction"]["inputSubmissionId"], submission_id)
+            self.assertEqual(service.field_submissions.get(submission_id)["form_schema"], saved_schema)
+            prepare_before_fields.assert_not_called()
             self.assertEqual(
                 service.interaction_required_scopes(
                     user_subject="user-a",
@@ -2887,12 +2907,15 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             with patch(
                 "bscli.core.write_catalog.prepare_meeting_create",
                 return_value=prepared_payload,
-            ):
+            ) as prepare:
                 prepared = service.invoke(
                     user_subject="user-a",
                     capability_name="oa.meeting.create.prepare",
-                    arguments={"input_submission_id": submission_id},
+                    arguments={"input_submission_id": submission_id, "room": "另一个会议室"},
                 )
+            prepare.assert_called_once()
+            self.assertEqual(prepare.call_args.args[2], fields)
+            self.assertEqual(service.field_submissions.get(submission_id)["state"], "consumed")
             authorization_id = prepared["nextAction"]["authorizationId"]
             authorization_interaction_id = prepared["interaction"]["interactionId"]
             self.assertEqual(
@@ -2902,6 +2925,13 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 ),
                 frozenset({"oa:write:meeting"}),
             )
+            with patch("bscli.core.write_catalog.create_meeting") as before_approval:
+                waiting = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting.create",
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(waiting["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+                before_approval.assert_not_called()
             csrf = service.write_authorizations.issue_csrf(authorization_id)
             service.write_authorizations.decide(
                 authorization_id,
@@ -2914,12 +2944,19 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 enter_commit_boundary()
                 return {"meeting_created": True, "meeting_sent": True, "submitted_count": 1}
 
-            with patch("bscli.core.write_catalog.create_meeting", side_effect=create):
+            with patch("bscli.core.write_catalog.create_meeting", side_effect=create) as commit:
                 committed = service.invoke(
                     user_subject="user-a",
                     capability_name="oa.meeting.create",
                     arguments={"authorization_id": authorization_id},
                 )
+                repeated = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting.create",
+                    arguments={"authorization_id": authorization_id},
+                )
+                commit.assert_called_once()
+            self.assertEqual(repeated["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+            build_schema.assert_called_once()
             self.assertEqual(committed["status"], "succeeded")
             self.assertTrue(committed["result"]["meeting_created"])
             self.assertEqual(
@@ -2937,17 +2974,36 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "start_time": "2026-09-10 14:00",
                 "end_time": "2026-09-10 15:00",
             }
-            with patch(
+            prepare_before_fields = self.enterContext(patch(
+                "bscli.core.write_catalog.prepare_meeting_room_application",
+            ))
+            dynamic_schema = deepcopy(MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA)
+            room_field = next(field for field in dynamic_schema["fields"] if field["name"] == "room")
+            room_field.update(control="select", value="3号会议室", options=[
+                {"value": "3号会议室", "label": "3号会议室（当前可用）"},
+            ])
+            build_schema = self.enterContext(patch(
                 "bscli.core.write_catalog.build_meeting_room_application_field_card_schema",
-                return_value=MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA,
-            ) as build_schema:
-                started = service.invoke(
-                    user_subject="user-a",
-                    capability_name="oa.meeting_room.application.prepare",
-                    arguments=initial_arguments,
-                )
+                return_value=dynamic_schema,
+            ))
+            started = service.invoke(
+                user_subject="user-a",
+                capability_name="oa.meeting_room.application.prepare",
+                arguments=initial_arguments,
+            )
             build_schema.assert_called_once()
+            self.assertEqual(build_schema.call_args.args[2], initial_arguments)
             submission_id = started["nextAction"]["inputSubmissionId"]
+            saved_schema = service.field_submissions.get(submission_id)["form_schema"]
+            self.assertEqual(next(field for field in saved_schema["fields"] if field["name"] == "room"), room_field)
+            build_schema.side_effect = AssertionError("resuming a field card must not rebuild its schema")
+            pending_fields = service.invoke(
+                user_subject="user-a", capability_name="oa.meeting_room.application.prepare",
+                arguments={"input_submission_id": submission_id},
+            )
+            self.assertEqual(pending_fields["nextAction"]["inputSubmissionId"], submission_id)
+            self.assertEqual(service.field_submissions.get(submission_id)["form_schema"], saved_schema)
+            prepare_before_fields.assert_not_called()
             self.assertEqual(
                 service.interaction_required_scopes(
                     user_subject="user-a",
@@ -2981,13 +3037,23 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             with patch(
                 "bscli.core.write_catalog.prepare_meeting_room_application",
                 return_value=prepared_payload,
-            ):
+            ) as prepare:
                 prepared = service.invoke(
                     user_subject="user-a",
                     capability_name="oa.meeting_room.application.prepare",
-                    arguments={"input_submission_id": submission_id},
+                    arguments={"input_submission_id": submission_id, "room": "另一个会议室"},
                 )
+            prepare.assert_called_once()
+            self.assertEqual(prepare.call_args.args[2], fields)
+            self.assertEqual(service.field_submissions.get(submission_id)["state"], "consumed")
             authorization_id = prepared["nextAction"]["authorizationId"]
+            with patch("bscli.core.write_catalog.create_meeting_room_application") as before_approval:
+                waiting = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.create",
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(waiting["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+                before_approval.assert_not_called()
             csrf = service.write_authorizations.issue_csrf(authorization_id)
             service.write_authorizations.decide(
                 authorization_id,
@@ -3007,12 +3073,19 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             with patch(
                 "bscli.core.write_catalog.create_meeting_room_application",
                 side_effect=create,
-            ):
+            ) as commit:
                 committed = service.invoke(
                     user_subject="user-a",
                     capability_name="oa.meeting_room.application.create",
                     arguments={"authorization_id": authorization_id},
                 )
+                repeated = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.create",
+                    arguments={"authorization_id": authorization_id},
+                )
+                commit.assert_called_once()
+            self.assertEqual(repeated["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+            build_schema.assert_called_once()
             self.assertEqual(committed["status"], "succeeded")
             self.assertTrue(
                 committed["result"]["meeting_room_application_created"]
@@ -3021,6 +3094,157 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 service.write_authorizations.get(authorization_id)["state"],
                 "consumed",
             )
+    def test_meeting_room_cancel_uses_static_card_and_one_target_bound_authorization(self):
+        with TemporaryDirectory() as tmp:
+            service = self._service(tmp, FakeWorker())
+            self._activate(service)
+            for builder in ("build_meeting_field_card_schema", "build_meeting_room_application_field_card_schema"):
+                self.enterContext(patch(
+                    "bscli.core.write_catalog." + builder,
+                    side_effect=AssertionError("cancellation must not query room choices"),
+                ))
+            prepared_payload = {
+                "plan": {
+                    "business_intent": "cancel_meeting_room_application",
+                    "target": {"application_id": "app-1", "room_id": "room-3"},
+                    "exact_input": {"cancellation_reason": "不再使用会议室"},
+                },
+                "summary": {"title": "撤销会议室申请", "system": "致远 OA", "fields": []},
+            }
+            with patch(
+                "bscli.core.write_catalog.prepare_meeting_room_application_cancel",
+                return_value=prepared_payload,
+            ) as prepare:
+                started = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.cancel.prepare",
+                    arguments={"application_id": "app-1", "cancellation_reason": "计划调整"},
+                )
+                self.assertEqual(started["error"]["code"], "FIELD_INPUT_REQUIRED")
+                submission_id = started["nextAction"]["inputSubmissionId"]
+                schema = service.field_submissions.get(submission_id)["form_schema"]
+                self.assertEqual(schema["_agentbridge_resume_arguments"], {"application_id": "app-1"})
+                self.assertEqual(schema["fields"][0]["value"], "计划调整")
+                prepare.assert_not_called()
+                csrf = service.field_submissions.issue_csrf(submission_id)
+                service.field_submissions.submit(
+                    submission_id, csrf_token=csrf, csrf_cookie=csrf,
+                    values={"cancellation_reason": "不再使用会议室"},
+                )
+                replaced_target = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.cancel.prepare",
+                    arguments={"application_id": "app-2", "input_submission_id": submission_id},
+                )
+                self.assertEqual(replaced_target["error"]["code"], "FIELD_INPUT_UNAVAILABLE")
+                self.assertEqual(service.field_submissions.get(submission_id)["state"], "submitted")
+                prepare.assert_not_called()
+                prepared = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.cancel.prepare",
+                    arguments={"application_id": "app-1", "input_submission_id": submission_id},
+                )
+                prepare.assert_called_once()
+                self.assertEqual(prepare.call_args.args[2], {
+                    "application_id": "app-1", "cancellation_reason": "不再使用会议室",
+                })
+            self.assertEqual(prepared["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+            authorization_id = prepared["nextAction"]["authorizationId"]
+            authorization = service.write_authorizations.get(authorization_id, include_plan=True)
+            self.assertEqual(authorization["plan"]["resume_arguments"], {"application_id": "app-1"})
+            self.assertEqual(authorization["plan"]["target"]["application_id"], "app-1")
+
+            def cancel(_adapter, _worker, plan, *, enter_commit_boundary):
+                self.assertEqual(plan["target"]["application_id"], "app-1")
+                self.assertEqual(plan["exact_input"], {"cancellation_reason": "不再使用会议室"})
+                enter_commit_boundary()
+                return {"meeting_room_application_canceled": True, "canceled_count": 1}
+
+            with patch("bscli.core.write_catalog.cancel_meeting_room_application", side_effect=cancel) as commit:
+                waiting = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.cancel",
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(waiting["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+                commit.assert_not_called()
+                csrf = service.write_authorizations.issue_csrf(authorization_id)
+                service.write_authorizations.decide(
+                    authorization_id, decision="approve", csrf_token=csrf, csrf_cookie=csrf,
+                )
+                committed = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.cancel",
+                    arguments={"authorization_id": authorization_id},
+                )
+                repeated = service.invoke(
+                    user_subject="user-a", capability_name="oa.meeting_room.application.cancel",
+                    arguments={"authorization_id": authorization_id},
+                )
+                commit.assert_called_once()
+            self.assertEqual(committed["status"], "succeeded")
+            self.assertTrue(committed["result"]["meeting_room_application_canceled"])
+            self.assertEqual(repeated["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+            self.assertEqual(service.write_authorizations.get(authorization_id)["state"], "consumed")
+
+    def test_meeting_workflow_unknown_is_persisted_without_replaying_authorization(self):
+        cases = (
+            ("oa.meeting.create.prepare", "oa.meeting.create", "create_meeting", MeetingOutcomeUnknown),
+            ("oa.meeting_room.application.prepare", "oa.meeting_room.application.create",
+             "create_meeting_room_application", MeetingRoomApplicationOutcomeUnknown),
+            ("oa.meeting_room.application.cancel.prepare", "oa.meeting_room.application.cancel",
+             "cancel_meeting_room_application", MeetingRoomApplicationOutcomeUnknown),
+        )
+        for prepare_capability, capability, function, outcome_error in cases:
+            with self.subTest(capability=capability), TemporaryDirectory() as tmp:
+                service = self._service(tmp, FakeWorker())
+                session = self._activate(service)
+                authorization = service.write_authorizations.create(
+                    user_subject="user-a", system_id="oa", session_id=session["session_id"],
+                    capability_name=capability, capability_version="0.1.0",
+                    prepare_operation_id="prepare-meeting",
+                    plan={
+                        "prepare_capability": prepare_capability, "user_subject": "user-a",
+                        "resume_arguments": {},
+                        "session_binding": {name: session[name] for name in (
+                            "session_id", "expected_principal_ref", "downstream_principal_ref", "last_verified_at",
+                        )},
+                    },
+                    summary={"title": "会议写操作", "fields": []},
+                    card_base_url=service.trusted_card_base_url,
+                )
+                authorization_id = authorization["authorization_id"]
+                csrf = service.write_authorizations.issue_csrf(authorization_id)
+                service.write_authorizations.decide(
+                    authorization_id, decision="approve", csrf_token=csrf, csrf_cookie=csrf,
+                )
+
+                def lose_result(_adapter, _worker, _plan, *, enter_commit_boundary):
+                    enter_commit_boundary()
+                    raise outcome_error("simulated authoritative result unavailable")
+
+                arguments = {"authorization_id": authorization_id}
+                with patch("bscli.core.write_catalog." + function, side_effect=lose_result) as commit:
+                    unknown = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments=arguments, idempotency_key="meeting-unknown",
+                    )
+                    same_request = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments=arguments, idempotency_key="meeting-unknown",
+                    )
+                    another_request = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments=arguments, idempotency_key="meeting-new-request",
+                    )
+                    commit.assert_called_once()
+                self.assertEqual(unknown["status"], "unknown")
+                self.assertEqual(unknown["error"]["code"], "RESULT_UNKNOWN")
+                self.assertEqual(same_request["operationId"], unknown["operationId"])
+                self.assertEqual(same_request["status"], "unknown")
+                self.assertTrue(same_request["reused"])
+                self.assertEqual(another_request["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+                persisted = OperationStore(service.operations.db_path).get(unknown["operationId"])
+                self.assertEqual(persisted["status"], "unknown")
+                consumed = service.write_authorizations.get(authorization_id)
+                self.assertEqual(consumed["state"], "consumed")
+                self.assertEqual(consumed["commit_operation_id"], unknown["operationId"])
+
     @staticmethod
     def _service(tmp, worker, *, keepalive_lease_seconds=None):
         return authorized_service(

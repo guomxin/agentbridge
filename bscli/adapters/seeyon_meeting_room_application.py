@@ -18,6 +18,8 @@ from bscli.adapters.seeyon_meeting_room import (
     room_app,
     room_is_available,
 )
+from bscli.core.capability import CapabilitySpec
+from bscli.core.write_workflow import WriteWorkflowDefinition
 
 
 MEETING_ROOM_APPLICATION_PREPARE_CAPABILITY = (
@@ -978,3 +980,82 @@ def _fingerprint(contract: dict) -> str:
         separators=(",", ":"),
     )
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+MEETING_ROOM_APPLICATION_CREATE_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=MEETING_ROOM_APPLICATION_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Collect a standalone room application's purpose, room, and time in a "
+            "trusted card, validate live availability, and create separate authorization."
+        ),
+        input_schema=MEETING_ROOM_APPLICATION_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter="seeyon-central",
+        workflow="meeting-room-application-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=MEETING_ROOM_APPLICATION_CREATE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume trusted authorization, recheck availability, submit one standalone "
+            "room application, and verify it in My Applications."
+        ),
+        input_schema=MEETING_ROOM_APPLICATION_CREATE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter="seeyon-central",
+        workflow="meeting-room-application-commit-v1",
+    ),
+    required_scopes=frozenset({"oa:write:meeting"}),
+    field_schema=MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA,
+    context_fields=(),
+    prepare_function=prepare_meeting_room_application,
+    commit_function=create_meeting_room_application,
+    contract_error=MeetingRoomApplicationContractMismatch,
+    outcome_error=MeetingRoomApplicationOutcomeUnknown,
+    field_message="会议室申请字段必须在可信字段卡中核对。",
+    authorization_message="会议室申请计划需要在可信授权卡中确认。",
+    field_schema_function=build_meeting_room_application_field_card_schema,
+)
+
+
+MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=MEETING_ROOM_APPLICATION_CANCEL_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Resolve one exact own standalone room application, collect a cancellation "
+            "reason in a trusted card, and create separate cancellation authorization."
+        ),
+        input_schema=MEETING_ROOM_APPLICATION_CANCEL_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter="seeyon-central",
+        workflow="meeting-room-application-cancel-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=MEETING_ROOM_APPLICATION_CANCEL_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume trusted authorization, cancel one exact own standalone room "
+            "application, and verify its terminal readback."
+        ),
+        input_schema=MEETING_ROOM_APPLICATION_CANCEL_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter="seeyon-central",
+        workflow="meeting-room-application-cancel-commit-v1",
+    ),
+    required_scopes=frozenset({"oa:write:meeting"}),
+    field_schema=MEETING_ROOM_APPLICATION_CANCEL_FIELD_CARD_SCHEMA,
+    context_fields=("application_id",),
+    prepare_function=prepare_meeting_room_application_cancel,
+    commit_function=cancel_meeting_room_application,
+    contract_error=MeetingRoomApplicationContractMismatch,
+    outcome_error=MeetingRoomApplicationOutcomeUnknown,
+    field_message="会议室申请撤销原因必须在可信字段卡中核对。",
+    authorization_message="会议室申请撤销计划需要在可信授权卡中确认。",
+)

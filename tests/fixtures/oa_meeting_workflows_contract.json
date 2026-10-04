@@ -1,0 +1,458 @@
+{
+  "baseline": "8567100cbbb3fafb371e8b193a72569f913b4d56",
+  "workflows": [
+    {
+      "module": "seeyon_meeting",
+      "declaration": "MEETING_CREATE_WORKFLOW",
+      "capabilities": [
+        {
+          "name": "oa.meeting.create.prepare",
+          "version": "0.1.0",
+          "description": "Collect meeting fields in a trusted card, resolve and validate room availability, and create a separate meeting-create authorization.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string",
+                "maxLength": 255
+              },
+              "room": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "start_time": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "end_time": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "input_submission_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "seeyon-central",
+          "workflow": "meeting-create-prepare-v1",
+          "system": "oa"
+        },
+        {
+          "name": "oa.meeting.create",
+          "version": "0.1.0",
+          "description": "Consume one trusted authorization, recheck room availability, create and send the meeting, then verify room-list and meeting-view readback.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "authorization_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "authorization_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "seeyon-central",
+          "workflow": "meeting-create-commit-v1",
+          "system": "oa"
+        }
+      ],
+      "definition": {
+        "commit_capability": "oa.meeting.create",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_meeting_create_fields.v1",
+          "title": "填写会议创建信息",
+          "system": "致远 OA",
+          "effect": "创建并发送完整会议，可同时占用会议室",
+          "submit_label": "提交字段",
+          "notice": "这是会议创建流程，不是独立会议室申请。字段提交后还需单独授权；授权前不会创建或发送会议。",
+          "fields": [
+            {
+              "name": "subject",
+              "label": "会议主题",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "room",
+              "label": "会议室",
+              "control": "text",
+              "required": true,
+              "max_length": 100,
+              "autocomplete": "off"
+            },
+            {
+              "name": "start_time",
+              "label": "开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "结束时间",
+              "control": "datetime-local",
+              "required": true
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 10080,
+              "message": "结束时间必须晚于开始时间，且会议时长不能超过 7 天。"
+            }
+          ]
+        },
+        "field_schema_function": "build_meeting_field_card_schema",
+        "context_fields": [],
+        "prepare_function": "prepare_meeting_create",
+        "commit_function": "create_meeting",
+        "contract_error": "bscli.adapters.seeyon_meeting.MeetingContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_meeting.MeetingOutcomeUnknown",
+        "field_message": "Meeting fields must be entered in the trusted field card.",
+        "authorization_message": "The meeting-create plan requires confirmation in the trusted action card."
+      },
+      "scopes": {
+        "oa.meeting.create.prepare": [
+          "oa:write:meeting"
+        ],
+        "oa.meeting.create": [
+          "oa:write:meeting"
+        ]
+      },
+      "permissions": {
+        "oa.meeting.create.prepare": "oa.meeting.create",
+        "oa.meeting.create": "oa.meeting.create"
+      },
+      "permission_definitions": {
+        "oa.meeting.create": {
+          "id": "oa.meeting.create",
+          "label": "创建会议",
+          "capabilities": [
+            "oa.meeting.create",
+            "oa.meeting.create.prepare"
+          ],
+          "tools": [
+            "oa_meeting_create_prepare"
+          ],
+          "legacy_scopes": [
+            "oa:write:meeting"
+          ],
+          "dependencies": "选人流程如调用通讯录，另检查通讯录查询",
+          "resource": "绑定下游账号实际可见范围",
+          "private_tools": [
+            "oa_meeting_create"
+          ]
+        }
+      },
+      "planning": {
+        "oa.meeting.create.prepare": null,
+        "oa.meeting.create": null
+      }
+    },
+    {
+      "module": "seeyon_meeting_room_application",
+      "declaration": "MEETING_ROOM_APPLICATION_CREATE_WORKFLOW",
+      "capabilities": [
+        {
+          "name": "oa.meeting_room.application.prepare",
+          "version": "0.1.0",
+          "description": "Collect a standalone room application's purpose, room, and time in a trusted card, validate live availability, and create separate authorization.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "purpose": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "room": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "start_time": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "end_time": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "input_submission_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "seeyon-central",
+          "workflow": "meeting-room-application-prepare-v1",
+          "system": "oa"
+        },
+        {
+          "name": "oa.meeting_room.application.create",
+          "version": "0.1.0",
+          "description": "Consume trusted authorization, recheck availability, submit one standalone room application, and verify it in My Applications.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "authorization_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "authorization_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "seeyon-central",
+          "workflow": "meeting-room-application-commit-v1",
+          "system": "oa"
+        }
+      ],
+      "definition": {
+        "commit_capability": "oa.meeting_room.application.create",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_meeting_room_application_fields.v1",
+          "title": "填写会议室申请",
+          "system": "致远 OA",
+          "effect": "申请一间会议室，不创建或发送会议",
+          "submit_label": "提交字段",
+          "notice": "提交字段后还需单独授权；授权前不会占用会议室。",
+          "fields": [
+            {
+              "name": "purpose",
+              "label": "会议室用途",
+              "control": "textarea",
+              "required": true,
+              "max_length": 80,
+              "rows": 3
+            },
+            {
+              "name": "room",
+              "label": "会议室",
+              "control": "text",
+              "required": true,
+              "max_length": 100,
+              "autocomplete": "off"
+            },
+            {
+              "name": "start_time",
+              "label": "开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "结束时间",
+              "control": "datetime-local",
+              "required": true
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 10080,
+              "message": "结束时间必须晚于开始时间，且申请时长不能超过 7 天。"
+            }
+          ]
+        },
+        "field_schema_function": "build_meeting_room_application_field_card_schema",
+        "context_fields": [],
+        "prepare_function": "prepare_meeting_room_application",
+        "commit_function": "create_meeting_room_application",
+        "contract_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationOutcomeUnknown",
+        "field_message": "会议室申请字段必须在可信字段卡中核对。",
+        "authorization_message": "会议室申请计划需要在可信授权卡中确认。"
+      },
+      "scopes": {
+        "oa.meeting_room.application.prepare": [
+          "oa:write:meeting"
+        ],
+        "oa.meeting_room.application.create": [
+          "oa:write:meeting"
+        ]
+      },
+      "permissions": {
+        "oa.meeting_room.application.prepare": "oa.meeting_room.apply",
+        "oa.meeting_room.application.create": "oa.meeting_room.apply"
+      },
+      "permission_definitions": {
+        "oa.meeting_room.apply": {
+          "id": "oa.meeting_room.apply",
+          "label": "会议室申请",
+          "capabilities": [
+            "oa.meeting_room.application.prepare",
+            "oa.meeting_room.application.create"
+          ],
+          "tools": [
+            "oa_meeting_room_application_prepare"
+          ],
+          "legacy_scopes": [
+            "oa:write:meeting"
+          ],
+          "dependencies": "目标会议室检查；推荐搭配会议室查询",
+          "resource": "绑定下游账号实际可见范围",
+          "private_tools": [
+            "oa_meeting_room_application_create"
+          ]
+        }
+      },
+      "planning": {
+        "oa.meeting_room.application.prepare": null,
+        "oa.meeting_room.application.create": null
+      }
+    },
+    {
+      "module": "seeyon_meeting_room_application",
+      "declaration": "MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW",
+      "capabilities": [
+        {
+          "name": "oa.meeting_room.application.cancel.prepare",
+          "version": "0.1.0",
+          "description": "Resolve one exact own standalone room application, collect a cancellation reason in a trusted card, and create separate cancellation authorization.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "application_id": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "cancellation_reason": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "input_submission_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "application_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "seeyon-central",
+          "workflow": "meeting-room-application-cancel-prepare-v1",
+          "system": "oa"
+        },
+        {
+          "name": "oa.meeting_room.application.cancel",
+          "version": "0.1.0",
+          "description": "Consume trusted authorization, cancel one exact own standalone room application, and verify its terminal readback.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "authorization_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "authorization_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "seeyon-central",
+          "workflow": "meeting-room-application-cancel-commit-v1",
+          "system": "oa"
+        }
+      ],
+      "definition": {
+        "commit_capability": "oa.meeting_room.application.cancel",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_meeting_room_application_cancel_fields.v1",
+          "title": "填写会议室申请撤销原因",
+          "system": "致远 OA",
+          "effect": "撤销一条自己的独立会议室申请",
+          "submit_label": "提交撤销原因",
+          "notice": "提交原因后还需单独授权；授权前不会撤销申请。",
+          "fields": [
+            {
+              "name": "cancellation_reason",
+              "label": "撤销原因",
+              "control": "textarea",
+              "required": true,
+              "max_length": 100,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "application_id"
+        ],
+        "prepare_function": "prepare_meeting_room_application_cancel",
+        "commit_function": "cancel_meeting_room_application",
+        "contract_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationOutcomeUnknown",
+        "field_message": "会议室申请撤销原因必须在可信字段卡中核对。",
+        "authorization_message": "会议室申请撤销计划需要在可信授权卡中确认。"
+      },
+      "scopes": {
+        "oa.meeting_room.application.cancel.prepare": [
+          "oa:write:meeting"
+        ],
+        "oa.meeting_room.application.cancel": [
+          "oa:write:meeting"
+        ]
+      },
+      "permissions": {
+        "oa.meeting_room.application.cancel.prepare": "oa.meeting_room.cancel",
+        "oa.meeting_room.application.cancel": "oa.meeting_room.cancel"
+      },
+      "permission_definitions": {
+        "oa.meeting_room.cancel": {
+          "id": "oa.meeting_room.cancel",
+          "label": "取消会议室申请",
+          "capabilities": [
+            "oa.meeting_room.application.cancel.prepare",
+            "oa.meeting_room.application.cancel"
+          ],
+          "tools": [
+            "oa_meeting_room_application_cancel_prepare"
+          ],
+          "legacy_scopes": [
+            "oa:write:meeting"
+          ],
+          "dependencies": "目标申请归属检查；推荐搭配会议室查询",
+          "resource": "绑定下游账号实际可见范围",
+          "private_tools": [
+            "oa_meeting_room_application_cancel"
+          ]
+        }
+      },
+      "planning": {
+        "oa.meeting_room.application.cancel.prepare": null,
+        "oa.meeting_room.application.cancel": null
+      }
+    }
+  ]
+}

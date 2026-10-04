@@ -16,6 +16,8 @@ from bscli.adapters.seeyon_meeting_room import (
     room_app as shared_room_app,
     room_is_available as shared_room_is_available,
 )
+from bscli.core.capability import CapabilitySpec
+from bscli.core.write_workflow import WriteWorkflowDefinition
 
 
 MEETING_PREPARE_CAPABILITY = "oa.meeting.create.prepare"
@@ -699,3 +701,43 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+MEETING_CREATE_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=MEETING_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Collect meeting fields in a trusted card, resolve and validate room "
+            "availability, and create a separate meeting-create authorization."
+        ),
+        input_schema=MEETING_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter="seeyon-central",
+        workflow="meeting-create-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=MEETING_CREATE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume one trusted authorization, recheck room availability, create "
+            "and send the meeting, then verify room-list and meeting-view readback."
+        ),
+        input_schema=MEETING_CREATE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter="seeyon-central",
+        workflow="meeting-create-commit-v1",
+    ),
+    required_scopes=frozenset({"oa:write:meeting"}),
+    field_schema=MEETING_FIELD_CARD_SCHEMA,
+    context_fields=(),
+    prepare_function=prepare_meeting_create,
+    commit_function=create_meeting,
+    contract_error=MeetingContractMismatch,
+    outcome_error=MeetingOutcomeUnknown,
+    field_message="Meeting fields must be entered in the trusted field card.",
+    authorization_message="The meeting-create plan requires confirmation in the trusted action card.",
+    field_schema_function=build_meeting_field_card_schema,
+)
