@@ -1,0 +1,3825 @@
+{
+  "baseline": "5020bf61245e30c598c005c3b2eb9ae9ce0bf7e8",
+  "registry_order": [
+    "oa.template.list",
+    "oa.document.certificate.search",
+    "oa.business_trip.prepare",
+    "oa.meeting_room.availability.list",
+    "oa.meeting_room.my_applications.list",
+    "oa.business_trip.save_draft",
+    "oa.business_trip.submit.prepare",
+    "oa.business_trip.submit",
+    "oa.leave.prepare",
+    "oa.leave.save_draft",
+    "oa.leave.submit.prepare",
+    "oa.leave.submit",
+    "oa.missed_punch.prepare",
+    "oa.missed_punch.save_draft",
+    "oa.missed_punch.approval.prepare",
+    "oa.missed_punch.approval.batch.prepare",
+    "oa.workflow.pending.batch.prepare",
+    "oa.missed_punch.approve",
+    "oa.meeting.create.prepare",
+    "oa.meeting.create",
+    "oa.meeting_room.application.prepare",
+    "oa.meeting_room.application.create",
+    "oa.meeting_room.application.cancel.prepare",
+    "oa.meeting_room.application.cancel",
+    "oa.efficiency_data.approval.prepare",
+    "oa.efficiency_data.approve",
+    "oa.travel_expense.approval.prepare",
+    "oa.travel_expense.approve",
+    "oa.business_trip.approval.prepare",
+    "oa.business_trip.approve",
+    "oa.labor_contract_renewal.approval.prepare",
+    "oa.labor_contract_renewal.approve",
+    "oa.intellectual_property_declaration.approval.prepare",
+    "oa.intellectual_property_declaration.approve",
+    "oa.overtime.approval.prepare",
+    "oa.overtime.approve",
+    "oa.leave.approval.prepare",
+    "oa.leave.approve",
+    "oa.resignation.approval.prepare",
+    "oa.resignation.approve",
+    "oa.work_handover.approval.prepare",
+    "oa.work_handover.approve",
+    "oa.flight_application.approval.prepare",
+    "oa.flight_application.approve",
+    "oa.attendance_confirmation.prepare",
+    "oa.attendance_confirmation.confirm",
+    "oa.weekly_report.acknowledgement.prepare",
+    "oa.weekly_report.acknowledge",
+    "oa.standard_collaboration.approval.prepare",
+    "oa.standard_collaboration.approve",
+    "oa.workflow.revoke.prepare",
+    "oa.workflow.revoke",
+    "oa.workflow.pending.list",
+    "oa.workflow.sent.list",
+    "oa.workflow.done.list",
+    "oa.workflow.tracked.list",
+    "oa.workflow.detail.get",
+    "oa.workflow.opinions.list",
+    "oa.addressbook.organization.tree",
+    "oa.addressbook.department.members",
+    "oa.addressbook.person.search",
+    "oa.addressbook.person.get",
+    "oa.addressbook.group.list",
+    "oa.addressbook.group.members",
+    "oa.addressbook.private_contact.search",
+    "oa.addressbook.private_contact.get",
+    "oa.addressbook.export"
+  ],
+  "catalog_order": [
+    "oa.business_trip.prepare",
+    "oa.business_trip.submit.prepare",
+    "oa.leave.prepare",
+    "oa.leave.submit.prepare",
+    "oa.missed_punch.prepare",
+    "oa.missed_punch.approval.prepare",
+    "oa.missed_punch.approval.batch.prepare",
+    "oa.meeting.create.prepare",
+    "oa.meeting_room.application.prepare",
+    "oa.meeting_room.application.cancel.prepare",
+    "oa.workflow.revoke.prepare",
+    "oa.efficiency_data.approval.prepare",
+    "oa.travel_expense.approval.prepare",
+    "oa.business_trip.approval.prepare",
+    "oa.labor_contract_renewal.approval.prepare",
+    "oa.intellectual_property_declaration.approval.prepare",
+    "oa.overtime.approval.prepare",
+    "oa.leave.approval.prepare",
+    "oa.resignation.approval.prepare",
+    "oa.work_handover.approval.prepare",
+    "oa.flight_application.approval.prepare",
+    "oa.attendance_confirmation.prepare",
+    "oa.weekly_report.acknowledgement.prepare",
+    "oa.standard_collaboration.approval.prepare",
+    "taihua.work_log.create.prepare",
+    "smartlight.alarm.remark.update.prepare",
+    "smartlight.alarm.work_area.submit.prepare",
+    "smartlight.alarm.work_area.revoke.prepare",
+    "smartlight.alarm.dispose.prepare",
+    "oa.workflow.pending.batch.prepare"
+  ],
+  "scope_order": [
+    "oa.workflow.pending.batch.prepare",
+    "oa.business_trip.prepare",
+    "oa.business_trip.save_draft",
+    "oa.business_trip.submit.prepare",
+    "oa.business_trip.submit",
+    "oa.leave.prepare",
+    "oa.leave.save_draft",
+    "oa.leave.submit.prepare",
+    "oa.leave.submit",
+    "oa.missed_punch.prepare",
+    "oa.missed_punch.save_draft",
+    "oa.missed_punch.approval.prepare",
+    "oa.missed_punch.approval.batch.prepare",
+    "oa.missed_punch.approve",
+    "oa.meeting.create.prepare",
+    "oa.meeting.create",
+    "oa.meeting_room.application.prepare",
+    "oa.meeting_room.application.create",
+    "oa.meeting_room.application.cancel.prepare",
+    "oa.meeting_room.application.cancel",
+    "oa.efficiency_data.approval.prepare",
+    "oa.efficiency_data.approve",
+    "oa.travel_expense.approval.prepare",
+    "oa.travel_expense.approve",
+    "oa.business_trip.approval.prepare",
+    "oa.business_trip.approve",
+    "oa.labor_contract_renewal.approval.prepare",
+    "oa.labor_contract_renewal.approve",
+    "oa.intellectual_property_declaration.approval.prepare",
+    "oa.intellectual_property_declaration.approve",
+    "oa.overtime.approval.prepare",
+    "oa.overtime.approve",
+    "oa.leave.approval.prepare",
+    "oa.leave.approve",
+    "oa.resignation.approval.prepare",
+    "oa.work_handover.approval.prepare",
+    "oa.resignation.approve",
+    "oa.work_handover.approve",
+    "oa.flight_application.approval.prepare",
+    "oa.flight_application.approve",
+    "oa.attendance_confirmation.prepare",
+    "oa.attendance_confirmation.confirm",
+    "oa.weekly_report.acknowledgement.prepare",
+    "oa.weekly_report.acknowledge",
+    "oa.standard_collaboration.approval.prepare",
+    "oa.standard_collaboration.approve",
+    "oa.workflow.revoke.prepare",
+    "oa.workflow.revoke",
+    "taihua.work_log.create.prepare",
+    "taihua.work_log.create",
+    "smartlight.alarm.remark.update.prepare",
+    "smartlight.alarm.remark.update",
+    "smartlight.alarm.work_area.submit.prepare",
+    "smartlight.alarm.work_area.submit",
+    "smartlight.alarm.work_area.revoke.prepare",
+    "smartlight.alarm.work_area.revoke",
+    "smartlight.alarm.dispose.prepare",
+    "smartlight.alarm.dispose"
+  ],
+  "capabilities": [
+    {
+      "name": "oa.business_trip.prepare",
+      "version": "0.3.0",
+      "description": "Collect business-trip fields through a trusted card, validate the live OA form, and create a separate one-time confirmation card.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "travel_mode": {
+            "type": "string",
+            "enum": [
+              "大巴",
+              "火车",
+              "飞机",
+              "轮渡",
+              "自驾车"
+            ]
+          },
+          "origin": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "destination": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "has_direct_supervisor": {
+            "type": "boolean"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "reversible_write",
+      "adapter": "seeyon-central",
+      "workflow": "business-trip-draft-prepare-v2",
+      "system": "oa"
+    },
+    {
+      "name": "oa.business_trip.save_draft",
+      "version": "0.1.0",
+      "description": "Consume a trusted authorization once, save the frozen business-trip plan as an OA wait-send draft, and verify it by server readback.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "reversible_write",
+      "adapter": "seeyon-central",
+      "workflow": "business-trip-draft-save-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.business_trip.submit.prepare",
+      "version": "0.3.0",
+      "description": "Collect business-trip fields through a trusted card, validate the live OA form and sent-item baseline, and create a separate submit authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "travel_mode": {
+            "type": "string",
+            "enum": [
+              "大巴",
+              "火车",
+              "飞机",
+              "轮渡",
+              "自驾车"
+            ]
+          },
+          "origin": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "destination": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "has_direct_supervisor": {
+            "type": "boolean"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "business-trip-submit-prepare-v2",
+      "system": "oa"
+    },
+    {
+      "name": "oa.business_trip.submit",
+      "version": "0.2.0",
+      "description": "Consume one trusted authorization, submit the frozen business-trip request, and verify one new readable item in the OA sent collection.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "business-trip-submit-commit-v2",
+      "system": "oa"
+    },
+    {
+      "name": "oa.leave.prepare",
+      "version": "0.2.0",
+      "description": "Collect supported leave-request fields through a trusted card, validate the live OA form, and create a separate draft-save authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "leave_type": {
+            "type": "string",
+            "enum": [
+              "年休",
+              "事假",
+              "调休"
+            ]
+          },
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "has_direct_supervisor": {
+            "type": "boolean"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "reversible_write",
+      "adapter": "seeyon-central",
+      "workflow": "leave-draft-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.leave.save_draft",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, save the frozen leave request as an OA wait-send draft, and verify it by server readback without submission.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "reversible_write",
+      "adapter": "seeyon-central",
+      "workflow": "leave-draft-save-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.leave.submit.prepare",
+      "version": "0.1.0",
+      "description": "Collect supported leave-request fields through a trusted card, validate the live OA form and sent-item baseline, and create a submit authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "leave_type": {
+            "type": "string",
+            "enum": [
+              "年休",
+              "事假",
+              "调休"
+            ]
+          },
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "has_direct_supervisor": {
+            "type": "boolean"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "leave-submit-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.leave.submit",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, submit the frozen leave request, and verify one new readable item in the OA sent collection.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "leave-submit-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.missed_punch.prepare",
+      "version": "0.2.0",
+      "description": "Collect missed-punch fields in a trusted card, validate the live OA form, and create a separate draft-save authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "reason_type": {
+            "type": "string",
+            "enum": [
+              "忘记打卡",
+              "人脸识别有误",
+              "其他"
+            ]
+          },
+          "explanation": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "reversible_write",
+      "adapter": "seeyon-central",
+      "workflow": "missed-punch-draft-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.missed_punch.save_draft",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, save the frozen missed-punch plan as an OA wait-send draft, and verify it without submitting approval.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "reversible_write",
+      "adapter": "seeyon-central",
+      "workflow": "missed-punch-draft-save-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.missed_punch.approval.prepare",
+      "version": "0.2.0",
+      "description": "Collect an approval opinion in a trusted card, validate one exact pending missed-punch item, and create a separate approval authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "missed-punch-approval-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.missed_punch.approval.batch.prepare",
+      "version": "0.1.0",
+      "description": "Compatibility entry; use oa.workflow.pending.batch.prepare for new batches. Freeze up to ten current pending missed-punch items and process them sequentially with independent trusted input and authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "failure_policy": {
+            "type": "string"
+          },
+          "batch_id": {
+            "type": "string"
+          },
+          "affair_id": {
+            "type": "string"
+          },
+          "batch_ordinal": {
+            "type": "integer"
+          },
+          "batch_total": {
+            "type": "integer"
+          },
+          "target_title": {
+            "type": "string"
+          },
+          "target_sender": {
+            "type": "string"
+          },
+          "target_date": {
+            "type": "string"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "missed-punch-approval-batch-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.workflow.pending.batch.prepare",
+      "version": "0.1.0",
+      "description": "Freeze a variable-length selection of current OA pending items, including mixed supported workflow types. Process each with independent trusted input, authorization and verification. Use this for multiple/all pending items instead of promising to continue singular prepares. Incomplete sources, unsupported selections and overflow stop before any approval.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "workflow_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "missed_punch",
+                "efficiency_data",
+                "travel_expense",
+                "business_trip",
+                "labor_contract_renewal",
+                "intellectual_property_declaration",
+                "overtime",
+                "leave",
+                "resignation",
+                "work_handover",
+                "flight_application",
+                "attendance_confirmation",
+                "weekly_report",
+                "standard_collaboration"
+              ]
+            },
+            "minItems": 1
+          },
+          "keyword": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "max_items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "batch_id": {
+            "type": "string"
+          },
+          "affair_id": {
+            "type": "string"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "pending-batch-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.missed_punch.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, approve the frozen missed-punch target, and verify that it left the pending collection.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "missed-punch-approval-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.meeting.create.prepare",
+      "version": "0.1.0",
+      "description": "Collect meeting fields in a trusted card, resolve and validate room availability, and create a separate meeting-create authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "room": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "meeting-create-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.meeting.create",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, recheck room availability, create and send the meeting, then verify room-list and meeting-view readback.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "meeting-create-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.meeting_room.application.prepare",
+      "version": "0.1.0",
+      "description": "Collect a standalone room application's purpose, room, and time in a trusted card, validate live availability, and create separate authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "purpose": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "room": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "start_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "end_time": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "meeting-room-application-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.meeting_room.application.create",
+      "version": "0.1.0",
+      "description": "Consume trusted authorization, recheck availability, submit one standalone room application, and verify it in My Applications.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "meeting-room-application-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.meeting_room.application.cancel.prepare",
+      "version": "0.1.0",
+      "description": "Resolve one exact own standalone room application, collect a cancellation reason in a trusted card, and create separate cancellation authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "application_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "cancellation_reason": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "meeting-room-application-cancel-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.meeting_room.application.cancel",
+      "version": "0.1.0",
+      "description": "Consume trusted authorization, cancel one exact own standalone room application, and verify its terminal readback.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "meeting-room-application-cancel-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.efficiency_data.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending efficiency data item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "efficiency-data-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.efficiency_data.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen efficiency data item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "efficiency-data-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.travel_expense.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending travel expense item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "travel-expense-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.travel_expense.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen travel expense item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "travel-expense-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.business_trip.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending business trip item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "business-trip-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.business_trip.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen business trip item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "business-trip-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.labor_contract_renewal.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending labor contract renewal item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "labor-contract-renewal-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.labor_contract_renewal.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen labor contract renewal item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "labor-contract-renewal-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.intellectual_property_declaration.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending intellectual property declaration item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "intellectual-property-declaration-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.intellectual_property_declaration.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen intellectual property declaration item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "intellectual-property-declaration-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.overtime.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending overtime item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "overtime-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.overtime.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen overtime item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "overtime-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.leave.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending leave item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "leave-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.leave.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen leave item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "leave-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.resignation.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending resignation item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "resignation-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.resignation.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen resignation item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "resignation-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.work_handover.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending work handover item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "work-handover-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.work_handover.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen work handover item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "work-handover-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.flight_application.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending flight application item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "flight-application-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.flight_application.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen flight application item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "flight-application-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.attendance_confirmation.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending attendance confirmation item, and create separate confirmation confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "attendance-confirmation-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.attendance_confirmation.confirm",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen attendance confirmation item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "attendance-confirmation-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.weekly_report.acknowledgement.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending weekly report item, and create separate acknowledgement confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "weekly-report-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.weekly_report.acknowledge",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen weekly report item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "weekly-report-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.standard_collaboration.approval.prepare",
+      "version": "0.1.0",
+      "description": "Collect a trusted opinion, validate one exact pending standard collaboration item, and create separate approval confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "standard-collaboration-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.standard_collaboration.approve",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, process the frozen standard collaboration item, and verify pending disappearance.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "standard-collaboration-commit-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.workflow.revoke.prepare",
+      "version": "0.1.0",
+      "description": "Collect a revoke comment in a trusted card, resolve one exact active sent workflow, run non-destructive OA eligibility checks, and create a separate revoke authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "repeal_comment": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "workflow-revoke-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.workflow.revoke",
+      "version": "0.1.0",
+      "description": "Consume one trusted authorization, revoke the frozen sent workflow through OA's native action, and verify its revoked wait-send state.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "workflow-revoke-commit-v1",
+      "system": "oa"
+    }
+  ],
+  "definitions": [
+    [
+      "oa.business_trip.prepare",
+      {
+        "commit_capability": "oa.business_trip.save_draft",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_business_trip_fields.v2",
+          "title": "填写出差申请",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的出差申请草稿计划",
+          "submit_label": "提交字段",
+          "notice": "字段提交后还需单独授权；最终只保存为待发草稿，不会发送或进入审批流程。",
+          "fields": [
+            {
+              "name": "start_time",
+              "label": "出差开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "出差结束时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "travel_mode",
+              "label": "出差工具",
+              "control": "select",
+              "required": true,
+              "options": [
+                {
+                  "value": "大巴",
+                  "label": "大巴"
+                },
+                {
+                  "value": "火车",
+                  "label": "火车"
+                },
+                {
+                  "value": "飞机",
+                  "label": "飞机"
+                },
+                {
+                  "value": "轮渡",
+                  "label": "轮渡"
+                },
+                {
+                  "value": "自驾车",
+                  "label": "自驾车"
+                }
+              ]
+            },
+            {
+              "name": "origin",
+              "label": "出差始发地",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "destination",
+              "label": "出差目的地",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "reason",
+              "label": "出差事由",
+              "control": "textarea",
+              "required": true,
+              "max_length": 4000,
+              "rows": 4
+            },
+            {
+              "name": "has_direct_supervisor",
+              "label": "是否有直接上级",
+              "control": "segmented",
+              "value_type": "boolean",
+              "required": true,
+              "options": [
+                {
+                  "value": "true",
+                  "label": "是"
+                },
+                {
+                  "value": "false",
+                  "label": "否"
+                }
+              ]
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 527040,
+              "message": "结束时间必须晚于开始时间，且出差时长不能超过 366 天。"
+            }
+          ]
+        },
+        "context_fields": [],
+        "prepare_function": "prepare_business_trip_draft",
+        "commit_function": "save_business_trip_draft",
+        "contract_error": "bscli.adapters.seeyon_business_trip.BusinessTripContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_business_trip.BusinessTripOutcomeUnknown",
+        "field_message": "Business-trip fields must be entered in the trusted field card.",
+        "authorization_message": "The business-trip draft plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.business_trip.submit.prepare",
+      {
+        "commit_capability": "oa.business_trip.submit",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_business_trip_submit_fields.v2",
+          "title": "填写并提交出差申请",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的出差申请提交计划",
+          "submit_label": "提交字段",
+          "notice": "字段提交后还需单独授权；授权后会正式发送并进入 OA 审批流程。",
+          "fields": [
+            {
+              "name": "start_time",
+              "label": "出差开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "出差结束时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "travel_mode",
+              "label": "出差工具",
+              "control": "select",
+              "required": true,
+              "options": [
+                {
+                  "value": "大巴",
+                  "label": "大巴"
+                },
+                {
+                  "value": "火车",
+                  "label": "火车"
+                },
+                {
+                  "value": "飞机",
+                  "label": "飞机"
+                },
+                {
+                  "value": "轮渡",
+                  "label": "轮渡"
+                },
+                {
+                  "value": "自驾车",
+                  "label": "自驾车"
+                }
+              ]
+            },
+            {
+              "name": "origin",
+              "label": "出差始发地",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "destination",
+              "label": "出差目的地",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "reason",
+              "label": "出差事由",
+              "control": "textarea",
+              "required": true,
+              "max_length": 4000,
+              "rows": 4
+            },
+            {
+              "name": "has_direct_supervisor",
+              "label": "是否有直接上级",
+              "control": "segmented",
+              "value_type": "boolean",
+              "required": true,
+              "options": [
+                {
+                  "value": "true",
+                  "label": "是"
+                },
+                {
+                  "value": "false",
+                  "label": "否"
+                }
+              ]
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 527040,
+              "message": "结束时间必须晚于开始时间，且出差时长不能超过 366 天。"
+            }
+          ]
+        },
+        "context_fields": [],
+        "prepare_function": "prepare_business_trip_submission",
+        "commit_function": "submit_business_trip_request",
+        "contract_error": "bscli.adapters.seeyon_business_trip.BusinessTripContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_business_trip.BusinessTripOutcomeUnknown",
+        "field_message": "Business-trip fields must be entered in the trusted field card.",
+        "authorization_message": "The business-trip submission plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.leave.prepare",
+      {
+        "commit_capability": "oa.leave.save_draft",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_leave_fields.v1",
+          "title": "填写请假申请",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的请假申请草稿计划",
+          "submit_label": "提交字段",
+          "notice": "一期支持年休、事假和调休；请假天数与小时数由 OA 自动计算。字段提交后还需单独授权，最终只保存为待发草稿，不会进入审批流程。",
+          "fields": [
+            {
+              "name": "leave_type",
+              "label": "请假类型",
+              "control": "select",
+              "required": true,
+              "options": [
+                {
+                  "value": "年休",
+                  "label": "年休"
+                },
+                {
+                  "value": "事假",
+                  "label": "事假"
+                },
+                {
+                  "value": "调休",
+                  "label": "调休"
+                }
+              ]
+            },
+            {
+              "name": "start_time",
+              "label": "请假开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "请假结束时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "reason",
+              "label": "请假事由",
+              "control": "textarea",
+              "required": true,
+              "max_length": 4000,
+              "rows": 4
+            },
+            {
+              "name": "has_direct_supervisor",
+              "label": "是否有直接上级",
+              "control": "segmented",
+              "value_type": "boolean",
+              "required": true,
+              "options": [
+                {
+                  "value": "true",
+                  "label": "是"
+                },
+                {
+                  "value": "false",
+                  "label": "否"
+                }
+              ]
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 527040,
+              "message": "结束时间必须晚于开始时间，且请假时长不能超过 366 天。"
+            }
+          ]
+        },
+        "context_fields": [],
+        "prepare_function": "prepare_leave_draft",
+        "commit_function": "save_leave_draft",
+        "contract_error": "bscli.adapters.seeyon_leave.LeaveContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_leave.LeaveOutcomeUnknown",
+        "field_message": "Leave-request fields must be entered in the trusted field card.",
+        "authorization_message": "The leave draft plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.leave.submit.prepare",
+      {
+        "commit_capability": "oa.leave.submit",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_leave_submit_fields.v1",
+          "title": "填写并提交请假申请",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的请假申请提交计划",
+          "submit_label": "提交字段",
+          "notice": "字段提交后还需单独授权；授权后会正式发送并进入 OA 审批流程。",
+          "fields": [
+            {
+              "name": "leave_type",
+              "label": "请假类型",
+              "control": "select",
+              "required": true,
+              "options": [
+                {
+                  "value": "年休",
+                  "label": "年休"
+                },
+                {
+                  "value": "事假",
+                  "label": "事假"
+                },
+                {
+                  "value": "调休",
+                  "label": "调休"
+                }
+              ]
+            },
+            {
+              "name": "start_time",
+              "label": "请假开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "请假结束时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "reason",
+              "label": "请假事由",
+              "control": "textarea",
+              "required": true,
+              "max_length": 4000,
+              "rows": 4
+            },
+            {
+              "name": "has_direct_supervisor",
+              "label": "是否有直接上级",
+              "control": "segmented",
+              "value_type": "boolean",
+              "required": true,
+              "options": [
+                {
+                  "value": "true",
+                  "label": "是"
+                },
+                {
+                  "value": "false",
+                  "label": "否"
+                }
+              ]
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 527040,
+              "message": "结束时间必须晚于开始时间，且请假时长不能超过 366 天。"
+            }
+          ]
+        },
+        "context_fields": [],
+        "prepare_function": "prepare_leave_submission",
+        "commit_function": "submit_leave_request",
+        "contract_error": "bscli.adapters.seeyon_leave.LeaveContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_leave.LeaveOutcomeUnknown",
+        "field_message": "Leave-request fields must be entered in the trusted field card.",
+        "authorization_message": "The leave submission plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.missed_punch.prepare",
+      {
+        "commit_capability": "oa.missed_punch.save_draft",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_missed_punch_fields.v1",
+          "title": "填写补签申请",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的补签申请草稿计划",
+          "submit_label": "提交字段",
+          "notice": "字段提交后还需单独授权；最终只保存为待发草稿，不会发送或进入审批流程。",
+          "fields": [
+            {
+              "name": "start_time",
+              "label": "开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "结束时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "location",
+              "label": "外出地点",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "reason_type",
+              "label": "补签原因",
+              "control": "select",
+              "required": true,
+              "options": [
+                {
+                  "value": "忘记打卡",
+                  "label": "忘记打卡"
+                },
+                {
+                  "value": "人脸识别有误",
+                  "label": "人脸识别有误"
+                },
+                {
+                  "value": "其他",
+                  "label": "其他"
+                }
+              ]
+            },
+            {
+              "name": "explanation",
+              "label": "事由说明",
+              "control": "textarea",
+              "required": true,
+              "max_length": 4000,
+              "rows": 4
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 527040,
+              "message": "结束时间必须晚于开始时间，且时间跨度不能超过 366 天。"
+            }
+          ]
+        },
+        "context_fields": [],
+        "prepare_function": "prepare_missed_punch_draft",
+        "commit_function": "save_missed_punch_draft",
+        "contract_error": "bscli.adapters.seeyon_missed_punch.MissedPunchContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_missed_punch.MissedPunchOutcomeUnknown",
+        "field_message": "Missed-punch fields must be entered in the trusted field card.",
+        "authorization_message": "The missed-punch draft plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.missed_punch.approval.prepare",
+      {
+        "commit_capability": "oa.missed_punch.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_missed_punch_approval_fields.v1",
+          "title": "填写补签审批意见",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的补签审批计划",
+          "submit_label": "提交意见",
+          "notice": "提交意见后还需在独立授权卡中核对目标事项；未授权前不会审批。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "审批意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_missed_punch_approval",
+        "commit_function": "approve_missed_punch_request",
+        "contract_error": "bscli.adapters.seeyon_missed_punch.MissedPunchContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_missed_punch.MissedPunchOutcomeUnknown",
+        "field_message": "The missed-punch approval opinion must be entered in the trusted field card.",
+        "authorization_message": "The missed-punch approval plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.missed_punch.approval.batch.prepare",
+      {
+        "commit_capability": "oa.missed_punch.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_missed_punch_approval_fields.v1",
+          "title": "填写补签审批意见",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的补签审批计划",
+          "submit_label": "提交意见",
+          "notice": "提交意见后还需在独立授权卡中核对目标事项；未授权前不会审批。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "审批意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "field_schema_function": "build_missed_punch_approval_batch_field_schema",
+        "context_fields": [
+          "batch_id",
+          "affair_id"
+        ],
+        "prepare_function": "prepare_missed_punch_approval",
+        "commit_function": "approve_missed_punch_request",
+        "contract_error": "bscli.adapters.seeyon_missed_punch.MissedPunchContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_missed_punch.MissedPunchOutcomeUnknown",
+        "field_message": "The current missed-punch opinion must be entered in the trusted field card.",
+        "authorization_message": "The current missed-punch approval plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.meeting.create.prepare",
+      {
+        "commit_capability": "oa.meeting.create",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_meeting_create_fields.v1",
+          "title": "填写会议创建信息",
+          "system": "致远 OA",
+          "effect": "创建并发送完整会议，可同时占用会议室",
+          "submit_label": "提交字段",
+          "notice": "这是会议创建流程，不是独立会议室申请。字段提交后还需单独授权；授权前不会创建或发送会议。",
+          "fields": [
+            {
+              "name": "subject",
+              "label": "会议主题",
+              "control": "text",
+              "required": true,
+              "max_length": 255,
+              "autocomplete": "off"
+            },
+            {
+              "name": "room",
+              "label": "会议室",
+              "control": "text",
+              "required": true,
+              "max_length": 100,
+              "autocomplete": "off"
+            },
+            {
+              "name": "start_time",
+              "label": "开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "结束时间",
+              "control": "datetime-local",
+              "required": true
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 10080,
+              "message": "结束时间必须晚于开始时间，且会议时长不能超过 7 天。"
+            }
+          ]
+        },
+        "field_schema_function": "build_meeting_field_card_schema",
+        "context_fields": [],
+        "prepare_function": "prepare_meeting_create",
+        "commit_function": "create_meeting",
+        "contract_error": "bscli.adapters.seeyon_meeting.MeetingContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_meeting.MeetingOutcomeUnknown",
+        "field_message": "Meeting fields must be entered in the trusted field card.",
+        "authorization_message": "The meeting-create plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.meeting_room.application.prepare",
+      {
+        "commit_capability": "oa.meeting_room.application.create",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_meeting_room_application_fields.v1",
+          "title": "填写会议室申请",
+          "system": "致远 OA",
+          "effect": "申请一间会议室，不创建或发送会议",
+          "submit_label": "提交字段",
+          "notice": "提交字段后还需单独授权；授权前不会占用会议室。",
+          "fields": [
+            {
+              "name": "purpose",
+              "label": "会议室用途",
+              "control": "textarea",
+              "required": true,
+              "max_length": 80,
+              "rows": 3
+            },
+            {
+              "name": "room",
+              "label": "会议室",
+              "control": "text",
+              "required": true,
+              "max_length": 100,
+              "autocomplete": "off"
+            },
+            {
+              "name": "start_time",
+              "label": "开始时间",
+              "control": "datetime-local",
+              "required": true
+            },
+            {
+              "name": "end_time",
+              "label": "结束时间",
+              "control": "datetime-local",
+              "required": true
+            }
+          ],
+          "constraints": [
+            {
+              "kind": "datetime_after",
+              "earlier": "start_time",
+              "later": "end_time",
+              "maximum_minutes": 10080,
+              "message": "结束时间必须晚于开始时间，且申请时长不能超过 7 天。"
+            }
+          ]
+        },
+        "field_schema_function": "build_meeting_room_application_field_card_schema",
+        "context_fields": [],
+        "prepare_function": "prepare_meeting_room_application",
+        "commit_function": "create_meeting_room_application",
+        "contract_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationOutcomeUnknown",
+        "field_message": "会议室申请字段必须在可信字段卡中核对。",
+        "authorization_message": "会议室申请计划需要在可信授权卡中确认。"
+      }
+    ],
+    [
+      "oa.meeting_room.application.cancel.prepare",
+      {
+        "commit_capability": "oa.meeting_room.application.cancel",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_meeting_room_application_cancel_fields.v1",
+          "title": "填写会议室申请撤销原因",
+          "system": "致远 OA",
+          "effect": "撤销一条自己的独立会议室申请",
+          "submit_label": "提交撤销原因",
+          "notice": "提交原因后还需单独授权；授权前不会撤销申请。",
+          "fields": [
+            {
+              "name": "cancellation_reason",
+              "label": "撤销原因",
+              "control": "textarea",
+              "required": true,
+              "max_length": 100,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "application_id"
+        ],
+        "prepare_function": "prepare_meeting_room_application_cancel",
+        "commit_function": "cancel_meeting_room_application",
+        "contract_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_meeting_room_application.MeetingRoomApplicationOutcomeUnknown",
+        "field_message": "会议室申请撤销原因必须在可信字段卡中核对。",
+        "authorization_message": "会议室申请撤销计划需要在可信授权卡中确认。"
+      }
+    ],
+    [
+      "oa.workflow.revoke.prepare",
+      {
+        "commit_capability": "oa.workflow.revoke",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_workflow_revoke_fields.v1",
+          "title": "填写流程撤销附言",
+          "system": "致远 OA",
+          "effect": "撤销一条已发流程并退回待发事项",
+          "submit_label": "提交撤销附言",
+          "notice": "撤销是正式写操作，可能留下审计记录、通知当前处理人或触发表单业务逻辑。提交附言后还需在独立授权卡中核对目标流程；授权前不会执行撤销。",
+          "fields": [
+            {
+              "name": "repeal_comment",
+              "label": "撤销附言",
+              "control": "textarea",
+              "required": true,
+              "max_length": 100,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_workflow_revoke",
+        "commit_function": "revoke_workflow",
+        "contract_error": "bscli.adapters.seeyon_workflow_revoke.WorkflowRevokeContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_workflow_revoke.WorkflowRevokeOutcomeUnknown",
+        "field_message": "The workflow revoke comment must be entered in the trusted field card.",
+        "authorization_message": "The workflow revoke plan requires confirmation in the trusted action card."
+      }
+    ],
+    [
+      "oa.efficiency_data.approval.prepare",
+      {
+        "commit_capability": "oa.efficiency_data.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_efficiency_data_approval_fields.v1",
+          "title": "填写效能数据审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条效能数据流程",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_efficiency_data_approval",
+        "commit_function": "approve_efficiency_data",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The efficiency-data opinion must be entered in the trusted field card.",
+        "authorization_message": "The efficiency-data approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "efficiency_data"
+      }
+    ],
+    [
+      "oa.travel_expense.approval.prepare",
+      {
+        "commit_capability": "oa.travel_expense.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_travel_expense_approval_fields.v1",
+          "title": "填写差旅费审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条差旅费审批报销单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_travel_expense_approval",
+        "commit_function": "approve_travel_expense",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The travel-expense opinion must be entered in the trusted field card.",
+        "authorization_message": "The travel-expense approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "travel_expense"
+      }
+    ],
+    [
+      "oa.business_trip.approval.prepare",
+      {
+        "commit_capability": "oa.business_trip.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_business_trip_approval_fields.v1",
+          "title": "填写出差申请审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条出差申请单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_business_trip_approval",
+        "commit_function": "approve_business_trip_request",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The business-trip approval opinion must be entered in the trusted field card.",
+        "authorization_message": "The business-trip approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "business_trip"
+      }
+    ],
+    [
+      "oa.labor_contract_renewal.approval.prepare",
+      {
+        "commit_capability": "oa.labor_contract_renewal.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_labor_contract_renewal_approval_fields.v1",
+          "title": "填写劳动合同续签审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条劳动合同续签表",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_labor_contract_renewal_approval",
+        "commit_function": "approve_labor_contract_renewal",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The labor-contract renewal opinion must be entered in the trusted field card.",
+        "authorization_message": "The labor-contract renewal approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "labor_contract_renewal"
+      }
+    ],
+    [
+      "oa.intellectual_property_declaration.approval.prepare",
+      {
+        "commit_capability": "oa.intellectual_property_declaration.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_intellectual_property_declaration_approval_fields.v1",
+          "title": "填写知识产权申报审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条知识产权申报审批单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_intellectual_property_declaration_approval",
+        "commit_function": "approve_intellectual_property_declaration",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The intellectual-property declaration opinion must be entered in the trusted field card.",
+        "authorization_message": "The intellectual-property declaration approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "intellectual_property_declaration"
+      }
+    ],
+    [
+      "oa.overtime.approval.prepare",
+      {
+        "commit_capability": "oa.overtime.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_overtime_approval_fields.v1",
+          "title": "填写加班申请审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条加班申请审核单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_overtime_approval",
+        "commit_function": "approve_overtime",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The overtime approval opinion must be entered in the trusted field card.",
+        "authorization_message": "The overtime approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "overtime"
+      }
+    ],
+    [
+      "oa.leave.approval.prepare",
+      {
+        "commit_capability": "oa.leave.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_leave_approval_fields.v1",
+          "title": "填写请假申请审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条请假申请单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_leave_approval",
+        "commit_function": "approve_leave_request",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The leave-request approval opinion must be entered in the trusted field card.",
+        "authorization_message": "The leave-request approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "leave"
+      }
+    ],
+    [
+      "oa.resignation.approval.prepare",
+      {
+        "commit_capability": "oa.resignation.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_resignation_approval_fields.v1",
+          "title": "填写离职申请审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条离职申请单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_resignation_approval",
+        "commit_function": "approve_resignation",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The resignation approval opinion must be entered in the trusted field card.",
+        "authorization_message": "The resignation approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "resignation"
+      }
+    ],
+    [
+      "oa.work_handover.approval.prepare",
+      {
+        "commit_capability": "oa.work_handover.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_work_handover_approval_fields.v1",
+          "title": "填写工作交接审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条工作交接单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_work_handover_approval",
+        "commit_function": "approve_work_handover",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The work-handover approval opinion must be entered in the trusted field card.",
+        "authorization_message": "The work-handover approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "work_handover"
+      }
+    ],
+    [
+      "oa.flight_application.approval.prepare",
+      {
+        "commit_capability": "oa.flight_application.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_flight_application_approval_fields.v1",
+          "title": "填写乘坐飞机申请审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条乘坐飞机申请单",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_flight_application_approval",
+        "commit_function": "approve_flight_application",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The flight-application opinion must be entered in the trusted field card.",
+        "authorization_message": "The flight-application approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "flight_application"
+      }
+    ],
+    [
+      "oa.attendance_confirmation.prepare",
+      {
+        "commit_capability": "oa.attendance_confirmation.confirm",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_attendance_confirmation_fields.v1",
+          "title": "填写月度考勤确认意见",
+          "system": "致远 OA",
+          "effect": "确认并提交一张月度考勤确认单",
+          "submit_label": "提交确认意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_attendance_confirmation",
+        "commit_function": "confirm_attendance",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The attendance-confirmation opinion must be entered in the trusted field card.",
+        "authorization_message": "The attendance confirmation requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "attendance_confirmation"
+      }
+    ],
+    [
+      "oa.weekly_report.acknowledgement.prepare",
+      {
+        "commit_capability": "oa.weekly_report.acknowledge",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_weekly_report_acknowledgement_fields.v1",
+          "title": "填写周报阅办意见",
+          "system": "致远 OA",
+          "effect": "阅办一条周报发送流程",
+          "submit_label": "提交阅办意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_weekly_report_acknowledgement",
+        "commit_function": "acknowledge_weekly_report",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The weekly-report opinion must be entered in the trusted field card.",
+        "authorization_message": "The weekly-report acknowledgement requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "weekly_report"
+      }
+    ],
+    [
+      "oa.standard_collaboration.approval.prepare",
+      {
+        "commit_capability": "oa.standard_collaboration.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_standard_collaboration_approval_fields.v1",
+          "title": "填写普通协同事项审批意见",
+          "system": "致远 OA",
+          "effect": "审批通过一条普通协同事项",
+          "submit_label": "提交审批意见",
+          "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "处理意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "context_fields": [
+          "affair_id"
+        ],
+        "prepare_function": "prepare_standard_collaboration_approval",
+        "commit_function": "approve_standard_collaboration",
+        "contract_error": "bscli.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+        "field_message": "The collaboration opinion must be entered in the trusted field card.",
+        "authorization_message": "The collaboration approval requires trusted confirmation.",
+        "preflight_function": "preflight_pending_action",
+        "preflight_profile": "standard_collaboration"
+      }
+    ],
+    [
+      "oa.workflow.pending.batch.prepare",
+      {
+        "commit_capability": "oa.missed_punch.approve",
+        "field_schema": {
+          "schema_version": "agentbridge.oa_missed_punch_approval_fields.v1",
+          "title": "填写补签审批意见",
+          "system": "致远 OA",
+          "effect": "生成一份待确认的补签审批计划",
+          "submit_label": "提交意见",
+          "notice": "提交意见后还需在独立授权卡中核对目标事项；未授权前不会审批。",
+          "fields": [
+            {
+              "name": "opinion",
+              "label": "审批意见",
+              "control": "textarea",
+              "required": true,
+              "max_length": 1000,
+              "rows": 4
+            }
+          ]
+        },
+        "field_schema_function": "build_missed_punch_approval_batch_field_schema",
+        "context_fields": [
+          "batch_id",
+          "affair_id"
+        ],
+        "prepare_function": "prepare_missed_punch_approval",
+        "commit_function": "approve_missed_punch_request",
+        "contract_error": "bscli.adapters.seeyon_missed_punch.MissedPunchContractMismatch",
+        "outcome_error": "bscli.adapters.seeyon_missed_punch.MissedPunchOutcomeUnknown",
+        "field_message": "The current missed-punch opinion must be entered in the trusted field card.",
+        "authorization_message": "The current missed-punch approval plan requires confirmation in the trusted action card."
+      }
+    ]
+  ],
+  "commits": [
+    [
+      "oa.business_trip.save_draft",
+      "oa.business_trip.prepare"
+    ],
+    [
+      "oa.business_trip.submit",
+      "oa.business_trip.submit.prepare"
+    ],
+    [
+      "oa.leave.save_draft",
+      "oa.leave.prepare"
+    ],
+    [
+      "oa.leave.submit",
+      "oa.leave.submit.prepare"
+    ],
+    [
+      "oa.missed_punch.save_draft",
+      "oa.missed_punch.prepare"
+    ],
+    [
+      "oa.missed_punch.approve",
+      "oa.missed_punch.approval.prepare"
+    ],
+    [
+      "oa.meeting.create",
+      "oa.meeting.create.prepare"
+    ],
+    [
+      "oa.meeting_room.application.create",
+      "oa.meeting_room.application.prepare"
+    ],
+    [
+      "oa.meeting_room.application.cancel",
+      "oa.meeting_room.application.cancel.prepare"
+    ],
+    [
+      "oa.workflow.revoke",
+      "oa.workflow.revoke.prepare"
+    ],
+    [
+      "oa.efficiency_data.approve",
+      "oa.efficiency_data.approval.prepare"
+    ],
+    [
+      "oa.travel_expense.approve",
+      "oa.travel_expense.approval.prepare"
+    ],
+    [
+      "oa.business_trip.approve",
+      "oa.business_trip.approval.prepare"
+    ],
+    [
+      "oa.labor_contract_renewal.approve",
+      "oa.labor_contract_renewal.approval.prepare"
+    ],
+    [
+      "oa.intellectual_property_declaration.approve",
+      "oa.intellectual_property_declaration.approval.prepare"
+    ],
+    [
+      "oa.overtime.approve",
+      "oa.overtime.approval.prepare"
+    ],
+    [
+      "oa.leave.approve",
+      "oa.leave.approval.prepare"
+    ],
+    [
+      "oa.resignation.approve",
+      "oa.resignation.approval.prepare"
+    ],
+    [
+      "oa.work_handover.approve",
+      "oa.work_handover.approval.prepare"
+    ],
+    [
+      "oa.flight_application.approve",
+      "oa.flight_application.approval.prepare"
+    ],
+    [
+      "oa.attendance_confirmation.confirm",
+      "oa.attendance_confirmation.prepare"
+    ],
+    [
+      "oa.weekly_report.acknowledge",
+      "oa.weekly_report.acknowledgement.prepare"
+    ],
+    [
+      "oa.standard_collaboration.approve",
+      "oa.standard_collaboration.approval.prepare"
+    ]
+  ],
+  "scopes": [
+    [
+      "oa.workflow.pending.batch.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.business_trip.prepare",
+      [
+        "oa:write:draft"
+      ]
+    ],
+    [
+      "oa.business_trip.save_draft",
+      [
+        "oa:write:draft"
+      ]
+    ],
+    [
+      "oa.business_trip.submit.prepare",
+      [
+        "oa:write:submit"
+      ]
+    ],
+    [
+      "oa.business_trip.submit",
+      [
+        "oa:write:submit"
+      ]
+    ],
+    [
+      "oa.leave.prepare",
+      [
+        "oa:write:draft"
+      ]
+    ],
+    [
+      "oa.leave.save_draft",
+      [
+        "oa:write:draft"
+      ]
+    ],
+    [
+      "oa.leave.submit.prepare",
+      [
+        "oa:write:submit"
+      ]
+    ],
+    [
+      "oa.leave.submit",
+      [
+        "oa:write:submit"
+      ]
+    ],
+    [
+      "oa.missed_punch.prepare",
+      [
+        "oa:write:draft"
+      ]
+    ],
+    [
+      "oa.missed_punch.save_draft",
+      [
+        "oa:write:draft"
+      ]
+    ],
+    [
+      "oa.missed_punch.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.missed_punch.approval.batch.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.missed_punch.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.meeting.create.prepare",
+      [
+        "oa:write:meeting"
+      ]
+    ],
+    [
+      "oa.meeting.create",
+      [
+        "oa:write:meeting"
+      ]
+    ],
+    [
+      "oa.meeting_room.application.prepare",
+      [
+        "oa:write:meeting"
+      ]
+    ],
+    [
+      "oa.meeting_room.application.create",
+      [
+        "oa:write:meeting"
+      ]
+    ],
+    [
+      "oa.meeting_room.application.cancel.prepare",
+      [
+        "oa:write:meeting"
+      ]
+    ],
+    [
+      "oa.meeting_room.application.cancel",
+      [
+        "oa:write:meeting"
+      ]
+    ],
+    [
+      "oa.efficiency_data.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.efficiency_data.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.travel_expense.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.travel_expense.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.business_trip.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.business_trip.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.labor_contract_renewal.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.labor_contract_renewal.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.intellectual_property_declaration.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.intellectual_property_declaration.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.overtime.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.overtime.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.leave.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.leave.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.resignation.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.work_handover.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.resignation.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.work_handover.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.flight_application.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.flight_application.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.attendance_confirmation.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.attendance_confirmation.confirm",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.weekly_report.acknowledgement.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.weekly_report.acknowledge",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.standard_collaboration.approval.prepare",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.standard_collaboration.approve",
+      [
+        "oa:write:approval"
+      ]
+    ],
+    [
+      "oa.workflow.revoke.prepare",
+      [
+        "oa:write:revoke"
+      ]
+    ],
+    [
+      "oa.workflow.revoke",
+      [
+        "oa:write:revoke"
+      ]
+    ]
+  ],
+  "function_names": [
+    "acknowledge_weekly_report",
+    "approve_business_trip_request",
+    "approve_efficiency_data",
+    "approve_flight_application",
+    "approve_intellectual_property_declaration",
+    "approve_labor_contract_renewal",
+    "approve_leave_request",
+    "approve_missed_punch_request",
+    "approve_overtime",
+    "approve_resignation",
+    "approve_standard_collaboration",
+    "approve_travel_expense",
+    "approve_work_handover",
+    "build_meeting_field_card_schema",
+    "build_meeting_room_application_field_card_schema",
+    "build_missed_punch_approval_batch_field_schema",
+    "cancel_meeting_room_application",
+    "commit_smartlight_alarm_remark_update",
+    "commit_smartlight_alarm_work_area_revoke",
+    "commit_smartlight_alarm_work_area_submit",
+    "commit_smartlight_rtu_alarm_dispose",
+    "commit_taihua_work_log_create",
+    "confirm_attendance",
+    "create_meeting",
+    "create_meeting_room_application",
+    "preflight_pending_action",
+    "prepare_attendance_confirmation",
+    "prepare_business_trip_approval",
+    "prepare_business_trip_draft",
+    "prepare_business_trip_submission",
+    "prepare_efficiency_data_approval",
+    "prepare_flight_application_approval",
+    "prepare_intellectual_property_declaration_approval",
+    "prepare_labor_contract_renewal_approval",
+    "prepare_leave_approval",
+    "prepare_leave_draft",
+    "prepare_leave_submission",
+    "prepare_meeting_create",
+    "prepare_meeting_room_application",
+    "prepare_meeting_room_application_cancel",
+    "prepare_missed_punch_approval",
+    "prepare_missed_punch_draft",
+    "prepare_overtime_approval",
+    "prepare_resignation_approval",
+    "prepare_smartlight_alarm_remark_update",
+    "prepare_smartlight_alarm_work_area_revoke",
+    "prepare_smartlight_alarm_work_area_submit",
+    "prepare_smartlight_rtu_alarm_dispose",
+    "prepare_standard_collaboration_approval",
+    "prepare_taihua_work_log_create",
+    "prepare_travel_expense_approval",
+    "prepare_weekly_report_acknowledgement",
+    "prepare_work_handover_approval",
+    "prepare_workflow_revoke",
+    "revoke_workflow",
+    "save_business_trip_draft",
+    "save_leave_draft",
+    "save_missed_punch_draft",
+    "submit_business_trip_request",
+    "submit_leave_request"
+  ],
+  "capability_permissions": {
+    "oa.attendance_confirmation.confirm": "oa.attendance_confirmation.approve",
+    "oa.attendance_confirmation.prepare": "oa.attendance_confirmation.approve",
+    "oa.business_trip.approval.prepare": "oa.business_trip.approve",
+    "oa.business_trip.approve": "oa.business_trip.approve",
+    "oa.business_trip.prepare": "oa.business_trip.draft",
+    "oa.business_trip.save_draft": "oa.business_trip.draft",
+    "oa.business_trip.submit": "oa.business_trip.submit",
+    "oa.business_trip.submit.prepare": "oa.business_trip.submit",
+    "oa.efficiency_data.approval.prepare": "oa.efficiency_data.approve",
+    "oa.efficiency_data.approve": "oa.efficiency_data.approve",
+    "oa.flight_application.approval.prepare": "oa.flight_application.approve",
+    "oa.flight_application.approve": "oa.flight_application.approve",
+    "oa.intellectual_property_declaration.approval.prepare": "oa.intellectual_property_declaration.approve",
+    "oa.intellectual_property_declaration.approve": "oa.intellectual_property_declaration.approve",
+    "oa.labor_contract_renewal.approval.prepare": "oa.labor_contract_renewal.approve",
+    "oa.labor_contract_renewal.approve": "oa.labor_contract_renewal.approve",
+    "oa.leave.approval.prepare": "oa.leave.approve",
+    "oa.leave.approve": "oa.leave.approve",
+    "oa.leave.prepare": "oa.leave.draft",
+    "oa.leave.save_draft": "oa.leave.draft",
+    "oa.leave.submit": "oa.leave.submit",
+    "oa.leave.submit.prepare": "oa.leave.submit",
+    "oa.meeting.create": "oa.meeting.create",
+    "oa.meeting.create.prepare": "oa.meeting.create",
+    "oa.meeting_room.application.cancel": "oa.meeting_room.cancel",
+    "oa.meeting_room.application.cancel.prepare": "oa.meeting_room.cancel",
+    "oa.meeting_room.application.create": "oa.meeting_room.apply",
+    "oa.meeting_room.application.prepare": "oa.meeting_room.apply",
+    "oa.missed_punch.approval.batch.prepare": "oa.missed_punch.approve",
+    "oa.missed_punch.approval.prepare": "oa.missed_punch.approve",
+    "oa.missed_punch.approve": "oa.missed_punch.approve",
+    "oa.missed_punch.prepare": "oa.missed_punch.draft",
+    "oa.missed_punch.save_draft": "oa.missed_punch.draft",
+    "oa.overtime.approval.prepare": "oa.overtime.approve",
+    "oa.overtime.approve": "oa.overtime.approve",
+    "oa.resignation.approval.prepare": "oa.resignation.approve",
+    "oa.resignation.approve": "oa.resignation.approve",
+    "oa.standard_collaboration.approval.prepare": "oa.standard_collaboration.approve",
+    "oa.standard_collaboration.approve": "oa.standard_collaboration.approve",
+    "oa.travel_expense.approval.prepare": "oa.travel_expense.approve",
+    "oa.travel_expense.approve": "oa.travel_expense.approve",
+    "oa.weekly_report.acknowledge": "oa.weekly_report.approve",
+    "oa.weekly_report.acknowledgement.prepare": "oa.weekly_report.approve",
+    "oa.work_handover.approval.prepare": "oa.work_handover.approve",
+    "oa.work_handover.approve": "oa.work_handover.approve",
+    "oa.workflow.pending.batch.prepare": null,
+    "oa.workflow.revoke": "oa.workflow.revoke",
+    "oa.workflow.revoke.prepare": "oa.workflow.revoke"
+  },
+  "permissions": {
+    "oa.attendance_confirmation.approve": {
+      "id": "oa.attendance_confirmation.approve",
+      "label": "考勤确认",
+      "capabilities": [
+        "oa.attendance_confirmation.confirm",
+        "oa.attendance_confirmation.prepare"
+      ],
+      "tools": [
+        "oa_attendance_confirmation_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.business_trip.approve": {
+      "id": "oa.business_trip.approve",
+      "label": "出差审批",
+      "capabilities": [
+        "oa.business_trip.approval.prepare",
+        "oa.business_trip.approve"
+      ],
+      "tools": [
+        "oa_business_trip_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.business_trip.draft": {
+      "id": "oa.business_trip.draft",
+      "label": "出差草稿",
+      "capabilities": [
+        "oa.business_trip.prepare",
+        "oa.business_trip.save_draft"
+      ],
+      "tools": [
+        "oa_business_trip_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:draft"
+      ],
+      "dependencies": "无额外业务权限",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_business_trip_save_draft"
+      ]
+    },
+    "oa.business_trip.submit": {
+      "id": "oa.business_trip.submit",
+      "label": "出差提交",
+      "capabilities": [
+        "oa.business_trip.submit.prepare",
+        "oa.business_trip.submit"
+      ],
+      "tools": [
+        "oa_business_trip_submit_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:submit"
+      ],
+      "dependencies": "目标及提交确认检查；不自动授予独立草稿操作",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_business_trip_submit"
+      ]
+    },
+    "oa.efficiency_data.approve": {
+      "id": "oa.efficiency_data.approve",
+      "label": "效能数据审批",
+      "capabilities": [
+        "oa.efficiency_data.approval.prepare",
+        "oa.efficiency_data.approve"
+      ],
+      "tools": [
+        "oa_efficiency_data_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.flight_application.approve": {
+      "id": "oa.flight_application.approve",
+      "label": "乘机申请审批",
+      "capabilities": [
+        "oa.flight_application.approval.prepare",
+        "oa.flight_application.approve"
+      ],
+      "tools": [
+        "oa_flight_application_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.intellectual_property_declaration.approve": {
+      "id": "oa.intellectual_property_declaration.approve",
+      "label": "知识产权申报审批",
+      "capabilities": [
+        "oa.intellectual_property_declaration.approval.prepare",
+        "oa.intellectual_property_declaration.approve"
+      ],
+      "tools": [
+        "oa_intellectual_property_declaration_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.labor_contract_renewal.approve": {
+      "id": "oa.labor_contract_renewal.approve",
+      "label": "劳动合同续签审批",
+      "capabilities": [
+        "oa.labor_contract_renewal.approval.prepare",
+        "oa.labor_contract_renewal.approve"
+      ],
+      "tools": [
+        "oa_labor_contract_renewal_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.leave.approve": {
+      "id": "oa.leave.approve",
+      "label": "请假审批",
+      "capabilities": [
+        "oa.leave.approval.prepare",
+        "oa.leave.approve"
+      ],
+      "tools": [
+        "oa_leave_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.leave.draft": {
+      "id": "oa.leave.draft",
+      "label": "请假草稿",
+      "capabilities": [
+        "oa.leave.prepare",
+        "oa.leave.save_draft"
+      ],
+      "tools": [
+        "oa_leave_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:draft"
+      ],
+      "dependencies": "无额外业务权限",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_leave_save_draft"
+      ]
+    },
+    "oa.leave.submit": {
+      "id": "oa.leave.submit",
+      "label": "请假提交",
+      "capabilities": [
+        "oa.leave.submit.prepare",
+        "oa.leave.submit"
+      ],
+      "tools": [
+        "oa_leave_submit_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:submit"
+      ],
+      "dependencies": "目标及提交确认检查；不自动授予独立草稿操作",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_leave_submit"
+      ]
+    },
+    "oa.meeting.create": {
+      "id": "oa.meeting.create",
+      "label": "创建会议",
+      "capabilities": [
+        "oa.meeting.create",
+        "oa.meeting.create.prepare"
+      ],
+      "tools": [
+        "oa_meeting_create_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:meeting"
+      ],
+      "dependencies": "选人流程如调用通讯录，另检查通讯录查询",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_meeting_create"
+      ]
+    },
+    "oa.meeting_room.apply": {
+      "id": "oa.meeting_room.apply",
+      "label": "会议室申请",
+      "capabilities": [
+        "oa.meeting_room.application.prepare",
+        "oa.meeting_room.application.create"
+      ],
+      "tools": [
+        "oa_meeting_room_application_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:meeting"
+      ],
+      "dependencies": "目标会议室检查；推荐搭配会议室查询",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_meeting_room_application_create"
+      ]
+    },
+    "oa.meeting_room.cancel": {
+      "id": "oa.meeting_room.cancel",
+      "label": "取消会议室申请",
+      "capabilities": [
+        "oa.meeting_room.application.cancel.prepare",
+        "oa.meeting_room.application.cancel"
+      ],
+      "tools": [
+        "oa_meeting_room_application_cancel_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:meeting"
+      ],
+      "dependencies": "目标申请归属检查；推荐搭配会议室查询",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_meeting_room_application_cancel"
+      ]
+    },
+    "oa.missed_punch.approve": {
+      "id": "oa.missed_punch.approve",
+      "label": "补签审批",
+      "capabilities": [
+        "oa.missed_punch.approval.batch.prepare",
+        "oa.missed_punch.approval.prepare",
+        "oa.missed_punch.approve"
+      ],
+      "tools": [
+        "oa_missed_punch_approval_prepare",
+        "oa_missed_punch_approval_batch_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_missed_punch_approve"
+      ]
+    },
+    "oa.missed_punch.draft": {
+      "id": "oa.missed_punch.draft",
+      "label": "补签草稿",
+      "capabilities": [
+        "oa.missed_punch.prepare",
+        "oa.missed_punch.save_draft"
+      ],
+      "tools": [
+        "oa_missed_punch_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:draft"
+      ],
+      "dependencies": "无额外业务权限",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_missed_punch_save_draft"
+      ]
+    },
+    "oa.overtime.approve": {
+      "id": "oa.overtime.approve",
+      "label": "加班审批",
+      "capabilities": [
+        "oa.overtime.approval.prepare",
+        "oa.overtime.approve"
+      ],
+      "tools": [
+        "oa_overtime_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.resignation.approve": {
+      "id": "oa.resignation.approve",
+      "label": "离职审批",
+      "capabilities": [
+        "oa.resignation.approval.prepare",
+        "oa.resignation.approve"
+      ],
+      "tools": [
+        "oa_resignation_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.standard_collaboration.approve": {
+      "id": "oa.standard_collaboration.approve",
+      "label": "普通协同审批",
+      "capabilities": [
+        "oa.standard_collaboration.approval.prepare",
+        "oa.standard_collaboration.approve"
+      ],
+      "tools": [
+        "oa_standard_collaboration_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.travel_expense.approve": {
+      "id": "oa.travel_expense.approve",
+      "label": "差旅报销审批",
+      "capabilities": [
+        "oa.travel_expense.approval.prepare",
+        "oa.travel_expense.approve"
+      ],
+      "tools": [
+        "oa_travel_expense_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.weekly_report.approve": {
+      "id": "oa.weekly_report.approve",
+      "label": "周报阅知",
+      "capabilities": [
+        "oa.weekly_report.acknowledge",
+        "oa.weekly_report.acknowledgement.prepare"
+      ],
+      "tools": [
+        "oa_weekly_report_acknowledgement_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.work_handover.approve": {
+      "id": "oa.work_handover.approve",
+      "label": "工作交接审批",
+      "capabilities": [
+        "oa.work_handover.approval.prepare",
+        "oa.work_handover.approve"
+      ],
+      "tools": [
+        "oa_work_handover_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    "oa.workflow.revoke": {
+      "id": "oa.workflow.revoke",
+      "label": "撤回流程",
+      "capabilities": [
+        "oa.workflow.revoke",
+        "oa.workflow.revoke.prepare"
+      ],
+      "tools": [
+        "oa_workflow_revoke_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:revoke"
+      ],
+      "dependencies": "目标归属及状态检查；查询另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围",
+      "private_tools": [
+        "oa_workflow_revoke"
+      ]
+    }
+  },
+  "planning": {
+    "oa.attendance_confirmation.confirm": null,
+    "oa.attendance_confirmation.prepare": null,
+    "oa.business_trip.approval.prepare": null,
+    "oa.business_trip.approve": null,
+    "oa.business_trip.prepare": null,
+    "oa.business_trip.save_draft": null,
+    "oa.business_trip.submit": null,
+    "oa.business_trip.submit.prepare": null,
+    "oa.efficiency_data.approval.prepare": null,
+    "oa.efficiency_data.approve": null,
+    "oa.flight_application.approval.prepare": null,
+    "oa.flight_application.approve": null,
+    "oa.intellectual_property_declaration.approval.prepare": null,
+    "oa.intellectual_property_declaration.approve": null,
+    "oa.labor_contract_renewal.approval.prepare": null,
+    "oa.labor_contract_renewal.approve": null,
+    "oa.leave.approval.prepare": null,
+    "oa.leave.approve": null,
+    "oa.leave.prepare": null,
+    "oa.leave.save_draft": null,
+    "oa.leave.submit": null,
+    "oa.leave.submit.prepare": null,
+    "oa.meeting.create": null,
+    "oa.meeting.create.prepare": null,
+    "oa.meeting_room.application.cancel": null,
+    "oa.meeting_room.application.cancel.prepare": null,
+    "oa.meeting_room.application.create": null,
+    "oa.meeting_room.application.prepare": null,
+    "oa.missed_punch.approval.batch.prepare": null,
+    "oa.missed_punch.approval.prepare": null,
+    "oa.missed_punch.approve": null,
+    "oa.missed_punch.prepare": null,
+    "oa.missed_punch.save_draft": null,
+    "oa.overtime.approval.prepare": null,
+    "oa.overtime.approve": null,
+    "oa.resignation.approval.prepare": null,
+    "oa.resignation.approve": null,
+    "oa.standard_collaboration.approval.prepare": null,
+    "oa.standard_collaboration.approve": null,
+    "oa.travel_expense.approval.prepare": null,
+    "oa.travel_expense.approve": null,
+    "oa.weekly_report.acknowledge": null,
+    "oa.weekly_report.acknowledgement.prepare": null,
+    "oa.work_handover.approval.prepare": null,
+    "oa.work_handover.approve": null,
+    "oa.workflow.pending.batch.prepare": null,
+    "oa.workflow.revoke": null,
+    "oa.workflow.revoke.prepare": null
+  }
+}

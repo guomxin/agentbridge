@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -50,6 +51,14 @@ SMARTLIGHT_ACTION_CASES = (
      "isSubmitWorkArea", 0),
     ("smartlight.alarm.dispose", "/rHisHitchAlarm/setRtuConductStatusDisposed",
      "conductStatue", 3),
+)
+# Route expectations come from the captured pre-migration contract, not the live catalog.
+PENDING_PREFLIGHT_CASES = tuple(
+    (capability, definition)
+    for capability, definition in json.loads(
+        (Path(__file__).parent / "fixtures/oa_write_workflows_contract.json").read_text(encoding="utf-8")
+    )["definitions"]
+    if "preflight_profile" in definition
 )
 
 
@@ -1024,6 +1033,112 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 },
             )
             self.assertIn("最新详情", authorization["summary"]["authorization_notice"])
+
+    def test_all_pending_profiles_preserve_preflight_review_and_trusted_resume(self):
+        self.assertEqual(len(PENDING_PREFLIGHT_CASES), 13)
+        for capability, definition in PENDING_PREFLIGHT_CASES:
+            profile = definition["preflight_profile"]
+            with self.subTest(profile=profile), TemporaryDirectory() as tmp:
+                service = self._service(tmp, FakeWorker())
+                self._activate(service)
+                review = {"title": profile, "fields": [{"label": "详情", "value": "首次预检"}]}
+                prepared_payload = {
+                    "plan": {
+                        "target": {"affair_id": "affair-1", "review_fingerprint": "sha256:after-opinion"},
+                        "exact_input": {"opinion": "可信意见"},
+                    },
+                    "summary": {"title": profile, "fields": [{"label": "处理意见", "value": "可信意见"}]},
+                }
+
+                def preflight_result(*_args):
+                    create_field.assert_not_called()
+                    create_authorization.assert_not_called()
+                    return {"review": review, "review_fingerprint": "sha256:before-opinion"}
+
+                with (
+                    patch.object(service.field_submissions, "create", wraps=service.field_submissions.create) as create_field,
+                    patch.object(service.write_authorizations, "create", wraps=service.write_authorizations.create) as create_authorization,
+                    patch("bscli.core.write_catalog.preflight_pending_action", side_effect=preflight_result) as preflight,
+                    patch("bscli.core.write_catalog." + definition["prepare_function"], return_value=prepared_payload) as prepare,
+                ):
+                    started = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments={"affair_id": "affair-1", "opinion": "预填意见"},
+                    )
+                    self.assertEqual(started["error"]["code"], "FIELD_INPUT_REQUIRED")
+                    preflight.assert_called_once()
+                    self.assertEqual(preflight.call_args.args[2:], (
+                        {"affair_id": "affair-1", "opinion": "预填意见"}, profile,
+                    ))
+                    create_field.assert_called_once()
+                    create_authorization.assert_not_called()
+                    prepare.assert_not_called()
+                    submission_id = started["nextAction"]["inputSubmissionId"]
+                    schema = service.field_submissions.get(submission_id)["form_schema"]
+                    self.assertEqual(schema["title"], definition["field_schema"]["title"])
+                    self.assertEqual(schema["review"], review)
+                    self.assertEqual(schema["_agentbridge_review_fingerprint"], "sha256:before-opinion")
+                    self.assertEqual(schema["_agentbridge_resume_arguments"], {"affair_id": "affair-1"})
+                    preflight.side_effect = AssertionError("existing field cards must not rerun preflight")
+                    resume_arguments = {"affair_id": "affair-1", "input_submission_id": submission_id}
+                    pending = service.invoke(
+                        user_subject="user-a", capability_name=capability, arguments=resume_arguments,
+                    )
+                    self.assertEqual(pending["nextAction"]["inputSubmissionId"], submission_id)
+                    prepare.assert_not_called()
+                    csrf = service.field_submissions.issue_csrf(submission_id)
+                    service.field_submissions.submit(
+                        submission_id, csrf_token=csrf, csrf_cookie=csrf, values={"opinion": "可信意见"},
+                    )
+                    prepared = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments={**resume_arguments, "opinion": "不能覆盖已提交意见"},
+                    )
+                    self.assertEqual(prepared["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+                    prepare.assert_called_once()
+                    self.assertEqual(prepare.call_args.args[2], {"affair_id": "affair-1", "opinion": "可信意见"})
+                    authorization = service.write_authorizations.get(
+                        prepared["nextAction"]["authorizationId"], include_plan=True,
+                    )
+                    self.assertEqual(authorization["state"], "pending")
+                    self.assertEqual(authorization["capability_name"], definition["commit_capability"])
+                    self.assertEqual(authorization["plan"]["target"]["review_fingerprint"], "sha256:after-opinion")
+                    self.assertEqual(authorization["summary"]["fields"][0]["label"], "详情变化")
+                    self.assertIn("最新详情", authorization["summary"]["authorization_notice"])
+                    self.assertEqual(service.field_submissions.get(submission_id)["state"], "consumed")
+                    repeated = service.invoke(
+                        user_subject="user-a", capability_name=capability, arguments=resume_arguments,
+                    )
+                    self.assertEqual(repeated["error"]["code"], "FIELD_INPUT_UNAVAILABLE")
+                    preflight.assert_called_once()
+                    prepare.assert_called_once()
+                    create_field.assert_called_once()
+                    create_authorization.assert_called_once()
+
+    def test_all_pending_profiles_reject_unsupported_targets_before_creating_cards(self):
+        for capability, definition in PENDING_PREFLIGHT_CASES:
+            with self.subTest(profile=definition["preflight_profile"]), TemporaryDirectory() as tmp:
+                service = self._service(tmp, FakeWorker())
+                self._activate(service)
+                with (
+                    patch("bscli.core.write_catalog.preflight_pending_action",
+                          side_effect=PendingActionContractMismatch("unsupported pending target")) as preflight,
+                    patch.object(service.field_submissions, "create", wraps=service.field_submissions.create) as create_field,
+                    patch.object(service.write_authorizations, "create", wraps=service.write_authorizations.create) as create_authorization,
+                    patch("bscli.core.write_catalog." + definition["prepare_function"]) as prepare,
+                ):
+                    response = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments={"affair_id": "unsupported-affair"},
+                    )
+                    self.assertEqual(response["status"], "failed")
+                    self.assertEqual(response["error"]["code"], "WORKFLOW_NOT_SUPPORTED")
+                    self.assertIsNone(response["nextAction"])
+                    preflight.assert_called_once()
+                    self.assertEqual(preflight.call_args.args[3], definition["preflight_profile"])
+                    prepare.assert_not_called()
+                    create_field.assert_not_called()
+                    create_authorization.assert_not_called()
 
     def test_invoke_restores_session_and_persists_operation(self):
         with TemporaryDirectory() as tmp:
@@ -2628,6 +2743,36 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 prepare.call_args.args[2],
                 {"affair_id": "affair-1", "opinion": "同意"},
             )
+
+    def test_missed_punch_legacy_authorization_falls_back_to_single_item_prepare(self):
+        with TemporaryDirectory() as tmp:
+            service = self._service(tmp, FakeWorker())
+            session = self._activate(service)
+            authorization = service.write_authorizations.create(
+                user_subject="user-a", system_id="oa", session_id=session["session_id"],
+                capability_name="oa.missed_punch.approve", capability_version="0.1.0",
+                prepare_operation_id="legacy-prepare",
+                # Older persisted plans may omit prepare_capability.
+                plan={"resume_arguments": {"affair_id": "affair-1"}},
+                summary={"title": "审批补签申请", "fields": []},
+                card_base_url=service.trusted_card_base_url,
+            )
+            authorization_id = authorization["authorization_id"]
+            csrf = service.write_authorizations.issue_csrf(authorization_id)
+            service.write_authorizations.decide(
+                authorization_id, decision="reject", csrf_token=csrf, csrf_cookie=csrf,
+            )
+            with patch("bscli.core.write_catalog.approve_missed_punch_request") as commit:
+                response = service.invoke(
+                    user_subject="user-a", capability_name="oa.missed_punch.approve",
+                    arguments={"authorization_id": authorization_id},
+                )
+                commit.assert_not_called()
+            self.assertEqual(response["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+            self.assertEqual(response["nextAction"], {
+                "type": "prepare_again", "capability": "oa.missed_punch.approval.prepare",
+                "arguments": {"affair_id": "affair-1"},
+            })
 
     def test_missed_punch_batch_advances_cards_until_every_item_succeeds(self):
         with TemporaryDirectory() as tmp:

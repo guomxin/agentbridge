@@ -5,7 +5,7 @@ This module owns no execution, persistence, or authorization transaction.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Protocol
 
 from bscli.core.capability import CapabilitySpec
@@ -13,6 +13,7 @@ from bscli.core.capability import CapabilitySpec
 
 PrepareHandler = Callable[[object, object, dict], dict]
 FieldSchemaHandler = Callable[[object, object, dict], dict]
+PreflightHandler = Callable[[object, object, dict, str], dict]
 
 
 class CommitHandler(Protocol):
@@ -49,6 +50,8 @@ class WriteWorkflowDefinition:
     field_message: str | None
     authorization_message: str
     field_schema_function: FieldSchemaHandler | None = field(default=None, kw_only=True)
+    preflight_function: PreflightHandler | None = field(default=None, kw_only=True)
+    preflight_profile: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.prepare_spec, CapabilitySpec) or not isinstance(self.commit_spec, CapabilitySpec):
@@ -77,6 +80,12 @@ class WriteWorkflowDefinition:
         _binding_name(self.commit_function)
         if self.field_schema_function is not None:
             _binding_name(self.field_schema_function)
+        if (self.preflight_function is None) != (self.preflight_profile is None):
+            raise ValueError("write preflight function and profile must be paired")
+        if self.preflight_function is not None:
+            _binding_name(self.preflight_function)
+            if not isinstance(self.preflight_profile, str) or not self.preflight_profile.strip():
+                raise ValueError("write preflight profile must be nonempty")
         for error in (self.contract_error, self.outcome_error):
             if not isinstance(error, type) or not issubclass(error, Exception):
                 raise TypeError("write errors must be Exception classes")
@@ -91,6 +100,10 @@ class WriteWorkflowDefinition:
         object.__setattr__(self, "prepare_spec", deepcopy(self.prepare_spec))
         object.__setattr__(self, "commit_spec", deepcopy(self.commit_spec))
         object.__setattr__(self, "field_schema", deepcopy(self.field_schema))
+
+    @property
+    def canonical_prepare_name(self) -> str:
+        return self.prepare_spec.name
 
     def capability_specs(self) -> tuple[CapabilitySpec, CapabilitySpec]:
         return deepcopy((self.prepare_spec, self.commit_spec))
@@ -109,8 +122,71 @@ class WriteWorkflowDefinition:
             "outcome_error": self.outcome_error,
             **({"field_message": self.field_message} if self.field_message is not None else {}),
             "authorization_message": self.authorization_message,
+            **({"preflight_function": _binding_name(self.preflight_function),
+                "preflight_profile": self.preflight_profile}
+               if self.preflight_function is not None else {}),
         }
 
     def scope_bindings(self) -> dict[str, frozenset[str]]:
         return {self.prepare_spec.name: self.required_scopes,
                 self.commit_spec.name: self.required_scopes}
+
+
+@dataclass(frozen=True)
+class WritePrepareAliasDefinition:
+    """An additional prepare entry sharing a canonical workflow's commit.
+
+    An alias registers only its prepare capability. Its legacy definition retains
+    the shared commit binding without changing that commit's canonical reverse route.
+    """
+
+    prepare_spec: CapabilitySpec
+    canonical_workflow: WriteWorkflowDefinition
+    context_fields: tuple[str, ...]
+    field_message: str | None
+    authorization_message: str
+    field_schema_function: FieldSchemaHandler | None = field(default=None, kw_only=True)
+    _workflow: WriteWorkflowDefinition = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.prepare_spec, CapabilitySpec):
+            raise TypeError("write alias prepare must be a CapabilitySpec value")
+        if not isinstance(self.canonical_workflow, WriteWorkflowDefinition):
+            raise TypeError("write alias must reference a canonical workflow")
+        if self.prepare_spec.name == self.canonical_workflow.prepare_spec.name:
+            raise ValueError("write alias prepare must differ from its canonical prepare")
+        if self.prepare_spec.effect != self.canonical_workflow.prepare_spec.effect:
+            raise ValueError("write alias must preserve its canonical prepare effect")
+        canonical = deepcopy(self.canonical_workflow)
+        workflow = replace(
+            canonical,
+            prepare_spec=self.prepare_spec,
+            context_fields=self.context_fields,
+            field_message=self.field_message,
+            authorization_message=self.authorization_message,
+            field_schema_function=self.field_schema_function,
+        )
+        object.__setattr__(self, "prepare_spec", workflow.prepare_spec)
+        object.__setattr__(self, "canonical_workflow", canonical)
+        object.__setattr__(self, "_workflow", workflow)
+
+    @property
+    def canonical_prepare_name(self) -> str:
+        return self.canonical_workflow.prepare_spec.name
+
+    @property
+    def commit_spec(self) -> CapabilitySpec:
+        return self._workflow.commit_spec
+
+    @property
+    def required_scopes(self) -> frozenset[str]:
+        return self._workflow.required_scopes
+
+    def capability_specs(self) -> tuple[CapabilitySpec]:
+        return (deepcopy(self.prepare_spec),)
+
+    def legacy_definition(self) -> dict:
+        return self._workflow.legacy_definition()
+
+    def scope_bindings(self) -> dict[str, frozenset[str]]:
+        return {self.prepare_spec.name: self.required_scopes}

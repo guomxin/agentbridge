@@ -134,6 +134,7 @@ from bscli.adapters.seeyon_home import (
     parse_template_center_response,
 )
 from bscli.core.capability import CapabilityRegistry, CapabilitySpec
+from bscli.adapters.seeyon_write_workflows import oa_write_capability_specs_by_name
 
 
 _LOGGER = logging.getLogger("uvicorn.error")
@@ -545,6 +546,8 @@ _WORKFLOW_OPINIONS_INPUT_SCHEMA = {
 
 def build_central_capability_registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
+    # Keep each projection at its original position among read capabilities.
+    write_specs = oa_write_capability_specs_by_name()
     registry.register(
         CapabilitySpec(
             name="oa.template.list",
@@ -572,21 +575,7 @@ def build_central_capability_registry() -> CapabilityRegistry:
             workflow="certificate-document-search-v1",
         )
     )
-    registry.register(
-        CapabilitySpec(
-            name=BUSINESS_TRIP_PREPARE_CAPABILITY,
-            version="0.3.0",
-            description=(
-                "Collect business-trip fields through a trusted card, validate the live "
-                "OA form, and create a separate one-time confirmation card."
-            ),
-            input_schema=BUSINESS_TRIP_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter="seeyon-central",
-            workflow="business-trip-draft-prepare-v2",
-        )
-    )
+    registry.register(write_specs[BUSINESS_TRIP_PREPARE_CAPABILITY])
     for capability_name, description, workflow in (
         (
             MEETING_ROOM_AVAILABILITY_CAPABILITY,
@@ -611,263 +600,30 @@ def build_central_capability_registry() -> CapabilityRegistry:
                 workflow=workflow,
             )
         )
-    registry.register(
-        CapabilitySpec(
-            name=BUSINESS_TRIP_SAVE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume a trusted authorization once, save the frozen business-trip "
-                "plan as an OA wait-send draft, and verify it by server readback."
-            ),
-            input_schema=BUSINESS_TRIP_SAVE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter="seeyon-central",
-            workflow="business-trip-draft-save-v1",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY,
-            version="0.3.0",
-            description=(
-                "Collect business-trip fields through a trusted card, validate the live "
-                "OA form and sent-item baseline, and create a separate submit authorization."
-            ),
-            input_schema=BUSINESS_TRIP_SUBMIT_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="business-trip-submit-prepare-v2",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=BUSINESS_TRIP_SUBMIT_CAPABILITY,
-            version="0.2.0",
-            description=(
-                "Consume one trusted authorization, submit the frozen business-trip "
-                "request, and verify one new readable item in the OA sent collection."
-            ),
-            input_schema=BUSINESS_TRIP_SUBMIT_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="business-trip-submit-commit-v2",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=LEAVE_PREPARE_CAPABILITY,
-            version="0.2.0",
-            description=(
-                "Collect supported leave-request fields through a trusted card, validate "
-                "the live OA form, and create a separate draft-save authorization."
-            ),
-            input_schema=LEAVE_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter="seeyon-central",
-            workflow="leave-draft-prepare-v1",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=LEAVE_SAVE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one trusted authorization, save the frozen leave request as an "
-                "OA wait-send draft, and verify it by server readback without submission."
-            ),
-            input_schema=LEAVE_SAVE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter="seeyon-central",
-            workflow="leave-draft-save-v1",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=LEAVE_SUBMIT_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Collect supported leave-request fields through a trusted card, validate "
-                "the live OA form and sent-item baseline, and create a submit authorization."
-            ),
-            input_schema=LEAVE_SUBMIT_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="leave-submit-prepare-v1",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=LEAVE_SUBMIT_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one trusted authorization, submit the frozen leave request, "
-                "and verify one new readable item in the OA sent collection."
-            ),
-            input_schema=LEAVE_SUBMIT_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="leave-submit-commit-v1",
-        )
-    )
+    registry.register(write_specs[BUSINESS_TRIP_SAVE_CAPABILITY])
+    registry.register(write_specs[BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY])
+    registry.register(write_specs[BUSINESS_TRIP_SUBMIT_CAPABILITY])
+    registry.register(write_specs[LEAVE_PREPARE_CAPABILITY])
+    registry.register(write_specs[LEAVE_SAVE_CAPABILITY])
+    registry.register(write_specs[LEAVE_SUBMIT_PREPARE_CAPABILITY])
+    registry.register(write_specs[LEAVE_SUBMIT_CAPABILITY])
     for spec in (
-        CapabilitySpec(
-            name=MISSED_PUNCH_PREPARE_CAPABILITY,
-            version="0.2.0",
-            description=(
-                "Collect missed-punch fields in a trusted card, validate the live OA "
-                "form, and create a separate draft-save authorization."
-            ),
-            input_schema=MISSED_PUNCH_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter="seeyon-central",
-            workflow="missed-punch-draft-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=MISSED_PUNCH_SAVE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one trusted authorization, save the frozen missed-punch plan "
-                "as an OA wait-send draft, and verify it without submitting approval."
-            ),
-            input_schema=MISSED_PUNCH_SAVE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter="seeyon-central",
-            workflow="missed-punch-draft-save-v1",
-        ),
-        CapabilitySpec(
-            name=MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY,
-            version="0.2.0",
-            description=(
-                "Collect an approval opinion in a trusted card, validate one exact "
-                "pending missed-punch item, and create a separate approval authorization."
-            ),
-            input_schema=MISSED_PUNCH_APPROVAL_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="missed-punch-approval-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Compatibility entry; use oa.workflow.pending.batch.prepare for new batches. "
-                "Freeze up to ten current pending missed-punch items and process "
-                "them sequentially with independent trusted input and authorization."
-            ),
-            input_schema=MISSED_PUNCH_APPROVAL_BATCH_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="missed-punch-approval-batch-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=PENDING_BATCH_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Freeze a variable-length selection of current OA pending items, including mixed supported "
-                "workflow types. Process each with independent trusted input, authorization and verification. "
-                "Use this for multiple/all pending items instead of promising to continue singular prepares. "
-                "Incomplete sources, unsupported selections and overflow stop before any approval."
-            ),
-            input_schema=PENDING_BATCH_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="pending-batch-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=MISSED_PUNCH_APPROVE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one trusted authorization, approve the frozen missed-punch "
-                "target, and verify that it left the pending collection."
-            ),
-            input_schema=MISSED_PUNCH_APPROVE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="missed-punch-approval-commit-v1",
-        ),
+        write_specs[MISSED_PUNCH_PREPARE_CAPABILITY],
+        write_specs[MISSED_PUNCH_SAVE_CAPABILITY],
+        write_specs[MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY],
+        write_specs[MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY],
+        write_specs[PENDING_BATCH_PREPARE_CAPABILITY],
+        write_specs[MISSED_PUNCH_APPROVE_CAPABILITY],
         *MEETING_CREATE_WORKFLOW.capability_specs(),
         *MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.capability_specs(),
         *MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.capability_specs(),
     ):
         registry.register(spec)
     for definition in PENDING_ACTION_CAPABILITY_DEFINITIONS:
-        profile_name = definition["profile"].replace("_", " ")
-        workflow_prefix = definition["workflow_prefix"]
-        action_kind = definition["action_kind"]
-        registry.register(
-            CapabilitySpec(
-                name=definition["prepare_capability"],
-                version="0.1.0",
-                description=(
-                    f"Collect a trusted opinion, validate one exact pending "
-                    f"{profile_name} item, and create separate {action_kind} confirmation."
-                ),
-                input_schema=PENDING_ACTION_PREPARE_INPUT_SCHEMA,
-                output_schema={"type": "object"},
-                effect="controlled_write",
-                adapter="seeyon-central",
-                workflow=f"{workflow_prefix}-prepare-v1",
-            )
-        )
-        registry.register(
-            CapabilitySpec(
-                name=definition["commit_capability"],
-                version="0.1.0",
-                description=(
-                    f"Consume one trusted authorization, process the frozen "
-                    f"{profile_name} item, and verify pending disappearance."
-                ),
-                input_schema=PENDING_ACTION_COMMIT_INPUT_SCHEMA,
-                output_schema={"type": "object"},
-                effect="controlled_write",
-                adapter="seeyon-central",
-                workflow=f"{workflow_prefix}-commit-v1",
-            )
-        )
-    registry.register(
-        CapabilitySpec(
-            name=WORKFLOW_REVOKE_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Collect a revoke comment in a trusted card, resolve one exact active "
-                "sent workflow, run non-destructive OA eligibility checks, and create "
-                "a separate revoke authorization."
-            ),
-            input_schema=WORKFLOW_REVOKE_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="workflow-revoke-prepare-v1",
-        )
-    )
-    registry.register(
-        CapabilitySpec(
-            name=WORKFLOW_REVOKE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one trusted authorization, revoke the frozen sent workflow "
-                "through OA's native action, and verify its revoked wait-send state."
-            ),
-            input_schema=WORKFLOW_REVOKE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter="seeyon-central",
-            workflow="workflow-revoke-commit-v1",
-        )
-    )
+        registry.register(write_specs[definition["prepare_capability"]])
+        registry.register(write_specs[definition["commit_capability"]])
+    registry.register(write_specs[WORKFLOW_REVOKE_PREPARE_CAPABILITY])
+    registry.register(write_specs[WORKFLOW_REVOKE_CAPABILITY])
     for capability_name, collection in _WORKFLOW_LIST_CAPABILITIES.items():
         registry.register(
             CapabilitySpec(

@@ -1,6 +1,7 @@
 """Business write bindings and scope policy; no task or transaction mutation."""
 
 from bscli.adapters.seeyon_pending_batch import PENDING_BATCH_PREPARE_CAPABILITY
+from bscli.adapters.seeyon_write_workflows import OA_WRITE_DECLARATIONS
 
 from bscli.adapters.taihua import (
     TAIHUA_WORK_LOG_CREATE_CAPABILITY,
@@ -206,292 +207,78 @@ from bscli.adapters.seeyon_workflow_revoke import (
 )
 
 _TRUSTED_WRITE_DEFINITIONS = {
-    BUSINESS_TRIP_PREPARE_CAPABILITY: {
-        "commit_capability": BUSINESS_TRIP_SAVE_CAPABILITY,
-        "field_schema": BUSINESS_TRIP_FIELD_CARD_SCHEMA,
-        "context_fields": (),
-        "prepare_function": "prepare_business_trip_draft",
-        "commit_function": "save_business_trip_draft",
-        "contract_error": BusinessTripContractMismatch,
-        "outcome_error": BusinessTripOutcomeUnknown,
-        "field_message": "Business-trip fields must be entered in the trusted field card.",
-        "authorization_message": "The business-trip draft plan requires confirmation in the trusted action card.",
-    },
-    BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY: {
-        "commit_capability": BUSINESS_TRIP_SUBMIT_CAPABILITY,
-        "field_schema": BUSINESS_TRIP_SUBMIT_FIELD_CARD_SCHEMA,
-        "context_fields": (),
-        "prepare_function": "prepare_business_trip_submission",
-        "commit_function": "submit_business_trip_request",
-        "contract_error": BusinessTripContractMismatch,
-        "outcome_error": BusinessTripOutcomeUnknown,
-        "field_message": "Business-trip fields must be entered in the trusted field card.",
-        "authorization_message": "The business-trip submission plan requires confirmation in the trusted action card.",
-    },
-    LEAVE_PREPARE_CAPABILITY: {
-        "commit_capability": LEAVE_SAVE_CAPABILITY,
-        "field_schema": LEAVE_FIELD_CARD_SCHEMA,
-        "context_fields": (),
-        "prepare_function": "prepare_leave_draft",
-        "commit_function": "save_leave_draft",
-        "contract_error": LeaveContractMismatch,
-        "outcome_error": LeaveOutcomeUnknown,
-        "field_message": "Leave-request fields must be entered in the trusted field card.",
-        "authorization_message": "The leave draft plan requires confirmation in the trusted action card.",
-    },
-    LEAVE_SUBMIT_PREPARE_CAPABILITY: {
-        "commit_capability": LEAVE_SUBMIT_CAPABILITY,
-        "field_schema": LEAVE_SUBMIT_FIELD_CARD_SCHEMA,
-        "context_fields": (),
-        "prepare_function": "prepare_leave_submission",
-        "commit_function": "submit_leave_request",
-        "contract_error": LeaveContractMismatch,
-        "outcome_error": LeaveOutcomeUnknown,
-        "field_message": "Leave-request fields must be entered in the trusted field card.",
-        "authorization_message": "The leave submission plan requires confirmation in the trusted action card.",
-    },
-    MISSED_PUNCH_PREPARE_CAPABILITY: {
-        "commit_capability": MISSED_PUNCH_SAVE_CAPABILITY,
-        "field_schema": MISSED_PUNCH_FIELD_CARD_SCHEMA,
-        "context_fields": (),
-        "prepare_function": "prepare_missed_punch_draft",
-        "commit_function": "save_missed_punch_draft",
-        "contract_error": MissedPunchContractMismatch,
-        "outcome_error": MissedPunchOutcomeUnknown,
-        "field_message": "Missed-punch fields must be entered in the trusted field card.",
-        "authorization_message": "The missed-punch draft plan requires confirmation in the trusted action card.",
-    },
-    MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY: {
-        "commit_capability": MISSED_PUNCH_APPROVE_CAPABILITY,
-        "field_schema": MISSED_PUNCH_APPROVAL_FIELD_CARD_SCHEMA,
-        "context_fields": ("affair_id",),
-        "prepare_function": "prepare_missed_punch_approval",
-        "commit_function": "approve_missed_punch_request",
-        "contract_error": MissedPunchContractMismatch,
-        "outcome_error": MissedPunchOutcomeUnknown,
-        "field_message": "The missed-punch approval opinion must be entered in the trusted field card.",
-        "authorization_message": "The missed-punch approval plan requires confirmation in the trusted action card.",
-    },
-    MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY: {
-        "commit_capability": MISSED_PUNCH_APPROVE_CAPABILITY,
-        "field_schema": MISSED_PUNCH_APPROVAL_FIELD_CARD_SCHEMA,
-        "field_schema_function": "build_missed_punch_approval_batch_field_schema",
-        "context_fields": ("batch_id", "affair_id"),
-        "prepare_function": "prepare_missed_punch_approval",
-        "commit_function": "approve_missed_punch_request",
-        "contract_error": MissedPunchContractMismatch,
-        "outcome_error": MissedPunchOutcomeUnknown,
-        "field_message": "The current missed-punch opinion must be entered in the trusted field card.",
-        "authorization_message": "The current missed-punch approval plan requires confirmation in the trusted action card.",
-    },
+    BUSINESS_TRIP_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        BUSINESS_TRIP_PREPARE_CAPABILITY
+    ].legacy_definition(),
+    BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY
+    ].legacy_definition(),
+    LEAVE_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        LEAVE_PREPARE_CAPABILITY
+    ].legacy_definition(),
+    LEAVE_SUBMIT_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        LEAVE_SUBMIT_PREPARE_CAPABILITY
+    ].legacy_definition(),
+    MISSED_PUNCH_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        MISSED_PUNCH_PREPARE_CAPABILITY
+    ].legacy_definition(),
+    MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY
+    ].legacy_definition(),
+    MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY
+    ].legacy_definition(),
     MEETING_PREPARE_CAPABILITY: MEETING_CREATE_WORKFLOW.legacy_definition(),
     MEETING_ROOM_APPLICATION_PREPARE_CAPABILITY: MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.legacy_definition(),
     MEETING_ROOM_APPLICATION_CANCEL_PREPARE_CAPABILITY: MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.legacy_definition(),
-    WORKFLOW_REVOKE_PREPARE_CAPABILITY: {
-        "commit_capability": WORKFLOW_REVOKE_CAPABILITY,
-        "field_schema": WORKFLOW_REVOKE_FIELD_CARD_SCHEMA,
-        "context_fields": ("affair_id",),
-        "prepare_function": "prepare_workflow_revoke",
-        "commit_function": "revoke_workflow",
-        "contract_error": WorkflowRevokeContractMismatch,
-        "outcome_error": WorkflowRevokeOutcomeUnknown,
-        "field_message": "The workflow revoke comment must be entered in the trusted field card.",
-        "authorization_message": "The workflow revoke plan requires confirmation in the trusted action card.",
-    },
+    WORKFLOW_REVOKE_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+        WORKFLOW_REVOKE_PREPARE_CAPABILITY
+    ].legacy_definition(),
 }
 
 _TRUSTED_WRITE_DEFINITIONS.update(
     {
-        EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": EFFICIENCY_DATA_APPROVE_CAPABILITY,
-            "field_schema": EFFICIENCY_DATA_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_efficiency_data_approval",
-            "commit_function": "approve_efficiency_data",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The efficiency-data opinion must be entered in the trusted field card.",
-            "authorization_message": "The efficiency-data approval requires trusted confirmation.",
-        },
-        TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": TRAVEL_EXPENSE_APPROVE_CAPABILITY,
-            "field_schema": TRAVEL_EXPENSE_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_travel_expense_approval",
-            "commit_function": "approve_travel_expense",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The travel-expense opinion must be entered in the trusted field card.",
-            "authorization_message": "The travel-expense approval requires trusted confirmation.",
-        },
-        BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": BUSINESS_TRIP_APPROVE_CAPABILITY,
-            "field_schema": BUSINESS_TRIP_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_business_trip_approval",
-            "commit_function": "approve_business_trip_request",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The business-trip approval opinion must be entered in the trusted field card.",
-            "authorization_message": "The business-trip approval requires trusted confirmation.",
-        },
-        LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": LABOR_CONTRACT_RENEWAL_APPROVE_CAPABILITY,
-            "field_schema": LABOR_CONTRACT_RENEWAL_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_labor_contract_renewal_approval",
-            "commit_function": "approve_labor_contract_renewal",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The labor-contract renewal opinion must be entered in the trusted field card.",
-            "authorization_message": "The labor-contract renewal approval requires trusted confirmation.",
-        },
-        INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": (
-                INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY
-            ),
-            "field_schema": (
-                INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_FIELD_CARD_SCHEMA
-            ),
-            "context_fields": ("affair_id",),
-            "prepare_function": (
-                "prepare_intellectual_property_declaration_approval"
-            ),
-            "commit_function": "approve_intellectual_property_declaration",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": (
-                "The intellectual-property declaration opinion must be entered "
-                "in the trusted field card."
-            ),
-            "authorization_message": (
-                "The intellectual-property declaration approval requires trusted "
-                "confirmation."
-            ),
-        },
-        OVERTIME_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": OVERTIME_APPROVE_CAPABILITY,
-            "field_schema": OVERTIME_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_overtime_approval",
-            "commit_function": "approve_overtime",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The overtime approval opinion must be entered in the trusted field card.",
-            "authorization_message": "The overtime approval requires trusted confirmation.",
-        },
-        LEAVE_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": LEAVE_APPROVE_CAPABILITY,
-            "field_schema": LEAVE_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_leave_approval",
-            "commit_function": "approve_leave_request",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The leave-request approval opinion must be entered in the trusted field card.",
-            "authorization_message": "The leave-request approval requires trusted confirmation.",
-        },
-        RESIGNATION_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": RESIGNATION_APPROVE_CAPABILITY,
-            "field_schema": RESIGNATION_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_resignation_approval",
-            "commit_function": "approve_resignation",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": (
-                "The resignation approval opinion must be entered in the trusted field card."
-            ),
-            "authorization_message": (
-                "The resignation approval requires trusted confirmation."
-            ),
-        },
-        WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": WORK_HANDOVER_APPROVE_CAPABILITY,
-            "field_schema": WORK_HANDOVER_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_work_handover_approval",
-            "commit_function": "approve_work_handover",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": (
-                "The work-handover approval opinion must be entered in the trusted field card."
-            ),
-            "authorization_message": (
-                "The work-handover approval requires trusted confirmation."
-            ),
-        },
-        FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": FLIGHT_APPLICATION_APPROVE_CAPABILITY,
-            "field_schema": FLIGHT_APPLICATION_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_flight_application_approval",
-            "commit_function": "approve_flight_application",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The flight-application opinion must be entered in the trusted field card.",
-            "authorization_message": "The flight-application approval requires trusted confirmation.",
-        },
-        ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY: {
-            "commit_capability": ATTENDANCE_CONFIRM_CAPABILITY,
-            "field_schema": ATTENDANCE_CONFIRMATION_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_attendance_confirmation",
-            "commit_function": "confirm_attendance",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The attendance-confirmation opinion must be entered in the trusted field card.",
-            "authorization_message": "The attendance confirmation requires trusted confirmation.",
-        },
-        WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY: {
-            "commit_capability": WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY,
-            "field_schema": WEEKLY_REPORT_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_weekly_report_acknowledgement",
-            "commit_function": "acknowledge_weekly_report",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The weekly-report opinion must be entered in the trusted field card.",
-            "authorization_message": "The weekly-report acknowledgement requires trusted confirmation.",
-        },
-        STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY: {
-            "commit_capability": STANDARD_COLLABORATION_APPROVE_CAPABILITY,
-            "field_schema": STANDARD_COLLABORATION_APPROVAL_FIELD_CARD_SCHEMA,
-            "context_fields": ("affair_id",),
-            "prepare_function": "prepare_standard_collaboration_approval",
-            "commit_function": "approve_standard_collaboration",
-            "contract_error": PendingActionContractMismatch,
-            "outcome_error": PendingActionOutcomeUnknown,
-            "field_message": "The collaboration opinion must be entered in the trusted field card.",
-            "authorization_message": "The collaboration approval requires trusted confirmation.",
-        },
+        EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        OVERTIME_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            OVERTIME_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        LEAVE_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            LEAVE_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        RESIGNATION_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            RESIGNATION_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
     }
 )
-
-for _pending_profile, _pending_prepare_capability in (
-    ("efficiency_data", EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY),
-    ("travel_expense", TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY),
-    ("business_trip", BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY),
-    ("labor_contract_renewal", LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY),
-    (
-        "intellectual_property_declaration",
-        INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY,
-    ),
-    ("overtime", OVERTIME_APPROVAL_PREPARE_CAPABILITY),
-    ("leave", LEAVE_APPROVAL_PREPARE_CAPABILITY),
-    ("resignation", RESIGNATION_APPROVAL_PREPARE_CAPABILITY),
-    ("work_handover", WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY),
-    ("flight_application", FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY),
-    ("attendance_confirmation", ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY),
-    ("weekly_report", WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY),
-    ("standard_collaboration", STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY),
-):
-    _TRUSTED_WRITE_DEFINITIONS[_pending_prepare_capability].update(
-        {
-            "preflight_function": "preflight_pending_action",
-            "preflight_profile": _pending_profile,
-        }
-    )
 
 _TRUSTED_WRITE_DEFINITIONS.update(
     {
@@ -503,72 +290,154 @@ _TRUSTED_WRITE_DEFINITIONS.update(
     }
 )
 
-_TRUSTED_WRITE_DEFINITIONS[PENDING_BATCH_PREPARE_CAPABILITY] = {
-    **_TRUSTED_WRITE_DEFINITIONS[MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY],
-}
+_TRUSTED_WRITE_DEFINITIONS[PENDING_BATCH_PREPARE_CAPABILITY] = OA_WRITE_DECLARATIONS[PENDING_BATCH_PREPARE_CAPABILITY].legacy_definition()
 
 _TRUSTED_WRITE_COMMITS = {
-
     definition["commit_capability"]: (prepare_capability, definition)
     for prepare_capability, definition in _TRUSTED_WRITE_DEFINITIONS.items()
 }
+# Both batch aliases share this commit; historical fallback stays on single-item input.
 _TRUSTED_WRITE_COMMITS[MISSED_PUNCH_APPROVE_CAPABILITY] = (
     MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY,
     _TRUSTED_WRITE_DEFINITIONS[MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY],
 )
 
+_OA_WRITE_SCOPES = {
+    name: scopes
+    for declaration in OA_WRITE_DECLARATIONS.values()
+    for name, scopes in declaration.scope_bindings().items()
+}
+
 _CAPABILITY_SCOPES = {
-    PENDING_BATCH_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    BUSINESS_TRIP_PREPARE_CAPABILITY: frozenset({"oa:write:draft"}),
-    BUSINESS_TRIP_SAVE_CAPABILITY: frozenset({"oa:write:draft"}),
-    BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY: frozenset({"oa:write:submit"}),
-    BUSINESS_TRIP_SUBMIT_CAPABILITY: frozenset({"oa:write:submit"}),
-    LEAVE_PREPARE_CAPABILITY: frozenset({"oa:write:draft"}),
-    LEAVE_SAVE_CAPABILITY: frozenset({"oa:write:draft"}),
-    LEAVE_SUBMIT_PREPARE_CAPABILITY: frozenset({"oa:write:submit"}),
-    LEAVE_SUBMIT_CAPABILITY: frozenset({"oa:write:submit"}),
-    MISSED_PUNCH_PREPARE_CAPABILITY: frozenset({"oa:write:draft"}),
-    MISSED_PUNCH_SAVE_CAPABILITY: frozenset({"oa:write:draft"}),
-    MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY: frozenset(
-        {"oa:write:approval"}
-    ),
-    MISSED_PUNCH_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
+    PENDING_BATCH_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        PENDING_BATCH_PREPARE_CAPABILITY
+    ],
+    BUSINESS_TRIP_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_TRIP_PREPARE_CAPABILITY
+    ],
+    BUSINESS_TRIP_SAVE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_TRIP_SAVE_CAPABILITY
+    ],
+    BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_TRIP_SUBMIT_PREPARE_CAPABILITY
+    ],
+    BUSINESS_TRIP_SUBMIT_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_TRIP_SUBMIT_CAPABILITY
+    ],
+    LEAVE_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        LEAVE_PREPARE_CAPABILITY
+    ],
+    LEAVE_SAVE_CAPABILITY: _OA_WRITE_SCOPES[
+        LEAVE_SAVE_CAPABILITY
+    ],
+    LEAVE_SUBMIT_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        LEAVE_SUBMIT_PREPARE_CAPABILITY
+    ],
+    LEAVE_SUBMIT_CAPABILITY: _OA_WRITE_SCOPES[
+        LEAVE_SUBMIT_CAPABILITY
+    ],
+    MISSED_PUNCH_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        MISSED_PUNCH_PREPARE_CAPABILITY
+    ],
+    MISSED_PUNCH_SAVE_CAPABILITY: _OA_WRITE_SCOPES[
+        MISSED_PUNCH_SAVE_CAPABILITY
+    ],
+    MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY
+    ],
+    MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY
+    ],
+    MISSED_PUNCH_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        MISSED_PUNCH_APPROVE_CAPABILITY
+    ],
     **MEETING_CREATE_WORKFLOW.scope_bindings(),
     **MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.scope_bindings(),
     **MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.scope_bindings(),
-    EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    EFFICIENCY_DATA_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    TRAVEL_EXPENSE_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    BUSINESS_TRIP_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    LABOR_CONTRACT_RENEWAL_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY: frozenset(
-        {"oa:write:approval"}
-    ),
-    INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY: frozenset(
-        {"oa:write:approval"}
-    ),
-    OVERTIME_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    OVERTIME_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    LEAVE_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    LEAVE_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    RESIGNATION_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    RESIGNATION_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    WORK_HANDOVER_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    FLIGHT_APPLICATION_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    ATTENDANCE_CONFIRM_CAPABILITY: frozenset({"oa:write:approval"}),
-    WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY: frozenset({"oa:write:approval"}),
-    STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY: frozenset({"oa:write:approval"}),
-    STANDARD_COLLABORATION_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
-    WORKFLOW_REVOKE_PREPARE_CAPABILITY: frozenset({"oa:write:revoke"}),
-    WORKFLOW_REVOKE_CAPABILITY: frozenset({"oa:write:revoke"}),
+    EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY
+    ],
+    EFFICIENCY_DATA_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        EFFICIENCY_DATA_APPROVE_CAPABILITY
+    ],
+    TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY
+    ],
+    TRAVEL_EXPENSE_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        TRAVEL_EXPENSE_APPROVE_CAPABILITY
+    ],
+    BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY
+    ],
+    BUSINESS_TRIP_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_TRIP_APPROVE_CAPABILITY
+    ],
+    LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY
+    ],
+    LABOR_CONTRACT_RENEWAL_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        LABOR_CONTRACT_RENEWAL_APPROVE_CAPABILITY
+    ],
+    INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY
+    ],
+    INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY
+    ],
+    OVERTIME_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        OVERTIME_APPROVAL_PREPARE_CAPABILITY
+    ],
+    OVERTIME_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        OVERTIME_APPROVE_CAPABILITY
+    ],
+    LEAVE_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        LEAVE_APPROVAL_PREPARE_CAPABILITY
+    ],
+    LEAVE_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        LEAVE_APPROVE_CAPABILITY
+    ],
+    RESIGNATION_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        RESIGNATION_APPROVAL_PREPARE_CAPABILITY
+    ],
+    WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY
+    ],
+    RESIGNATION_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        RESIGNATION_APPROVE_CAPABILITY
+    ],
+    WORK_HANDOVER_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        WORK_HANDOVER_APPROVE_CAPABILITY
+    ],
+    FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY
+    ],
+    FLIGHT_APPLICATION_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        FLIGHT_APPLICATION_APPROVE_CAPABILITY
+    ],
+    ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY
+    ],
+    ATTENDANCE_CONFIRM_CAPABILITY: _OA_WRITE_SCOPES[
+        ATTENDANCE_CONFIRM_CAPABILITY
+    ],
+    WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY
+    ],
+    WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY: _OA_WRITE_SCOPES[
+        WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY
+    ],
+    STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY
+    ],
+    STANDARD_COLLABORATION_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        STANDARD_COLLABORATION_APPROVE_CAPABILITY
+    ],
+    WORKFLOW_REVOKE_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        WORKFLOW_REVOKE_PREPARE_CAPABILITY
+    ],
+    WORKFLOW_REVOKE_CAPABILITY: _OA_WRITE_SCOPES[
+        WORKFLOW_REVOKE_CAPABILITY
+    ],
     **TAIHUA_WORK_LOG_CREATE_WORKFLOW.scope_bindings(),
     **SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.scope_bindings(),
     **SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW.scope_bindings(),

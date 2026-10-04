@@ -1,6 +1,7 @@
 from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from functools import partial
 
 import pytest
 
@@ -10,6 +11,7 @@ from bscli.adapters.seeyon_pending_batch import (
     select_pending_batch_items,
 )
 from bscli.adapters.seeyon_pending_actions import PendingActionOutcomeUnknown
+from bscli.adapters.seeyon_missed_punch import MissedPunchOutcomeUnknown
 from bscli.core.central_service import _TRUSTED_WRITE_DEFINITIONS
 import tests.test_central_service as helpers
 
@@ -91,6 +93,67 @@ def test_five_mixed_items_advance_once_and_survive_restart(run, tmp_path, monkey
     assert prepared == committed == [f"affair-{i}" for i in range(1, 6)]
 
 
+def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run, monkeypatch):
+    service, tid, rows, _prepared, _committed = run
+    rows[:] = [row(1), row(2, "周报发送流程"), row(3, "【HR】补签申请单")]
+    cases = (
+        ("efficiency_data", "prepare_efficiency_data_approval", "approve_efficiency_data", "oa.efficiency_data.approve"),
+        ("weekly_report", "prepare_weekly_report_acknowledgement", "acknowledge_weekly_report", "oa.weekly_report.acknowledge"),
+        ("missed_punch", "prepare_missed_punch_approval", "approve_missed_punch_request", "oa.missed_punch.approve"),
+    )
+    preflights, prepared, committed, authorization_ids = [], [], [], []
+
+    def preflight(_adapter, _worker, arguments, profile):
+        preflights.append((profile, arguments["affair_id"]))
+        return {"review": {"title": profile, "fields": []}, "review_fingerprint": "sha256:" + profile}
+
+    def prepare(profile, _adapter, _worker, arguments):
+        prepared.append((profile, arguments["affair_id"]))
+        return {
+            "plan": {"target": {"profile": profile, "affair_id": arguments["affair_id"],
+                                "review_fingerprint": "sha256:" + profile},
+                     "exact_input": {"opinion": arguments["opinion"]}},
+            "summary": {"title": profile, "fields": []},
+        }
+
+    def commit(profile, _adapter, _worker, plan, *, enter_commit_boundary):
+        assert plan["target"]["profile"] == profile
+        enter_commit_boundary()
+        committed.append((profile, plan["target"]["affair_id"]))
+        return {"workflow_approved": True, "verification": {"confirmed": True}}
+
+    monkeypatch.setattr("bscli.core.write_catalog.preflight_pending_action", preflight)
+    for profile, prepare_name, commit_name, _capability in cases:
+        monkeypatch.setattr("bscli.core.write_catalog." + prepare_name, partial(prepare, profile))
+        monkeypatch.setattr("bscli.core.write_catalog." + commit_name, partial(commit, profile))
+
+    field = start(service, tid)
+    for ordinal, (profile, _prepare_name, _commit_name, capability) in enumerate(cases, 1):
+        schema = service.field_submissions.get(field["nextAction"]["inputSubmissionId"])["form_schema"]
+        assert schema["_agentbridge_resume_arguments"] == {
+            "batch_id": field["batch"]["batchId"], "affair_id": f"affair-{ordinal}",
+        }
+        if profile == "missed_punch":
+            assert "review" not in schema
+        else:
+            assert schema["review"]["title"] == profile
+        assert preflights == [(name, f"affair-{i}") for i, (name, *_rest) in enumerate(cases[:min(ordinal, 2)], 1)]
+        auth = authorize(service, field)
+        authorization = service.write_authorizations.get(auth["nextAction"]["authorizationId"], include_plan=True)
+        authorization_ids.append(authorization["authorization_id"])
+        assert authorization["state"] == "pending"
+        assert authorization["capability_name"] == capability
+        assert authorization["plan"]["prepare_capability"] == BATCH
+        assert authorization["plan"]["target"]["profile"] == profile
+        assert len(committed) == ordinal - 1
+        field = finish(service, auth)
+        assert committed[-1] == (profile, f"affair-{ordinal}")
+    assert len(set(authorization_ids)) == 3
+    assert prepared == committed == [(profile, f"affair-{i}") for i, (profile, *_rest) in enumerate(cases, 1)]
+    assert preflights == [("efficiency_data", "affair-1"), ("weekly_report", "affair-2")]
+    assert field["batch"]["state"] == "succeeded"
+
+
 def test_success_before_progress_crash_recovers_without_resubmission(run, tmp_path, monkeypatch):
     service, tid, _rows, _prepared, committed = run
     auth = authorize(service, start(service, tid))
@@ -133,6 +196,38 @@ def test_unknown_second_item_stops_remaining_and_never_retries(run, monkeypatch)
     assert result["batch"]["items"][2]["state"] != "succeeded"
     service.resume_interaction(user_subject="user-a", interaction_id=auth["interaction"]["interactionId"])
     assert committed == ["affair-1", "unknown-second"]
+
+
+@pytest.mark.parametrize("batch_capability", [BATCH, "oa.missed_punch.approval.batch.prepare"])
+def test_shared_missed_punch_commit_unknown_stops_both_batch_entries(run, monkeypatch, batch_capability):
+    service, tid, rows, prepared, committed = run
+    rows[:] = [row(i, "【HR】补签申请单") for i in range(1, 4)]
+    first = service.invoke(user_subject="user-a", capability_name=batch_capability, arguments={}, task_id=tid)
+    second = finish(service, authorize(service, first))
+
+    def unknown(_adapter, _worker, _plan, *, enter_commit_boundary):
+        enter_commit_boundary()
+        committed.append("unknown-second")
+        raise MissedPunchOutcomeUnknown("simulated lost shared-commit response")
+
+    monkeypatch.setattr("bscli.core.write_catalog.approve_missed_punch_request", unknown)
+    auth = authorize(service, second)
+    result = finish(service, auth)
+    assert result["status"] == "unknown"
+    assert result["error"]["code"] == "RESULT_UNKNOWN"
+    assert result["batch"]["state"] == "outcome_unknown"
+    assert result["batch"]["succeededCount"] == 1
+    assert result["batch"]["items"][2]["state"] != "succeeded"
+    aid = auth["nextAction"]["authorizationId"]
+    assert service.write_authorizations.get(aid)["state"] == "consumed"
+    assert service.operations.get(result["operationId"])["status"] == "unknown"
+    for key in (None, "another-callback-key"):
+        service.resume_interaction(
+            user_subject="user-a", interaction_id=auth["interaction"]["interactionId"], idempotency_key=key,
+        )
+    assert prepared == ["affair-1", "affair-2"]
+    assert committed == ["affair-1", "unknown-second"]
+    assert service.tasks.get_batch_for_task(parent_task_id=tid, user_subject="user-a")["state"] == "outcome_unknown"
 
 
 def test_frozen_selection_rejects_target_and_scope_changes(run):

@@ -6,8 +6,9 @@
     "eb5b8d5794d1",
     "ea5ff6773ddf",
     "9c7e6fe5e85e",
-    "dd986b88a0ca"
+    "dd986b88a0ca",
+    "54f68a01474d"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Includes atomic Workspace acceptance and POSIX validation, with Taihua work-log, all four Smartlight writes and three OA meeting workflows projected from typed declarations. Optional dynamic field functions retain their existing late-bound names and invocation timing. Capability and field schemas, authorization boundaries, persisted data and production configuration remain unchanged; no database migration is required."
+  "reason": "Includes atomic Workspace acceptance and POSIX validation, with all existing OA, Taihua and Smartlight write catalogs projected from typed declarations. Paired preflight metadata and explicit batch prepare aliases preserve schemas, invocation order, canonical commit routing and late-bound functions. Business execution, authorization transactions, persisted data and production configuration remain unchanged; no database migration is required."
 }
