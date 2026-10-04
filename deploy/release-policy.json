@@ -2,8 +2,9 @@
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
     "35dcf996a6e8",
-    "565cbe4ecead"
+    "565cbe4ecead",
+    "eb5b8d5794d1"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Atomic Workspace request acceptance joins existing message, attachment, outbox and dispatch writes in one transaction; controlled attachment cleanup and validation evidence/Ubuntu CI changes. Existing schemas, persisted idempotency hashes, business authorization, grants and production configuration remain unchanged."
+  "reason": "Includes atomic Workspace acceptance and POSIX validation changes, then projects the existing Taihua work-log prepare/commit metadata from one typed static declaration. Capability and field schemas, runtime function resolution, authorization boundaries, persisted data and production configuration remain unchanged; no database migration is required."
 }
