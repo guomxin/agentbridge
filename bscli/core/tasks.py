@@ -83,10 +83,12 @@ def _is_pull_based_endpoint(endpoint: sqlite3.Row | dict[str, Any]) -> bool:
 class TaskHubStore:
     """Persistent, non-sensitive task continuity ledger."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, maintain_on_startup: bool = True) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        if maintain_on_startup:
+            self.run_startup_maintenance()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -321,9 +323,6 @@ class TaskHubStore:
                 """
             )
             self._migrate_task_interaction_observations(connection)
-            self._repair_terminal_task_statuses(connection)
-            self._expire_orphan_task_shells(connection)
-            self._reconcile_pull_based_deliveries(connection)
 
     @staticmethod
     def _migrate_task_interaction_observations(
@@ -343,6 +342,17 @@ class TaskHubStore:
             connection.execute(
                 "ALTER TABLE task_interactions ADD COLUMN last_observed_at TEXT"
             )
+
+    def run_startup_maintenance(self) -> None:
+        """Repair local history in order, atomically; never dispatch business work."""
+        with self._connect() as connection:
+            self._backfill_task_interaction_observations(connection)
+            self._repair_terminal_task_statuses(connection)
+            self._expire_orphan_task_shells(connection)
+            self._reconcile_pull_based_deliveries(connection)
+
+    @staticmethod
+    def _backfill_task_interaction_observations(connection: sqlite3.Connection) -> None:
         event_states = {
             "task.interaction.waiting": "pending",
             "task.interaction.completed": "completed",

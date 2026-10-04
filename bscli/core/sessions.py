@@ -15,11 +15,15 @@ class SessionPrincipalMismatch(RuntimeError):
 
 
 class SessionRegistry:
-    def __init__(self, db_path: Path | str, profile_root: Path | str) -> None:
+    def __init__(
+        self, db_path: Path | str, profile_root: Path | str, *, maintain_on_startup: bool = True,
+    ) -> None:
         self.db_path = Path(db_path)
         self.profile_root = Path(profile_root)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        if maintain_on_startup:
+            self.run_startup_maintenance()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -93,6 +97,10 @@ class SessionRegistry:
             ):
                 if column not in columns:
                     connection.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
+
+    def run_startup_maintenance(self) -> None:
+        """Backfill legacy activity timestamps without probing downstream sessions."""
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE sessions

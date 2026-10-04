@@ -206,6 +206,18 @@ class IndependentDatabase:
         self.home = Path(home)
         self.original_base_url = original_base_url
         self.grants = DatabaseGrants(self.home / 'database' / 'grants.sqlite3')
+        self._sources_lock = threading.Lock()
+        self._sources_initialized = False
+
+    def _source_store(self):
+        # Reuse schema readiness only. Each handle reloads the key protector;
+        # every authorization/configuration read still goes to the current files.
+        with self._sources_lock:
+            if not self._sources_initialized:
+                sources = Sources(self.home)
+                self._sources_initialized = True
+                return sources
+        return Sources(self.home, initialize=False)
 
     def discover(self, subject, source_id=None, capability=None, after_source_id=None):
         """Bounded MCP discovery. Full internal catalog stays available to administrators."""
@@ -245,7 +257,7 @@ class IndependentDatabase:
         return result
 
     def catalog(self, subject, source_id=None):
-        sources=Sources(self.home)
+        sources=self._source_store()
         items=[]
         for record in sources.list():
             sid=record['source_id']
@@ -271,7 +283,7 @@ class IndependentDatabase:
 
     def snapshot(self, subject, capability, source_id):
         grant=self.grants.authorize(subject,capability,source_id)
-        sources=Sources(self.home)
+        sources=self._source_store()
         sources.migrate()
         record=sources.get(source_id,required=False)
         if not record or record['state']!='enabled' or capability not in sources.capabilities(record['active']):
@@ -334,7 +346,7 @@ class IndependentDatabase:
         from bscli.database.sources import connect, check_role
         current,record=self.snapshot(subject,capability,source_id)
         if current!=grant: raise DatabaseRejected('DATABASE_AUTHORIZATION_CHANGED')
-        sources=Sources(self.home)
+        sources=self._source_store()
         config=record['active']
         plan=None
         directory_entity=None

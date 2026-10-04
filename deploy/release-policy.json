@@ -9,8 +9,9 @@
     "dd986b88a0ca",
     "54f68a01474d",
     "e6cf0f1c9b7d",
-    "1d298fcceae4"
+    "1d298fcceae4",
+    "8687c1a712db"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Controlled write composition replaces shared-state inheritance with explicit stores and callbacks. Existing behavior, central construction, authorization consumption and skill/plan guards in the same transaction, persisted data and production configuration remain unchanged; no database migration is required."
+  "reason": "Central storage assembly preserves constructor contracts and schema. Session/task startup maintenance keeps existing repair SQL and atomic data repair order. Source catalog initialization is reused without caching grants, configurations or key protectors. Persisted data and production configuration remain unchanged; no database migration is required."
 }

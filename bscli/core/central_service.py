@@ -60,26 +60,21 @@ from bscli.adapters.seeyon_missed_punch import (
     MISSED_PUNCH_APPROVE_CAPABILITY,
     select_missed_punch_approval_batch_items,
 )
-from bscli.admin.stores import (
-    GovernancePolicyDenied,
-    GovernancePolicyStore,
-)
+from bscli.admin.stores import GovernancePolicyDenied
 from bscli.browser.central import (
     AttachedCentralBrowserWorker,
     CentralBrowserWorker,
 )
 from bscli.browser.http import CentralHttpWorker
-from bscli.core.auth_challenges import AuthChallengeStore
 from bscli.core.capability import CapabilityRegistry
-from bscli.core.user_grants import UserGrants
-from bscli.core.business_skills import SkillStore, SkillRejected, validate_binding
+from bscli.core.business_skills import SkillRejected, validate_binding
 from bscli.core.capability_runtime import (
     CapabilityRejected,
     CapabilityContext,
     CapabilityEngine,
     RequiresUserAction,
 )
-from bscli.core.operations import OperationStore
+from bscli.core.central_storage import CentralAccessStores, CentralRuntimeStores
 from bscli.core.login_recovery import resume_login_read
 from bscli.core.controlled_write_executor import (
     ControlledWriteDependencies,
@@ -92,16 +87,12 @@ from bscli.core.write_catalog import (
     capability_required_scopes,
     resolve_write_function,
 )
-from bscli.core.runtime_governance import (
-    RuntimeGovernanceStore,
-    classify_runtime_error,
-)
+from bscli.core.runtime_governance import classify_runtime_error
 from bscli.core.document_downloads import (
     DocumentDownloadAccessDenied,
     DocumentDownloadIntegrityError,
     DocumentDownloadNotFound,
     DocumentDownloadStateError,
-    DocumentDownloadStore,
     PREPARED_DOCUMENT_TTL_SECONDS,
 )
 from bscli.core.report_exports import (
@@ -120,15 +111,9 @@ from bscli.core.report_exports import (
     smartlight_report_filename,
     smartlight_report_recipe,
 )
-from bscli.core.timeline_attachments import TimelineAttachmentStore
-from bscli.core.field_submissions import (
-    FieldSubmissionStateError,
-    FieldSubmissionStore,
-)
-from bscli.core.host_contract import HostContractStore
+from bscli.core.field_submissions import FieldSubmissionStateError
 from bscli.core.interactions import (
     InteractionIntegrityError,
-    InteractionStore,
     build_interaction_envelope,
 )
 from bscli.core.session_secrets import (
@@ -136,9 +121,7 @@ from bscli.core.session_secrets import (
     SessionStateAccessDenied,
     SessionStateStore,
 )
-from bscli.core.sessions import SessionRegistry
 from bscli.core.tasks import (
-    TaskHubStore,
     TaskIntegrityError,
     TaskNotFound,
 )
@@ -157,15 +140,9 @@ from bscli.core.task_plan_validation import (
 )
 from bscli.core.task_plans import (
     ACTIVE_PLAN_STATES,
-    TaskPlanStore,
     task_plan_response,
 )
-from bscli.core.transforms import build_transform_registry
-from bscli.core.write_authorizations import (
-    WriteAuthorizationStateError,
-    WriteAuthorizationStore,
-)
-from bscli.workspace.stores import WorkspaceStore
+from bscli.core.write_authorizations import WriteAuthorizationStateError
 
 
 WorkerFactory = Callable[[dict, object], object]
@@ -203,8 +180,9 @@ class CentralCapabilityService:
     ) -> None:
         self.home = Path(home)
         self.db_path = self.home / "agentbridge.db"
-        self.user_grants = UserGrants(self.db_path)
-        self.skills = SkillStore(self.db_path)
+        access_stores = CentralAccessStores.create(self.db_path)
+        self.user_grants = access_stores.user_grants
+        self.skills = access_stores.skills
         from bscli.core.skill_authoring import SkillAuthoring
         self.skill_authoring = SkillAuthoring(self)
         if registry is None:
@@ -217,27 +195,27 @@ class CentralCapabilityService:
                 self.registry.register(spec)
         else:
             self.registry = registry
-        self.operations = OperationStore(self.db_path)
-        self.sessions = SessionRegistry(self.db_path, self.home / "profiles")
-        self.session_states = session_state_store or SessionStateStore(
-            self.home / "session-secrets"
-        )
-        self.challenges = AuthChallengeStore(self.db_path)
-        self.field_submissions = FieldSubmissionStore(self.db_path)
-        self.document_downloads = DocumentDownloadStore(self.db_path)
-        self.timeline_attachments = TimelineAttachmentStore(self.db_path)
-        self.write_authorizations = WriteAuthorizationStore(self.db_path)
-        self.interactions = InteractionStore(self.db_path)
-        self.tasks = TaskHubStore(self.db_path)
-        self.task_plans = TaskPlanStore(self.db_path)
-        self.transforms = build_transform_registry()
-        self.host_contract = HostContractStore(self.db_path)
-        self.workspace = WorkspaceStore(self.db_path)
-        self.governance_policies = GovernancePolicyStore(self.db_path)
-        self.runtime_governance = RuntimeGovernanceStore(
-            self.db_path,
+        runtime_stores = CentralRuntimeStores.create(
+            self.home,
+            session_state_store=session_state_store,
             release_id=os.environ.get("AGENTBRIDGE_RELEASE_ID") or "development",
         )
+        self.operations = runtime_stores.operations
+        self.sessions = runtime_stores.sessions
+        self.session_states = runtime_stores.session_states
+        self.challenges = runtime_stores.challenges
+        self.field_submissions = runtime_stores.field_submissions
+        self.document_downloads = runtime_stores.document_downloads
+        self.timeline_attachments = runtime_stores.timeline_attachments
+        self.write_authorizations = runtime_stores.write_authorizations
+        self.interactions = runtime_stores.interactions
+        self.tasks = runtime_stores.tasks
+        self.task_plans = runtime_stores.task_plans
+        self.transforms = runtime_stores.transforms
+        self.host_contract = runtime_stores.host_contract
+        self.workspace = runtime_stores.workspace
+        self.governance_policies = runtime_stores.governance_policies
+        self.runtime_governance = runtime_stores.runtime_governance
         self.adapter = SeeyonCentralAdapter(base_url=base_url)
         self.worker_factory = worker_factory or self._default_worker_factory
         self._adapters_by_system: dict[str, object] = {"oa": self.adapter}

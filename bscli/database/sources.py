@@ -58,11 +58,18 @@ def validate(value):
 
 
 class Sources:
-    def __init__(self, home):
+    def __init__(self, home, *, initialize=True):
+        # initialize=False is for a catalog already initialized by its owner.
+        # Keep key-file validation per handle; never cache grants or source records.
         self.home=Path(home)
         self.path=self.home/'database'/'catalog.sqlite3'
-        self.path.parent.mkdir(parents=True,exist_ok=True)
+        if initialize:
+            self.path.parent.mkdir(parents=True,exist_ok=True)
         self.secrets=DataSourceSecretStore(self.home/'database'/'credentials')
+        if initialize:
+            self._initialize()
+
+    def _initialize(self):
         with closing(sqlite3.connect(self.path)) as c, c:
             c.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, record TEXT NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS source_audit (id TEXT PRIMARY KEY, source TEXT, actor TEXT, reason TEXT, action TEXT, at TEXT, revision INTEGER)')
