@@ -14,6 +14,7 @@ from bscli.adapters.base import (
     AdapterUnsupportedAuthMethod,
 )
 from bscli.core.capability import CapabilityRegistry, CapabilitySpec
+from bscli.core.write_workflow import WriteWorkflowDefinition
 
 
 TAIHUA_SYSTEM_ID = "taihua"
@@ -602,26 +603,7 @@ def build_taihua_capability_registry() -> CapabilityRegistry:
             adapter=TAIHUA_ADAPTER_ID,
             workflow="taihua-project-search-v1",
         ),
-        CapabilitySpec(
-            name=TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description="Collect and freeze one Taihua work-log submission for approval.",
-            input_schema=TAIHUA_WORK_LOG_CREATE_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter=TAIHUA_ADAPTER_ID,
-            workflow="taihua-work-log-create-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=TAIHUA_WORK_LOG_CREATE_CAPABILITY,
-            version="0.1.0",
-            description="Create one approved Taihua work log and verify it by readback.",
-            input_schema=TAIHUA_WORK_LOG_CREATE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter=TAIHUA_ADAPTER_ID,
-            workflow="taihua-work-log-create-v1",
-        ),
+        *TAIHUA_WORK_LOG_CREATE_WORKFLOW.capability_specs(),
     ):
         registry.register(spec)
     return registry
@@ -1127,3 +1109,36 @@ def _page_content(payload: Any, label: str) -> tuple[list[dict], int]:
     content = [item for item in payload["content"] if isinstance(item, dict)]
     total = payload.get("totalElements")
     return content, int(total) if isinstance(total, int) else len(content)
+
+
+TAIHUA_WORK_LOG_CREATE_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description="Collect and freeze one Taihua work-log submission for approval.",
+        input_schema=TAIHUA_WORK_LOG_CREATE_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter=TAIHUA_ADAPTER_ID,
+        workflow="taihua-work-log-create-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=TAIHUA_WORK_LOG_CREATE_CAPABILITY,
+        version="0.1.0",
+        description="Create one approved Taihua work log and verify it by readback.",
+        input_schema=TAIHUA_WORK_LOG_CREATE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter=TAIHUA_ADAPTER_ID,
+        workflow="taihua-work-log-create-v1",
+    ),
+    required_scopes=frozenset({"taihua:write:worklog"}),
+    field_schema=TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA,
+    context_fields=(),
+    prepare_function=prepare_taihua_work_log_create,
+    commit_function=commit_taihua_work_log_create,
+    contract_error=TaihuaWorkLogContractMismatch,
+    outcome_error=TaihuaWorkLogOutcomeUnknown,
+    field_message="工作日志字段必须在可信字段卡中核对。",
+    authorization_message="工作日志提交计划需要在可信授权卡中确认。",
+)

@@ -1,0 +1,103 @@
+{
+  "baseline": "eb5b8d5",
+  "capabilities": [
+    {
+      "name": "taihua.work_log.create.prepare",
+      "version": "0.1.0",
+      "description": "Collect and freeze one Taihua work-log submission for approval.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "log_date": {
+            "type": "string"
+          },
+          "hours": {
+            "type": "number"
+          },
+          "project": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "taihua-central",
+      "workflow": "taihua-work-log-create-prepare-v1",
+      "system": "taihua"
+    },
+    {
+      "name": "taihua.work_log.create",
+      "version": "0.1.0",
+      "description": "Create one approved Taihua work log and verify it by readback.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "taihua-central",
+      "workflow": "taihua-work-log-create-v1",
+      "system": "taihua"
+    }
+  ],
+  "field_schema": {
+    "schema_version": "agentbridge.taihua_work_log_fields.v1",
+    "title": "填写工作日志",
+    "system": "日志系统",
+    "effect": "创建并正式提交一条个人工作日志",
+    "submit_label": "提交字段",
+    "notice": "字段提交后还需单独授权；授权前不会向日志系统写入任何内容。",
+    "fields": [
+      {
+        "name": "log_date",
+        "label": "日志日期",
+        "control": "date",
+        "required": true
+      },
+      {
+        "name": "hours",
+        "label": "工时",
+        "control": "number",
+        "required": true,
+        "minimum": 0.5,
+        "maximum": 16,
+        "step": 0.5
+      },
+      {
+        "name": "project",
+        "label": "所属项目名称或编码（可选）",
+        "control": "text",
+        "required": false,
+        "max_length": 255,
+        "autocomplete": "off"
+      },
+      {
+        "name": "content",
+        "label": "日志内容",
+        "control": "textarea",
+        "required": true,
+        "max_length": 4000,
+        "rows": 6
+      }
+    ]
+  }
+}

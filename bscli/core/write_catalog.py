@@ -6,6 +6,7 @@ from bscli.adapters.taihua import (
     TAIHUA_WORK_LOG_CREATE_CAPABILITY,
     TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY,
     TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA,
+    TAIHUA_WORK_LOG_CREATE_WORKFLOW,
     TaihuaWorkLogContractMismatch,
     TaihuaWorkLogOutcomeUnknown,
     commit_taihua_work_log_create,
@@ -519,17 +520,7 @@ for _pending_profile, _pending_prepare_capability in (
 
 _TRUSTED_WRITE_DEFINITIONS.update(
     {
-        TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY: {
-            "commit_capability": TAIHUA_WORK_LOG_CREATE_CAPABILITY,
-            "field_schema": TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA,
-            "context_fields": (),
-            "prepare_function": "prepare_taihua_work_log_create",
-            "commit_function": "commit_taihua_work_log_create",
-            "contract_error": TaihuaWorkLogContractMismatch,
-            "outcome_error": TaihuaWorkLogOutcomeUnknown,
-            "field_message": "工作日志字段必须在可信字段卡中核对。",
-            "authorization_message": "工作日志提交计划需要在可信授权卡中确认。",
-        },
+        TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY: TAIHUA_WORK_LOG_CREATE_WORKFLOW.legacy_definition(),
         SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY: {
             "commit_capability": SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY,
             "field_schema": SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA,
@@ -645,8 +636,7 @@ _CAPABILITY_SCOPES = {
     STANDARD_COLLABORATION_APPROVE_CAPABILITY: frozenset({"oa:write:approval"}),
     WORKFLOW_REVOKE_PREPARE_CAPABILITY: frozenset({"oa:write:revoke"}),
     WORKFLOW_REVOKE_CAPABILITY: frozenset({"oa:write:revoke"}),
-    TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY: frozenset({"taihua:write:worklog"}),
-    TAIHUA_WORK_LOG_CREATE_CAPABILITY: frozenset({"taihua:write:worklog"}),
+    **TAIHUA_WORK_LOG_CREATE_WORKFLOW.scope_bindings(),
     SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY: frozenset(
         {"smartlight:write:alarm_remark"}
     ),
