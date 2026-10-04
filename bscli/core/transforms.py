@@ -5,6 +5,9 @@ import hashlib
 from typing import Any, Callable
 
 from bscli.core.query_contracts import HISTORY_QUERY_EVIDENCE_SCHEMA
+from bscli.core.input_validation import (
+    ValidationProfile, matches_json_type, schema_value_issue,
+)
 
 
 class TransformRejected(ValueError):
@@ -673,58 +676,17 @@ def _validate_schema_value(
     path: str,
     error_code: str,
 ) -> None:
-    expected = schema.get("type")
-    if expected is not None and not _matches_schema_type(value, expected):
-        raise TransformRejected(error_code, f"{path} must be {expected}")
-    if "enum" in schema and value not in schema["enum"]:
-        raise TransformRejected(error_code, f"{path} is outside the allowed values")
-    if isinstance(value, dict):
-        properties = schema.get("properties") or {}
-        missing = [name for name in schema.get("required") or [] if name not in value]
-        if missing:
-            raise TransformRejected(
-                error_code, f"{path} is missing required fields: {', '.join(missing)}"
-            )
-        if schema.get("additionalProperties") is False:
-            unexpected = sorted(set(value) - set(properties))
-            if unexpected:
-                raise TransformRejected(
-                    error_code, f"{path} has unexpected fields: {', '.join(unexpected)}"
-                )
-        for name, item in value.items():
-            definition = properties.get(name)
-            if isinstance(definition, dict):
-                _validate_schema_value(
-                    item,
-                    definition,
-                    path=f"{path}.{name}",
-                    error_code=error_code,
-                )
-    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, item in enumerate(value):
-            _validate_schema_value(
-                item,
-                schema["items"],
-                path=f"{path}[{index}]",
-                error_code=error_code,
-            )
+    issue = schema_value_issue(value, schema, profile=ValidationProfile.TRANSFORM, path=path)
+    if issue is None:
+        return
+    messages = {
+        "type": f"{issue.path} must be {issue.expected}",
+        "enum": f"{issue.path} is outside the allowed values",
+        "missing": f"{issue.path} is missing required fields: {', '.join(issue.fields)}",
+        "unexpected": f"{issue.path} has unexpected fields: {', '.join(issue.fields)}",
+    }
+    raise TransformRejected(error_code, messages[issue.kind])
 
 
 def _matches_schema_type(value: Any, expected: Any) -> bool:
-    if isinstance(expected, list):
-        return any(_matches_schema_type(value, item) for item in expected)
-    mapping = {
-        "object": dict,
-        "array": list,
-        "string": str,
-        "boolean": bool,
-        "integer": int,
-        "number": (int, float),
-        "null": type(None),
-    }
-    target = mapping.get(expected)
-    if target is None:
-        return True
-    if expected in {"integer", "number"} and isinstance(value, bool):
-        return False
-    return isinstance(value, target)
+    return matches_json_type(value, expected, profile=ValidationProfile.TRANSFORM)

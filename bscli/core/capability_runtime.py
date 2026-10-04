@@ -6,6 +6,9 @@ from uuid import uuid4
 
 from bscli.core.capability import CapabilityRegistry, CapabilitySpec
 from bscli.core.operations import OperationStore
+from bscli.core.input_validation import (
+    ValidationProfile, matches_json_type, object_input_issue,
+)
 
 
 @dataclass(frozen=True)
@@ -156,46 +159,18 @@ def _validate_json_object(value: Any, schema: dict) -> None:
         raise ValueError("capability input must be a JSON object")
     if schema.get("type") not in (None, "object"):
         raise ValueError("only object capability input schemas are supported")
-    properties = schema.get("properties") or {}
-    required = schema.get("required") or []
-    missing = [name for name in required if name not in value]
-    if missing:
-        raise ValueError(f"missing required capability input: {', '.join(missing)}")
-    if schema.get("additionalProperties") is False:
-        unexpected = sorted(set(value) - set(properties))
-        if unexpected:
-            raise ValueError(f"unexpected capability input: {', '.join(unexpected)}")
-    for name, item in value.items():
-        definition = properties.get(name)
-        if not isinstance(definition, dict) or "type" not in definition:
-            continue
-        expected = definition["type"]
-        if not _matches_json_type(item, expected):
-            raise ValueError(f"capability input {name!r} must be {expected}")
+    issue = object_input_issue(value, schema, profile=ValidationProfile.CAPABILITY)
+    if issue is None:
+        return
+    if issue.kind == "missing":
+        raise ValueError(f"missing required capability input: {', '.join(issue.fields)}")
+    if issue.kind == "unexpected":
+        raise ValueError(f"unexpected capability input: {', '.join(issue.fields)}")
+    raise ValueError(f"capability input {issue.path!r} must be {issue.expected}")
 
 
 def _matches_json_type(value: Any, expected: str | list[str]) -> bool:
-    if isinstance(expected, list):
-        return any(
-            _matches_json_type(value, candidate)
-            for candidate in expected
-            if isinstance(candidate, str)
-        )
-    types = {
-        "string": str,
-        "object": dict,
-        "array": list,
-        "boolean": bool,
-        "integer": int,
-        "number": (int, float),
-        "null": type(None),
-    }
-    expected_type = types.get(expected)
-    if expected_type is None:
-        return True
-    if expected in {"integer", "number"} and isinstance(value, bool):
-        return False
-    return isinstance(value, expected_type)
+    return matches_json_type(value, expected, profile=ValidationProfile.CAPABILITY)
 
 
 def _operation_input_summary(arguments: dict, *, effect: str, capability_name: str = "") -> dict:

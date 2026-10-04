@@ -1,0 +1,2200 @@
+{
+  "baseline": "1ab6dddedea54cc821ba103639d34e1e611f6e7e",
+  "schemas": {
+    "flat": {
+      "type": "object",
+      "properties": {
+        "z": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "a": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "choice": {
+          "type": "string",
+          "enum": [
+            "one",
+            "two"
+          ]
+        },
+        "nullable": {
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ]
+        },
+        "array": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "maxItems": 2
+        },
+        "object": {
+          "type": "object",
+          "properties": {
+            "secret": {
+              "type": "string",
+              "enum": [
+                "ok"
+              ]
+            }
+          },
+          "required": [
+            "secret"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "z",
+        "a"
+      ],
+      "additionalProperties": false
+    },
+    "recursive": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "ok"
+                ],
+                "minLength": 5
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "untyped": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "enum": [
+            "ok"
+          ],
+          "minLength": 2,
+          "maximum": 3
+        },
+        "ignored": true
+      }
+    },
+    "union": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": [
+            null,
+            "integer"
+          ]
+        }
+      }
+    },
+    "unknown": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "future-type",
+          "pattern": "^only$"
+        }
+      }
+    },
+    "open": {
+      "properties": {
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "array_root": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "missing-order",
+      "schema": "flat",
+      "value": {},
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "missing required capability input: z, a"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "步骤缺少必需参数：a, z。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input is missing required fields: z, a",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "missing-before-unexpected",
+      "schema": "flat",
+      "value": {
+        "extra": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "missing required capability input: z, a"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "步骤包含能力未声明的参数：extra。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input is missing required fields: z, a",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "unknown-fields-sorted",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "zz": 1,
+        "aa": 2
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "unexpected capability input: aa, zz"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "步骤包含能力未声明的参数：aa, zz。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input has unexpected fields: aa, zz",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "valid",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "z-0",
+      "schema": "flat",
+      "value": {
+        "z": true,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'z' must be integer"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 类型必须是 integer。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.z must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "z-1",
+      "schema": "flat",
+      "value": {
+        "z": false,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'z' must be integer"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 类型必须是 integer。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.z must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "z-2",
+      "schema": "flat",
+      "value": {
+        "z": 0,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 小于最小值。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "z-3",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "z-4",
+      "schema": "flat",
+      "value": {
+        "z": 3,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "z-5",
+      "schema": "flat",
+      "value": {
+        "z": 4,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 大于最大值。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "z-6",
+      "schema": "flat",
+      "value": {
+        "z": 1.0,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'z' must be integer"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 类型必须是 integer。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.z must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "z-7",
+      "schema": "flat",
+      "value": {
+        "z": "1",
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'z' must be integer"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 类型必须是 integer。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.z must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "z-8",
+      "schema": "flat",
+      "value": {
+        "z": null,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'z' must be integer"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 z 类型必须是 integer。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.z must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "a-0",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": ""
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 a 太短。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "a-1",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "x"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 a 太短。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "a-2",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "a-3",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "four"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "a-4",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "longer"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 a 太长。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "a-5",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'a' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 a 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.a must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "a-6",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'a' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 a 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.a must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "choice-0",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "choice": "one"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "choice-1",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "choice": "bad"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 choice 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.choice is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "choice-2",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "choice": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'choice' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 choice 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.choice must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nullable-0",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "nullable": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "nullable-1",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "nullable": ""
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "nullable-2",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "nullable": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "nullable-3",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "nullable": false
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'nullable' must be ['string', 'integer', 'null']"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 nullable 类型必须是 ['string', 'integer', 'null']。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.nullable must be ['string', 'integer', 'null']",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nullable-4",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "nullable": 1.5
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'nullable' must be ['string', 'integer', 'null']"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 nullable 类型必须是 ['string', 'integer', 'null']。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.nullable must be ['string', 'integer', 'null']",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nullable-5",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "nullable": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'nullable' must be ['string', 'integer', 'null']"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 nullable 类型必须是 ['string', 'integer', 'null']。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.nullable must be ['string', 'integer', 'null']",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "array-0",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "array": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "array-1",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "array": [
+          1
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "array-2",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "array": [
+          1,
+          2,
+          3
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "array-3",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "array": [
+          "x"
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.array[0] must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "array-4",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "array": {}
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'array' must be array"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 array 类型必须是 array。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.array must be array",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "object-0",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "object": {}
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.object is missing required fields: secret",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "object-1",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "object": {
+          "secret": "ok"
+        }
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "object-2",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "object": {
+          "secret": "bad"
+        }
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.object.secret is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "object-3",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "object": {
+          "secret": "ok",
+          "extra": 1
+        }
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.object has unexpected fields: extra",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "object-4",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok",
+        "object": {
+          "extra": 1
+        }
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.object is missing required fields: secret",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "value-order",
+      "schema": "flat",
+      "value": {
+        "a": 1,
+        "z": false
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'a' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 a 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.a must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "bindings-satisfy-required",
+      "schema": "flat",
+      "value": {},
+      "bindings": {
+        "a": {},
+        "z": {}
+      },
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "missing required capability input: z, a"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input is missing required fields: z, a",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "bindings-overlap",
+      "schema": "flat",
+      "value": {
+        "z": 1,
+        "a": "ok"
+      },
+      "bindings": {
+        "a": {}
+      },
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "静态参数与绑定重复：a。",
+          "code": "PLAN_BINDING_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "bindings-missing-before-overlap",
+      "schema": "flat",
+      "value": {
+        "a": "ok"
+      },
+      "bindings": {
+        "a": {}
+      },
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "missing required capability input: z"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "步骤缺少必需参数：z。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input is missing required fields: z",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "bindings-unknown-before-missing",
+      "schema": "flat",
+      "value": {},
+      "bindings": {
+        "extra": {}
+      },
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "missing required capability input: z, a"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "步骤包含能力未声明的参数：extra。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input is missing required fields: z, a",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nested-0",
+      "schema": "recursive",
+      "value": {
+        "items": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "nested-1",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {}
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.items[0] is missing required fields: name",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nested-2",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {
+            "name": "ok"
+          }
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "nested-3",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {
+            "name": "bad"
+          }
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.items[0].name is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nested-4",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {
+            "name": "ok",
+            "extra": 1
+          }
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.items[0] has unexpected fields: extra",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nested-5",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {
+            "name": 1
+          }
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.items[0].name must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nested-6",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {
+            "name": "ok"
+          },
+          {}
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.items[1] is missing required fields: name",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "nested-7",
+      "schema": "recursive",
+      "value": {
+        "items": [
+          {
+            "extra": 1
+          }
+        ]
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.items[0] is missing required fields: name",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "untyped-0",
+      "schema": "untyped",
+      "value": {
+        "value": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "untyped-1",
+      "schema": "untyped",
+      "value": {
+        "value": true
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "untyped-2",
+      "schema": "untyped",
+      "value": {
+        "value": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "untyped-3",
+      "schema": "untyped",
+      "value": {
+        "value": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "untyped-4",
+      "schema": "untyped",
+      "value": {
+        "value": "x"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "untyped-5",
+      "schema": "untyped",
+      "value": {
+        "value": {}
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "untyped-6",
+      "schema": "untyped",
+      "value": {
+        "value": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 不在允许值范围内。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value is outside the allowed values",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "union-0",
+      "schema": "union",
+      "value": {
+        "value": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be [None, 'integer']"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "union-1",
+      "schema": "union",
+      "value": {
+        "value": true
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be [None, 'integer']"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "union-2",
+      "schema": "union",
+      "value": {
+        "value": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "union-3",
+      "schema": "union",
+      "value": {
+        "value": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be [None, 'integer']"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "union-4",
+      "schema": "union",
+      "value": {
+        "value": "x"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be [None, 'integer']"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "union-5",
+      "schema": "union",
+      "value": {
+        "value": {}
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be [None, 'integer']"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "union-6",
+      "schema": "union",
+      "value": {
+        "value": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be [None, 'integer']"
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-0",
+      "schema": "unknown",
+      "value": {
+        "value": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-1",
+      "schema": "unknown",
+      "value": {
+        "value": true
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-2",
+      "schema": "unknown",
+      "value": {
+        "value": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-3",
+      "schema": "unknown",
+      "value": {
+        "value": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-4",
+      "schema": "unknown",
+      "value": {
+        "value": "x"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-5",
+      "schema": "unknown",
+      "value": {
+        "value": {}
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "unknown-6",
+      "schema": "unknown",
+      "value": {
+        "value": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "open-0",
+      "schema": "open",
+      "value": {
+        "value": null
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "open-1",
+      "schema": "open",
+      "value": {
+        "value": true
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "open-2",
+      "schema": "open",
+      "value": {
+        "value": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "open-3",
+      "schema": "open",
+      "value": {
+        "value": "ok"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "open-4",
+      "schema": "open",
+      "value": {
+        "value": "x"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "open-5",
+      "schema": "open",
+      "value": {
+        "value": {}
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "open-6",
+      "schema": "open",
+      "value": {
+        "value": []
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input 'value' must be string"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "参数 value 类型必须是 string。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input.value must be string",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "open-extra-schema-ignored",
+      "schema": "open",
+      "value": {
+        "extra": "text"
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": true
+        },
+        "plan": {
+          "accepted": true
+        },
+        "transform": {
+          "accepted": true
+        }
+      }
+    },
+    {
+      "id": "non-object-capability",
+      "schema": "flat",
+      "value": [],
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input must be a JSON object"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "步骤缺少必需参数：a, z。",
+          "code": "PLAN_SCHEMA_INVALID",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input must be object",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "unsupported-root-schema",
+      "schema": "array_root",
+      "value": {
+        "value": 1
+      },
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "only object capability input schemas are supported"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "一期只支持对象类型的步骤输入 Schema。",
+          "code": "PLAN_SCHEMA_INCOMPATIBLE",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input must be array",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    },
+    {
+      "id": "transform-array-root",
+      "schema": "array_root",
+      "value": [
+        true
+      ],
+      "bindings": {},
+      "results": {
+        "capability": {
+          "accepted": false,
+          "exception": "ValueError",
+          "message": "capability input must be a JSON object"
+        },
+        "plan": {
+          "accepted": false,
+          "exception": "PlanValidationError",
+          "message": "一期只支持对象类型的步骤输入 Schema。",
+          "code": "PLAN_SCHEMA_INCOMPATIBLE",
+          "step_key": "sample"
+        },
+        "transform": {
+          "accepted": false,
+          "exception": "TransformRejected",
+          "message": "input[0] must be integer",
+          "code": "TRANSFORM_INPUT_INVALID"
+        }
+      }
+    }
+  ]
+}

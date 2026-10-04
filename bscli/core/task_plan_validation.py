@@ -9,6 +9,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from bscli.core.capability import CapabilityRegistry
+from bscli.core.input_validation import (
+    SchemaIssue, ValidationProfile, matches_json_type, object_input_issue, schema_value_issue,
+)
 from bscli.core.planning_policy import planning_descriptor
 from bscli.core.transforms import TransformRegistry
 
@@ -725,33 +728,11 @@ def _validate_partial_input(
             "一期只支持对象类型的步骤输入 Schema。",
             step_key=step_key,
         )
-    properties = schema.get("properties") or {}
-    if schema.get("additionalProperties") is False:
-        unexpected = sorted((set(arguments) | set(bindings)) - set(properties))
-        if unexpected:
-            raise PlanValidationError(
-                "PLAN_SCHEMA_INVALID",
-                f"步骤包含能力未声明的参数：{', '.join(unexpected)}。",
-                step_key=step_key,
-            )
-    missing = sorted(set(schema.get("required") or []) - set(arguments) - set(bindings))
-    if missing:
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID",
-            f"步骤缺少必需参数：{', '.join(missing)}。",
-            step_key=step_key,
-        )
-    overlap = sorted(set(arguments) & set(bindings))
-    if overlap:
-        raise PlanValidationError(
-            "PLAN_BINDING_INVALID",
-            f"静态参数与绑定重复：{', '.join(overlap)}。",
-            step_key=step_key,
-        )
-    for name, value in arguments.items():
-        definition = properties.get(name)
-        if isinstance(definition, dict):
-            _validate_value(value, definition, name=name, step_key=step_key)
+    issue = object_input_issue(
+        arguments, schema, profile=ValidationProfile.PLAN, bound_fields=bindings
+    )
+    if issue is not None:
+        _raise_input_issue(issue, step_key=step_key)
 
 
 def _validate_value(
@@ -761,38 +742,25 @@ def _validate_value(
     name: str,
     step_key: str,
 ) -> None:
-    expected = definition.get("type")
-    if expected is not None and not _matches_type(value, expected):
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID",
-            f"参数 {name} 类型必须是 {expected}。",
-            step_key=step_key,
-        )
-    if "enum" in definition and value not in definition["enum"]:
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID",
-            f"参数 {name} 不在允许值范围内。",
-            step_key=step_key,
-        )
-    if isinstance(value, str):
-        if len(value) < int(definition.get("minLength", 0)):
-            raise PlanValidationError(
-                "PLAN_SCHEMA_INVALID", f"参数 {name} 太短。", step_key=step_key
-            )
-        maximum = definition.get("maxLength")
-        if maximum is not None and len(value) > int(maximum):
-            raise PlanValidationError(
-                "PLAN_SCHEMA_INVALID", f"参数 {name} 太长。", step_key=step_key
-            )
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in definition and value < definition["minimum"]:
-            raise PlanValidationError(
-                "PLAN_SCHEMA_INVALID", f"参数 {name} 小于最小值。", step_key=step_key
-            )
-        if "maximum" in definition and value > definition["maximum"]:
-            raise PlanValidationError(
-                "PLAN_SCHEMA_INVALID", f"参数 {name} 大于最大值。", step_key=step_key
-            )
+    issue = schema_value_issue(value, definition, profile=ValidationProfile.PLAN, path=name)
+    if issue is not None:
+        _raise_input_issue(issue, step_key=step_key)
+
+
+def _raise_input_issue(issue: SchemaIssue, *, step_key: str) -> None:
+    messages = {
+        "unexpected": f"步骤包含能力未声明的参数：{', '.join(issue.fields)}。",
+        "missing": f"步骤缺少必需参数：{', '.join(issue.fields)}。",
+        "overlap": f"静态参数与绑定重复：{', '.join(issue.fields)}。",
+        "type": f"参数 {issue.path} 类型必须是 {issue.expected}。",
+        "enum": f"参数 {issue.path} 不在允许值范围内。",
+        "min_length": f"参数 {issue.path} 太短。",
+        "max_length": f"参数 {issue.path} 太长。",
+        "minimum": f"参数 {issue.path} 小于最小值。",
+        "maximum": f"参数 {issue.path} 大于最大值。",
+    }
+    code = "PLAN_BINDING_INVALID" if issue.kind == "overlap" else "PLAN_SCHEMA_INVALID"
+    raise PlanValidationError(code, messages[issue.kind], step_key=step_key)
 
 
 def _topological_order(
@@ -983,23 +951,7 @@ def _types_compatible(source: Any, target: Any) -> bool:
 
 
 def _matches_type(value: Any, expected: Any) -> bool:
-    if isinstance(expected, list):
-        return any(_matches_type(value, item) for item in expected)
-    mapping = {
-        "string": str,
-        "object": dict,
-        "array": list,
-        "boolean": bool,
-        "integer": int,
-        "number": (int, float),
-        "null": type(None),
-    }
-    python_type = mapping.get(expected)
-    if python_type is None:
-        return True
-    if expected in {"integer", "number"} and isinstance(value, bool):
-        return False
-    return isinstance(value, python_type)
+    return matches_json_type(value, expected, profile=ValidationProfile.PLAN)
 
 
 def _required_text(value: Any, name: str, maximum: int) -> str:

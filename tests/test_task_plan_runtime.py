@@ -8,7 +8,7 @@ from bscli.core.operations import OperationStore
 from bscli.core.task_plan_runtime import TaskPlanRuntime
 from bscli.core.task_plan_validation import PlanValidationError, validate_and_compile_task_plan
 from bscli.core.task_plans import TaskPlanStore
-from bscli.core.transforms import build_transform_registry
+from bscli.core.transforms import TransformSpec, build_transform_registry
 
 
 class FakeTaskHub:
@@ -298,6 +298,42 @@ class TaskPlanRuntimeTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_resolved_binding_is_validated_before_creating_sink_operation(self):
+        # The declared union permits planning a string sink; the actual runtime
+        # result is an integer, so the sink must never be invoked or create a card.
+        self.transforms.register(TransformSpec(
+            name="test.union_draft.v1", description="binding validation probe",
+            input_schema={"type": "object", "properties": {"items": {"type": "array"}}},
+            output_schema={"type": "object", "properties": {"draft": {"type": ["string", "integer"]}}},
+            maximum_input_items=100, maximum_output_chars=100,
+        ), lambda _arguments: {"draft": 7})
+        compiled = validate_and_compile_task_plan(
+            {"schemaVersion": "agentbridge.task-plan.proposal.v1", "goal": "test binding",
+             "steps": [
+                 {"stepKey": "read", "kind": "capability", "capabilityName": "source.items"},
+                 {"stepKey": "draft", "kind": "transform", "transformName": "test.union_draft.v1",
+                  "dependsOn": ["read"], "bindings": {"items": {"step": "read", "pointer": "/items"}}},
+                 {"stepKey": "write", "kind": "capability", "capabilityName": "sink.prepare",
+                  "dependsOn": ["draft"], "bindings": {"content": {"step": "draft", "pointer": "/draft"}}},
+             ]},
+            registry=self.service.registry, transforms=self.transforms,
+            trusted_write_prepares={"sink.prepare"}, hidden_commit_capabilities={"sink.commit"},
+            scope_resolver=lambda _name: frozenset(),
+        )
+        plan, _ = self.plans.create(
+            user_subject="user-1", parent_task_id="task-1", compiled_plan=compiled,
+            proposal_source="agent_host", coordinator_lease_version=1, idempotency_key="bad-binding",
+        )
+        result = self.runtime.start(plan["plan_id"], user_subject="user-1")
+        self.assertEqual(result["status"], "failed")
+        stored = self.plans.get(plan["plan_id"], user_subject="user-1")
+        self.assertEqual(stored["steps"][-1]["error_code"], "PLAN_SCHEMA_INVALID")
+        self.assertEqual(stored["steps"][-1]["error_message"], "参数 content 类型必须是 string。")
+        self.assertEqual(len(self.service.operations.list()), 2)
+        self.assertFalse(any(item["capability_name"] == "sink.prepare" for item in self.service.operations.list()))
+        self.assertIsNone(self.service.interaction)
+        self.assertEqual(self.service.source_calls, 1)
 
     def compile(self, *, include_sink):
         steps = [

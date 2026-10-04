@@ -7,8 +7,9 @@
     "ea5ff6773ddf",
     "9c7e6fe5e85e",
     "dd986b88a0ca",
-    "54f68a01474d"
+    "54f68a01474d",
+    "e6cf0f1c9b7d"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Includes atomic Workspace acceptance and POSIX validation, with all existing OA, Taihua and Smartlight write catalogs projected from typed declarations. Paired preflight metadata and explicit batch prepare aliases preserve schemas, invocation order, canonical commit routing and late-bound functions. Business execution, authorization transactions, persisted data and production configuration remain unchanged; no database migration is required."
+  "reason": "Shared input validation preserves ordinary capability, task-plan and transform compatibility profiles, original errors and execution timing. Existing declarations, business normalization, authorization transactions, persisted data and production configuration remain unchanged; no database migration is required."
 }
