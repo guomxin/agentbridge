@@ -14,6 +14,7 @@ import re
 from uuid import uuid4
 
 from bscli.core.business_skills import PROTOCOL, _json, validate_skill_bundle
+from bscli.core.skill_actions import dispatch_skill_action
 from bscli.core.user_grants import UserGrantConflict
 
 
@@ -105,7 +106,7 @@ class SkillAuthoring:
         return row, json.loads(row['payload_json'])
 
     def normalize(self, skill_id, proposal):
-        from bscli.core.skill_quality import SkillProposal
+        from bscli.core.skill_contracts import SkillProposal
         from pydantic import ValidationError
         try:
             proposal = SkillProposal.model_validate(proposal).model_dump(exclude_none=True)
@@ -443,18 +444,4 @@ class SkillAuthoring:
             'instructions':bundle['resources']['SKILL.md'],'references':{k:v for k,v in bundle['resources'].items() if k!='SKILL.md'}}}
 
     def dispatch(self, owner, action, data):
-        # Explicit allowlist: never expose review/decision or an arbitrary method name.
-        methods={'save':self.save,'list':self.list,'get':self.get,'test':self.test_start,
-            'test_result':self.test_result,'submit':self.submit,'withdraw':self.withdraw,
-            'preferences':self.preferences,'restore':self.restore,'archive':self.archive,'export':self.export,'requests':self.reviews}
-        w = self.workbench
-        methods.update({'inspect':w.inspect, 'generate':w.generate, 'evaluate':w.evaluate, 'jobs':w.jobs,
-            'cancel_job':w.cancel, 'retry_job':w.retry, 'scopes':w.scopes, 'export_standard':w.export,
-            'import_standard':w.import_package, 'feedback':w.feedback, 'metrics':w.metrics, 'recipients':w.recipients,
-            'discover':w.discover, 'resource':w.resource, 'composition':w.composition, 'adopt':w.adopt})
-        if action not in methods or not isinstance(data,dict) or any(k.startswith('_') for k in data): raise ValueError('草稿操作无效')
-        import inspect
-        method=methods[action]
-        try: inspect.signature(method).bind(owner,**data)
-        except TypeError as exc: raise ValueError('草稿操作参数无效') from exc
-        return method(owner,**data)
+        return dispatch_skill_action(self, owner, action, data)

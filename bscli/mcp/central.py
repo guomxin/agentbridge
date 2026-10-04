@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bscli.core.skill_quality import SkillAuthoringData
+from bscli.core.skill_contracts import SkillAuthoringData
 
 import asyncio
 from functools import wraps

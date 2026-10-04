@@ -10,8 +10,9 @@
     "54f68a01474d",
     "e6cf0f1c9b7d",
     "1d298fcceae4",
-    "8687c1a712db"
+    "8687c1a712db",
+    "1422644d87ca"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Central storage assembly preserves constructor contracts and schema. Session/task startup maintenance keeps existing repair SQL and atomic data repair order. Source catalog initialization is reused without caching grants, configurations or key protectors. Persisted data and production configuration remain unchanged; no database migration is required."
+  "reason": "Skill request contracts, declared dispatch, durable queue and model executor preserve public schemas, action arguments, existing SQL, lease and retry rules, and the atomic generated draft/job transaction. Persisted data and production configuration remain unchanged; no database migration is required."
 }
