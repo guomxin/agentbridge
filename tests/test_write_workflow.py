@@ -11,11 +11,30 @@ from bscli.adapters import smartlight, taihua
 from bscli.core import write_catalog
 from bscli.core.planning_policy import planning_descriptor
 from bscli.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
+from bscli.core.write_workflow import WriteWorkflowDefinition
 
 
 WORKFLOW = taihua.TAIHUA_WORK_LOG_CREATE_WORKFLOW
 CONTRACT = json.loads((Path(__file__).parent / "fixtures/taihua_work_log_contract.json").read_text(encoding="utf-8"))
 SMARTLIGHT_CONTRACT = json.loads((Path(__file__).parent / "fixtures/smartlight_alarm_remark_contract.json").read_text(encoding="utf-8"))
+SMARTLIGHT_ACTION_CONTRACT = json.loads((Path(__file__).parent / "fixtures/smartlight_alarm_actions_contract.json").read_text(encoding="utf-8"))
+ACTION_CONTRACTS = SMARTLIGHT_ACTION_CONTRACT["workflows"]
+DECLARATIONS = [
+    (taihua, "TAIHUA_WORK_LOG_CREATE_WORKFLOW"),
+    (smartlight, "SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW"),
+    *[(smartlight, item["declaration"]) for item in ACTION_CONTRACTS],
+]
+
+
+def _action_definition(contract):
+    expected = deepcopy(contract["definition"])
+    expected["context_fields"] = tuple(expected["context_fields"])
+    for field in ("contract_error", "outcome_error"):
+        qualified_name = expected[field]
+        error = getattr(smartlight, qualified_name.rsplit(".", 1)[1])
+        assert f"{error.__module__}.{error.__qualname__}" == qualified_name
+        expected[field] = error
+    return expected
 
 
 def test_taihua_capabilities_and_field_schema_match_pre_refactor_contract():
@@ -49,10 +68,7 @@ def test_taihua_legacy_catalog_and_scopes_preserve_runtime_binding_contract():
     assert WORKFLOW.commit_function is taihua.commit_taihua_work_log_create
 
 
-@pytest.mark.parametrize("adapter, declaration_name", [
-    (taihua, "TAIHUA_WORK_LOG_CREATE_WORKFLOW"),
-    (smartlight, "SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW"),
-])
+@pytest.mark.parametrize("adapter, declaration_name", DECLARATIONS)
 def test_legacy_function_bridge_remains_late_bound_for_fault_injection(adapter, declaration_name):
     declaration = getattr(adapter, declaration_name)
     definition = declaration.legacy_definition()
@@ -203,3 +219,131 @@ def test_smartlight_schema_projections_cannot_mutate_target_context_or_other_wor
 def test_smartlight_invalid_context_declarations_are_rejected(context_fields):
     with pytest.raises(ValueError):
         replace(smartlight.SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW, context_fields=context_fields)
+
+
+@pytest.mark.parametrize("contract", ACTION_CONTRACTS, ids=lambda item: item["declaration"])
+def test_smartlight_action_capabilities_and_no_field_card_match_frozen_contract(contract):
+    declaration = getattr(smartlight, contract["declaration"])
+    registry = smartlight.build_smartlight_capability_registry()
+    assert [registry.get(spec["name"]).to_dict() for spec in contract["capabilities"]] == contract["capabilities"]
+    assert [spec.to_dict() for spec in declaration.capability_specs()] == contract["capabilities"]
+    assert declaration.context_fields == ("alarm_id",)
+    assert declaration.field_schema is None
+    assert declaration.field_message is None
+    definition = declaration.legacy_definition()
+    assert "field_schema" in definition and definition["field_schema"] is None
+    assert "field_message" not in definition
+    assert definition == _action_definition(contract)
+    assert list(definition) == list(contract["definition"])
+    assert declaration.prepare_function is getattr(smartlight, contract["definition"]["prepare_function"])
+    assert declaration.commit_function is getattr(smartlight, contract["definition"]["commit_function"])
+
+
+@pytest.mark.parametrize("contract", ACTION_CONTRACTS, ids=lambda item: item["declaration"])
+def test_smartlight_action_catalog_permissions_scopes_and_planning_keep_frozen_contract(contract):
+    declaration = getattr(smartlight, contract["declaration"])
+    prepare_name, commit_name = [spec["name"] for spec in contract["capabilities"]]
+    expected = _action_definition(contract)
+    assert write_catalog._TRUSTED_WRITE_DEFINITIONS[prepare_name] == expected
+    assert write_catalog._TRUSTED_WRITE_COMMITS[commit_name] == (prepare_name, expected)
+    assert "field_message" not in write_catalog._TRUSTED_WRITE_DEFINITIONS[prepare_name]
+    assert declaration.scope_bindings() == {
+        name: frozenset(scopes) for name, scopes in contract["scopes"].items()
+    }
+    for name, scopes in contract["scopes"].items():
+        assert write_catalog.capability_required_scopes(name) == frozenset(scopes)
+        assert CAPABILITY_PERMISSIONS[name] == contract["permissions"][name]
+        assert planning_descriptor(name) == contract["planning"][name]
+    assert PERMISSIONS[contract["permission"]["id"]] == contract["permission"]
+
+
+@pytest.mark.parametrize("contract", ACTION_CONTRACTS, ids=lambda item: item["declaration"])
+def test_smartlight_action_source_and_projection_mutations_are_isolated(contract):
+    declaration = getattr(smartlight, contract["declaration"])
+    source_prepare, source_commit = declaration.capability_specs()
+    isolated = replace(declaration, prepare_spec=source_prepare, commit_spec=source_commit)
+    source_prepare.input_schema["properties"]["alarm_id"]["type"] = "array"
+    source_prepare.input_schema["required"].clear()
+    source_commit.input_schema["properties"]["authorization_id"]["type"] = "array"
+    source_commit.output_schema["type"] = "array"
+
+    projected_prepare, projected_commit = isolated.capability_specs()
+    projected_prepare.input_schema["required"].clear()
+    projected_prepare.output_schema["type"] = "array"
+    projected_commit.input_schema["properties"]["authorization_id"]["type"] = "array"
+    projected_commit.input_schema["required"].clear()
+    projected_definition = isolated.legacy_definition()
+    projected_definition["field_schema"] = {"fields": []}
+    projected_definition["field_message"] = "projection only"
+    projected_definition["context_fields"] = ()
+    isolated.scope_bindings().clear()
+
+    assert [spec.to_dict() for spec in isolated.capability_specs()] == contract["capabilities"]
+    assert isolated.legacy_definition() == _action_definition(contract)
+    assert isolated.scope_bindings() == {
+        name: frozenset(scopes) for name, scopes in contract["scopes"].items()
+    }
+    for other_contract in ACTION_CONTRACTS:
+        other = getattr(smartlight, other_contract["declaration"])
+        assert [spec.to_dict() for spec in other.capability_specs()] == other_contract["capabilities"]
+        assert other.legacy_definition() == _action_definition(other_contract)
+        prepare_name = other_contract["capabilities"][0]["name"]
+        assert write_catalog._TRUSTED_WRITE_DEFINITIONS[prepare_name] == _action_definition(other_contract)
+    assert smartlight.SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA == contract["capabilities"][0]["input_schema"]
+    assert smartlight.SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA == contract["capabilities"][1]["input_schema"]
+    assert [spec.to_dict() for spec in WORKFLOW.capability_specs()] == CONTRACT["capabilities"]
+    assert WORKFLOW.legacy_definition()["field_schema"] == CONTRACT["field_schema"]
+    remark = smartlight.SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW
+    assert [spec.to_dict() for spec in remark.capability_specs()] == SMARTLIGHT_CONTRACT["capabilities"]
+    assert remark.legacy_definition()["field_schema"] == SMARTLIGHT_CONTRACT["field_schema"]
+
+
+@pytest.mark.parametrize("adapter, declaration_name", DECLARATIONS)
+def test_write_declaration_positional_arguments_retain_message_order(adapter, declaration_name):
+    declaration = getattr(adapter, declaration_name)
+    positional = WriteWorkflowDefinition(
+        declaration.prepare_spec, declaration.commit_spec, declaration.required_scopes,
+        declaration.field_schema, declaration.context_fields, declaration.prepare_function,
+        declaration.commit_function, declaration.contract_error, declaration.outcome_error,
+        declaration.field_message, declaration.authorization_message,
+    )
+    assert positional.legacy_definition() == declaration.legacy_definition()
+    assert positional.field_message == declaration.field_message
+    assert positional.authorization_message == declaration.authorization_message
+
+
+@pytest.mark.parametrize("adapter, declaration_name", DECLARATIONS[:2])
+@pytest.mark.parametrize("field_message", [None, "", " \t", 7])
+def test_field_card_declarations_require_a_nonempty_field_message(adapter, declaration_name, field_message):
+    with pytest.raises(ValueError):
+        replace(getattr(adapter, declaration_name), field_message=field_message)
+
+
+def test_empty_schema_object_is_not_treated_as_absent_field_card():
+    with pytest.raises(ValueError):
+        replace(WORKFLOW, field_schema={}, field_message=None)
+
+
+def test_no_field_card_can_preserve_an_explicit_nonempty_hint():
+    declaration = getattr(smartlight, ACTION_CONTRACTS[0]["declaration"])
+    explicit = replace(declaration, field_message="Explicit legacy field hint.")
+    definition = explicit.legacy_definition()
+    assert definition["field_schema"] is None
+    assert definition["field_message"] == "Explicit legacy field hint."
+    assert definition["authorization_message"] == declaration.authorization_message
+    assert list(definition)[-2:] == ["field_message", "authorization_message"]
+    assert "field_message" not in declaration.legacy_definition()
+
+
+@pytest.mark.parametrize("contract", ACTION_CONTRACTS, ids=lambda item: item["declaration"])
+@pytest.mark.parametrize("field_message", ["", " \t", 7])
+def test_no_field_card_declarations_reject_invalid_explicit_field_messages(contract, field_message):
+    with pytest.raises(ValueError):
+        replace(getattr(smartlight, contract["declaration"]), field_message=field_message)
+
+
+@pytest.mark.parametrize("adapter, declaration_name", DECLARATIONS)
+@pytest.mark.parametrize("authorization_message", [None, "", " \t", 7])
+def test_every_write_declaration_requires_nonempty_authorization_message(adapter, declaration_name, authorization_message):
+    with pytest.raises(ValueError):
+        replace(getattr(adapter, declaration_name), authorization_message=authorization_message)

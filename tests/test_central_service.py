@@ -34,11 +34,21 @@ from bscli.core.central_service import (
     session_response,
 )
 from bscli.core.interactions import InteractionNotFound
+from bscli.core.operations import OperationStore
 from bscli.core.session_secrets import SessionStateAccessDenied
 from bscli.core.tasks import TaskIntegrityError, TaskNotFound
+from tests.test_smartlight_adapter import FakeSmartlightWorker
 
 
 BASE_URL = "http://oa.example.test/seeyon/main.do?method=main"
+SMARTLIGHT_ACTION_CASES = (
+    ("smartlight.alarm.work_area.submit", "/rHisHitchAlarm/updateIsSubmitWorkArea",
+     "isSubmitWorkArea", 1),
+    ("smartlight.alarm.work_area.revoke", "/rHisHitchAlarm/cancleSubmitWorkArea",
+     "isSubmitWorkArea", 0),
+    ("smartlight.alarm.dispose", "/rHisHitchAlarm/setRtuConductStatusDisposed",
+     "conductStatue", 3),
+)
 
 
 class CentralCapabilityServiceTests(unittest.TestCase):
@@ -675,6 +685,148 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 service.write_authorizations.get(authorization_id)["state"],
                 "consumed",
             )
+
+    def test_smartlight_actions_authorize_frozen_targets_once_without_field_cards(self):
+        for capability, path, _, _ in SMARTLIGHT_ACTION_CASES:
+            with self.subTest(capability=capability), TemporaryDirectory() as tmp:
+                service, worker = self._smartlight_action_service(tmp, capability)
+                prepared = service.invoke(
+                    user_subject="user-a", capability_name=capability + ".prepare",
+                    arguments={"alarm_id": "alarm-1"},
+                )
+                self.assertEqual(prepared["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+                self.assertNotIn("inputSubmissionId", prepared["nextAction"])
+                authorization_id = prepared["nextAction"]["authorizationId"]
+                authorization = service.write_authorizations.get(
+                    authorization_id, include_plan=True,
+                )
+                self.assertEqual(authorization["plan"]["exact_input"], {"alarm_id": "alarm-1"})
+                self.assertEqual(authorization["plan"]["resume_arguments"], {"alarm_id": "alarm-1"})
+                self.assertEqual(authorization["plan"]["target"]["alarmId"], "alarm-1")
+                self.assertEqual(authorization["plan"]["target"]["rtuId"], "rtu-1")
+                pending = service.invoke(
+                    user_subject="user-a", capability_name=capability,
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(pending["error"]["code"], "WRITE_AUTHORIZATION_REQUIRED")
+                self.assertEqual(self._smartlight_action_writes(worker, path), [])
+
+                self._approve_smartlight_action(service, authorization_id)
+                with self.assertRaisesRegex(ValueError, "unexpected capability input: alarm_id"):
+                    service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments={"authorization_id": authorization_id, "alarm_id": "alarm-2"},
+                    )
+                self.assertEqual(self._smartlight_action_writes(worker, path), [])
+                committed = service.invoke(
+                    user_subject="user-a", capability_name=capability,
+                    arguments={"authorization_id": authorization_id},
+                )
+                repeated = service.invoke(
+                    user_subject="user-a", capability_name=capability,
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(committed["status"], "succeeded")
+                self.assertEqual(committed["result"]["alarm"]["alarmId"], "alarm-1")
+                self.assertTrue(committed["result"]["verification"]["matched"])
+                self.assertEqual(repeated["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+                self.assertEqual(len(self._smartlight_action_writes(worker, path)), 1)
+                self.assertEqual(
+                    service.write_authorizations.get(authorization_id)["state"], "consumed",
+                )
+
+    def test_smartlight_actions_already_completed_consume_authorization_without_writing(self):
+        for capability, path, field, reached in SMARTLIGHT_ACTION_CASES:
+            with self.subTest(capability=capability), TemporaryDirectory() as tmp:
+                service, worker = self._smartlight_action_service(tmp, capability)
+                prepared = service.invoke(
+                    user_subject="user-a", capability_name=capability + ".prepare",
+                    arguments={"alarm_id": "alarm-1"},
+                )
+                authorization_id = prepared["nextAction"]["authorizationId"]
+                self._approve_smartlight_action(service, authorization_id)
+                worker.alarm_record[field] = reached
+                completed = service.invoke(
+                    user_subject="user-a", capability_name=capability,
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(completed["status"], "succeeded")
+                self.assertEqual(completed["result"]["status"], "already_completed")
+                self.assertEqual(completed["result"]["downstream"]["affected"], 0)
+                self.assertEqual(self._smartlight_action_writes(worker, path), [])
+                self.assertEqual(
+                    service.write_authorizations.get(authorization_id)["state"], "consumed",
+                )
+
+    def test_smartlight_action_unknown_results_are_durable_and_never_replayed(self):
+        for capability, path, _, _ in SMARTLIGHT_ACTION_CASES:
+            for phase in ("submit", "readback"):
+                with self.subTest(capability=capability, phase=phase), TemporaryDirectory() as tmp:
+                    service, worker = self._smartlight_action_service(tmp, capability)
+                    prepared = service.invoke(
+                        user_subject="user-a", capability_name=capability + ".prepare",
+                        arguments={"alarm_id": "alarm-1"},
+                    )
+                    authorization_id = prepared["nextAction"]["authorizationId"]
+                    self._approve_smartlight_action(service, authorization_id)
+                    if phase == "submit":
+                        worker.alarm_action_request_error = ConnectionError("simulated lost response")
+                    else:
+                        worker.fail_alarm_readback_after_action = True
+                    arguments = {"authorization_id": authorization_id}
+                    unknown = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments=arguments, idempotency_key="action-unknown",
+                    )
+                    same_request = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments=arguments, idempotency_key="action-unknown",
+                    )
+                    another_request = service.invoke(
+                        user_subject="user-a", capability_name=capability,
+                        arguments=arguments, idempotency_key="action-new-request",
+                    )
+                    self.assertEqual(unknown["status"], "unknown")
+                    self.assertEqual(unknown["error"]["code"], "RESULT_UNKNOWN")
+                    self.assertEqual(same_request["operationId"], unknown["operationId"])
+                    self.assertEqual(same_request["status"], "unknown")
+                    self.assertTrue(same_request["reused"])
+                    self.assertEqual(another_request["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+                    self.assertEqual(len(self._smartlight_action_writes(worker, path)), 1)
+                    persisted = OperationStore(service.operations.db_path).get(unknown["operationId"])
+                    self.assertEqual(persisted["status"], "unknown")
+                    consumed = service.write_authorizations.get(authorization_id)
+                    self.assertEqual(consumed["state"], "consumed")
+                    self.assertEqual(consumed["commit_operation_id"], unknown["operationId"])
+
+    @staticmethod
+    def _smartlight_action_service(tmp, capability):
+        worker = FakeSmartlightWorker(authenticated=True)
+        if capability == "smartlight.alarm.work_area.revoke":
+            worker.alarm_record["isSubmitWorkArea"] = 1
+        service = authorized_service(
+            home=Path(tmp), base_url=BASE_URL,
+            smartlight_base_url="http://smartlight.example.test/smartlight",
+            smartlight_allow_insecure_http=True,
+        )
+        service._worker_factories_by_system["smartlight"] = lambda *_: worker
+        session = service.sessions.get_or_create(
+            user_subject="user-a", system_id="smartlight", expected_principal_ref="无为",
+        )
+        service.sessions.activate(session["session_id"], observed_principal_ref="无为")
+        service.session_states.save(session["session_id"], worker.capture_session_state())
+        return service, worker
+
+    @staticmethod
+    def _smartlight_action_writes(worker, path):
+        return [request for request in worker.api_requests if request["path"].endswith(path)]
+
+    @staticmethod
+    def _approve_smartlight_action(service, authorization_id):
+        csrf = service.write_authorizations.issue_csrf(authorization_id)
+        service.write_authorizations.decide(
+            authorization_id, decision="approve", csrf_token=csrf, csrf_cookie=csrf,
+        )
 
     def test_submit_and_leave_capabilities_have_separate_scope_policies(self):
         self.assertEqual(

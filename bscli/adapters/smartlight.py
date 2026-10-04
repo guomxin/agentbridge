@@ -4650,85 +4650,9 @@ def build_smartlight_capability_registry() -> CapabilityRegistry:
             workflow="smartlight-report-export-v1",
         ),
         *SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.capability_specs(),
-        CapabilitySpec(
-            name=SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Read one exact RTU alarm, validate work-area eligibility, freeze "
-                "the target state, and require trusted authorization without a "
-                "field card. This step does not modify Smartlight."
-            ),
-            input_schema=SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-alarm-work-area-submit-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one approved authorization, submit the exact RTU alarm "
-                "to its work area, and verify isSubmitWorkArea by readback."
-            ),
-            input_schema=SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-alarm-work-area-submit-commit-v1",
-        ),
-        CapabilitySpec(
-            name=SMARTLIGHT_ALARM_WORK_AREA_REVOKE_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Read one exact submitted RTU alarm, freeze its work-area state, "
-                "and require trusted authorization without a field card."
-            ),
-            input_schema=SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-alarm-work-area-revoke-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=SMARTLIGHT_ALARM_WORK_AREA_REVOKE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one approved authorization, revoke the exact RTU "
-                "alarm's work-area submission, and verify the result by readback."
-            ),
-            input_schema=SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-alarm-work-area-revoke-commit-v1",
-        ),
-        CapabilitySpec(
-            name=SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Read one exact RTU alarm, validate that it is disposable, freeze "
-                "the target state, and require explicit irreversible authorization."
-            ),
-            input_schema=SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-rtu-alarm-dispose-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume one approved authorization, mark the exact RTU alarm "
-                "as disposed, and require authoritative state-3 readback."
-            ),
-            input_schema=SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="controlled_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-rtu-alarm-dispose-commit-v1",
-        ),
+        *SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW.capability_specs(),
+        *SMARTLIGHT_ALARM_WORK_AREA_REVOKE_WORKFLOW.capability_specs(),
+        *SMARTLIGHT_RTU_ALARM_DISPOSE_WORKFLOW.capability_specs(),
     )
     for spec in specs:
         registry.register(spec)
@@ -6314,4 +6238,122 @@ SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW = WriteWorkflowDefinition(
     outcome_error=SmartlightAlarmRemarkOutcomeUnknown,
     field_message="请在可信字段卡中核对告警备注。",
     authorization_message="照明告警备注修改计划需要在可信授权卡中确认。",
+)
+
+
+SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Read one exact RTU alarm, validate work-area eligibility, freeze "
+            "the target state, and require trusted authorization without a "
+            "field card. This step does not modify Smartlight."
+        ),
+        input_schema=SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="reversible_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-alarm-work-area-submit-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume one approved authorization, submit the exact RTU alarm "
+            "to its work area, and verify isSubmitWorkArea by readback."
+        ),
+        input_schema=SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="reversible_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-alarm-work-area-submit-commit-v1",
+    ),
+    required_scopes=frozenset({"smartlight:write:alarm_work_area_submit"}),
+    field_schema=None,
+    context_fields=("alarm_id",),
+    prepare_function=prepare_smartlight_alarm_work_area_submit,
+    commit_function=commit_smartlight_alarm_work_area_submit,
+    contract_error=SmartlightAlarmActionContractMismatch,
+    outcome_error=SmartlightAlarmActionOutcomeUnknown,
+    field_message=None,
+    authorization_message="请在可信授权卡中确认把该 RTU 告警提交工区。",
+)
+
+
+SMARTLIGHT_ALARM_WORK_AREA_REVOKE_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=SMARTLIGHT_ALARM_WORK_AREA_REVOKE_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Read one exact submitted RTU alarm, freeze its work-area state, "
+            "and require trusted authorization without a field card."
+        ),
+        input_schema=SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="reversible_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-alarm-work-area-revoke-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=SMARTLIGHT_ALARM_WORK_AREA_REVOKE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume one approved authorization, revoke the exact RTU "
+            "alarm's work-area submission, and verify the result by readback."
+        ),
+        input_schema=SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="reversible_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-alarm-work-area-revoke-commit-v1",
+    ),
+    required_scopes=frozenset({"smartlight:write:alarm_work_area_revoke"}),
+    field_schema=None,
+    context_fields=("alarm_id",),
+    prepare_function=prepare_smartlight_alarm_work_area_revoke,
+    commit_function=commit_smartlight_alarm_work_area_revoke,
+    contract_error=SmartlightAlarmActionContractMismatch,
+    outcome_error=SmartlightAlarmActionOutcomeUnknown,
+    field_message=None,
+    authorization_message="请在可信授权卡中确认撤回该 RTU 告警的工区提交。",
+)
+
+
+SMARTLIGHT_RTU_ALARM_DISPOSE_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Read one exact RTU alarm, validate that it is disposable, freeze "
+            "the target state, and require explicit irreversible authorization."
+        ),
+        input_schema=SMARTLIGHT_ALARM_ACTION_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-rtu-alarm-dispose-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume one approved authorization, mark the exact RTU alarm "
+            "as disposed, and require authoritative state-3 readback."
+        ),
+        input_schema=SMARTLIGHT_ALARM_ACTION_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="controlled_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-rtu-alarm-dispose-commit-v1",
+    ),
+    required_scopes=frozenset({"smartlight:write:alarm_disposition"}),
+    field_schema=None,
+    context_fields=("alarm_id",),
+    prepare_function=prepare_smartlight_rtu_alarm_dispose,
+    commit_function=commit_smartlight_rtu_alarm_dispose,
+    contract_error=SmartlightAlarmActionContractMismatch,
+    outcome_error=SmartlightAlarmActionOutcomeUnknown,
+    field_message=None,
+    authorization_message="该 RTU 告警处置不可撤销，请在可信授权卡中明确确认。",
 )

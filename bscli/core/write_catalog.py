@@ -16,14 +16,17 @@ from bscli.adapters.taihua import (
 from bscli.adapters.smartlight import (
     SMARTLIGHT_ALARM_WORK_AREA_REVOKE_CAPABILITY,
     SMARTLIGHT_ALARM_WORK_AREA_REVOKE_PREPARE_CAPABILITY,
+    SMARTLIGHT_ALARM_WORK_AREA_REVOKE_WORKFLOW,
     SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_CAPABILITY,
     SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY,
+    SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW,
     SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA,
     SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY,
     SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY,
     SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW,
     SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY,
     SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY,
+    SMARTLIGHT_RTU_ALARM_DISPOSE_WORKFLOW,
     SmartlightAlarmActionContractMismatch,
     SmartlightAlarmActionOutcomeUnknown,
     SmartlightAlarmRemarkContractMismatch,
@@ -523,36 +526,9 @@ _TRUSTED_WRITE_DEFINITIONS.update(
     {
         TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY: TAIHUA_WORK_LOG_CREATE_WORKFLOW.legacy_definition(),
         SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY: SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.legacy_definition(),
-        SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY: {
-            "commit_capability": SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_CAPABILITY,
-            "field_schema": None,
-            "context_fields": ("alarm_id",),
-            "prepare_function": "prepare_smartlight_alarm_work_area_submit",
-            "commit_function": "commit_smartlight_alarm_work_area_submit",
-            "contract_error": SmartlightAlarmActionContractMismatch,
-            "outcome_error": SmartlightAlarmActionOutcomeUnknown,
-            "authorization_message": "请在可信授权卡中确认把该 RTU 告警提交工区。",
-        },
-        SMARTLIGHT_ALARM_WORK_AREA_REVOKE_PREPARE_CAPABILITY: {
-            "commit_capability": SMARTLIGHT_ALARM_WORK_AREA_REVOKE_CAPABILITY,
-            "field_schema": None,
-            "context_fields": ("alarm_id",),
-            "prepare_function": "prepare_smartlight_alarm_work_area_revoke",
-            "commit_function": "commit_smartlight_alarm_work_area_revoke",
-            "contract_error": SmartlightAlarmActionContractMismatch,
-            "outcome_error": SmartlightAlarmActionOutcomeUnknown,
-            "authorization_message": "请在可信授权卡中确认撤回该 RTU 告警的工区提交。",
-        },
-        SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY: {
-            "commit_capability": SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY,
-            "field_schema": None,
-            "context_fields": ("alarm_id",),
-            "prepare_function": "prepare_smartlight_rtu_alarm_dispose",
-            "commit_function": "commit_smartlight_rtu_alarm_dispose",
-            "contract_error": SmartlightAlarmActionContractMismatch,
-            "outcome_error": SmartlightAlarmActionOutcomeUnknown,
-            "authorization_message": "该 RTU 告警处置不可撤销，请在可信授权卡中明确确认。",
-        },
+        SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY: SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW.legacy_definition(),
+        SMARTLIGHT_ALARM_WORK_AREA_REVOKE_PREPARE_CAPABILITY: SMARTLIGHT_ALARM_WORK_AREA_REVOKE_WORKFLOW.legacy_definition(),
+        SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY: SMARTLIGHT_RTU_ALARM_DISPOSE_WORKFLOW.legacy_definition(),
     }
 )
 
@@ -629,24 +605,9 @@ _CAPABILITY_SCOPES = {
     WORKFLOW_REVOKE_CAPABILITY: frozenset({"oa:write:revoke"}),
     **TAIHUA_WORK_LOG_CREATE_WORKFLOW.scope_bindings(),
     **SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.scope_bindings(),
-    SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_work_area_submit"}
-    ),
-    SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_work_area_submit"}
-    ),
-    SMARTLIGHT_ALARM_WORK_AREA_REVOKE_PREPARE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_work_area_revoke"}
-    ),
-    SMARTLIGHT_ALARM_WORK_AREA_REVOKE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_work_area_revoke"}
-    ),
-    SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_disposition"}
-    ),
-    SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_disposition"}
-    ),
+    **SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW.scope_bindings(),
+    **SMARTLIGHT_ALARM_WORK_AREA_REVOKE_WORKFLOW.scope_bindings(),
+    **SMARTLIGHT_RTU_ALARM_DISPOSE_WORKFLOW.scope_bindings(),
 }
 
 

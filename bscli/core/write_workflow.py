@@ -45,7 +45,7 @@ class WriteWorkflowDefinition:
     commit_function: CommitHandler
     contract_error: type[Exception]
     outcome_error: type[Exception]
-    field_message: str
+    field_message: str | None
     authorization_message: str
 
     def __post_init__(self) -> None:
@@ -76,8 +76,11 @@ class WriteWorkflowDefinition:
         for error in (self.contract_error, self.outcome_error):
             if not isinstance(error, type) or not issubclass(error, Exception):
                 raise TypeError("write errors must be Exception classes")
+        messages = [self.authorization_message]
+        if self.field_schema is not None or self.field_message is not None:
+            messages.append(self.field_message)
         if any(not isinstance(message, str) or not message.strip()
-               for message in (self.field_message, self.authorization_message)):
+               for message in messages):
             raise ValueError("write workflow messages must be nonempty")
         # Adapter schema constants stay source-compatible; consumers cannot mutate
         # them through a descriptor or one of its legacy projections.
@@ -98,7 +101,7 @@ class WriteWorkflowDefinition:
             "commit_function": _binding_name(self.commit_function),
             "contract_error": self.contract_error,
             "outcome_error": self.outcome_error,
-            "field_message": self.field_message,
+            **({"field_message": self.field_message} if self.field_message is not None else {}),
             "authorization_message": self.authorization_message,
         }
 

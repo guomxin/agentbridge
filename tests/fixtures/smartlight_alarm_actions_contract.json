@@ -1,0 +1,305 @@
+{
+  "baseline": "dcf68ffca12d8ed01c082ac0d979cef6a9192e87",
+  "workflows": [
+    {
+      "declaration": "SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_WORKFLOW",
+      "capabilities": [
+        {
+          "name": "smartlight.alarm.work_area.submit.prepare",
+          "version": "0.1.0",
+          "description": "Read one exact RTU alarm, validate work-area eligibility, freeze the target state, and require trusted authorization without a field card. This step does not modify Smartlight.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "alarm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alarm_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "reversible_write",
+          "adapter": "smartlight-central",
+          "workflow": "smartlight-alarm-work-area-submit-prepare-v1",
+          "system": "smartlight"
+        },
+        {
+          "name": "smartlight.alarm.work_area.submit",
+          "version": "0.1.0",
+          "description": "Consume one approved authorization, submit the exact RTU alarm to its work area, and verify isSubmitWorkArea by readback.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "authorization_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "authorization_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "reversible_write",
+          "adapter": "smartlight-central",
+          "workflow": "smartlight-alarm-work-area-submit-commit-v1",
+          "system": "smartlight"
+        }
+      ],
+      "definition": {
+        "commit_capability": "smartlight.alarm.work_area.submit",
+        "field_schema": null,
+        "context_fields": [
+          "alarm_id"
+        ],
+        "prepare_function": "prepare_smartlight_alarm_work_area_submit",
+        "commit_function": "commit_smartlight_alarm_work_area_submit",
+        "contract_error": "bscli.adapters.smartlight.SmartlightAlarmActionContractMismatch",
+        "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
+        "authorization_message": "请在可信授权卡中确认把该 RTU 告警提交工区。"
+      },
+      "scopes": {
+        "smartlight.alarm.work_area.submit.prepare": [
+          "smartlight:write:alarm_work_area_submit"
+        ],
+        "smartlight.alarm.work_area.submit": [
+          "smartlight:write:alarm_work_area_submit"
+        ]
+      },
+      "permissions": {
+        "smartlight.alarm.work_area.submit.prepare": "smartlight.alarm.work_area.submit",
+        "smartlight.alarm.work_area.submit": "smartlight.alarm.work_area.submit"
+      },
+      "permission": {
+        "id": "smartlight.alarm.work_area.submit",
+        "label": "告警提交工区",
+        "capabilities": [
+          "smartlight.alarm.work_area.submit",
+          "smartlight.alarm.work_area.submit.prepare"
+        ],
+        "tools": [
+          "smartlight_alarm_work_area_submit_prepare"
+        ],
+        "legacy_scopes": [
+          "smartlight:write:alarm_work_area_submit"
+        ],
+        "dependencies": "写入核对目标；查询告警另需 smartlight.alarm.read",
+        "resource": "绑定下游账号实际可见范围",
+        "private_tools": [
+          "smartlight_alarm_work_area_submit"
+        ]
+      },
+      "planning": {
+        "smartlight.alarm.work_area.submit.prepare": null,
+        "smartlight.alarm.work_area.submit": null
+      }
+    },
+    {
+      "declaration": "SMARTLIGHT_ALARM_WORK_AREA_REVOKE_WORKFLOW",
+      "capabilities": [
+        {
+          "name": "smartlight.alarm.work_area.revoke.prepare",
+          "version": "0.1.0",
+          "description": "Read one exact submitted RTU alarm, freeze its work-area state, and require trusted authorization without a field card.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "alarm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alarm_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "reversible_write",
+          "adapter": "smartlight-central",
+          "workflow": "smartlight-alarm-work-area-revoke-prepare-v1",
+          "system": "smartlight"
+        },
+        {
+          "name": "smartlight.alarm.work_area.revoke",
+          "version": "0.1.0",
+          "description": "Consume one approved authorization, revoke the exact RTU alarm's work-area submission, and verify the result by readback.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "authorization_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "authorization_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "reversible_write",
+          "adapter": "smartlight-central",
+          "workflow": "smartlight-alarm-work-area-revoke-commit-v1",
+          "system": "smartlight"
+        }
+      ],
+      "definition": {
+        "commit_capability": "smartlight.alarm.work_area.revoke",
+        "field_schema": null,
+        "context_fields": [
+          "alarm_id"
+        ],
+        "prepare_function": "prepare_smartlight_alarm_work_area_revoke",
+        "commit_function": "commit_smartlight_alarm_work_area_revoke",
+        "contract_error": "bscli.adapters.smartlight.SmartlightAlarmActionContractMismatch",
+        "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
+        "authorization_message": "请在可信授权卡中确认撤回该 RTU 告警的工区提交。"
+      },
+      "scopes": {
+        "smartlight.alarm.work_area.revoke.prepare": [
+          "smartlight:write:alarm_work_area_revoke"
+        ],
+        "smartlight.alarm.work_area.revoke": [
+          "smartlight:write:alarm_work_area_revoke"
+        ]
+      },
+      "permissions": {
+        "smartlight.alarm.work_area.revoke.prepare": "smartlight.alarm.work_area.revoke",
+        "smartlight.alarm.work_area.revoke": "smartlight.alarm.work_area.revoke"
+      },
+      "permission": {
+        "id": "smartlight.alarm.work_area.revoke",
+        "label": "告警工区撤回",
+        "capabilities": [
+          "smartlight.alarm.work_area.revoke",
+          "smartlight.alarm.work_area.revoke.prepare"
+        ],
+        "tools": [
+          "smartlight_alarm_work_area_revoke_prepare"
+        ],
+        "legacy_scopes": [
+          "smartlight:write:alarm_work_area_revoke"
+        ],
+        "dependencies": "写入核对目标；查询告警另需 smartlight.alarm.read",
+        "resource": "绑定下游账号实际可见范围",
+        "private_tools": [
+          "smartlight_alarm_work_area_revoke"
+        ]
+      },
+      "planning": {
+        "smartlight.alarm.work_area.revoke.prepare": null,
+        "smartlight.alarm.work_area.revoke": null
+      }
+    },
+    {
+      "declaration": "SMARTLIGHT_RTU_ALARM_DISPOSE_WORKFLOW",
+      "capabilities": [
+        {
+          "name": "smartlight.alarm.dispose.prepare",
+          "version": "0.1.0",
+          "description": "Read one exact RTU alarm, validate that it is disposable, freeze the target state, and require explicit irreversible authorization.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "alarm_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alarm_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "smartlight-central",
+          "workflow": "smartlight-rtu-alarm-dispose-prepare-v1",
+          "system": "smartlight"
+        },
+        {
+          "name": "smartlight.alarm.dispose",
+          "version": "0.1.0",
+          "description": "Consume one approved authorization, mark the exact RTU alarm as disposed, and require authoritative state-3 readback.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "authorization_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "authorization_id"
+            ],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "effect": "controlled_write",
+          "adapter": "smartlight-central",
+          "workflow": "smartlight-rtu-alarm-dispose-commit-v1",
+          "system": "smartlight"
+        }
+      ],
+      "definition": {
+        "commit_capability": "smartlight.alarm.dispose",
+        "field_schema": null,
+        "context_fields": [
+          "alarm_id"
+        ],
+        "prepare_function": "prepare_smartlight_rtu_alarm_dispose",
+        "commit_function": "commit_smartlight_rtu_alarm_dispose",
+        "contract_error": "bscli.adapters.smartlight.SmartlightAlarmActionContractMismatch",
+        "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
+        "authorization_message": "该 RTU 告警处置不可撤销，请在可信授权卡中明确确认。"
+      },
+      "scopes": {
+        "smartlight.alarm.dispose.prepare": [
+          "smartlight:write:alarm_disposition"
+        ],
+        "smartlight.alarm.dispose": [
+          "smartlight:write:alarm_disposition"
+        ]
+      },
+      "permissions": {
+        "smartlight.alarm.dispose.prepare": "smartlight.alarm.dispose",
+        "smartlight.alarm.dispose": "smartlight.alarm.dispose"
+      },
+      "permission": {
+        "id": "smartlight.alarm.dispose",
+        "label": "RTU告警处置",
+        "capabilities": [
+          "smartlight.alarm.dispose",
+          "smartlight.alarm.dispose.prepare"
+        ],
+        "tools": [
+          "smartlight_rtu_alarm_dispose_prepare"
+        ],
+        "legacy_scopes": [
+          "smartlight:write:alarm_disposition"
+        ],
+        "dependencies": "写入核对目标；查询告警另需 smartlight.alarm.read",
+        "resource": "绑定下游账号实际可见范围",
+        "private_tools": [
+          "smartlight_rtu_alarm_dispose"
+        ]
+      },
+      "planning": {
+        "smartlight.alarm.dispose.prepare": null,
+        "smartlight.alarm.dispose": null
+      }
+    }
+  ]
+}

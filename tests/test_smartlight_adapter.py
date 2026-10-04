@@ -1042,6 +1042,14 @@ class SmartlightAdapterTests(unittest.TestCase):
         )
         self.assertFalse(revoked["alarm"]["workAreaSubmitted"])
         self.assertEqual(worker.alarm_record["isSubmitWorkArea"], 0)
+        self.assertEqual(revoked["rollback"], {
+            "available": True,
+            "capability": SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY,
+            "arguments": {"alarm_id": "alarm-1"},
+        })
+        self.assertIn(
+            "必须重新生成并确认授权卡", prepared_revoke["summary"]["authorization_notice"],
+        )
 
         action_reads = [
             request
@@ -1193,11 +1201,61 @@ class SmartlightAdapterTests(unittest.TestCase):
         self.assertEqual(entered, [True])
         self.assertEqual(result["alarm"]["alarmState"], 3)
         self.assertFalse(result["rollback"]["available"])
+        self.assertIn(
+            "确认后不能由 AgentBridge 恢复", prepared["summary"]["authorization_notice"],
+        )
         self.assertEqual(worker.alarm_record["conductStatue"], 3)
         self.assertEqual(
             capability_required_scopes(SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY),
             frozenset({"smartlight:write:alarm_disposition"}),
         )
+
+    def test_alarm_actions_reject_changed_targets_before_commit_boundary(self):
+        cases = (
+            ("submit", prepare_smartlight_alarm_work_area_submit,
+             commit_smartlight_alarm_work_area_submit, "conductStatue", 1),
+            ("revoke", prepare_smartlight_alarm_work_area_revoke,
+             commit_smartlight_alarm_work_area_revoke, "rtuId", "rtu-2"),
+            ("revoke", prepare_smartlight_alarm_work_area_revoke,
+             commit_smartlight_alarm_work_area_revoke, "workAreaId", "work-area-2"),
+            ("revoke", prepare_smartlight_alarm_work_area_revoke,
+             commit_smartlight_alarm_work_area_revoke, "conductStatue", 1),
+            ("dispose", prepare_smartlight_rtu_alarm_dispose,
+             commit_smartlight_rtu_alarm_dispose, "rtuId", "rtu-2"),
+            ("dispose", prepare_smartlight_rtu_alarm_dispose,
+             commit_smartlight_rtu_alarm_dispose, "workAreaId", "work-area-2"),
+            ("dispose", prepare_smartlight_rtu_alarm_dispose,
+             commit_smartlight_rtu_alarm_dispose, "conductStatue", 1),
+        )
+        for action, prepare, commit, field, value in cases:
+            with self.subTest(action=action, changed=field):
+                worker = FakeSmartlightWorker(authenticated=True)
+                if action == "revoke":
+                    worker.alarm_record["isSubmitWorkArea"] = 1
+                prepared = prepare(self.adapter, worker, {"alarm_id": "alarm-1"})
+                worker.alarm_record[field] = value
+                if field == "rtuId":
+                    # Reaching the desired state cannot override a changed RTU binding.
+                    if action == "revoke":
+                        worker.alarm_record["isSubmitWorkArea"] = 0
+                    else:
+                        worker.alarm_record["conductStatue"] = 3
+                expected = "RTU 已变化" if field == "rtuId" else "已经变化"
+                with self.assertRaisesRegex(SmartlightBusinessRuleRejected, expected):
+                    commit(
+                        self.adapter, worker, prepared["plan"],
+                        enter_commit_boundary=lambda: self.fail(
+                            "changed targets must not enter the commit boundary"
+                        ),
+                    )
+                self.assertFalse(worker.alarm_action_performed)
+                self.assertFalse(any(
+                    request["path"].endswith((
+                        "/rHisHitchAlarm/updateIsSubmitWorkArea",
+                        "/rHisHitchAlarm/cancleSubmitWorkArea",
+                        "/rHisHitchAlarm/setRtuConductStatusDisposed",
+                    )) for request in worker.api_requests
+                ))
 
     def test_alarm_action_timeout_after_commit_boundary_is_outcome_unknown(self):
         worker = FakeSmartlightWorker(authenticated=True)
@@ -1319,6 +1377,18 @@ class FakeSmartlightWorker:
                 "refresh_token": "jwt-refresh",
                 "principal": _safe_principal(),
             }
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        return None
+
+    def capture_session_state(self) -> dict:
+        return {"cookies": [], "http": deepcopy(self.state)}
+
+    def restore_session_state(self, state: dict) -> None:
+        self.state = deepcopy(state["http"])
 
     def goto(self, url: str, *, timeout_seconds: float = 30):
         del url, timeout_seconds
