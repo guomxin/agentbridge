@@ -1,4 +1,4 @@
-"""The typed declaration must retain the existing Taihua write contract."""
+"""Typed declarations must retain the frozen Taihua and Smartlight contracts."""
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from bscli.adapters import taihua
+from bscli.adapters import smartlight, taihua
 from bscli.core import write_catalog
 from bscli.core.planning_policy import planning_descriptor
 from bscli.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
@@ -15,6 +15,7 @@ from bscli.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
 
 WORKFLOW = taihua.TAIHUA_WORK_LOG_CREATE_WORKFLOW
 CONTRACT = json.loads((Path(__file__).parent / "fixtures/taihua_work_log_contract.json").read_text(encoding="utf-8"))
+SMARTLIGHT_CONTRACT = json.loads((Path(__file__).parent / "fixtures/smartlight_alarm_remark_contract.json").read_text(encoding="utf-8"))
 
 
 def test_taihua_capabilities_and_field_schema_match_pre_refactor_contract():
@@ -48,13 +49,18 @@ def test_taihua_legacy_catalog_and_scopes_preserve_runtime_binding_contract():
     assert WORKFLOW.commit_function is taihua.commit_taihua_work_log_create
 
 
-def test_legacy_function_bridge_remains_late_bound_for_fault_injection():
-    definition = WORKFLOW.legacy_definition()
+@pytest.mark.parametrize("adapter, declaration_name", [
+    (taihua, "TAIHUA_WORK_LOG_CREATE_WORKFLOW"),
+    (smartlight, "SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW"),
+])
+def test_legacy_function_bridge_remains_late_bound_for_fault_injection(adapter, declaration_name):
+    declaration = getattr(adapter, declaration_name)
+    definition = declaration.legacy_definition()
     for field in ("prepare_function", "commit_function"):
         name = definition[field]
         with patch.object(write_catalog, name) as injected:
             assert write_catalog.resolve_write_function(name) is injected
-        assert write_catalog.resolve_write_function(name) is getattr(taihua, name)
+        assert write_catalog.resolve_write_function(name) is getattr(adapter, name)
     assert write_catalog.resolve_write_function("legacy_definition") is None
 
 
@@ -124,3 +130,76 @@ def test_schema_sources_and_repeated_projections_are_isolated():
 def test_invalid_write_declarations_fail_before_runtime_registration(changes):
     with pytest.raises((TypeError, ValueError)):
         replace(WORKFLOW, **changes)
+
+
+def test_smartlight_capabilities_and_field_card_match_frozen_contract():
+    declaration = smartlight.SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW
+    registry = smartlight.build_smartlight_capability_registry()
+    assert [registry.get(spec["name"]).to_dict() for spec in SMARTLIGHT_CONTRACT["capabilities"]] == SMARTLIGHT_CONTRACT["capabilities"]
+    assert [spec.to_dict() for spec in declaration.capability_specs()] == SMARTLIGHT_CONTRACT["capabilities"]
+    assert declaration.legacy_definition()["field_schema"] == SMARTLIGHT_CONTRACT["field_schema"]
+    assert declaration.context_fields == ("alarm_id",)
+    assert declaration.prepare_spec.input_schema["required"] == ["alarm_id"]
+    assert declaration.prepare_spec.effect == declaration.commit_spec.effect == "reversible_write"
+    assert declaration.prepare_function is smartlight.prepare_smartlight_alarm_remark_update
+    assert declaration.commit_function is smartlight.commit_smartlight_alarm_remark_update
+
+
+def test_smartlight_catalog_scopes_permissions_and_planning_match_frozen_contract():
+    declaration = smartlight.SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW
+    expected = deepcopy(SMARTLIGHT_CONTRACT["definition"])
+    expected["context_fields"] = tuple(expected["context_fields"])
+    for name, error in (
+        ("contract_error", smartlight.SmartlightAlarmRemarkContractMismatch),
+        ("outcome_error", smartlight.SmartlightAlarmRemarkOutcomeUnknown),
+    ):
+        assert f"{error.__module__}.{error.__qualname__}" == expected[name]
+        expected[name] = error
+    assert declaration.legacy_definition() == expected
+    assert write_catalog._TRUSTED_WRITE_DEFINITIONS["smartlight.alarm.remark.update.prepare"] == expected
+    assert write_catalog._TRUSTED_WRITE_COMMITS["smartlight.alarm.remark.update"] == (
+        "smartlight.alarm.remark.update.prepare", expected,
+    )
+    assert declaration.scope_bindings() == {
+        name: frozenset(scopes) for name, scopes in SMARTLIGHT_CONTRACT["scopes"].items()
+    }
+    for name, scopes in SMARTLIGHT_CONTRACT["scopes"].items():
+        assert write_catalog.capability_required_scopes(name) == frozenset(scopes)
+        assert CAPABILITY_PERMISSIONS[name] == SMARTLIGHT_CONTRACT["permissions"][name]
+        assert planning_descriptor(name) == SMARTLIGHT_CONTRACT["planning"][name]
+    assert PERMISSIONS["smartlight.alarm.remark.write"] == SMARTLIGHT_CONTRACT["permission"]
+
+
+def test_smartlight_schema_projections_cannot_mutate_target_context_or_other_workflow():
+    declaration = smartlight.SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW
+    source_prepare, source_commit = declaration.capability_specs()
+    source_fields = deepcopy(SMARTLIGHT_CONTRACT["field_schema"])
+    isolated = replace(
+        declaration, prepare_spec=source_prepare, commit_spec=source_commit,
+        field_schema=source_fields,
+    )
+    source_prepare.input_schema["required"].clear()
+    source_commit.input_schema["properties"]["authorization_id"]["type"] = "array"
+    source_fields["fields"][0]["required"] = True
+    projected_prepare, projected_commit = isolated.capability_specs()
+    projected_prepare.input_schema["required"].clear()
+    projected_commit.input_schema["required"].clear()
+    isolated.legacy_definition()["field_schema"]["fields"][0]["max_length"] = 0
+    isolated.scope_bindings().clear()
+
+    assert [spec.to_dict() for spec in isolated.capability_specs()] == SMARTLIGHT_CONTRACT["capabilities"]
+    assert isolated.legacy_definition()["field_schema"] == SMARTLIGHT_CONTRACT["field_schema"]
+    assert isolated.context_fields == ("alarm_id",)
+    assert isolated.scope_bindings() == {
+        name: frozenset(scopes) for name, scopes in SMARTLIGHT_CONTRACT["scopes"].items()
+    }
+    assert smartlight.SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA == SMARTLIGHT_CONTRACT["field_schema"]
+    assert write_catalog._TRUSTED_WRITE_DEFINITIONS["smartlight.alarm.remark.update.prepare"]["field_schema"] == SMARTLIGHT_CONTRACT["field_schema"]
+    assert [spec.to_dict() for spec in WORKFLOW.capability_specs()] == CONTRACT["capabilities"]
+    assert WORKFLOW.legacy_definition()["field_schema"] == CONTRACT["field_schema"]
+
+
+@pytest.mark.parametrize("context_fields", [("missing_alarm",), ("alarm_id", "alarm_id"), ["alarm_id"]])
+def test_smartlight_invalid_context_declarations_are_rejected(context_fields):
+    with pytest.raises(ValueError):
+        replace(smartlight.SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW, context_fields=context_fields)

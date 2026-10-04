@@ -18,6 +18,7 @@ from bscli.adapters.base import (
     AdapterSessionCheckUnavailable,
 )
 from bscli.core.capability import CapabilityRegistry, CapabilitySpec
+from bscli.core.write_workflow import WriteWorkflowDefinition
 
 
 SMARTLIGHT_SYSTEM_ID = "smartlight"
@@ -4648,33 +4649,7 @@ def build_smartlight_capability_registry() -> CapabilityRegistry:
             adapter=SMARTLIGHT_ADAPTER_ID,
             workflow="smartlight-report-export-v1",
         ),
-        CapabilitySpec(
-            name=SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Open a trusted field card for one exact RTU alarm, freeze the "
-                "current remark and requested replacement, then require separate "
-                "authorization. This step does not modify Smartlight."
-            ),
-            input_schema=SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-alarm-remark-update-prepare-v1",
-        ),
-        CapabilitySpec(
-            name=SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY,
-            version="0.1.0",
-            description=(
-                "Consume an approved authorization, update the exact RTU alarm "
-                "remark, and verify the result by authoritative readback."
-            ),
-            input_schema=SMARTLIGHT_ALARM_REMARK_UPDATE_INPUT_SCHEMA,
-            output_schema={"type": "object"},
-            effect="reversible_write",
-            adapter=SMARTLIGHT_ADAPTER_ID,
-            workflow="smartlight-alarm-remark-update-commit-v1",
-        ),
+        *SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.capability_specs(),
         CapabilitySpec(
             name=SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY,
             version="0.1.0",
@@ -6300,3 +6275,43 @@ def _date_part(value: Any) -> str | None:
     except ValueError:
         return None
     return candidate
+
+
+SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW = WriteWorkflowDefinition(
+    prepare_spec=CapabilitySpec(
+        name=SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Open a trusted field card for one exact RTU alarm, freeze the "
+            "current remark and requested replacement, then require separate "
+            "authorization. This step does not modify Smartlight."
+        ),
+        input_schema=SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="reversible_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-alarm-remark-update-prepare-v1",
+    ),
+    commit_spec=CapabilitySpec(
+        name=SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY,
+        version="0.1.0",
+        description=(
+            "Consume an approved authorization, update the exact RTU alarm "
+            "remark, and verify the result by authoritative readback."
+        ),
+        input_schema=SMARTLIGHT_ALARM_REMARK_UPDATE_INPUT_SCHEMA,
+        output_schema={"type": "object"},
+        effect="reversible_write",
+        adapter=SMARTLIGHT_ADAPTER_ID,
+        workflow="smartlight-alarm-remark-update-commit-v1",
+    ),
+    required_scopes=frozenset({"smartlight:write:alarm_remark"}),
+    field_schema=SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA,
+    context_fields=("alarm_id",),
+    prepare_function=prepare_smartlight_alarm_remark_update,
+    commit_function=commit_smartlight_alarm_remark_update,
+    contract_error=SmartlightAlarmRemarkContractMismatch,
+    outcome_error=SmartlightAlarmRemarkOutcomeUnknown,
+    field_message="请在可信字段卡中核对告警备注。",
+    authorization_message="照明告警备注修改计划需要在可信授权卡中确认。",
+)

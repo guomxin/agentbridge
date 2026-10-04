@@ -21,6 +21,7 @@ from bscli.adapters.smartlight import (
     SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA,
     SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY,
     SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY,
+    SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW,
     SMARTLIGHT_RTU_ALARM_DISPOSE_CAPABILITY,
     SMARTLIGHT_RTU_ALARM_DISPOSE_PREPARE_CAPABILITY,
     SmartlightAlarmActionContractMismatch,
@@ -521,17 +522,7 @@ for _pending_profile, _pending_prepare_capability in (
 _TRUSTED_WRITE_DEFINITIONS.update(
     {
         TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY: TAIHUA_WORK_LOG_CREATE_WORKFLOW.legacy_definition(),
-        SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY: {
-            "commit_capability": SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY,
-            "field_schema": SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA,
-            "context_fields": ("alarm_id",),
-            "prepare_function": "prepare_smartlight_alarm_remark_update",
-            "commit_function": "commit_smartlight_alarm_remark_update",
-            "contract_error": SmartlightAlarmRemarkContractMismatch,
-            "outcome_error": SmartlightAlarmRemarkOutcomeUnknown,
-            "field_message": "请在可信字段卡中核对告警备注。",
-            "authorization_message": "照明告警备注修改计划需要在可信授权卡中确认。",
-        },
+        SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY: SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.legacy_definition(),
         SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY: {
             "commit_capability": SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_CAPABILITY,
             "field_schema": None,
@@ -637,12 +628,7 @@ _CAPABILITY_SCOPES = {
     WORKFLOW_REVOKE_PREPARE_CAPABILITY: frozenset({"oa:write:revoke"}),
     WORKFLOW_REVOKE_CAPABILITY: frozenset({"oa:write:revoke"}),
     **TAIHUA_WORK_LOG_CREATE_WORKFLOW.scope_bindings(),
-    SMARTLIGHT_ALARM_REMARK_UPDATE_PREPARE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_remark"}
-    ),
-    SMARTLIGHT_ALARM_REMARK_UPDATE_CAPABILITY: frozenset(
-        {"smartlight:write:alarm_remark"}
-    ),
+    **SMARTLIGHT_ALARM_REMARK_UPDATE_WORKFLOW.scope_bindings(),
     SMARTLIGHT_ALARM_WORK_AREA_SUBMIT_PREPARE_CAPABILITY: frozenset(
         {"smartlight:write:alarm_work_area_submit"}
     ),

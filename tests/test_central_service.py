@@ -359,6 +359,19 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "bscli.core.write_catalog.prepare_smartlight_alarm_remark_update",
                 return_value=prepared_payload,
             ) as prepare:
+                replaced_target = service.invoke(
+                    user_subject="user-a",
+                    capability_name="smartlight.alarm.remark.update.prepare",
+                    arguments={
+                        "alarm_id": "alarm-2",
+                        "input_submission_id": submission_id,
+                    },
+                )
+                self.assertEqual(replaced_target["error"]["code"], "FIELD_INPUT_UNAVAILABLE")
+                self.assertEqual(
+                    service.field_submissions.get(submission_id)["state"], "submitted",
+                )
+                prepare.assert_not_called()
                 prepared = service.invoke(
                     user_subject="user-a",
                     capability_name="smartlight.alarm.remark.update.prepare",
@@ -404,17 +417,94 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             with patch(
                 "bscli.core.write_catalog.commit_smartlight_alarm_remark_update",
                 side_effect=commit,
-            ):
+            ) as commit_handler:
                 committed = service.invoke(
                     user_subject="user-a",
                     capability_name="smartlight.alarm.remark.update",
                     arguments={"authorization_id": authorization_id},
                 )
+                repeated = service.invoke(
+                    user_subject="user-a",
+                    capability_name="smartlight.alarm.remark.update",
+                    arguments={"authorization_id": authorization_id},
+                )
+                self.assertEqual(repeated["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+                commit_handler.assert_called_once()
             self.assertEqual(committed["status"], "succeeded")
             self.assertEqual(
                 service.write_authorizations.get(authorization_id)["state"],
                 "consumed",
             )
+
+    def test_smartlight_remark_readback_unknown_is_durable_and_never_replayed(self):
+        with TemporaryDirectory() as tmp:
+            worker = FakeWorker()
+            service = authorized_service(
+                home=Path(tmp),
+                base_url=BASE_URL,
+                smartlight_base_url="http://smartlight.example.test/smartlight",
+                smartlight_allow_insecure_http=True,
+            )
+            service._worker_factories_by_system["smartlight"] = lambda *_: worker
+            session = service.sessions.get_or_create(
+                user_subject="user-a", system_id="smartlight", expected_principal_ref="无为",
+            )
+            session = service.sessions.activate(session["session_id"], observed_principal_ref="无为")
+            service.session_states.save(session["session_id"], {"cookies": []})
+            plan = {
+                "schema_version": "agentbridge.smartlight_alarm_remark_update_plan.v1",
+                "prepare_capability": "smartlight.alarm.remark.update.prepare",
+                "user_subject": "user-a",
+                "session_binding": {
+                    name: session[name] for name in (
+                        "session_id", "expected_principal_ref", "downstream_principal_ref", "last_verified_at",
+                    )
+                },
+                "exact_input": {"alarm_id": "alarm-1", "remark": "new remark"},
+                "exact_payload": {"hitchAlarmId": "alarm-1", "rtuId": "rtu-1", "remark": "new remark"},
+                "target": {"alarmId": "alarm-1", "rtuId": "rtu-1"},
+                "preconditions": {"previous_remark": "old remark"},
+                "resume_arguments": {"alarm_id": "alarm-1"},
+            }
+            authorization = service.write_authorizations.create(
+                user_subject="user-a", system_id="smartlight", session_id=session["session_id"],
+                capability_name="smartlight.alarm.remark.update", capability_version="0.1.0",
+                prepare_operation_id="prepare-alarm-1", plan=plan,
+                summary={"title": "修改告警备注", "fields": []},
+                card_base_url=service.trusted_card_base_url,
+            )
+            authorization_id = authorization["authorization_id"]
+            csrf = service.write_authorizations.issue_csrf(authorization_id)
+            service.write_authorizations.decide(
+                authorization_id, decision="approve", csrf_token=csrf, csrf_cookie=csrf,
+            )
+            adapter = service._adapters_by_system["smartlight"]
+            with patch.object(adapter, "alarm_remark_snapshot", side_effect=[
+                {"rtuId": "rtu-1", "remark": "old remark"},
+                ConnectionError("simulated authoritative readback failure"),
+            ]), patch.object(adapter, "save_alarm_remark", return_value={"code": 200}) as save:
+                unknown = service.invoke(
+                    user_subject="user-a", capability_name="smartlight.alarm.remark.update",
+                    arguments={"authorization_id": authorization_id}, idempotency_key="remark-unknown",
+                )
+                same_request = service.invoke(
+                    user_subject="user-a", capability_name="smartlight.alarm.remark.update",
+                    arguments={"authorization_id": authorization_id}, idempotency_key="remark-unknown",
+                )
+                another_request = service.invoke(
+                    user_subject="user-a", capability_name="smartlight.alarm.remark.update",
+                    arguments={"authorization_id": authorization_id}, idempotency_key="remark-new-request",
+                )
+                save.assert_called_once()
+            self.assertEqual(unknown["status"], "unknown")
+            self.assertEqual(unknown["error"]["code"], "RESULT_UNKNOWN")
+            self.assertEqual(same_request["operationId"], unknown["operationId"])
+            self.assertEqual(same_request["status"], "unknown")
+            self.assertEqual(another_request["error"]["code"], "WRITE_AUTHORIZATION_UNAVAILABLE")
+            self.assertEqual(service.operations.get(unknown["operationId"])["status"], "unknown")
+            consumed = service.write_authorizations.get(authorization_id)
+            self.assertEqual(consumed["state"], "consumed")
+            self.assertEqual(consumed["commit_operation_id"], unknown["operationId"])
 
     def test_smartlight_prepare_preserves_business_rule_rejection(self):
         with TemporaryDirectory() as tmp:
