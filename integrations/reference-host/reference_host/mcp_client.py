@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from .recovery_policy import transport_recovery_strategy, transport_retry_allowed
 
 
 TRANSIENT_TRANSPORT_CODES = frozenset(
@@ -88,7 +89,7 @@ class AgentBridgeMcpClient:
         recovery_class = str(recovery_class or "unsafe").lower()
         if recovery_class not in {"read", "prepare", "unsafe"}:
             raise ValueError("MCP recovery class is invalid")
-        maximum_attempts = 3 if recovery_class in {"read", "prepare"} else 1
+        maximum_attempts = 3 if transport_recovery_strategy(recovery_class).startswith("bounded_retry") else 1
         attempt = 0
         recovery_deadline: float | None = None
         while True:
@@ -114,9 +115,9 @@ class AgentBridgeMcpClient:
                     attempts=attempt,
                 )
             except Exception as exc:
-                if (
-                    attempt >= maximum_attempts
-                    or not is_transient_transport_error(exc)
+                if not transport_retry_allowed(
+                    retryable=is_transient_transport_error(exc),
+                    attempt=attempt, maximum_attempts=maximum_attempts,
                 ):
                     raise
                 if recovery_deadline is None:
@@ -125,7 +126,11 @@ class AgentBridgeMcpClient:
                         + MAXIMUM_RECOVERY_SECONDS
                     )
                 delay = SAFE_RECOVERY_DELAYS[attempt - 1]
-                if asyncio.get_running_loop().time() + delay >= recovery_deadline:
+                if not transport_retry_allowed(
+                    retryable=True, attempt=attempt, maximum_attempts=maximum_attempts,
+                    delay_ms=delay * 1000,
+                    remaining_ms=(recovery_deadline - asyncio.get_running_loop().time()) * 1000,
+                ):
                     raise
                 await asyncio.sleep(delay)
 

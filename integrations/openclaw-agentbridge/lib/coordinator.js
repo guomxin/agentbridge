@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { interactionResumeAllowed, resumeClaimAllowed } from "./recovery-policy.js";
 
 import {
   appendPresentationLinks,
@@ -937,12 +938,8 @@ export class InteractionCoordinator {
       taskId,
     });
     record.mcpClient ||= mcpClient;
-    if (
-      record.interaction.state === "completed" &&
-      record.interaction.resume?.ready === true &&
-      record.interaction.resume?.completed !== true
-    ) {
-      if (record.resumeStarted || this.resumeClaims.has(interaction.interactionId)) {
+    if (interactionResumeAllowed(record.interaction)) {
+      if (!resumeClaimAllowed({ claimed: Boolean(record.resumeStarted || this.resumeClaims.has(interaction.interactionId)) })) {
         return true;
       }
       return await this.resume(record, new AbortController().signal);
@@ -1362,11 +1359,7 @@ export class InteractionCoordinator {
     if (this.isTaskTerminal(taskId)) {
       return true;
     }
-    const resumableCompleted = Boolean(
-      interaction?.state === "completed" &&
-        interaction.resume?.ready === true &&
-        interaction.resume?.completed !== true,
-    );
+    const resumableCompleted = interactionResumeAllowed(interaction);
     if (!interaction) return false;
     if (!resumableCompleted && !["pending", "processing"].includes(interaction.state)) return true;
     if (!workspaceSession && !endpoint?.route) return false;
@@ -1522,7 +1515,7 @@ export class InteractionCoordinator {
       if (current.state !== "completed") {
         continue;
       }
-      if (current.resume.ready !== true || current.resume.completed === true) {
+      if (!interactionResumeAllowed(current)) {
         await this.notify(record, "completed", null);
         return;
       }
@@ -1536,11 +1529,10 @@ export class InteractionCoordinator {
 
   async resume(record, signal) {
     const interactionId = record.interaction.interactionId;
-    if (
-      (record.taskId && this.isTaskTerminal(record.taskId)) ||
-      record.resumeStarted ||
-      this.resumeClaims.has(interactionId)
-    ) {
+    if (!resumeClaimAllowed({
+      taskTerminal: Boolean(record.taskId && this.isTaskTerminal(record.taskId)),
+      claimed: Boolean(record.resumeStarted || this.resumeClaims.has(interactionId)),
+    })) {
       return false;
     }
     record.resumeStarted = true;

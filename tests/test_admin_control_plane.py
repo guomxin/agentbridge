@@ -1375,7 +1375,9 @@ class AdminStaticAssetTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         static = root / "bscli/admin/static"
         page = (static / "index.html").read_text(encoding="utf-8")
-        script = (static / "admin.js").read_text(encoding="utf-8")
+        script = (static / "admin.js").read_text(encoding="utf-8") + "\n" + "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(static.glob("*.mjs"))
+        )
         names = set(re.findall(r'/assets/(icon-[a-z-]+\.svg)', page))
         names.update(f"icon-{name}.svg" for name in re.findall(r'icon\("([a-z-]+)"', script))
         self.assertGreater(len(names), 10)
@@ -1392,7 +1394,10 @@ class AdminStaticAssetTests(unittest.TestCase):
 
     def test_login_form_survives_async_submit_and_assets_are_csp_clean(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        script = (root / "bscli/admin/static/admin.js").read_text(encoding="utf-8")
+        static = root / "bscli/admin/static"
+        script = (static / "admin.js").read_text(encoding="utf-8") + "\n" + "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(static.glob("*.mjs"))
+        )
         page = (root / "bscli/admin/static/index.html").read_text(encoding="utf-8")
         stylesheet = (root / "bscli/admin/static/admin.css").read_text(encoding="utf-8")
 

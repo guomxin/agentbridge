@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from bscli.core.task_projections import build_plan_result_projection, plan_result_response
 from bscli.core.task_plan_validation import (
     PlanValidationError,
     resolve_json_pointer,
@@ -839,55 +840,10 @@ class TaskPlanRuntime:
         transform = self.transforms.get(step["transform_name"])
         if not transform.result_projection:
             return
-        projection: dict[str, Any] = {
-            "schemaVersion": "agentbridge.plan-result-projection.v1",
-            "visibility": "user_private",
-            "kind": transform.result_projection,
-            "stepKey": step["step_key"],
-            "operationId": operation_id,
-            "resultHash": json_hash(result),
-            "sourceSteps": sorted(
-                {
-                    reference["step"]
-                    for binding in (step.get("bindings") or {}).values()
-                    for reference in (
-                        binding.get("items") or []
-                        if binding.get("mode") == "many"
-                        else [binding]
-                    )
-                }
-            ),
-        }
-        if transform.result_projection == "private_draft":
-            projection["result"] = {
-                key: result.get(key)
-                for key in (
-                    "draft",
-                    "empty",
-                    "source_incomplete",
-                    "source_count",
-                    "included_count",
-                    "excluded_count",
-                    "excluded_automatic_count",
-                    "excluded_duplicate_count",
-                    "source_summaries",
-                    "coverage",
-                )
-            }
-        else:
-            projection["result"] = {
-                key: result.get(key)
-                for key in (
-                    "items",
-                    "source_summaries",
-                    "coverage",
-                    "source_incomplete",
-                    "empty",
-                    "source_count",
-                    "item_count",
-                    "duplicate_count",
-                )
-            }
+        projection = build_plan_result_projection(
+            projection_kind=transform.result_projection, step=step,
+            operation_id=operation_id, result=result,
+        )
         updated = self.plans.set_result_projection(
             plan["plan_id"],
             user_subject=plan["user_subject"],
@@ -927,31 +883,7 @@ class TaskPlanRuntime:
 
     @staticmethod
     def _plan_result(plan: dict[str, Any]) -> dict[str, Any]:
-        status = {
-            "succeeded": "succeeded",
-            "failed": "failed",
-            "outcome_unknown": "outcome_unknown",
-            "canceled": "canceled",
-            "waiting_user": "requires_user_action",
-        }.get(plan["state"], "running")
-        response = {
-            "protocolVersion": "0.1",
-            "status": status,
-            "plan": task_plan_response(plan),
-        }
-        if status == "succeeded" and plan.get("result_projection"):
-            response["nextAction"] = {
-                "type": "report_plan_result",
-                "source": "plan.resultProjection.result",
-                "doNotQueryOperations": True,
-            }
-        if plan.get("terminal_reason") == "PLAN_SOURCE_INCOMPLETE":
-            response["nextAction"] = {
-                "type": "report_plan_failure", "doNotRetryAtomicTools": True,
-                "businessWriteOccurred": False,
-                "source": "plan.resultProjection.result.source_summaries",
-            }
-        return response
+        return plan_result_response(plan)
 
     def _event(
         self,

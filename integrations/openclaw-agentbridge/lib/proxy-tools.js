@@ -10,6 +10,8 @@ import {
   hostContextMeta,
 } from "./host-contract.js";
 
+import { transportRecoveryStrategy } from "./recovery-policy.js";
+
 export { HOST_CONTEXT_META_KEY, TASK_CONTEXT_META_KEY, hostContextMeta };
 
 export const IDENTITY_STATUS_TOOL_NAME = "agentbridge_identity_status";
@@ -555,14 +557,12 @@ function safeTransportRetryPolicy({
 }
 
 function supportsSafeTransportRetry(descriptor) {
-  if (descriptor.annotations?.readOnlyHint === true) {
-    return descriptor.annotations?.idempotentHint === true;
-  }
-  return (
-    AGENTBRIDGE_GOVERNED_ENTRY_TOOLS.has(descriptor.name) &&
+  const read = descriptor.annotations?.readOnlyHint === true;
+  const callClass = read ? "read" :
+    AGENTBRIDGE_GOVERNED_ENTRY_TOOLS.has(descriptor.name) ? "prepare" : "unsafe";
+  return transportRecoveryStrategy(callClass).startsWith("bounded_retry") &&
     descriptor.annotations?.idempotentHint === true &&
-    descriptor.annotations?.destructiveHint !== true
-  );
+    (read || descriptor.annotations?.destructiveHint !== true);
 }
 
 function safeTransportCode(error) {

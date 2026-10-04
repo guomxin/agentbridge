@@ -128,6 +128,328 @@
       }
     }
   ],
+  "recoveryStrategies": [
+    {
+      "name": "read",
+      "callClass": "read",
+      "expected": "bounded_retry"
+    },
+    {
+      "name": "prepare",
+      "callClass": "prepare",
+      "expected": "bounded_retry_with_stable_idempotency_key"
+    },
+    {
+      "name": "commit",
+      "callClass": "commit",
+      "expected": "query_operation_then_stop_if_unknown"
+    },
+    {
+      "name": "resume",
+      "callClass": "resume",
+      "expected": "query_operation_then_stop_if_unknown"
+    },
+    {
+      "name": "completedResume",
+      "callClass": "completedResume",
+      "expected": "query_operation_then_stop_if_unknown"
+    },
+    {
+      "name": "unsafe",
+      "callClass": "unsafe",
+      "expected": "query_operation_then_stop_if_unknown"
+    },
+    {
+      "name": "unrecognized",
+      "callClass": "unrecognized",
+      "expected": "query_operation_then_stop_if_unknown"
+    }
+  ],
+  "retryDecisions": [
+    {
+      "name": "first-transient",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3
+      },
+      "expected": true
+    },
+    {
+      "name": "last-allowed",
+      "value": {
+        "retryable": true,
+        "attempt": 2,
+        "maximumAttempts": 3
+      },
+      "expected": true
+    },
+    {
+      "name": "attempt-budget-exhausted",
+      "value": {
+        "retryable": true,
+        "attempt": 3,
+        "maximumAttempts": 3
+      },
+      "expected": false
+    },
+    {
+      "name": "unsafe-no-retry",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 1
+      },
+      "expected": false
+    },
+    {
+      "name": "non-transient",
+      "value": {
+        "retryable": false,
+        "attempt": 1,
+        "maximumAttempts": 3
+      },
+      "expected": false
+    },
+    {
+      "name": "canceled",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "canceled": true
+      },
+      "expected": false
+    },
+    {
+      "name": "remaining-budget",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "delayMs": 500,
+        "remainingMs": 501
+      },
+      "expected": true
+    },
+    {
+      "name": "exact-deadline",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "delayMs": 500,
+        "remainingMs": 500
+      },
+      "expected": false
+    },
+    {
+      "name": "past-deadline",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "delayMs": 500,
+        "remainingMs": 499
+      },
+      "expected": false
+    },
+    {
+      "name": "zero-budget",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "delayMs": 0,
+        "remainingMs": 0
+      },
+      "expected": false
+    },
+    {
+      "name": "negative-budget",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "remainingMs": -1
+      },
+      "expected": false
+    },
+    {
+      "name": "host-per-attempt-timeout",
+      "value": {
+        "retryable": true,
+        "attempt": 1,
+        "maximumAttempts": 3,
+        "delayMs": 2000,
+        "remainingMs": null
+      },
+      "expected": true
+    }
+  ],
+  "interactionResumeDecisions": [
+    {
+      "name": "ready-completed",
+      "value": {
+        "state": "completed",
+        "resume": {
+          "ready": true,
+          "completed": false
+        }
+      },
+      "expected": true
+    },
+    {
+      "name": "pending",
+      "value": {
+        "state": "pending",
+        "resume": {
+          "ready": true,
+          "completed": false
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "processing",
+      "value": {
+        "state": "processing",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "declined",
+      "value": {
+        "state": "declined",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "expired",
+      "value": {
+        "state": "expired",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "superseded",
+      "value": {
+        "state": "superseded",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "failed",
+      "value": {
+        "state": "failed",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "unknown",
+      "value": {
+        "state": "unknown",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "completion-before-ready",
+      "value": {
+        "state": "completed",
+        "resume": {
+          "ready": false
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "already-resumed",
+      "value": {
+        "state": "completed",
+        "resume": {
+          "ready": true,
+          "completed": true
+        }
+      },
+      "expected": false
+    },
+    {
+      "name": "missing-resume",
+      "value": {
+        "state": "completed"
+      },
+      "expected": false
+    },
+    {
+      "name": "missing-completed-flag",
+      "value": {
+        "state": "completed",
+        "resume": {
+          "ready": true
+        }
+      },
+      "expected": true
+    }
+  ],
+  "resumeClaimDecisions": [
+    {
+      "name": "new-claim",
+      "value": {
+        "claimed": false,
+        "taskTerminal": false
+      },
+      "expected": true
+    },
+    {
+      "name": "duplicate-or-lost-reply",
+      "value": {
+        "claimed": true,
+        "taskTerminal": false
+      },
+      "expected": false
+    },
+    {
+      "name": "canceled-or-terminal-task",
+      "value": {
+        "claimed": false,
+        "taskTerminal": true
+      },
+      "expected": false
+    },
+    {
+      "name": "terminal-claimed",
+      "value": {
+        "claimed": true,
+        "taskTerminal": true
+      },
+      "expected": false
+    }
+  ],
+  "recoveryPolicyNotes": {
+    "central": "Publishes call-class strategy; does not execute host transport retries.",
+    "openclaw": "Retry needs an explicit policy admitted by readOnly+idempotent or the governed-entry allowlist. Each request keeps its own timeout; existing policy delays bound attempts.",
+    "referenceHost": "Read/prepare classification allows at most three attempts; the five-second recovery deadline starts after the first transient failure.",
+    "completedNotReady": "Reference Host continues polling; OpenClaw preserves its current completed notification and stop behavior. Shared eligibility is false in both hosts.",
+    "unknownResume": "A dispatched resume with a lost reply retains its local claim; repeated completion events cannot submit it again."
+  },
   "conformanceCases": [
     {"id": "H01", "level": "L1", "subject": "unknown_host_downgrade"},
     {"id": "H02", "level": "L1", "subject": "authenticated_read"},

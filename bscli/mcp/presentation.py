@@ -13,6 +13,7 @@ from bscli.core.host_contract import (
     HOST_CONTEXT_META_KEY,
     HOST_PROFILE_META_KEY,
     TASK_CONTEXT_META_KEY,
+    host_transport_recovery_strategy,
 )
 from bscli.core.planning_policy import COMPOSED_TASK_PLANNING_POLICY
 
@@ -122,10 +123,8 @@ def build_server_profile(*, mcp_url: str) -> dict[str, Any]:
                 "explicitTakeover": True,
             },
             "transportRecovery": {
-                "read": "bounded_retry",
-                "prepare": "bounded_retry_with_stable_idempotency_key",
-                "commit": "query_operation_then_stop_if_unknown",
-                "completedResume": "query_operation_then_stop_if_unknown",
+                call_class: host_transport_recovery_strategy(call_class)
+                for call_class in ("read", "prepare", "commit", "completedResume")
             },
         },
     }

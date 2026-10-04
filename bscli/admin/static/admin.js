@@ -1,6 +1,9 @@
-"use strict";
+import { statusText, statusClass, escapeHtml, fmtTime, fmtBytes, fmtDuration, fmtMetric, boundaryLabel, shortId, badge, sessionStateBadge, empty, table, filterRow, filteredTable, scopeBadges, rowMenuButton, skillReviewQualityHtml } from "./admin_presentation.mjs";
+import { createViewScope, createTimerSlot } from "./admin_lifecycle.mjs";
+import { createAdminApi, restoreAdminSession } from "./admin_request.mjs";
+import { createModalController } from "./admin_forms.mjs";
 
-const state = { account: null, view: "overview", modalAction: null, coordinationTab: "tasks", governanceTab: "events", incidents: [], selectedIncident: null, detailRevision: 0, viewRevision: 0, readController: null };
+const state = { account: null, view: "overview", coordinationTab: "tasks", governanceTab: "events", incidents: [], selectedIncident: null, detailRevision: 0 };
 const titles = {
   overview: ["CONTROL PLANE", "运行总览"],
   skillReviews: ["SKILL PUBLICATION", "助手发布审批"],
@@ -16,86 +19,17 @@ const titles = {
   runtime: ["RUNTIME", "系统运行"],
   audit: ["ADMIN AUDIT", "管理审计"],
 };
-const statusText = {
-  active: "有效", inactive: "未活动", revoked: "已撤销", expired: "已过期", quarantined: "已隔离",
-  awaiting_login: "待登录", new: "未登录", succeeded: "成功", partially_succeeded: "部分成功", failed: "失败", completed: "已完成",
-  validated: "已校验", queued: "等待执行", skipped: "已跳过",
-  unknown: "结果未知", outcome_unknown: "结果未知", requires_user_action: "用户交互节点", waiting_user: "等待用户",
-  awaiting_user: "当前等待用户", user_action_completed: "用户已处理", resumed: "已续办",
-  user_action_expired: "交互已过期", user_action_rejected: "用户已拒绝", user_action_superseded: "已被替换",
-  user_action_failed: "交互失败", user_action_handoff: "已转交用户",
-  running: "执行中", canceled: "已取消", cancelled: "已取消", pending: "待处理", delivering: "投递中", deferred: "等待端点活动", acknowledged: "已送达",
-  submitted: "已填写", approved: "已授权", rejected: "已拒绝", consumed: "已使用", superseded: "已替换",
-  paused: "已暂停", available: "可用", selected: "已选择", awaiting_selection: "待选择",
-  observe_only: "只读接续", resume: "恢复执行", follow_up: "后续操作", pull: "网页拉取", direct: "聊天直推",
-  eligible: "保活中", outside_lease: "未保活（超期）", activity_unknown: "活动未知", not_configured: "未配置",
-  ready: "同步就绪", waiting_activity: "等待微信活动",
-  waiting: "等待中", open: "待处理", investigating: "调查中", resolved: "已解决", suppressed: "已抑制", archived: "已归档",
-  healthy: "健康", unavailable: "不可用", meeting: "达标", breached: "未达标", insufficient_data: "数据不足",
-};
-const statusClass = value => ["active", "succeeded", "approved", "submitted", "completed", "acknowledged", "eligible", "selected", "available", "healthy", "meeting", "resolved", "archived"].includes(value) ? "ok" :
-  ["failed", "unknown", "outcome_unknown", "expired", "quarantined", "revoked", "rejected", "user_action_failed", "unavailable", "breached"].includes(value) ? "bad" :
-  ["pending", "partially_succeeded", "delivering", "deferred", "waiting_activity", "awaiting_login", "awaiting_user", "waiting_user", "waiting", "paused", "awaiting_selection", "outside_lease", "user_action_expired", "user_action_rejected", "open", "acknowledged", "investigating"].includes(value) ? "warn" :
-  ["running", "resume", "follow_up", "pull", "direct"].includes(value) ? "info" : "neutral";
 const $ = selector => document.querySelector(selector);
 const content = $("#content");
 const modal = $("#modal");
+const viewScope = createViewScope();
+const accountScope = createViewScope();
+const modalReadScope = createViewScope();
+const toastTimer = createTimerSlot();
+const modalController = createModalController({ modal, select: $ });
+const api = createAdminApi({ cookieText: () => document.cookie, readScope: viewScope, accountScope,
+  submission: () => modalController.captureSubmission() });
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>'"]/g, character => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
-  })[character]);
-}
-function fmtTime(value) {
-  if (!value) return "--";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? escapeHtml(value) : date.toLocaleString("zh-CN", { hour12: false });
-}
-function fmtBytes(value) {
-  const size = Number(value || 0);
-  if (!Number.isFinite(size) || size <= 0) return "--";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-function fmtDuration(value) {
-  const duration = Number(value || 0);
-  if (!Number.isFinite(duration) || duration <= 0) return "--";
-  if (duration < 1000) return `${Math.round(duration)} ms`;
-  if (duration < 60000) return `${(duration / 1000).toFixed(1)} 秒`;
-  return `${(duration / 60000).toFixed(1)} 分`;
-}
-function fmtMetric(metric) {
-  if (metric.value == null) return "--";
-  if (metric.metricKey.endsWith("_rate") || metric.metricKey.endsWith("_coverage")) return `${(metric.value * 100).toFixed(1)}%`;
-  if (metric.metricKey.endsWith("_ms")) return fmtDuration(metric.value);
-  return Number(metric.value).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
-}
-function boundaryLabel(value) {
-  const labels = { B0_NO_EFFECT: "B0 无副作用", B1_READ_ONLY: "B1 只读", B2_INTERACTION_CREATED: "B2 已创建交互", B3_PREPARED_AUTHORIZED: "B3 已准备/授权", B4_COMMIT_ATTEMPTED: "B4 已尝试提交", B5_VERIFIED: "B5 已权威核验" };
-  return labels[value] || value || "--";
-}
-function shortId(value) { return value ? `${escapeHtml(value.slice(0, 8))}…` : "--"; }
-function badge(value) { return `<span class="status ${statusClass(value)}">${escapeHtml(statusText[value] || value || "未知")}</span>`; }
-function sessionStateBadge(session) {
-  if (session.state === "active" && session.session_state_basis === "last_confirmed") {
-    return `<span class="status warn" title="当前没有实时校验；这是最后一次确认成功时保存的状态">上次确认有效</span>`;
-  }
-  return badge(session.state);
-}
-function empty(message) { return `<div class="empty">${escapeHtml(message)}</div>`; }
-function table(headers, rows, filterable = false) {
-  if (!rows.length) return empty("暂无记录");
-  return `<div class="table-shell"><table${filterable ? " data-filter-table" : ""}><thead><tr>${headers.map(item => `<th>${escapeHtml(item)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
-}
-function filterRow(searchText, status, cells) {
-  return `<tr data-filter-text="${escapeHtml(String(searchText).toLowerCase())}" data-filter-status="${escapeHtml(status || "")}">${cells}</tr>`;
-}
-function filteredTable(headers, rows, placeholder, statuses = []) {
-  if (!rows.length) return empty("暂无记录");
-  const options = statuses.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(statusText[value] || value)}</option>`).join("");
-  return `<section class="data-block" data-filter-scope><div class="filters"><label class="filter-field"><span>搜索</span><input type="search" data-filter-search placeholder="${escapeHtml(placeholder)}"></label>${statuses.length ? `<label class="filter-field compact"><span>状态</span><select data-filter-status><option value="">全部状态</option>${options}</select></label>` : ""}<span class="filter-count" data-filter-count>${rows.length} 条</span></div>${table(headers, rows, true)}<div class="filter-empty hidden" data-filter-empty>没有匹配记录</div></section>`;
-}
 function applyFilter(control) {
   const scope = control.closest("[data-filter-scope]");
   if (!scope) return;
@@ -119,11 +53,6 @@ function applyFilter(control) {
     selected.closest("tr").classList.remove("selected");
     $("#incident-detail").innerHTML = empty("选择筛选结果中的事件查看证据");
   }
-}
-function scopeBadges(scopes) { return `<div class="scope-pills">${scopes.map(scope => `<span>${escapeHtml(scope)}</span>`).join("")}</div>`; }
-function rowMenuButton(label, items) {
-  if (!items.length) return "--";
-  return `<button type="button" class="row-menu-trigger" data-row-actions="${escapeHtml(JSON.stringify(items))}" aria-label="${escapeHtml(label)}操作" aria-haspopup="dialog" aria-expanded="false">操作 <span aria-hidden="true">⌄</span></button>`;
 }
 let activeMenuTrigger = null;
 function closeRowActions(restoreFocus = false) {
@@ -165,42 +94,18 @@ function openRowActions(trigger) {
   trigger.setAttribute("aria-controls", menu.id);
   menu.querySelector("button")?.focus();
 }
-function csrfToken() {
-  const prefix = "agentbridge_admin_csrf=";
-  const item = document.cookie.split(";").map(value => value.trim()).find(value => value.startsWith(prefix));
-  return item ? decodeURIComponent(item.slice(prefix.length)) : "";
-}
-async function api(path, options = {}) {
-  const method = options.method || "GET";
-  const headers = { ...(options.headers || {}) };
-  if (method !== "GET") {
-    headers["Content-Type"] = "application/json";
-    headers["X-AgentBridge-CSRF"] = csrfToken();
-  }
-  const signal = method === "GET" ? state.readController?.signal : undefined;
-  const response = await fetch(path, { signal, ...options, method, headers, credentials: "same-origin" });
-  const data = await response.json().catch(() => ({}));
-  signal?.throwIfAborted();
-  if (!response.ok) {
-    const error = new Error(data.error?.message || `请求失败 (${response.status})`);
-    error.code = data.error?.code || "REQUEST_FAILED";
-    error.status = response.status;
-    throw error;
-  }
-  return data;
-}
 function toast(message, error = false) {
   const node = $("#toast");
   node.textContent = message;
   node.classList.toggle("error", error);
   node.classList.remove("hidden");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => node.classList.add("hidden"), 3600);
+  toastTimer.clear();
+  toastTimer.replace(() => node.classList.add("hidden"), 3600);
 }
 function showLogin() {
   closeRowActions();
-  state.readController?.abort();
-  state.viewRevision++;
+  viewScope.invalidate();
+  accountScope.invalidate();
   state.detailRevision++;
   state.incidents = [];
   state.selectedIncident = null;
@@ -214,7 +119,7 @@ function showLogin() {
   $("#modal-body").replaceChildren();
   $("#account-menu").classList.add("hidden");
   $("#account-button").setAttribute("aria-expanded", "false");
-  clearTimeout(toast.timer);
+  toastTimer.clear();
   $("#toast").textContent = "";
   $("#toast").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
@@ -222,6 +127,7 @@ function showLogin() {
   state.account = null;
 }
 function showApp(account) {
+  accountScope.invalidate();
   state.account = account;
   $("#login-view").classList.add("hidden");
   $("#app").classList.remove("hidden");
@@ -230,22 +136,19 @@ function showApp(account) {
   $("#password-banner").classList.toggle("hidden", !account.must_change_password);
 }
 async function initialize() {
-  try {
-    const session = await api("/api/session");
-    if (!session.authenticated) { showLogin(); return; }
-    showApp(session.account);
-    if (session.account.must_change_password) openPasswordModal(true);
-    else await loadView(state.view);
-  } catch (error) { showLogin(); }
+  await restoreAdminSession({
+    accountScope, api, showLogin, showApp,
+    showPassword: () => openPasswordModal(true),
+    loadView: () => loadView(state.view),
+  });
 }
 
 async function loadView(view) {
   if (!state.account || state.account.must_change_password) return;
   if (!titles[view]) return;
   closeRowActions();
-  state.readController?.abort();
-  state.readController = new AbortController();
-  const revision = ++state.viewRevision;
+  modalReadScope.invalidate();
+  const viewTicket = viewScope.begin();
   state.detailRevision++;
   state.view = view;
   setNavigation(false);
@@ -267,17 +170,17 @@ async function loadView(view) {
       incidents: renderIncidents, coordination: renderCoordination, runtime: renderRuntime, audit: renderAudit,
     };
     await renderers[view]();
-    if (revision !== state.viewRevision) return;
+    if (!viewTicket.current()) return;
     content.querySelectorAll(".table-shell").forEach(table => { table.tabIndex = 0; table.setAttribute("aria-label", "数据表格"); });
     $("#freshness").textContent = `刷新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
   } catch (error) {
-    if (revision !== state.viewRevision || error.name === "AbortError") return;
+    if (!viewTicket.current() || error.name === "AbortError") return;
     $("#freshness").textContent = "刷新失败";
     if (error.status === 401) { showLogin(); return; }
     if (error.code === "PASSWORD_CHANGE_REQUIRED") { openPasswordModal(true); return; }
     content.innerHTML = empty(`读取失败：${error.message}`) + '<button class="button secondary section-spaced" data-open-view="' + view + '">重新读取</button>';
   } finally {
-    if (revision === state.viewRevision) {
+    if (viewTicket.current()) {
       content.setAttribute("aria-busy", "false");
       $("#refresh-button").disabled = false;
     }
@@ -362,12 +265,14 @@ async function renderDatabases() {
 }
 
 async function sourceGrantUser(sourceId) {
-  const users = await api("/api/users");
+  const read = beginModalRead();
+  const users = await read("/api/users");
   openModal({title: `${sourceId} · 选择中央账号`,submit:"查看能力",body:`<label>中央账号<select name="user">${users.items.map(u => `<option value="${escapeHtml(u.user_subject)}">${escapeHtml(u.user_subject)}</option>`).join("")}</select></label>`,action:async form => { const u = form.get("user"); closeModal(); await openDatabaseGrants(u,sourceId); }});
 }
 
 async function sourceAction(sourceId, action) {
-  const data = await api("/api/database-sources"); const r = data.items.find(x => x.source_id === sourceId);
+  const read = beginModalRead();
+  const data = await read("/api/database-sources"); const r = data.items.find(x => x.source_id === sourceId);
   if (!r) throw new Error("数据源已变化，请刷新");
   openModal({title: `${{preflight:"只读预检",enable:"启用数据源",disable:"停用数据源"}[action]} · ${(r.draft || r.active).name}`,submit:"执行",body:`<p>${action === "preflight" ? "检查当前草稿的连接、只读权限、开放对象和模板结构，不读取业务正文。" : action === "disable" ? "停用后此源的查询和下载立即不可用。" : "仅启用通过预检的当前草稿。不会自动为账号授权。"}</p>${reasonField()}`,action:async form => {
     const result = await api("/api/database-sources",{method:"POST",body:JSON.stringify({source_id:sourceId,action,expected_revision:r.revision,reason:form.get("reason")})});
@@ -376,7 +281,8 @@ async function sourceAction(sourceId, action) {
 }
 
 async function openSource(sourceId) {
-  const data = await api("/api/database-sources");
+  const read = beginModalRead();
+  const data = await read("/api/database-sources");
   const r = data.items.find(x => x.source_id === sourceId);
   const c = r?.draft || {source_id:"",name:"",description:"",engine:"postgresql",host:"",port:5432,dbname:"",username:"",sslmode:"verify-full",allowed_relations:[],template_pack:"generic",statement_timeout_ms:10000,export_rows:10000,export_bytes:10485760};
   const admin = state.account.role === "admin";
@@ -472,7 +378,8 @@ async function renderTraces() {
 }
 
 async function openTraceDetail(traceId) {
-  const data = await api(`/api/traces/${traceId}`);
+  const read = beginModalRead();
+  const data = await read(`/api/traces/${traceId}`);
   const trace = data.trace;
   const spanRows = data.spans.map((span, index) => `<tr><td>${index + 1}</td><td>${fmtTime(span.started_at)}</td><td class="code">${escapeHtml(span.stage)}</td><td>${badge(span.status)}</td><td>${fmtDuration(span.duration_ms)}</td><td><span class="boundary">${escapeHtml(boundaryLabel(span.side_effect_boundary))}</span></td><td class="truncate" title="${escapeHtml(span.error_code || "")}">${escapeHtml(span.error_code || "--")}</td></tr>`);
   const incidentRows = data.incidents.map(item => `<tr><td>${escapeHtml(item.severity)}</td><td>${escapeHtml(item.title)}</td><td>${badge(item.state)}</td><td>${fmtTime(item.last_seen_at)}</td></tr>`);
@@ -683,7 +590,8 @@ async function renderAudit() {
 }
 
 async function openSkillConfig(userSubject = null) {
-  const config = await api(`/api/skills${userSubject ? `?user=${encodeURIComponent(userSubject)}` : ""}`);
+  const read = beginModalRead();
+  const config = await read(`/api/skills${userSubject ? `?user=${encodeURIComponent(userSubject)}` : ""}`);
   const editable = state.account.role === "admin";
   const labels = { review: "复核", track: "追踪", search: "检索", preview: "仅预览", fill: "填写日志", single: "单条办理", batch: "批量办理" };
   const rows = config.items.map(item => {
@@ -727,7 +635,8 @@ async function openSkillConfig(userSubject = null) {
 }
 
 async function openUserGrants(userSubject) {
-  const config = await api(`/api/user-grants?user=${encodeURIComponent(userSubject)}`);
+  const read = beginModalRead();
+  const config = await read(`/api/user-grants?user=${encodeURIComponent(userSubject)}`);
   const editable = state.account.role === "admin";
   const selected = new Set(config.permissions);
   const groups = ["oa", "smartlight", "taihua", "yuque"].map(system => {
@@ -741,13 +650,14 @@ async function openUserGrants(userSubject) {
   });
 }
 async function openDatabaseGrants(userSubject, sourceId) {
+  const read = beginModalRead();
   if (!sourceId) {
-    const sources = await api("/api/database-sources");
+    const sources = await read("/api/database-sources");
     if (!sources.items.length) { toast("请先在数据库页面接入数据源"); return; }
     openModal({title: `${userSubject} · 选择数据源`, submit: "查看能力", body: `<label>数据源<select name="source">${sources.items.map(r => `<option value="${escapeHtml(r.source_id)}">${escapeHtml((r.active || r.draft).name)} · ${escapeHtml(r.source_id)}</option>`).join("")}</select></label>`, action: async form => { const id = form.get("source"); closeModal(); await openDatabaseGrants(userSubject, id); }}); return;
   }
   const request = state.databaseGrantRequest = (state.databaseGrantRequest || 0) + 1;
-  const config = await api(`/api/database-grants?user=${encodeURIComponent(userSubject)}&source=${encodeURIComponent(sourceId)}`);
+  const config = await read(`/api/database-grants?user=${encodeURIComponent(userSubject)}&source=${encodeURIComponent(sourceId)}`);
   if (request !== state.databaseGrantRequest || !["users", "databases"].includes(state.view) || !state.account) return;
   const editable = state.account.role === "admin";
   const selected = new Set(config.capabilities);
@@ -764,13 +674,12 @@ async function openDatabaseGrants(userSubject, sourceId) {
   });
 }
 
-function openModal({ kicker = "管理操作", title, body, submit = "确认", danger = false, action, locked = false }) {
-  $("#modal-kicker").textContent = kicker; $("#modal-title").textContent = title; $("#modal-body").innerHTML = body;
-  $("#modal-submit").textContent = submit; $("#modal-submit").className = `button ${danger ? "danger" : "primary"}`;
-  $("#modal-cancel").classList.toggle("hidden", locked); $("#modal-close").classList.toggle("hidden", locked);
-  $("#modal-error").textContent = ""; state.modalAction = action; modal.showModal();
+function beginModalRead() {
+  const ticket = modalReadScope.begin();
+  return path => api(path, { signal: ticket.signal });
 }
-function closeModal() { if (modal.open) modal.close(); state.modalAction = null; }
+function openModal(options) { modalReadScope.invalidate(); modalController.open(options); }
+function closeModal() { modalReadScope.invalidate(); modalController.close(); }
 function reasonField(label = "操作原因") { return `<label>${escapeHtml(label)}<textarea name="reason" maxlength="500" required placeholder="说明本次管理操作的原因，将写入审计日志"></textarea></label>`; }
 function openPasswordModal(locked = false) {
   openModal({ kicker: "账户安全", title: locked ? "修改初始密码" : "修改密码", submit: "更新密码", locked,
@@ -813,15 +722,30 @@ function openRuntimeRecovery({ actionType, targetId, title, submit, danger = fal
   openReasonAction({ title, submit, danger, request: reason => api("/api/recovery", { method: "POST", body: JSON.stringify({ action_type: actionType, target_id: targetId, reason, idempotency_key: crypto.randomUUID() }) }) });
 }
 async function openSessionHistory(sessionId) {
-  const data = await api(`/api/sessions/${sessionId}/events?limit=100`);
+  const read = beginModalRead();
+  const data = await read(`/api/sessions/${sessionId}/events?limit=100`);
   const rows = data.items.map(item => `<tr><td>${fmtTime(item.created_at)}</td><td>${escapeHtml(item.source)}</td><td>${escapeHtml(item.event_type)}</td><td>${escapeHtml(item.previous_state || "--")} → ${escapeHtml(item.new_state || "--")}</td><td class="truncate" title="${escapeHtml(item.reason || "")}">${escapeHtml(item.reason || "--")}</td></tr>`);
   openModal({ kicker: "SESSION HISTORY", title: "会话状态历史", submit: "关闭", body: `<p class="muted">保留失效、延期检查、重新登录等原因；后续成功登录不会覆盖旧记录。</p>${table(["时间", "来源", "事件", "状态变化", "原因"], rows)}`, action: async () => closeModal() });
 }
 
 $("#login-form").addEventListener("submit", async event => {
-  event.preventDefault(); $("#login-error").textContent = ""; const loginForm = event.currentTarget; const form = new FormData(loginForm);
-  try { const result = await api("/api/login", { method: "POST", body: JSON.stringify({ username: form.get("username"), password: form.get("password") }) }); loginForm.reset(); showApp(result.account); if (result.account.must_change_password) openPasswordModal(true); else await loadView("overview"); }
-  catch (error) { $("#login-error").textContent = error.message; }
+  event.preventDefault();
+  const loginForm = event.currentTarget;
+  const button = loginForm.querySelector('button[type="submit"]');
+  if (button.disabled) return;
+  button.disabled = true;
+  const ticket = accountScope.begin();
+  $("#login-error").textContent = "";
+  const form = new FormData(loginForm);
+  try {
+    const result = await api("/api/login", { method: "POST", body: JSON.stringify({ username: form.get("username"), password: form.get("password") }) });
+    if (!ticket.current()) return;
+    loginForm.reset(); showApp(result.account);
+    if (result.account.must_change_password) openPasswordModal(true);
+    else await loadView("overview");
+  } catch (error) {
+    if (ticket.current() && error.name !== "AbortError") $("#login-error").textContent = error.message;
+  } finally { button.disabled = false; }
 });
 $("#nav").addEventListener("click", event => { const button = event.target.closest("button[data-view]"); if (button) loadView(button.dataset.view); });
 $("#refresh-button").addEventListener("click", () => loadView(state.view));
@@ -832,9 +756,10 @@ $("#account-button").addEventListener("click", () => {
 });
 $("#change-password-button").addEventListener("click", () => { $("#account-menu").classList.add("hidden"); openPasswordModal(false); });
 $("#banner-password-button").addEventListener("click", () => openPasswordModal(true));
-$("#logout-button").addEventListener("click", async () => { try { await api("/api/logout", { method: "POST", body: "{}" }); } finally { showLogin(); } });
+$("#logout-button").addEventListener("click", async () => { const ticket = accountScope.capture(); try { await api("/api/logout", { method: "POST", body: "{}" }); } finally { if (ticket.current()) showLogin(); } });
 $("#modal-close").addEventListener("click", closeModal); $("#modal-cancel").addEventListener("click", closeModal);
-$("#modal-form").addEventListener("submit", async event => { event.preventDefault(); if (!state.modalAction) return; $("#modal-error").textContent = ""; $("#modal-submit").disabled = true; try { await state.modalAction(new FormData(event.currentTarget)); } catch (error) { $("#modal-error").textContent = error.message; } finally { $("#modal-submit").disabled = false; } });
+$("#modal-form").addEventListener("submit", event => modalController.submit(event));
+modal.addEventListener("cancel", event => modalController.cancel(event));
 content.addEventListener("input", event => { if (event.target.matches("[data-filter-search]")) applyFilter(event.target); });
 content.addEventListener("change", event => { if (event.target.matches("[data-filter-status], [data-incident-category]")) applyFilter(event.target); });
 content.addEventListener("click", async event => {
@@ -903,6 +828,8 @@ document.addEventListener("keydown", event => {
     tabs[next].focus();
   }
 });
+window.addEventListener("pagehide", () => { viewScope.invalidate(); accountScope.invalidate(); toastTimer.clear(); closeModal(); });
+window.addEventListener("pageshow", event => { if (event.persisted) initialize(); });
 initialize();
 
 
@@ -911,10 +838,11 @@ async function renderSkillReviews() {
   const labels={submitted:"待审批",published:"已发布",changes_requested:"需修改",rejected:"已拒绝",withdrawn:"已撤回"};
   content.innerHTML=`<p>普通用户的个人发布与共享发布均在此审批。通过后立即生效，不授予业务权限。请核对固定修订、版本差异、使用范围及评测报告。</p>`+table(["申请人","助手与修订","范围","状态","提交时间","操作"],result.items.map(r=>`<tr><td>${escapeHtml(r.owner_subject)}</td><td>${escapeHtml(r.name||'历史助手')} / ${r.draft_revision}</td><td>${escapeHtml(r.audience.join("、"))}</td><td>${escapeHtml(labels[r.state]||r.state)}</td><td>${fmtTime(r.created_at)}</td><td><button class="button secondary" data-skill-review="${escapeHtml(r.request_id)}">查看申请</button></td></tr>`));
   if(result.metrics){const ratings={useful:'有帮助',incorrect:'结果有误',not_applicable:'不适用'};content.insertAdjacentHTML('beforeend',`<details><summary>版本反馈与后台任务</summary><p>用户反馈不等于独立成功率，加载数量不作为质量证明。</p>${result.metrics.feedback.map(r=>`<p>${escapeHtml(r.skill_id)} · ${escapeHtml(r.version)} · ${ratings[r.rating]} ${r.count} 次</p>`).join('')||'<p>暂无版本反馈。</p>'}${result.metrics.jobs.map(r=>`<p>${r.kind==='evaluation'?'评测':'生成'} · ${escapeHtml(r.state)} ${r.count} 项</p>`).join('')}</details>`);}
-  content.querySelectorAll("[data-skill-review]").forEach(b=>b.onclick=()=>openSkillReview(b.dataset.skillReview).catch(e=>toast(e.message,true)));
+  content.querySelectorAll("[data-skill-review]").forEach(b=>b.onclick=()=>openSkillReview(b.dataset.skillReview).catch(e=>{if(e.name!=="AbortError")toast(e.message,true);}));
 }
 async function openSkillReview(id) {
-  const r=await api("/api/skill-reviews?id="+encodeURIComponent(id));const m=r.bundle.manifest;
+  const read = beginModalRead();
+  const r=await read("/api/skill-reviews?id="+encodeURIComponent(id));const m=r.bundle.manifest;
   const canReview=state.account.role==="admin"&&r.state==="submitted";
   openModal({title:`${m.name} · 修订 ${r.draft_revision}`,submit:canReview?"提交审批决定":"关闭",body:`
     <p>${escapeHtml(m.description)}</p><p>申请人：${escapeHtml(r.owner_subject)} · 使用范围：${escapeHtml(r.audience.join("、"))}</p><p>发布说明：${escapeHtml(r.reason)}</p>
@@ -925,16 +853,4 @@ async function openSkillReview(id) {
     <h3>样例结果（模型生成，待人工复核）</h3>${r.tests.map(t=>`<details open><summary>${escapeHtml(t.profile)} · ${escapeHtml(t.prompt)}</summary><pre class="skill-review-text">${escapeHtml(t.output)}</pre></details>`).join("")}
     ${canReview?`<label>决定<select name="decision"><option value="changes_requested">退回修改</option><option value="approve">通过并发布</option><option value="rejected">拒绝</option></select></label><label><input type="checkbox" name="reviewed_tests">我已检查方法、依赖、脱敏、发布范围和全部样例结果</label>${reasonField("审批意见")}`:`<p>${escapeHtml(r.decision_reason||r.state)}</p>`}`,
     action:async f=>{if(canReview)await api("/api/skill-reviews",{method:"POST",body:JSON.stringify({request_id:id,decision:f.get("decision"),reviewed_tests:f.get("reviewed_tests")==="on",reason:f.get("reason"),manual_quality_reason:f.get("manual_quality_reason")||null})});closeModal();await loadView("skillReviews");}});
-}
-
-function skillReviewQualityHtml(q){
-  if(!q)return '<p>历史申请未记录独立评测及版本差异。</p>';
-  const report=q.evaluation;const labels={candidate:'候选版本',published:'线上版本',without_skill:'不使用助手'};
-  return `<h3>固定修订质量依据</h3><p>${escapeHtml(q.diagnostics.message)}</p>${q.diagnostics.checks.filter(c=>c.level==='warning').map(c=>`<p>待复核：${escapeHtml(c.message)}</p>`).join('')}
-    <details><summary>版本差异（${q.diff.length} 项）</summary>${q.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre class="skill-review-text">${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
-    <p>新增使用用户：${escapeHtml(q.audience_diff.added.join('、')||'无')}；移除：${escapeHtml(q.audience_diff.removed.join('、')||'无')}</p>
-    ${report?`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p><p>${escapeHtml(report.limitations)}</p>
-    ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
-    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p></details>`).join('')}`:
-    `<p>尚无独立评测，仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`}`;
 }

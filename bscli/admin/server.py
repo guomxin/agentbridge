@@ -630,7 +630,7 @@ def create_admin_http_server(
             body = path.read_bytes()
             self.send_response(200)
             self._security_headers()
-            self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            self.send_header("Content-Type", ("text/javascript" if path.suffix == ".mjs" else mimetypes.guess_type(path.name)[0]) or "application/octet-stream")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

@@ -53,6 +53,9 @@ def _workspace_asset_version() -> str:
     ):
         digest.update(name.encode("ascii"))
         digest.update((STATIC_ROOT / name).read_bytes())
+    for path in sorted(STATIC_ROOT.glob("*.mjs")):
+        digest.update(path.name.encode("ascii"))
+        digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
 
@@ -912,7 +915,7 @@ def create_workspace_http_server(
             self.send_response(200)
             self.send_header(
                 "Content-Type",
-                mimetypes.guess_type(path.name)[0]
+                ("text/javascript" if path.suffix == ".mjs" else mimetypes.guess_type(path.name)[0])
                 or "application/octet-stream",
             )
             self.send_header("Content-Length", str(len(body)))
@@ -920,7 +923,7 @@ def create_workspace_http_server(
                 "Cache-Control",
                 (
                     "no-store"
-                    if path.name in {"index.html", "original.html"}
+                    if path.name in {"index.html", "original.html"} or path.suffix == ".mjs"
                     else "public, max-age=31536000, immutable"
                 ),
             )

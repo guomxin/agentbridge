@@ -1,11 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
+import { createResultView } from "../bscli/workspace/static/workspace_results.mjs";
 
-const source = readFileSync(new URL("../bscli/workspace/static/workspace.js", import.meta.url), "utf8");
-const begin = source.indexOf("function groupQueryCards(");
-const end = source.indexOf("function olderChatControl(", begin);
 function element(tag = "article", dataset = {}) {
   return { tag, dataset, children: [], events: {}, classList: { add() {} },
     append(...items) { this.children.push(...items); },
@@ -13,9 +9,7 @@ function element(tag = "article", dataset = {}) {
 }
 function fixture() {
   const state = { queryGroupOpen: new Map() };
-  const group = runInNewContext(`${source.slice(begin, end)}\ngroupQueryCards`, {
-    state, document: { createElement: element },
-  });
+  const { groupQueryCards: group } = createResultView({ state, document: { createElement: element } });
   return { group, state };
 }
 const query = (turn = "one", scope = "endpoint-a", status = "succeeded") =>

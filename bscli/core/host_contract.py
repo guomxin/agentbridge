@@ -61,6 +61,19 @@ class HostLeaseConflict(PermissionError):
     code = "HOST_COORDINATOR_LEASE_CONFLICT"
 
 
+def host_transport_recovery_strategy(call_class: str) -> str:
+    """Public host policy; it does not grant permission to retry a business call.
+
+    Hosts still apply their own classification, idempotency and transport budget.
+    Unknown classes share the conservative commit/resume policy.
+    """
+    if call_class == "read":
+        return "bounded_retry"
+    if call_class == "prepare":
+        return "bounded_retry_with_stable_idempotency_key"
+    return "query_operation_then_stop_if_unknown"
+
+
 def normalize_host_profile(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise HostContractError("host capability profile must be an object")
@@ -497,6 +510,10 @@ class HostContractStore:
             (
                 "openclaw", "0.4.109", "L3",
                 "shared-contract-h01-h29-skill-quality-durable-workbench-v1",
+            ),
+            (
+                "openclaw", "0.4.110", "L3",
+                "shared-contract-h01-h29-host-recovery-decisions-v1",
             ),
         )
         for name, version, level, evidence in builtins:

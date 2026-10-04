@@ -1,19 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
-
-const source = readFileSync(
-  new URL("../bscli/workspace/static/workspace.js", import.meta.url), "utf8",
-);
+import { createResultView, completedInteractionPresentation as presentation,
+  taskCardStatusMessage as batchMessage, taskCardStatusForInteraction as cardStatus,
+  taskPlanFailurePresentation as failurePresentation } from "../bscli/workspace/static/workspace_results.mjs";
+import { createTaskCards } from "../bscli/workspace/static/workspace_cards.mjs";
 
 test("database CSV artifacts expose only valid authenticated download paths", () => {
   const node = (tag = "div") => ({tag, children: [], append(...items) { this.children.push(...items); }});
-  const begin = source.indexOf("function appendArtifactList(");
-  const end = source.indexOf("async function reissueArtifact(", begin);
-  const render = runInNewContext(`${source.slice(begin, end)}\nappendArtifactList;`, {
-    document: {createElement: node}, formatBytes: String, formatTime: String,
-  });
+  const { appendArtifactList: render } = createResultView({ document: { createElement: node } });
   const path = `/api/database/reports/taihua_primary/${"a".repeat(32)}/download`;
   for (const [type, url, state, allowed] of [
     ["database_csv", path, "ready", true],
@@ -30,18 +24,6 @@ test("database CSV artifacts expose only valid authenticated download paths", ()
     if (allowed) assert.equal(links[0].href, path);
   }
 });
-const start = source.indexOf("function completedInteractionPresentation(");
-const end = source.indexOf("function taskCardStatusForInteraction(", start);
-assert.ok(start >= 0 && end > start);
-const presentation = runInNewContext(
-  `${source.slice(start, end)}\ncompletedInteractionPresentation;`,
-);
-
-const batchStart = source.indexOf("function taskCardStatusMessage(");
-const batchEnd = source.indexOf("function taskCardArtifactDeliveryMessage(", batchStart);
-const batchMessage = runInNewContext(`${source.slice(batchStart, batchEnd)}\ntaskCardStatusMessage;`);
-const cardStatus = runInNewContext(`${source.slice(end, batchStart)}\ntaskCardStatusForInteraction;`);
-
 test("canceled task takes precedence over its retired interaction", () => {
   for (const state of ["superseded", "pending", "completed", "expired"]) {
     assert.equal(cardStatus(state, "canceled"), "canceled");
@@ -72,11 +54,6 @@ test("pending, failed, canceled and business authorization retain their actual s
   assert.equal(presentation(null), null);
 });
 
-const failureStart = source.indexOf("function taskPlanFailurePresentation(");
-const failureEnd = source.indexOf("function renderTaskPlan(", failureStart);
-const failurePresentation = runInNewContext(
-  `${source.slice(failureStart, failureEnd)}\ntaskPlanFailurePresentation;`,
-);
 test("incomplete source plan shows safe stop with source counts and no business write", () => {
   const result = failurePresentation({
     terminalReason: "PLAN_SOURCE_INCOMPLETE",
@@ -94,10 +71,8 @@ test("incomplete source plan shows safe stop with source counts and no business 
 
 test("Skill cards distinguish rule loading from business success and render text safely", () => {
   const node = () => ({ children: [], append(...items) { this.children.push(...items); } });
-  const begin = source.indexOf("function skillProfileLabel(");
-  const end = source.indexOf("async function hydrateSkillCards(", begin);
-  const render = runInNewContext(`${source.slice(begin, end)}; renderSkillCard;`, {
-    document: { createElement: node }, formatTime: String, setTimelineNode() {},
+  const { renderSkillCard: render } = createTaskCards({
+    document: { createElement: node }, setTimelineNode() {},
   });
   const success = render({name: "<img onerror=bad>", status: "succeeded", profile: "fill", version: "1.0.0"});
   assert.equal(success.children[0].textContent, "业务助手 · <img onerror=bad>");

@@ -12,45 +12,36 @@ from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 
-TASK_STATUSES = {
-    "active",
-    "waiting_user",
-    "running",
-    "succeeded",
-    "failed",
-    "outcome_unknown",
-    "canceled",
-    "expired",
-    "superseded",
-    "partially_succeeded",
-}
+from bscli.core.task_state_rules import (
+    operation_observation, interaction_observation, plan_task_status,
+    terminal_transition, batch_failure_status, batch_task_status, task_finished_at,
+    TASK_STATUSES,
+    ACTIVE_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES,
+    BATCH_STATES,
+    ACTIVE_BATCH_STATES,
+    BATCH_ITEM_STATES,
+    _task_status_for_operation,
+    _event_type_for_operation,
+    _task_status_for_interaction,
+    _event_type_for_interaction,
+    _interaction_may_update_task,
+)
+from bscli.core.task_projections import (
+    batch_task_summary,
+    _endpoint_from_row,
+    _task_from_row,
+    _batch_from_row,
+    _batch_item_from_row,
+    _artifact_from_row,
+    _event_from_row,
+    _outbox_from_row,
+    _timeline_from_row,
+    _continuation_from_row,
+    _artifact_delivery_aggregate,
+)
 
-ACTIVE_TASK_STATUSES = {"active", "waiting_user", "running"}
-TERMINAL_TASK_STATUSES = TASK_STATUSES - ACTIVE_TASK_STATUSES
-BATCH_STATES = {
-    "running",
-    "waiting_user",
-    "paused",
-    "succeeded",
-    "partially_succeeded",
-    "failed",
-    "outcome_unknown",
-    "canceled",
-    "expired",
-}
-ACTIVE_BATCH_STATES = {"running", "waiting_user", "paused"}
-BATCH_ITEM_STATES = {
-    "queued",
-    "preparing",
-    "waiting_user",
-    "succeeded",
-    "failed",
-    "outcome_unknown",
-    "canceled",
-    "expired",
-    "skipped",
-    "superseded",
-}
+
 CONTINUATION_STATES = {"awaiting_selection", "selected", "expired", "cleared"}
 CONTINUATION_EXECUTION_MODES = {"observe_only", "resume", "follow_up"}
 ARTIFACT_DELIVERY_STATES = {
@@ -1565,14 +1556,7 @@ class TaskHubStore:
             )
             succeeded_count = int(batch["succeeded_count"])
             failed_count = int(batch["failed_count"]) + 1
-            if item_state == "outcome_unknown":
-                batch_state = "outcome_unknown"
-            elif succeeded_count:
-                batch_state = "partially_succeeded"
-            elif item_state in {"canceled", "expired"}:
-                batch_state = item_state
-            else:
-                batch_state = "failed"
+            batch_state = batch_failure_status(item_state, succeeded_count)
             connection.execute(
                 """
                 UPDATE task_batches
@@ -1680,8 +1664,6 @@ class TaskHubStore:
         if operation.get("user_subject") != user_subject:
             raise TaskIntegrityError("operation belongs to another user")
         status = str(operation.get("status") or "")
-        task_status = _task_status_for_operation(status)
-        event_type = _event_type_for_operation(status)
         now = _utc_now()
 
         with self._connect() as connection:
@@ -1691,21 +1673,18 @@ class TaskHubStore:
                 "SELECT * FROM task_batches WHERE parent_task_id = ?",
                 (task_id,),
             ).fetchone()
-            if batch is not None:
-                if batch["state"] in ACTIVE_BATCH_STATES:
-                    task_status = (
-                        "waiting_user"
-                        if batch["state"] in {"waiting_user", "paused"}
-                        else "running"
-                    )
-                else:
-                    task_status = str(batch["state"])
             linked = connection.execute(
                 "SELECT task_id FROM task_operations WHERE operation_id = ?",
                 (operation_id,),
             ).fetchone()
             if linked is not None and linked["task_id"] != task_id:
                 raise TaskIntegrityError("operation is already linked to another task")
+            decision = operation_observation(
+                task_status=task["status"], operation_status=status,
+                batch_state=batch["state"] if batch is not None else None,
+                newly_linked=linked is None,
+            )
+            task_status, event_type = decision.status, decision.event_type
             if linked is None:
                 connection.execute(
                     """
@@ -1732,7 +1711,7 @@ class TaskHubStore:
                     causation_ref=operation_id,
                     created_at=now,
                 )
-            if task["status"] != "outcome_unknown" or task_status == "outcome_unknown":
+            if decision.update_task:
                 self._update_task_state(
                     connection,
                     task_id=task_id,
@@ -1741,7 +1720,7 @@ class TaskHubStore:
                     current_interaction_id=task["current_interaction_id"],
                     now=now,
                 )
-            if linked is None or task["status"] != task_status:
+            if decision.emit_event:
                 self._append_event(
                     connection,
                     task_id=task_id,
@@ -1818,11 +1797,12 @@ class TaskHubStore:
                     causation_ref=operation_id,
                     created_at=now,
                 )
-            if task["status"] in ACTIVE_TASK_STATUSES:
+            task_status = plan_task_status(task["status"])
+            if task_status is not None:
                 self._update_task_state(
                     connection,
                     task_id=task_id,
-                    status="running",
+                    status=task_status,
                     current_operation_id=operation_id,
                     current_interaction_id=task["current_interaction_id"],
                     now=now,
@@ -1917,15 +1897,8 @@ class TaskHubStore:
                 causation_ref=causation_ref,
                 created_at=now,
             )
-            if task["status"] in ACTIVE_TASK_STATUSES:
-                status = (
-                    "waiting_user"
-                    if event_type in {
-                        "plan.step.waiting",
-                        "plan.authorization.waiting",
-                    }
-                    else "running"
-                )
+            status = plan_task_status(task["status"], event_type)
+            if status is not None:
                 self._update_task_state(
                     connection,
                     task_id=task_id,
@@ -1967,7 +1940,6 @@ class TaskHubStore:
         if scoped_task and scoped_task != task_id:
             raise TaskIntegrityError("interaction belongs to another task")
         state = str(interaction.get("state") or "")
-        event_type = _event_type_for_interaction(state)
         now = _utc_now()
 
         with self._connect() as connection:
@@ -1979,11 +1951,13 @@ class TaskHubStore:
             ).fetchone()
             if linked is not None and linked["task_id"] != task_id:
                 raise TaskIntegrityError("interaction is already linked to another task")
-            task_status = _task_status_for_interaction(
-                state,
+            decision = interaction_observation(
+                task=task, interaction_id=interaction_id, state=state,
                 interaction_type=str(interaction.get("type") or ""),
-                has_current_operation=bool(task["current_operation_id"]),
+                newly_linked=linked is None,
+                previous_state=linked["last_state"] if linked is not None else None,
             )
+            task_status, event_type = decision.status, decision.event_type
             if linked is None:
                 connection.execute(
                     """
@@ -2001,7 +1975,7 @@ class TaskHubStore:
                         now,
                     ),
                 )
-            elif linked["last_state"] != state:
+            elif decision.observation_changed:
                 connection.execute(
                     """
                     UPDATE task_interactions
@@ -2010,20 +1984,7 @@ class TaskHubStore:
                     """,
                     (state, now, interaction_id),
                 )
-            state_changed = linked is None or linked["last_state"] != state
-            event_changed = (
-                linked is None
-                or _event_type_for_interaction(
-                    str(linked["last_state"] or "")
-                )
-                != event_type
-            )
-            may_update_task = _interaction_may_update_task(
-                task=task,
-                interaction_id=interaction_id,
-                newly_linked=linked is None,
-            )
-            if may_update_task and state_changed:
+            if decision.update_task:
                 self._update_task_state(
                     connection,
                     task_id=task_id,
@@ -2032,7 +1993,7 @@ class TaskHubStore:
                     current_interaction_id=interaction_id,
                     now=now,
                 )
-            if may_update_task and state_changed and event_changed:
+            if decision.emit_event:
                 if event_type == "task.interaction.waiting":
                     self._subscribe_companion_endpoints(
                         connection,
@@ -2507,9 +2468,10 @@ class TaskHubStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task = self._select_owned_task(connection, task_id, user_subject)
-            if task["status"] == "succeeded":
+            transition = terminal_transition(task["status"], "succeeded")
+            if transition == "reuse":
                 return _task_from_row(task)
-            if task["status"] not in ACTIVE_TASK_STATUSES:
+            if transition == "reject":
                 raise TaskIntegrityError(
                     f"terminal task cannot be completed: {task['status']}"
                 )
@@ -2554,9 +2516,10 @@ class TaskHubStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task = self._select_owned_task(connection, task_id, user_subject)
-            if task["status"] == "failed":
+            transition = terminal_transition(task["status"], "failed")
+            if transition == "reuse":
                 return _task_from_row(task)
-            if task["status"] not in ACTIVE_TASK_STATUSES:
+            if transition == "reject":
                 raise TaskIntegrityError(
                     f"terminal task cannot be failed: {task['status']}"
                 )
@@ -2608,9 +2571,10 @@ class TaskHubStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             task = self._select_owned_task(connection, task_id, user_subject)
-            if task["status"] == "outcome_unknown":
+            transition = terminal_transition(task["status"], "outcome_unknown")
+            if transition == "reuse":
                 return _task_from_row(task)
-            if task["status"] not in ACTIVE_TASK_STATUSES:
+            if transition == "reject":
                 raise TaskIntegrityError(
                     f"terminal task cannot become outcome_unknown: {task['status']}"
                 )
@@ -2656,9 +2620,10 @@ class TaskHubStore:
             if own_connection:
                 connection.execute("BEGIN IMMEDIATE")
             task = self._select_owned_task(connection, task_id, user_subject)
-            if task["status"] == "canceled":
+            transition = terminal_transition(task["status"], "canceled")
+            if transition == "reuse":
                 return _task_from_row(task)
-            if task["status"] not in ACTIVE_TASK_STATUSES:
+            if transition == "reject":
                 raise TaskIntegrityError(
                     f"terminal task cannot be canceled: {task['status']}"
                 )
@@ -4740,40 +4705,13 @@ class TaskHubStore:
         current_interaction_id: str | None = None,
     ) -> None:
         current_item = self._select_current_batch_item(connection, batch)
-        summary = json.loads(task["summary_json"] or "{}")
-        summary["batch"] = {
-            "batchId": batch["batch_id"],
-            "systemId": batch["system_id"],
-            "capability": batch["capability_name"],
-            "state": batch["state"],
-            "currentOrdinal": int(batch["current_ordinal"]),
-            "totalCount": int(batch["total_count"]),
-            "succeededCount": int(batch["succeeded_count"]),
-            "failedCount": int(batch["failed_count"]),
-            "skippedCount": int(batch["skipped_count"]),
-            "failurePolicy": batch["failure_policy"],
-            "currentItem": {
-                "ordinal": int(current_item["ordinal"]),
-                "state": current_item["state"],
-                "display": json.loads(current_item["display_summary_json"] or "{}"),
-            },
-        }
+        summary = batch_task_summary(task, batch, current_item)
         connection.execute(
             "UPDATE agent_tasks SET summary_json = ? WHERE task_id = ?",
             (_canonical_json(summary), task["task_id"]),
         )
         if task_status is None:
-            task_status = {
-                "waiting_user": "waiting_user",
-                "running": "running",
-                "paused": "waiting_user",
-                "partially_succeeded": "partially_succeeded",
-                "outcome_unknown": "outcome_unknown",
-                "failed": "failed",
-                "canceled": "canceled",
-                "expired": "expired",
-                "succeeded": "succeeded",
-            }.get(str(batch["state"]), "active")
+            task_status = batch_task_status(batch["state"])
         self._update_task_state(
             connection,
             task_id=task["task_id"],
@@ -4801,17 +4739,7 @@ class TaskHubStore:
         current_interaction_id: str | None,
         now: str,
     ) -> None:
-        if status not in TASK_STATUSES:
-            raise ValueError(f"unsupported task status: {status}")
-        finished_at = now if status in {
-            "succeeded",
-            "partially_succeeded",
-            "failed",
-            "outcome_unknown",
-            "canceled",
-            "expired",
-            "superseded",
-        } else None
+        finished_at = task_finished_at(status, now)
         connection.execute(
             """
             UPDATE agent_tasks
@@ -4866,222 +4794,6 @@ class TaskHubStore:
         if row["user_subject"] != user_subject:
             raise TaskNotFound(f"task not found: {task_id}")
         return row
-
-
-def _task_status_for_operation(status: str) -> str:
-    return {
-        "pending": "running",
-        "running": "running",
-        "requires_user_action": "waiting_user",
-        "succeeded": "succeeded",
-        "failed": "failed",
-        "unknown": "outcome_unknown",
-    }.get(status, "active")
-
-
-def _event_type_for_operation(status: str) -> str:
-    return {
-        "pending": "task.operation.running",
-        "running": "task.operation.running",
-        "requires_user_action": "task.operation.requires_user_action",
-        "succeeded": "task.operation.succeeded",
-        "failed": "task.operation.failed",
-        "unknown": "task.operation.outcome_unknown",
-    }.get(status, "task.operation.updated")
-
-
-def _task_status_for_interaction(
-    state: str,
-    *,
-    interaction_type: str = "",
-    has_current_operation: bool = False,
-) -> str:
-    if (
-        state == "completed"
-        and interaction_type == "credential"
-        and not has_current_operation
-    ):
-        return "succeeded"
-    return {
-        "pending": "waiting_user",
-        "processing": "waiting_user",
-        "completed": "active",
-        "declined": "canceled",
-        "expired": "expired",
-        "failed": "failed",
-        "superseded": "superseded",
-    }.get(state, "active")
-
-
-def _event_type_for_interaction(state: str) -> str:
-    return {
-        "pending": "task.interaction.waiting",
-        "processing": "task.interaction.waiting",
-        "completed": "task.interaction.completed",
-        "declined": "task.canceled",
-        "expired": "task.interaction.expired",
-        "failed": "task.interaction.failed",
-        "superseded": "task.interaction.superseded",
-    }.get(state, "task.interaction.updated")
-
-
-def _interaction_may_update_task(
-    *,
-    task: sqlite3.Row,
-    interaction_id: str,
-    newly_linked: bool,
-) -> bool:
-    if task["status"] in TERMINAL_TASK_STATUSES:
-        return False
-    if newly_linked:
-        return True
-    return task["current_interaction_id"] == interaction_id
-
-
-def _endpoint_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["capabilities"] = json.loads(value.pop("capabilities_json"))
-    value["route"] = json.loads(value.pop("route_json"))
-    return value
-
-
-def _task_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["summary"] = json.loads(value.pop("summary_json"))
-    return value
-
-
-def _batch_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["selection_summary"] = json.loads(
-        value.pop("selection_summary_json") or "{}"
-    )
-    return value
-
-
-def _batch_item_from_row(
-    row: sqlite3.Row,
-    *,
-    include_resource_ref: bool,
-) -> dict:
-    value = dict(row)
-    value["display_summary"] = json.loads(
-        value.pop("display_summary_json") or "{}"
-    )
-    value["result_summary"] = json.loads(
-        value.pop("result_summary_json") or "{}"
-    )
-    if not include_resource_ref:
-        value.pop("resource_ref", None)
-    return value
-
-
-def _artifact_from_row(
-    row: sqlite3.Row,
-    *,
-    include_source_ref: bool = False,
-) -> dict:
-    result = {
-        "artifact_id": row["artifact_id"],
-        "task_id": row["task_id"],
-        "user_subject": row["user_subject"],
-        "artifact_type": row["artifact_type"],
-        "filename": row["filename"],
-        "content_type": row["content_type"],
-        "byte_size": int(row["byte_size"]),
-        "download_url": row["download_url"],
-        "state": row["state"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "expires_at": row["expires_at"],
-    }
-    if include_source_ref:
-        result["source_ref"] = row["source_ref"]
-    return result
-
-
-def _event_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["payload"] = json.loads(value.pop("payload_json"))
-    return value
-
-
-def _outbox_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["payload"] = json.loads(value.pop("payload_json"))
-    return value
-
-
-def _timeline_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["payload"] = json.loads(value.pop("payload_json"))
-    return value
-
-
-def _continuation_from_row(row: sqlite3.Row) -> dict:
-    value = dict(row)
-    value["candidate_task_ids"] = json.loads(
-        value.pop("candidate_task_ids_json")
-    )
-    value["allow_new_operation"] = value["execution_mode"] in {
-        "resume",
-        "follow_up",
-    }
-    return value
-
-
-def _artifact_delivery_aggregate(by_channel: dict[str, dict]) -> dict:
-    artifacts: set[str] = set()
-    parts: list[str] = []
-    delivered_channels = 0
-    failed_channels = 0
-    for channel, report in sorted(by_channel.items()):
-        files = report.get("files") if isinstance(report, dict) else []
-        for item in (files if isinstance(files, list) else []):
-            artifact_id = item.get("artifactId") if isinstance(item, dict) else None
-            if artifact_id:
-                artifacts.add(str(artifact_id))
-        attachment_count = max(0, int(report.get("attachmentSentCount") or 0))
-        fallback_count = max(0, int(report.get("fallbackLinkSentCount") or 0))
-        failed_count = max(0, int(report.get("failedCount") or 0))
-        label = {
-            "telegram": "Telegram",
-            "openclaw-weixin": "微信",
-            "weixin": "微信",
-            "wechat": "微信",
-            "web": "网页端",
-            "webchat": "网页端",
-            "agentbridge-workspace": "网页端",
-        }.get(str(channel).casefold(), str(channel))
-        channel_parts = []
-        if attachment_count:
-            channel_parts.append(f"{attachment_count} 份附件已送达")
-        if fallback_count:
-            channel_parts.append(
-                f"{fallback_count} 个下载入口可用"
-                if label == "网页端"
-                else f"{fallback_count} 份已通过下载链接送达"
-            )
-        if failed_count:
-            channel_parts.append(f"{failed_count} 份未送达")
-        if channel_parts:
-            parts.append(f"{label}：{'，'.join(channel_parts)}")
-        if report.get("state") == "delivered":
-            delivered_channels += 1
-        elif report.get("state") in {"partial", "failed"}:
-            failed_channels += 1
-    prepared_count = len(artifacts)
-    prefix = f"{prepared_count} 份文件已准备" if prepared_count else "文件已准备"
-    return {
-        "state": "partial" if failed_channels else "delivered",
-        "completionMeaning": "cross_endpoint_delivery_reported",
-        "preparedCount": prepared_count,
-        "channelCount": len(by_channel),
-        "deliveredChannelCount": delivered_channels,
-        "failedChannelCount": failed_channels,
-        "channels": by_channel,
-        "userMessage": f"{prefix}；{'；'.join(parts)}。" if parts else f"{prefix}。",
-    }
 
 
 def _safe_object(value: dict[str, Any] | None) -> dict[str, Any]:

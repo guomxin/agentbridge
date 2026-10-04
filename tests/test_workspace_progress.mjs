@@ -1,13 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
-
-const source = readFileSync(new URL("../bscli/workspace/static/workspace.js", import.meta.url), "utf8");
-const start = source.indexOf("function ensureLiveMessage(");
-const end = source.indexOf("function renderRunFailure(", start);
-const markdownSource = source.slice(source.indexOf("function renderMarkdown("), source.indexOf("function messageElement("));
-assert.ok(start >= 0 && end > start);
+import { createChatProgress } from "../bscli/workspace/static/workspace_progress.mjs";
+import { createResultView } from "../bscli/workspace/static/workspace_results.mjs";
+import { createChatStream } from "../bscli/workspace/static/workspace_stream.mjs";
+import { createLifecycle } from "../bscli/workspace/static/workspace_lifecycle.mjs";
 
 class Element {
   children = [];
@@ -28,9 +24,11 @@ function fixture() {
   const root = new Element();
   const state = { liveMessages: new Map() };
   let scrolls = 0;
-  const api = runInNewContext(`${markdownSource}\n${source.slice(start, end)}\n({handleChatProgress, handleChatDelta, addLiveProgress, adoptLiveMessage});`, {
-    state, document: { createElement: () => new Element() },
+  const document = { createElement: () => new Element() };
+  const { renderMarkdown } = createResultView({ document });
+  const api = createChatProgress({ state, document, renderMarkdown,
     $: () => root, scrollChat: () => scrolls++, scheduleChatRefresh: () => {},
+    attachDispatchCancel: () => { throw Error("accepted dispatch must not be canceled as unsent"); },
   });
   return { ...api, state, root, scrolls: () => scrolls };
 }
@@ -93,10 +91,8 @@ test("dispatch adoption, concurrent runs and final cleanup keep separate ownersh
 
 
 test("protected CSV cards accept only the exact authenticated same-origin route", () => {
-  const start = source.indexOf("function appendArtifactList(");
-  const end = source.indexOf("async function reissueArtifact(", start);
-  const render = runInNewContext(`${source.slice(start, end)}; appendArtifactList`, {
-    document: {createElement: () => new Element()}, formatBytes: String, formatTime: String,
+  const { appendArtifactList: render } = createResultView({
+    document: { createElement: () => new Element() },
   });
   for (const [url, allowed] of [["/api/database/reports/taihua_primary/" + "a".repeat(32) + "/download", true],
                                ["/api/analytics/reports/" + "a".repeat(32) + "/download", false],
@@ -111,41 +107,30 @@ test("protected CSV cards accept only the exact authenticated same-origin route"
 
 
 test("an explicit no-retry terminal event stays non-retryable without tool progress", async () => {
-  const begin = source.indexOf("async function consumeChatStream(");
-  const end = source.indexOf("async function fetchChatStreamResponse(", begin);
   for (const safe of [false, true]) {
     let renderedRetry;
-    const consume = runInNewContext(`${source.slice(begin, end)}; consumeChatStream`, {
-      AbortController, TextDecoder, Uint8Array,
-      registerActiveStream: () => {}, unregisterActiveStream: () => {},
+    const scope = createLifecycle().scope();
+    const { consumeChatStream: consume } = createChatStream({
+      state: { activeStreams: new Map() }, getScope: () => scope,
       fetchChatStreamResponse: async () => ({ok: true, body: {getReader: () => ({
-        read: async () => ({value: new TextEncoder().encode("event\n\n"), done: false}),
+        read: async () => ({value: new TextEncoder().encode(
+          `event: chat\ndata: ${JSON.stringify({state: "error", text: "结果未确认", safeToRetry: safe})}\n\n`
+        ), done: false}),
         cancel: async () => {},
       })}}),
-      parseSseBlock: () => ({name: "chat", data: {state: "error", text: "结果未确认", safeToRetry: safe}}),
       agentFailureMessage: text => text,
       renderRunFailure: (_id, _text, retry) => { renderedRetry = retry; },
     });
     await assert.rejects(consume({message: "do not replay", idempotencyKey: "run"}));
     assert.equal(renderedRetry, safe);
+    scope.dispose();
   }
 });
 
 test("refresh restores accepted result recovery without offering resend or cancel", () => {
   const f = fixture();
-  const begin = source.indexOf("function restoreActiveDispatches(");
-  const end = source.indexOf("function messageElement(", begin);
-  let label;
-  const restore = runInNewContext(`${source.slice(begin, end)}; restoreActiveDispatches`, {
-    state: f.state,
-    ensureLiveMessage: key => {
-      f.addLiveProgress(key, "initial", "active");
-      return f.state.liveMessages.get(key);
-    },
-    addLiveProgress: (_key, text) => { label = text; },
-    attachDispatchCancel: () => { throw Error("accepted dispatch must not be canceled as unsent"); },
-  });
+  const restore = f.restoreActiveDispatches;
   restore([{dispatchId: "d", runId: "r", state: "accepted", lastErrorCode: "HOST_RUN_RESULT_PENDING"}]);
-  assert.equal(label, "请求已接收，正在恢复结果；不会重复执行");
+  assert.equal(f.state.liveMessages.get("r").progressRow.lastElementChild.textContent, "请求已接收，正在恢复结果；不会重复执行");
   assert.equal(f.state.liveMessages.get("r").actions.children.length, 0);
 });

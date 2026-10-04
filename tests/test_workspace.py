@@ -3132,7 +3132,9 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
     def test_assets_are_csp_clean_and_mobile_detail_has_back_control(self) -> None:
         root = Path(__file__).resolve().parents[1] / "bscli" / "workspace" / "static"
         page = (root / "index.html").read_text(encoding="utf-8")
-        script = (root / "workspace.js").read_text(encoding="utf-8")
+        script = (root / "workspace.js").read_text(encoding="utf-8") + "\n" + "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(root.glob("*.mjs"))
+        )
         stylesheet = (root / "workspace.css").read_text(encoding="utf-8")
 
         self.assertNotIn('style="', page)
@@ -3183,7 +3185,7 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("task-plan-result", stylesheet)
         self.assertIn("请处理附加图片中的内容。", script)
         self.assertIn("activeStream.controller.abort()", script)
-        self.assertIn("await reader.cancel().catch(() => {})", script)
+        self.assertIn("await closeReader();", script)
         self.assertIn("parseSseBlock", script)
         self.assertIn("handleChatProgress", script)
         self.assertIn("handleChatDelta", script)

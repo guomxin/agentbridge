@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Mapping, TYPE_CHECKING
+from .recovery_policy import interaction_resume_allowed, resume_claim_allowed
 
 if TYPE_CHECKING:
     from .task_driver import ReferenceTaskDriver
@@ -62,12 +63,8 @@ class InteractionDriver:
                     local_task_id,
                     current,
                 )
-                if (
-                    state == "completed"
-                    and resume.get("ready") is True
-                    and resume.get("completed") is not True
-                ):
-                    if interaction_id in self._resume_started:
+                if interaction_resume_allowed({"state": state, "resume": resume}):
+                    if not resume_claim_allowed(claimed=interaction_id in self._resume_started):
                         return
                     self._resume_started.add(interaction_id)
                     await self.task_driver.resume_interaction(

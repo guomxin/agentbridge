@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { resolveMcpServer } from "./config.js";
+import { transportRetryAllowed } from "./recovery-policy.js";
 
 export class McpCallError extends Error {
   constructor(
@@ -83,12 +84,12 @@ export function createAgentBridgeMcpClient({
           error.attempts = attempt;
         }
         const delayMs = policy?.delaysMs[attempt - 1];
-        if (
-          !(error instanceof McpCallError) ||
-          error.retryable !== true ||
-          delayMs === undefined ||
-          signal?.aborted
-        ) {
+        if (!transportRetryAllowed({
+          retryable: error instanceof McpCallError && error.retryable === true,
+          attempt,
+          maximumAttempts: (policy?.delaysMs.length || 0) + 1,
+          canceled: signal?.aborted === true,
+        })) {
           throw error;
         }
         lastError = error;

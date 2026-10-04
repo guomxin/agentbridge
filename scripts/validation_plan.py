@@ -27,6 +27,10 @@ WORKSPACE_NODE = (
     "tests/test_workspace_card_messages.mjs",
     "tests/test_workspace_progress.mjs",
     "tests/test_workspace_query_groups.mjs",
+    "tests/test_workspace_request.mjs",
+    "tests/test_workspace_lifecycle.mjs",
+    "tests/test_workspace_forms.mjs",
+    "tests/test_admin_modules.mjs",
 )
 BROWSER_FIXTURES = ("tests/test_workspace_markdown.browser.js",)
 CHECKS = ["browser-runtime", "public-content", "current-facts", "python-full", "compileall",

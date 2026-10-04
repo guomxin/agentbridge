@@ -11,8 +11,9 @@
     "e6cf0f1c9b7d",
     "1d298fcceae4",
     "8687c1a712db",
-    "1422644d87ca"
+    "1422644d87ca",
+    "52407ea1db3d"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Skill request contracts, declared dispatch, durable queue and model executor preserve public schemas, action arguments, existing SQL, lease and retry rules, and the atomic generated draft/job transaction. Persisted data and production configuration remain unchanged; no database migration is required."
+  "reason": "Task state decisions and projections, independent host recovery policies, and browser module boundaries preserve public contracts, SQL, authorization and transaction semantics. No database migration or production configuration change is required."
 }
