@@ -104,16 +104,12 @@ class DeploymentAssetTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('"pytest-xdist"', script)
-        self.assertIn('"-n", "4", "--dist", "loadscope"', script)
-        self.assertIn('"--junitxml=output/release-validation/pytest.xml"', script)
-        self.assertLess(
-            script.index('scripts/agentbridge_artifact.py", "begin"'),
-            script.index('"-n", "4", "--dist", "loadscope"'),
-        )
-        self.assertLess(
-            script.index('"-n", "4", "--dist", "loadscope"'),
-            script.index('scripts/agentbridge_artifact.py", "finish"'),
-        )
+        self.assertIn('"scripts/validation_plan.py", "full", "--root", $repoRoot', script)
+        from scripts.validation_plan import plan
+        full = plan(ROOT)
+        python = next(s for s in full['stages'] if s['id'] == 'python-full')
+        self.assertEqual(python['command'][4:8], ['-n', '4', '--dist', 'loadscope'])
+        self.assertIn('--junitxml=output/release-validation/pytest.xml', python['command'])
 
     def test_backup_units_are_installed_only_after_runtime_readiness(self) -> None:
         deploy = (ROOT / "scripts/Deploy-AgentBridge.ps1").read_text(

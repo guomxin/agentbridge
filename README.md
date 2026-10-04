@@ -250,26 +250,22 @@ Agent Workspace 支持：
 | 8783 | Agent Workspace |
 | 8790 | Streamable HTTP MCP |
 
-Workspace 通过服务器回环地址和 Windows 工作站主动建立的反向 SSH 隧道访问 OpenClaw
+Workspace 通过服务器回环地址和宿主工作站主动建立的反向 SSH 隧道访问 OpenClaw
 Gateway，工作站切换网络时无需修改服务器配置。完整说明见
 [当前内网部署](docs/部署运维/当前内网部署.md)。
 
 ## 九、验证与发布
 
-常用验证命令：
+后续维护以 macOS 开发和本机宿主、Linux 中心服务及 CI 为目标，不再使用 Windows。
+常用验证命令（Python 3.12+ 环境）：
 
-```powershell
-.\scripts\Invoke-AgentBridgeValidation.ps1 -Mode Targeted -PythonTests @('tests/test_plan_write_boundaries.py', 'tests/test_documentation.py')
-.\scripts\Invoke-AgentBridgeValidation.ps1 -Mode Full
-.\scripts\Test-AgentBridgeMcp.ps1 -Check Release
-.\scripts\Test-AgentBridgeReleaseAcceptance.ps1
+```sh
+scripts/agentbridge-native validate --test tests/test_plan_write_boundaries.py --test tests/test_documentation.py
+scripts/agentbridge-native validate --full
 ```
 
-正式发布入口：
-
-```powershell
-.\scripts\Publish-AgentBridge.ps1
-```
+正式发布入口为 `scripts/agentbridge-native publish`。须提供外置环境配置、SSH 身份、可信主机及宿主交接证据；
+默认仅生成计划，使用 `--apply` 执行。依赖准备、完整参数和独立验收见[苹果系统原生维护](docs/部署运维/苹果系统原生维护.md)。
 
 发布脚本负责全量验证、构建 wheel、部署版本化 Release、安装受控 systemd unit、重启服务、
 执行治理验收并推送 GitHub。纯文档变更不需要重启或部署 AgentBridge，但仍须通过文档链接、

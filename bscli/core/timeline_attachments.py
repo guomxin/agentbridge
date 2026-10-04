@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 from typing import Any, Callable, Iterator
@@ -101,11 +102,44 @@ class TimelineAttachmentStore:
         media_base_url: str,
         ttl_seconds: int = TIMELINE_ATTACHMENT_TTL_SECONDS,
     ) -> list[dict]:
+        created_paths: list[Path] = []
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                return self._create_many_in_connection(
+                    connection,
+                    user_subject=user_subject,
+                    message_key=message_key,
+                    attachments=attachments,
+                    media_base_url=media_base_url,
+                    ttl_seconds=ttl_seconds,
+                    created_paths=created_paths,
+                )
+        except BaseException:
+            self._discard_created_files(created_paths)
+            raise
+
+    def _create_many_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        user_subject: str,
+        message_key: str,
+        attachments: list[dict[str, Any]],
+        media_base_url: str,
+        ttl_seconds: int = TIMELINE_ATTACHMENT_TTL_SECONDS,
+        created_paths: list[Path],
+    ) -> list[dict]:
+        """Register media in the caller's transaction and track only new files.
+
+        The caller must discard these paths if its outer transaction rolls back.
+        A hard process exit can leave unreferenced files for prune_expired().
+        """
+        if not connection.in_transaction:
+            raise RuntimeError("timeline attachments require an active transaction")
         user_subject = _required_text(user_subject, "user_subject", 256)
         message_key = _required_text(message_key, "message_key", 768)
         base_url = _validate_media_base_url(media_base_url)
-        if not attachments:
-            return []
         if ttl_seconds < 300 or ttl_seconds > 30 * 24 * 60 * 60:
             raise ValueError("timeline attachment TTL is invalid")
 
@@ -115,65 +149,62 @@ class TimelineAttachmentStore:
         ]
         now = _as_utc(self.clock())
         expires_at = now + timedelta(seconds=ttl_seconds)
-        created_paths: list[Path] = []
-        try:
-            with self._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                existing = connection.execute(
-                    """
-                    SELECT * FROM timeline_attachments
-                    WHERE user_subject = ? AND message_key = ?
-                    ORDER BY ordinal
-                    """,
-                    (user_subject, message_key),
-                ).fetchall()
-                if existing:
-                    self._verify_reused(existing, prepared)
-                    return [_record(row) for row in existing]
+        existing = connection.execute(
+            """
+            SELECT * FROM timeline_attachments
+            WHERE user_subject = ? AND message_key = ?
+            ORDER BY ordinal
+            """,
+            (user_subject, message_key),
+        ).fetchall()
+        if existing:
+            self._verify_reused(existing, prepared)
+            return [_record(row) for row in existing]
 
-                for item in prepared:
-                    attachment_id = secrets.token_urlsafe(32)
-                    final_path = self._cache_path(attachment_id)
-                    temporary_path = final_path.with_suffix(".tmp")
-                    temporary_path.write_bytes(item["body"])
-                    temporary_path.replace(final_path)
-                    created_paths.append(final_path)
-                    media_url = f"{base_url}/media/{attachment_id}/file"
-                    connection.execute(
-                        """
-                        INSERT INTO timeline_attachments (
-                            attachment_id, user_subject, message_key, ordinal,
-                            filename, content_type, byte_size, content_hash,
-                            media_url, state, created_at, expires_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
-                        """,
-                        (
-                            attachment_id,
-                            user_subject,
-                            message_key,
-                            item["ordinal"],
-                            item["filename"],
-                            item["content_type"],
-                            len(item["body"]),
-                            item["content_hash"],
-                            media_url,
-                            _format_time(now),
-                            _format_time(expires_at),
-                        ),
-                    )
-                rows = connection.execute(
-                    """
-                    SELECT * FROM timeline_attachments
-                    WHERE user_subject = ? AND message_key = ?
-                    ORDER BY ordinal
-                    """,
-                    (user_subject, message_key),
-                ).fetchall()
-            return [_record(row) for row in rows]
-        except Exception:
-            for path in created_paths:
-                path.unlink(missing_ok=True)
-            raise
+        for item in prepared:
+            attachment_id = secrets.token_urlsafe(32)
+            final_path = self._cache_path(attachment_id)
+            temporary_path = final_path.with_suffix(".tmp")
+            created_paths.extend((temporary_path, final_path))
+            temporary_path.write_bytes(item["body"])
+            temporary_path.replace(final_path)
+            media_url = f"{base_url}/media/{attachment_id}/file"
+            connection.execute(
+                """
+                INSERT INTO timeline_attachments (
+                    attachment_id, user_subject, message_key, ordinal,
+                    filename, content_type, byte_size, content_hash,
+                    media_url, state, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+                """,
+                (
+                    attachment_id,
+                    user_subject,
+                    message_key,
+                    item["ordinal"],
+                    item["filename"],
+                    item["content_type"],
+                    len(item["body"]),
+                    item["content_hash"],
+                    media_url,
+                    _format_time(now),
+                    _format_time(expires_at),
+                ),
+            )
+        rows = connection.execute(
+            """
+            SELECT * FROM timeline_attachments
+            WHERE user_subject = ? AND message_key = ?
+            ORDER BY ordinal
+            """,
+            (user_subject, message_key),
+        ).fetchall()
+        return [_record(row) for row in rows]
+
+    @staticmethod
+    def _discard_created_files(paths: list[Path]) -> None:
+        for path in paths:
+            path.unlink(missing_ok=True)
 
     def ready_payload(self, attachment_id: str) -> dict:
         with self._connect() as connection:
@@ -231,6 +262,21 @@ class TimelineAttachmentStore:
                     """,
                     (cutoff,),
                 )
+            # Attachment creation holds the same database write transaction
+            # while writing these files. Holding it here prevents collecting a
+            # concurrent creator's files before its rows have committed.
+            for path in self.cache_dir.iterdir():
+                if not re.fullmatch(r"[A-Za-z0-9_-]{43}(?:\.tmp)?", path.name):
+                    continue
+                if not path.is_file():
+                    continue
+                attachment_id = path.name.removesuffix(".tmp")
+                referenced = connection.execute(
+                    "SELECT 1 FROM timeline_attachments WHERE attachment_id = ?",
+                    (attachment_id,),
+                ).fetchone()
+                if referenced is None:
+                    path.unlink(missing_ok=True)
         for row in rows:
             self._cache_path(row["attachment_id"]).unlink(missing_ok=True)
         return len(rows)

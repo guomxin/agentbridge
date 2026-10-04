@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class EnvironmentProfileTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Legacy Windows PowerShell entrypoint; outside macOS/Linux maintenance")
     def test_explicit_profile_binds_target_and_unit_bytes(self):
         shell = shutil.which('pwsh') or shutil.which('powershell')
         if not shell:

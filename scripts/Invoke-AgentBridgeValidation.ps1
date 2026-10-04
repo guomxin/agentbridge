@@ -151,25 +151,9 @@ if ($Mode -eq "Targeted" -and $PythonTests.Count -eq 0 -and -not $runOpenClaw -a
 
 if ($Mode -eq "Full") {
     if ($SkipOpenClaw) { throw "Full candidate validation cannot skip OpenClaw; use Targeted for partial checks." }
-    Invoke-External -FilePath $venvPython -Arguments @("-m", "playwright", "install", "chromium") -Label "Offline DOM test browser runtime" -WorkingDirectory $repoRoot
-    Invoke-External -FilePath $venvPython -Arguments @("scripts/check_public_content.py") -Label "Public content credential guard" -WorkingDirectory $repoRoot
-    Invoke-External -FilePath $venvPython -Arguments @("scripts/current_facts.py", "--check") -Label "Current code facts" -WorkingDirectory $repoRoot
-    Invoke-External -FilePath $venvPython -Arguments @("scripts/agentbridge_artifact.py", "begin", "--root", $repoRoot) -Label "Begin candidate validation" -WorkingDirectory $repoRoot
-    Invoke-External -FilePath $venvPython -Arguments @(
-        "-m", "pytest", "-q", "-n", "4", "--dist", "loadscope",
-        "--junitxml=output/release-validation/pytest.xml"
-    ) -Label "Python full test suite" -WorkingDirectory $repoRoot
-    Invoke-External -FilePath $venvPython -Arguments @("-m", "compileall", "-q", "bscli") -Label "Python compileall" -WorkingDirectory $repoRoot
-    Invoke-External -FilePath $venvPython -Arguments @("-m", "pip", "check") -Label "Python dependency check" -WorkingDirectory $repoRoot
-    $node = Get-Command node -ErrorAction Stop
-    Invoke-External -FilePath $node.Source -Arguments @(
-        "--test",
-        "tests\test_workspace_gateway_events.mjs",
-        "tests\test_workspace_gateway_run_guard.mjs",
-        "tests\test_workspace_gateway_client.mjs",
-        "tests\test_workspace_card_messages.mjs",
-        "tests\test_workspace_progress.mjs"
-    ) -Label "Workspace Gateway Node tests" -WorkingDirectory $repoRoot
+    $fullArguments = @("scripts/validation_plan.py", "full", "--root", $repoRoot)
+    if ($McpApp) { $fullArguments += "--mcp-app" }
+    Invoke-NpmExternal -FilePath $venvPython -Arguments $fullArguments -Label "Shared Full validation with stage evidence" -WorkingDirectory $repoRoot
 }
 elseif ($PythonTests.Count -gt 0) {
     $resolvedTests = @()
@@ -195,25 +179,22 @@ if ($runOpenClaw -or $McpApp) {
     }
 }
 
-if ($runOpenClaw) {
+if ($runOpenClaw -and $Mode -ne "Full") {
     $pluginRoot = Join-Path $repoRoot "integrations\openclaw-agentbridge"
     Invoke-NpmExternal -FilePath $npm.Source -Arguments @("test") -Label "OpenClaw plugin tests" -WorkingDirectory $pluginRoot
 }
 
-if ($runOpenClaw -and ($Mode -eq "Full" -or $PackCheck)) {
+if ($runOpenClaw -and $Mode -ne "Full" -and $PackCheck) {
     $pluginRoot = Join-Path $repoRoot "integrations\openclaw-agentbridge"
     Invoke-NpmExternal -FilePath $npm.Source -Arguments @("run", "pack:check") -Label "OpenClaw package manifest check" -WorkingDirectory $pluginRoot
 }
 
-if ($McpApp) {
+if ($McpApp -and $Mode -ne "Full") {
     $appRoot = Join-Path $repoRoot "integrations\mcp-app"
     Invoke-NpmExternal -FilePath $npm.Source -Arguments @("run", "check") -Label "MCP App checks" -WorkingDirectory $appRoot
     Invoke-NpmExternal -FilePath $npm.Source -Arguments @("run", "build") -Label "MCP App build" -WorkingDirectory $appRoot
 }
 
-if ($Mode -eq "Full") {
-    Invoke-External -FilePath $venvPython -Arguments @("scripts/agentbridge_artifact.py", "finish", "--root", $repoRoot) -Label "Fixed-commit installed wheel validation" -WorkingDirectory $repoRoot
-}
 $stopwatch.Stop()
 [ordered]@{
     status = "succeeded"

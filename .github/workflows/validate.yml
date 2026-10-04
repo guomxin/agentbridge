@@ -13,8 +13,11 @@ concurrency:
 jobs:
   validation:
     name: repository-validation
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,30 +34,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.3'
+      - name: Prepare Python validation environment
+        run: |
+          set -euo pipefail
+          validation_venv="$RUNNER_TEMP/agentbridge-tests"
+          python -m venv "$validation_venv"
+          "$validation_venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77' pytest pytest-xdist
+          "$validation_venv/bin/python" -m pip install --disable-pip-version-check --no-build-isolation -e '.[database-analysis]'
+          echo "AGENTBRIDGE_TEST_PYTHON=$validation_venv/bin/python" >> "$GITHUB_ENV"
+      - name: Prepare Linux browser dependencies for full validation
+        if: steps.plan.outputs.profile == 'full'
+        run: |
+          set -euo pipefail
+          "$AGENTBRIDGE_TEST_PYTHON" -m playwright install --with-deps chromium
       - name: Validate repository revision without production credentials
-        shell: pwsh
         env:
           VALIDATION_PROFILE: ${{ steps.plan.outputs.profile }}
         run: |
-          python -m venv "$env:RUNNER_TEMP/agentbridge-tests"
-          & "$env:RUNNER_TEMP/agentbridge-tests/Scripts/python.exe" -m pip install 'setuptools>=77' pytest
-          if ($LASTEXITCODE -ne 0) { throw 'Test environment bootstrap failed' }
-          if ($env:VALIDATION_PROFILE -eq 'full') {
-            ./scripts/Invoke-AgentBridgeValidation.ps1 -Mode Full -VenvPath "$env:RUNNER_TEMP/agentbridge-tests"
-          } elseif ($env:VALIDATION_PROFILE -in @('docs', 'release')) {
-            $tests = @('tests/test_documentation.py')
-            if ($env:VALIDATION_PROFILE -eq 'release') {
-              $tests += @('tests/test_release_policy.py', 'tests/test_deployment_assets.py', 'tests/test_release_transaction.py', 'tests/test_release_artifact.py')
-            }
-            ./scripts/Invoke-AgentBridgeValidation.ps1 -Mode Targeted -PythonTests $tests -VenvPath "$env:RUNNER_TEMP/agentbridge-tests"
-            if ($LASTEXITCODE -ne 0) { throw 'Scoped validation failed' }
-            & "$env:RUNNER_TEMP/agentbridge-tests/Scripts/python.exe" scripts/check_public_content.py
-            if ($LASTEXITCODE -ne 0) { throw 'Public content check failed' }
-            & "$env:RUNNER_TEMP/agentbridge-tests/Scripts/python.exe" scripts/current_facts.py --check
-            if ($LASTEXITCODE -ne 0) { throw 'Current facts check failed' }
-          } else {
-            throw 'Unknown validation profile'
-          }
+          set -euo pipefail
+          "$AGENTBRIDGE_TEST_PYTHON" scripts/ci_validation.py --profile "$VALIDATION_PROFILE"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

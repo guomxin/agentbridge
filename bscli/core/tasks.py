@@ -2766,6 +2766,36 @@ class TaskHubStore:
         payload: dict[str, Any] | None = None,
         notify_source: bool = False,
     ) -> tuple[dict, bool]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._append_timeline_message_in_connection(
+                connection,
+                user_subject=user_subject,
+                source_endpoint_id=source_endpoint_id,
+                message_key=message_key,
+                role=role,
+                text=text,
+                task_id=task_id,
+                payload=payload,
+                notify_source=notify_source,
+            )
+
+    def _append_timeline_message_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        user_subject: str,
+        source_endpoint_id: str,
+        message_key: str,
+        role: str,
+        text: str,
+        task_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        notify_source: bool = False,
+    ) -> tuple[dict, bool]:
+        """Append with the caller's transaction; never commit independently."""
+        if not connection.in_transaction:
+            raise RuntimeError("timeline append requires an active transaction")
         user_subject = _required_text(user_subject, "user_subject", 256)
         message_key = _required_text(message_key, "message_key", 768)
         if role not in {"user", "assistant"}:
@@ -2778,61 +2808,59 @@ class TaskHubStore:
         now = _utc_now()
         dedupe_key = f"message:{message_key}"
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            endpoint = self._select_endpoint(connection, source_endpoint_id)
-            if (
-                endpoint["user_subject"] != user_subject
-                or endpoint["state"] != "active"
-            ):
-                raise TaskNotFound("client endpoint not found")
-            if normalized_task_id:
-                self._select_owned_task(
-                    connection,
-                    normalized_task_id,
-                    user_subject,
-                )
-            existing = connection.execute(
-                """
-                SELECT * FROM user_timeline
-                WHERE user_subject = ? AND dedupe_key = ?
-                """,
-                (user_subject, dedupe_key),
-            ).fetchone()
-            if existing is not None:
-                return _timeline_from_row(existing), True
-
-            entry_id = str(uuid4())
-            connection.execute(
-                """
-                INSERT INTO user_timeline (
-                    entry_id, user_subject, entry_type, dedupe_key,
-                    source_endpoint_id, task_id, role, text,
-                    payload_json, created_at
-                ) VALUES (?, ?, 'chat_message', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entry_id,
-                    user_subject,
-                    dedupe_key,
-                    source_endpoint_id,
-                    normalized_task_id,
-                    role,
-                    normalized_text,
-                    payload_json,
-                    now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM user_timeline WHERE entry_id = ?",
-                (entry_id,),
-            ).fetchone()
-            self._enqueue_timeline_message(
+        endpoint = self._select_endpoint(connection, source_endpoint_id)
+        if (
+            endpoint["user_subject"] != user_subject
+            or endpoint["state"] != "active"
+        ):
+            raise TaskNotFound("client endpoint not found")
+        if normalized_task_id:
+            self._select_owned_task(
                 connection,
-                entry=row,
-                source_endpoint_id=source_endpoint_id,
-                notify_source=notify_source,
+                normalized_task_id,
+                user_subject,
             )
+        existing = connection.execute(
+            """
+            SELECT * FROM user_timeline
+            WHERE user_subject = ? AND dedupe_key = ?
+            """,
+            (user_subject, dedupe_key),
+        ).fetchone()
+        if existing is not None:
+            return _timeline_from_row(existing), True
+
+        entry_id = str(uuid4())
+        connection.execute(
+            """
+            INSERT INTO user_timeline (
+                entry_id, user_subject, entry_type, dedupe_key,
+                source_endpoint_id, task_id, role, text,
+                payload_json, created_at
+            ) VALUES (?, ?, 'chat_message', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id,
+                user_subject,
+                dedupe_key,
+                source_endpoint_id,
+                normalized_task_id,
+                role,
+                normalized_text,
+                payload_json,
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM user_timeline WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        self._enqueue_timeline_message(
+            connection,
+            entry=row,
+            source_endpoint_id=source_endpoint_id,
+            notify_source=notify_source,
+        )
         return _timeline_from_row(row), False
 
     def get_timeline_message(

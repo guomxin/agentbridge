@@ -1,8 +1,9 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "35dcf996a6e8"
+    "35dcf996a6e8",
+    "565cbe4ecead"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Bounded generation-format retry and UI progress wording only. No schema, grant or configuration changes."
+  "reason": "Atomic Workspace request acceptance joins existing message, attachment, outbox and dispatch writes in one transaction; controlled attachment cleanup and validation evidence/Ubuntu CI changes. Existing schemas, persisted idempotency hashes, business authorization, grants and production configuration remain unchanged."
 }

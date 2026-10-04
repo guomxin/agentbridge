@@ -4,7 +4,6 @@ import base64
 import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import logging
 import re
@@ -547,45 +546,15 @@ class WorkspaceApplication:
         if not message or len(message) > 20_000:
             raise ValueError("chat message is empty or too long")
         effective_key = _safe_text(idempotency_key, 128) or str(uuid4())
-        message_key = f"workspace:user:{effective_key}"
-        stored_attachments = []
-        timeline_attachments = []
-        if normalized_attachments:
-            stored_attachments = self.service.timeline_attachments.create_many(
-                user_subject=account["user_subject"],
-                message_key=message_key,
-                attachments=normalized_attachments,
-                media_base_url=self.service.trusted_card_base_url,
-            )
-            timeline_attachments = [
-                public_attachment(item) for item in stored_attachments
-            ]
-        self._append_workspace_message(
-            account,
-            role="user",
-            text=message,
-            message_key=message_key,
-            payload={"attachments": timeline_attachments},
-            required=True,
-        )
-        payload_hash = _host_dispatch_payload_hash(
-            message,
-            stored_attachments,
-        )
-        dispatch, _reused = self.store.create_host_dispatch(
+        dispatch, _reused = self.store.accept_chat_request(
             account_id=account["account_id"],
             user_subject=account["user_subject"],
-            agent_host="openclaw",
-            host_binding_ref=account["endpoint_key"],
-            origin_endpoint_id=account["endpoint_id"],
-            conversation_ref=account["openclaw_session_key"],
-            message_key=message_key,
-            payload_hash=payload_hash,
+            message=message,
             idempotency_key=effective_key,
-            attachment_refs=[
-                item["attachment_id"] for item in stored_attachments
-            ],
-            deadline_seconds=60,
+            attachments=normalized_attachments,
+            tasks=self.service.tasks,
+            attachment_store=self.service.timeline_attachments,
+            media_base_url=self.service.trusted_card_base_url,
         )
         self._ensure_dispatch_worker(account["account_id"])
         return self._stream_host_dispatch(
@@ -1357,31 +1326,6 @@ class WorkspaceApplication:
                 "OpenClaw Gateway is not configured.",
             )
         return self.gateway
-
-
-def _host_dispatch_payload_hash(
-    message: str,
-    attachments: list[dict],
-) -> str:
-    canonical = {
-        "message": message,
-        "attachments": [
-            {
-                "attachmentId": item["attachment_id"],
-                "contentHash": item["content_hash"],
-                "mimeType": item["content_type"],
-                "fileName": item["filename"],
-            }
-            for item in attachments
-        ],
-    }
-    encoded = json.dumps(
-        canonical,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_safe_recoverable_pre_accept_error(

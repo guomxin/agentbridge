@@ -9,13 +9,17 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
+import uuid
 import zipfile
-import xml.etree.ElementTree as ET
+
+try:
+    import validation_plan
+except ModuleNotFoundError:
+    from scripts import validation_plan
 
 REQUIRED = ("bscli/adapters/seeyon_page_scripts/continue_submit.js",
             "bscli/adapters/seeyon_page_scripts/launch_save_draft.js")
-CHECKS = ["public-content", "current-facts", "python-full", "compileall", "pip-check", "workspace-node", "openclaw", "openclaw-pack", "installed-wheel"]
+CHECKS = validation_plan.CHECKS
 
 
 def run(args, cwd):
@@ -126,39 +130,44 @@ def build(root, output):
     return output / "artifact.json"
 
 
-def begin(root, receipt):
+def begin(root, receipt, *, mcp_app=False):
     clean(root)
+    full_plan = validation_plan.plan(root, mcp_app=mcp_app)
     # Remove only this run's old report; failed runs must not reuse a prior test result.
     (receipt.parent / "pytest.xml").unlink(missing_ok=True)
-    save(receipt, {"schema": "agentbridge.validation.v1", "status": "running", "inputs": inputs(root)})
+    save(receipt, {"schema": "agentbridge.validation.v1", "evidenceVersion": validation_plan.EVIDENCE_VERSION,
+                   "runId": uuid.uuid4().hex, "status": "running", "inputs": inputs(root), "plan": full_plan})
 
 
-def finish(root, receipt):
+def finish(root, receipt, *, run_id=None):
+    clean(root)
     original = json.loads(receipt.read_text(encoding="utf-8"))
+    if run_id is not None and original.get("runId") != run_id:
+        raise ValueError("Another Full validation replaced this run; restart Full validation")
     current = inputs(root)
     if original["status"] != "running" or original["inputs"] != json.loads(json.dumps(current)):
         raise ValueError("Candidate inputs changed during validation")
-    suites = ET.parse(receipt.parent / "pytest.xml").getroot()
-    cases = list(suites.iter("testcase"))
-    if not cases or any(c.find("failure") is not None or c.find("error") is not None for c in cases):
-        raise ValueError("Python test report is missing tests or contains failures")
-    skipped = [{"test": c.get("classname", "") + "." + c.get("name", ""),
-                "reason": c.find("skipped").get("message", "")} for c in cases if c.find("skipped") is not None]
-    output = Path(tempfile.mkdtemp(prefix="candidate-", dir=receipt.parent)) / "artifact"
-    manifest = build(root, output)
+    stages = validation_plan.verify_stages(root, receipt, original)
+    python_tests = validation_plan.test_report(receipt.parent / "pytest.xml")
+    installed = next(s for s in original['plan']['stages'] if s['id'] == 'installed-wheel')
+    manifest = root / validation_plan.resolve(installed['report'], original['runId'])
+    artifact = json.loads(manifest.read_text(encoding='utf-8'))
+    if artifact['commit'] != current['commit'] or digest(Path(artifact['wheel'])) != artifact['sha256']:
+        raise ValueError("Artifact commit or wheel hash mismatch")
     clean(root)
     if json.loads(json.dumps(inputs(root))) != original["inputs"]:
         raise ValueError("Candidate inputs changed during artifact checks")
-    save(receipt, {**original, "status": "succeeded", "checks": CHECKS, "skipped": [],
-                   "pythonTests": {"cases": len(cases), "passed": len(cases) - len(skipped), "skipped": skipped},
+    save(receipt, {**original, "status": "succeeded", "checks": [s['id'] for s in original['plan']['stages']], "skipped": [],
+                   "stageEvidence": stages, "pythonTests": python_tests,
                    "manifest": str(manifest), "manifestSha256": digest(manifest)})
 
 
 def verify(root, receipt):
     clean(root)
     data = json.loads(receipt.read_text(encoding="utf-8"))
+    validation_plan.verify_stages(root, receipt, data)
     if (data.get("schema") != "agentbridge.validation.v1" or data.get("status") != "succeeded"
-            or data.get("checks") != CHECKS or data.get("skipped") != []
+            or data.get("checks") != [s['id'] for s in data['plan']['stages']] or data.get("skipped") != []
             or data.get("inputs") != json.loads(json.dumps(inputs(root)))):
         raise ValueError("No complete validation for this candidate and environment; run Full validation")
     manifest_path = Path(data["manifest"])

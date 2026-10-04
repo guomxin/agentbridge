@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(os.name == "nt", "Legacy Windows PowerShell entrypoint; outside macOS/Linux maintenance")
 class OpenClawRestartPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

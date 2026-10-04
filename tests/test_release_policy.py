@@ -1,5 +1,6 @@
 """Validate the actual release declaration as well as transaction fixtures."""
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -30,6 +31,7 @@ def test_checked_in_release_policy_has_exact_existing_predecessors():
         assert git(root, 'merge-base', 'HEAD', commit) == commit
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Legacy Windows PowerShell entrypoint; outside macOS/Linux maintenance")
 @pytest.mark.parametrize('current,candidate,mode,compatibility,allowed', [
     ('111111111111', '222222222222', '', 'no-migration', True),
     ('333333333333', '222222222222', '', 'no-migration', False),

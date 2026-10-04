@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "scripts" / "AgentBridgeOpenClawLifecycleLease.psm1"
 
 
+@unittest.skipUnless(os.name == "nt", "Legacy Windows PowerShell entrypoint; outside macOS/Linux maintenance")
 class OpenClawLifecycleLeaseTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

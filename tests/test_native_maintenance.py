@@ -143,27 +143,31 @@ def test_snapshot_cannot_activate(private, host):
 
 
 def test_full_validation_stops_before_receipt_on_failure():
-    calls = []
-    def fail(args, **kwargs):
-        calls.append(args)
-        if 'pytest' in args:
-            raise RuntimeError('test failure')
-        return ''
-    with mock.patch.object(validation, 'run', side_effect=fail):
+    with mock.patch.object(validation, 'run', side_effect=RuntimeError('test failure')) as execute:
         with pytest.raises(RuntimeError):
             validation.validate(full=True)
-    assert any('begin' in a for a in calls)
-    assert not any('finish' in a for a in calls)
+    assert execute.call_count == 1
+    assert Path(execute.call_args.args[0][1]).name == 'validation_plan.py'
 
 
 def test_full_validation_preserves_required_checks():
     with mock.patch.object(validation, 'run') as execute:
         validation.validate(full=True)
     calls = [c.args[0] for c in execute.call_args_list]
-    assert any('pack:check' in a for a in calls)
-    assert any('compileall' in a for a in calls)
-    assert any('pip' in a and 'check' in a for a in calls)
-    assert 'finish' in calls[-1]
+    assert len(calls) == 1
+    assert Path(calls[0][1]).name == 'validation_plan.py'
+    assert calls[0][2:] == ['full', '--root', validation.ROOT]
+    # The common runner owns stage ordering/evidence; test_validation_plan uses
+    # real subprocesses to prove failed/missing stages cannot reach finish.
+    from scripts.validation_plan import plan, CHECKS
+    assert [s['id'] for s in plan(validation.ROOT)['stages']] == CHECKS
+
+
+def test_targeted_validation_never_invokes_full_runner():
+    with mock.patch.object(validation, 'run') as execute:
+        result = validation.validate(tests=['tests/test_native_maintenance.py'])
+    assert not result['formalReceipt']
+    assert all('full' not in call.args[0] for call in execute.call_args_list)
 
 
 def test_offline_plan_never_connects_and_reports_branch_blocker():

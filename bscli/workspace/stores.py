@@ -10,8 +10,14 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
-from typing import Callable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator
 from uuid import uuid4
+
+from bscli.core.timeline_attachments import public_attachment
+
+if TYPE_CHECKING:
+    from bscli.core.tasks import TaskHubStore
+    from bscli.core.timeline_attachments import TimelineAttachmentStore
 
 
 _USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,63}$")
@@ -829,6 +835,92 @@ class WorkspaceStore:
             "updated_at": row["updated_at"],
         }
 
+    def accept_chat_request(
+        self,
+        *,
+        account_id: str,
+        user_subject: str,
+        message: str,
+        idempotency_key: str,
+        attachments: list[dict],
+        tasks: TaskHubStore,
+        attachment_store: TimelineAttachmentStore,
+        media_base_url: str,
+    ) -> tuple[dict, bool]:
+        """Atomically accept the message, media references, outbox and dispatch.
+
+        Files are written before commit and only this attempt's new files are
+        removed on rollback. A hard process exit leaves unreferenced cache files
+        for attachment maintenance, never a partially accepted database record.
+        """
+        if any(
+            store.db_path.resolve() != self.db_path.resolve()
+            for store in (tasks, attachment_store)
+        ):
+            raise ValueError("workspace acceptance stores must share one database")
+        message_key = f"workspace:user:{idempotency_key}"
+        created_paths: list[Path] = []
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                account = connection.execute(
+                    """
+                    SELECT * FROM workspace_accounts
+                    WHERE account_id = ? AND user_subject = ? AND state = 'active'
+                    """,
+                    (account_id, user_subject),
+                ).fetchone()
+                if account is None:
+                    raise WorkspaceLinkError("workspace dispatch identity is not active")
+                stored_attachments = attachment_store._create_many_in_connection(
+                    connection,
+                    user_subject=user_subject,
+                    message_key=message_key,
+                    attachments=attachments,
+                    media_base_url=media_base_url,
+                    created_paths=created_paths,
+                )
+                dispatch, reused = self._create_host_dispatch_in_connection(
+                    connection,
+                    account_id=account_id,
+                    user_subject=user_subject,
+                    agent_host="openclaw",
+                    host_binding_ref=account["endpoint_key"],
+                    origin_endpoint_id=account["endpoint_id"],
+                    conversation_ref=account["openclaw_session_key"],
+                    message_key=message_key,
+                    payload_hash=_host_dispatch_payload_hash(message, stored_attachments),
+                    idempotency_key=idempotency_key,
+                    attachment_refs=[item["attachment_id"] for item in stored_attachments],
+                    deadline_seconds=60,
+                )
+                # An accepted retry must remain reusable even after attachment
+                # expiration or while a different request fills the queue.
+                if reused:
+                    return dispatch, True
+                timeline_attachments = [public_attachment(item) for item in stored_attachments]
+                entry, _ = tasks._append_timeline_message_in_connection(
+                    connection,
+                    user_subject=user_subject,
+                    source_endpoint_id=account["endpoint_id"],
+                    message_key=message_key,
+                    role="user",
+                    text=message,
+                    payload={"attachments": timeline_attachments},
+                )
+                # Older releases could leave a timeline message without a
+                # dispatch. Never attach a new payload hash to different text.
+                if (
+                    entry["role"] != "user"
+                    or entry["text"] != message.replace("\0", "").strip()
+                    or (entry["payload"].get("attachments") or []) != timeline_attachments
+                ):
+                    raise WorkspaceConflictError("IDEMPOTENCY_PAYLOAD_MISMATCH")
+            return dispatch, False
+        except BaseException:
+            attachment_store._discard_created_files(created_paths)
+            raise
+
     def create_host_dispatch(
         self,
         *,
@@ -844,6 +936,42 @@ class WorkspaceStore:
         attachment_refs: list[str] | None = None,
         deadline_seconds: int = 60,
     ) -> tuple[dict, bool]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._create_host_dispatch_in_connection(
+                connection,
+                account_id=account_id,
+                user_subject=user_subject,
+                agent_host=agent_host,
+                host_binding_ref=host_binding_ref,
+                origin_endpoint_id=origin_endpoint_id,
+                conversation_ref=conversation_ref,
+                message_key=message_key,
+                payload_hash=payload_hash,
+                idempotency_key=idempotency_key,
+                attachment_refs=attachment_refs,
+                deadline_seconds=deadline_seconds,
+            )
+
+    def _create_host_dispatch_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        account_id: str,
+        user_subject: str,
+        agent_host: str,
+        host_binding_ref: str,
+        origin_endpoint_id: str,
+        conversation_ref: str,
+        message_key: str,
+        payload_hash: str,
+        idempotency_key: str,
+        attachment_refs: list[str] | None = None,
+        deadline_seconds: int = 60,
+    ) -> tuple[dict, bool]:
+        """Write dispatch and events without taking ownership of the transaction."""
+        if not connection.in_transaction:
+            raise RuntimeError("host dispatch requires an active transaction")
         account_id = _required_text(account_id, "account_id", 128)
         user_subject = _required_text(user_subject, "user_subject", 256)
         agent_host = _required_text(agent_host, "agent_host", 80)
@@ -879,114 +1007,112 @@ class WorkspaceStore:
         deadline_at = _format_time(
             now + timedelta(seconds=deadline_seconds)
         )
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            account = connection.execute(
-                """
-                SELECT * FROM workspace_accounts
-                WHERE account_id = ? AND user_subject = ? AND state = 'active'
-                """,
-                (account_id, user_subject),
-            ).fetchone()
-            if account is None:
-                raise WorkspaceLinkError(
-                    "workspace dispatch identity is not active"
-                )
-            existing = connection.execute(
-                """
-                SELECT * FROM agent_host_dispatches
-                WHERE user_subject = ? AND agent_host = ?
-                  AND idempotency_key = ?
-                """,
-                (user_subject, agent_host, idempotency_key),
-            ).fetchone()
-            if existing is not None:
-                if not hmac.compare_digest(
-                    str(existing["payload_hash"]),
-                    payload_hash,
-                ):
-                    raise WorkspaceConflictError(
-                        "IDEMPOTENCY_PAYLOAD_MISMATCH"
-                    )
-                return _host_dispatch_from_row(existing), True
-
-            placeholders = ",".join("?" for _ in _HOST_DISPATCH_ACTIVE_STATES)
-            conversation_count = connection.execute(
-                f"""
-                SELECT COUNT(*) AS count FROM agent_host_dispatches
-                WHERE user_subject = ? AND agent_host = ?
-                  AND conversation_ref = ? AND state IN ({placeholders})
-                """,
-                (
-                    user_subject,
-                    agent_host,
-                    conversation_ref,
-                    *sorted(_HOST_DISPATCH_ACTIVE_STATES),
-                ),
-            ).fetchone()
-            if int(conversation_count["count"] or 0) >= 3:
+        account = connection.execute(
+            """
+            SELECT * FROM workspace_accounts
+            WHERE account_id = ? AND user_subject = ? AND state = 'active'
+            """,
+            (account_id, user_subject),
+        ).fetchone()
+        if account is None:
+            raise WorkspaceLinkError(
+                "workspace dispatch identity is not active"
+            )
+        existing = connection.execute(
+            """
+            SELECT * FROM agent_host_dispatches
+            WHERE user_subject = ? AND agent_host = ?
+              AND idempotency_key = ?
+            """,
+            (user_subject, agent_host, idempotency_key),
+        ).fetchone()
+        if existing is not None:
+            if not hmac.compare_digest(
+                str(existing["payload_hash"]),
+                payload_hash,
+            ):
                 raise WorkspaceConflictError(
-                    "WORKSPACE_HOST_QUEUE_CONVERSATION_LIMIT"
+                    "IDEMPOTENCY_PAYLOAD_MISMATCH"
                 )
-            user_count = connection.execute(
-                f"""
-                SELECT COUNT(*) AS count FROM agent_host_dispatches
-                WHERE user_subject = ? AND state IN ({placeholders})
-                """,
-                (user_subject, *sorted(_HOST_DISPATCH_ACTIVE_STATES)),
-            ).fetchone()
-            if int(user_count["count"] or 0) >= 10:
-                raise WorkspaceConflictError("WORKSPACE_HOST_QUEUE_USER_LIMIT")
+            return _host_dispatch_from_row(existing), True
 
-            dispatch_id = str(uuid4())
-            connection.execute(
-                """
-                INSERT INTO agent_host_dispatches (
-                    dispatch_id, account_id, user_subject, agent_host,
-                    host_binding_ref, origin_endpoint_id, conversation_ref,
-                    message_key, payload_hash, idempotency_key,
-                    attachment_refs_json, state, attempt_count,
-                    retry_count, next_attempt_at, deadline_at,
-                    had_tool_activity,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0,
-                          ?, ?, 0, ?, ?)
-                """,
-                (
-                    dispatch_id,
-                    account_id,
-                    user_subject,
-                    agent_host,
-                    host_binding_ref,
-                    origin_endpoint_id,
-                    conversation_ref,
-                    message_key,
-                    payload_hash,
-                    idempotency_key,
-                    json.dumps(refs, separators=(",", ":")),
-                    now_text,
-                    deadline_at,
-                    now_text,
-                    now_text,
-                ),
+        placeholders = ",".join("?" for _ in _HOST_DISPATCH_ACTIVE_STATES)
+        conversation_count = connection.execute(
+            f"""
+            SELECT COUNT(*) AS count FROM agent_host_dispatches
+            WHERE user_subject = ? AND agent_host = ?
+              AND conversation_ref = ? AND state IN ({placeholders})
+            """,
+            (
+                user_subject,
+                agent_host,
+                conversation_ref,
+                *sorted(_HOST_DISPATCH_ACTIVE_STATES),
+            ),
+        ).fetchone()
+        if int(conversation_count["count"] or 0) >= 3:
+            raise WorkspaceConflictError(
+                "WORKSPACE_HOST_QUEUE_CONVERSATION_LIMIT"
             )
-            self._append_host_dispatch_event(
-                connection,
-                dispatch_id=dispatch_id,
-                event_name="host_dispatch_created",
-                payload={
-                    "type": "progress",
-                    "runId": idempotency_key,
-                    "kind": "system",
-                    "phase": "queued",
-                    "label": "请求已保存，正在连接智能体",
-                },
-                created_at=now_text,
-            )
-            row = connection.execute(
-                "SELECT * FROM agent_host_dispatches WHERE dispatch_id = ?",
-                (dispatch_id,),
-            ).fetchone()
+        user_count = connection.execute(
+            f"""
+            SELECT COUNT(*) AS count FROM agent_host_dispatches
+            WHERE user_subject = ? AND state IN ({placeholders})
+            """,
+            (user_subject, *sorted(_HOST_DISPATCH_ACTIVE_STATES)),
+        ).fetchone()
+        if int(user_count["count"] or 0) >= 10:
+            raise WorkspaceConflictError("WORKSPACE_HOST_QUEUE_USER_LIMIT")
+
+        dispatch_id = str(uuid4())
+        connection.execute(
+            """
+            INSERT INTO agent_host_dispatches (
+                dispatch_id, account_id, user_subject, agent_host,
+                host_binding_ref, origin_endpoint_id, conversation_ref,
+                message_key, payload_hash, idempotency_key,
+                attachment_refs_json, state, attempt_count,
+                retry_count, next_attempt_at, deadline_at,
+                had_tool_activity,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0,
+                      ?, ?, 0, ?, ?)
+            """,
+            (
+                dispatch_id,
+                account_id,
+                user_subject,
+                agent_host,
+                host_binding_ref,
+                origin_endpoint_id,
+                conversation_ref,
+                message_key,
+                payload_hash,
+                idempotency_key,
+                json.dumps(refs, separators=(",", ":")),
+                now_text,
+                deadline_at,
+                now_text,
+                now_text,
+            ),
+        )
+        self._append_host_dispatch_event(
+            connection,
+            dispatch_id=dispatch_id,
+            event_name="host_dispatch_created",
+            payload={
+                "type": "progress",
+                "runId": idempotency_key,
+                "kind": "system",
+                "phase": "queued",
+                "label": "请求已保存，正在连接智能体",
+            },
+            created_at=now_text,
+        )
+        row = connection.execute(
+            "SELECT * FROM agent_host_dispatches WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchone()
         return _host_dispatch_from_row(row), False
 
     def get_host_dispatch(
@@ -1925,3 +2051,28 @@ def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
         timezone.utc
     )
+
+
+def _host_dispatch_payload_hash(
+    message: str,
+    attachments: list[dict],
+) -> str:
+    canonical = {
+        "message": message,
+        "attachments": [
+            {
+                "attachmentId": item["attachment_id"],
+                "contentHash": item["content_hash"],
+                "mimeType": item["content_type"],
+                "fileName": item["filename"],
+            }
+            for item in attachments
+        ],
+    }
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

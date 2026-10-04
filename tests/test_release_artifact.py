@@ -72,9 +72,13 @@ include = ["bscli*"]
         receipt = Path(self.temp.name) / "receipt.json"
         current = {"commit": self.manifest["commit"], "environment": "test"}
         data = {"schema": "agentbridge.validation.v1", "status": "succeeded", "inputs": current,
+                "plan": {"stages": [{"id": name} for name in artifact.CHECKS]},
                 "checks": artifact.CHECKS, "skipped": [], "manifest": str(self.manifest_path),
                 "manifestSha256": artifact.digest(self.manifest_path)}
-        with patch.object(artifact, "inputs", return_value=current):
+        # Stage execution/receipt integrity is tested with real subprocesses in
+        # test_validation_plan; this test isolates commit/environment/wheel gates.
+        with patch.object(artifact, "inputs", return_value=current), \
+             patch.object(artifact.validation_plan, "verify_stages", return_value=[]):
             artifact.save(receipt, data)
             self.assertEqual(artifact.verify(self.root, receipt)["sha256"], self.manifest["sha256"])
             for override in ({"status": "running"}, {"skipped": ["openclaw"]},
