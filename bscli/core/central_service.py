@@ -81,7 +81,10 @@ from bscli.core.capability_runtime import (
 )
 from bscli.core.operations import OperationStore
 from bscli.core.login_recovery import resume_login_read
-from bscli.core.controlled_write_executor import ControlledWriteExecutor
+from bscli.core.controlled_write_executor import (
+    ControlledWriteDependencies,
+    ControlledWriteExecutor,
+)
 from bscli.core.write_catalog import (
     _TRUSTED_WRITE_DEFINITIONS,
     _TRUSTED_WRITE_COMMITS,
@@ -181,7 +184,7 @@ def _serialize_host_task_calls(method):
     return wrapped
 
 
-class CentralCapabilityService(ControlledWriteExecutor):
+class CentralCapabilityService:
     def __init__(
         self,
         *,
@@ -3505,6 +3508,25 @@ class CentralCapabilityService(ControlledWriteExecutor):
                                         interaction_record=record, interaction=interaction)
         return interaction
 
+    def _controlled_writes(self) -> ControlledWriteExecutor:
+        # Bind at each entry so callers replacing a registry/store/callback before
+        # invocation use the current collaborators, without rebuilding any stores.
+        return ControlledWriteExecutor(ControlledWriteDependencies(
+            registry=self.registry,
+            tasks=self.tasks,
+            field_submissions=self.field_submissions,
+            write_authorizations=self.write_authorizations,
+            user_grants=self.user_grants,
+            task_plans=self.task_plans,
+            governance_policies=self.governance_policies,
+            trusted_card_base_url=self.trusted_card_base_url,
+            business_input_interaction=self._business_input_interaction,
+            execution_authorization_interaction=self._execution_authorization_interaction,
+            pending_batch_definition=self._pending_batch_definition,
+            guard_skill_authorization=self.guard_skill_authorization,
+            validate_task_plan_execution=self.validate_task_plan_execution,
+        ))
+
     def _business_input_interaction(self, submission: dict) -> dict:
         schema = submission["form_schema"]
         record = self.interactions.register(
@@ -3678,7 +3700,7 @@ class CentralCapabilityService(ControlledWriteExecutor):
                     self.validate_task_plan_execution(parent_plan)
                 except PlanValidationError as exc:
                     raise CapabilityRejected(exc.code, exc.message) from exc
-        self._assert_write_allowed(context=context, system_id=system_id)
+        self._controlled_writes().assert_write_allowed(context=context, system_id=system_id)
         session = self.sessions.find(user_subject=user_subject, system_id=system_id)
         if session is None or session["state"] != "active":
             raise login_required_action(user_subject, system_id, session)
@@ -3813,7 +3835,7 @@ class CentralCapabilityService(ControlledWriteExecutor):
                     if prepare_definition.get("field_schema") is None:
                         effective_arguments = dict(arguments)
                     else:
-                        field_submission, effective_arguments = self._resolve_trusted_field_input(
+                        field_submission, effective_arguments = self._controlled_writes().resolve_field_input(
                             context=context,
                             session=session,
                             arguments=arguments,
@@ -3823,7 +3845,7 @@ class CentralCapabilityService(ControlledWriteExecutor):
                 with worker_factory(session, adapter) as worker:
                     worker.restore_session_state(state)
                     if prepare_definition is not None:
-                        result = self._prepare_trusted_write(
+                        result = self._controlled_writes().prepare(
                             context=context,
                             session=session,
                             adapter=adapter,
@@ -3834,7 +3856,7 @@ class CentralCapabilityService(ControlledWriteExecutor):
                         )
                     elif commit_definition is not None:
                         prepare_capability, definition = commit_definition
-                        result = self._commit_trusted_write(
+                        result = self._controlled_writes().commit(
                             context=context,
                             session=session,
                             adapter=adapter,

@@ -8,8 +8,9 @@
     "9c7e6fe5e85e",
     "dd986b88a0ca",
     "54f68a01474d",
-    "e6cf0f1c9b7d"
+    "e6cf0f1c9b7d",
+    "1d298fcceae4"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Shared input validation preserves ordinary capability, task-plan and transform compatibility profiles, original errors and execution timing. Existing declarations, business normalization, authorization transactions, persisted data and production configuration remain unchanged; no database migration is required."
+  "reason": "Controlled write composition replaces shared-state inheritance with explicit stores and callbacks. Existing behavior, central construction, authorization consumption and skill/plan guards in the same transaction, persisted data and production configuration remain unchanged; no database migration is required."
 }

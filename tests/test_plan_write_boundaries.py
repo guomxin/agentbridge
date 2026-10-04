@@ -202,6 +202,35 @@ class PlanWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(self.service.write_authorizations.get(self.auth_id)["state"], "approved")
         self.assertIsNone(self.write.created_payload)
 
+    def test_composed_executor_uses_current_guards_in_the_authorization_transaction(self):
+        self.start()
+        self.authorize()
+        skill_guard = self.service.guard_skill_authorization
+        plan_guard = self.service.task_plans.guard_authorization_consumption
+        connections = []
+
+        def guard_skill(connection, authorization_id, user_subject):
+            self.assertTrue(connection.in_transaction)
+            connections.append(connection)
+            skill_guard(connection, authorization_id, user_subject)
+
+        def guard_plan(connection, **kwargs):
+            self.assertIs(connection, connections[0])
+            plan_guard(connection, **kwargs)
+
+        def commit(*_, enter_commit_boundary):
+            enter_commit_boundary()
+            return {"status": "created", "verification": {"matched": True}}
+
+        with patch.object(self.service, "guard_skill_authorization", side_effect=guard_skill) as skill, \
+                patch.object(self.service.task_plans, "guard_authorization_consumption", side_effect=guard_plan) as plan, \
+                patch("bscli.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
+            result = self.resume(self.authorization)
+        self.assertEqual(result["status"], "succeeded")
+        skill.assert_called_once()
+        plan.assert_called_once()
+        self.assertEqual(self.service.write_authorizations.get(self.auth_id)["state"], "consumed")
+
     def test_cancel_before_commit_wins_against_real_authorization_consumption(self):
         self.start()
         self.authorize()

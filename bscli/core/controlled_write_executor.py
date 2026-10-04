@@ -1,5 +1,10 @@
 """Trusted field preparation and single-use authorized write execution."""
+from __future__ import annotations
+
 from copy import deepcopy
+from dataclasses import dataclass
+from sqlite3 import Connection
+from typing import Callable, Protocol
 
 import hashlib
 
@@ -11,7 +16,8 @@ from bscli.adapters.base import AdapterBusinessRuleRejected
 
 from bscli.adapters.seeyon_submit_phases import SeeyonBusinessValidationRequired
 
-from bscli.admin.stores import GovernancePolicyDenied
+from bscli.admin.stores import GovernancePolicyDenied, GovernancePolicyStore
+from bscli.core.capability import CapabilityRegistry
 
 from bscli.core.capability_runtime import (
     CapabilityRejected,
@@ -27,22 +33,60 @@ from bscli.core.field_submissions import (
     FieldSubmissionIntegrityError,
     FieldSubmissionNotFound,
     FieldSubmissionStateError,
+    FieldSubmissionStore,
 )
 
 from bscli.core.task_plan_validation import PlanValidationError
+from bscli.core.task_plans import TaskPlanStore
+from bscli.core.tasks import TaskHubStore
+from bscli.core.user_grants import UserGrants
 
 from bscli.core.write_authorizations import (
     WriteAuthorizationAccessDenied,
     WriteAuthorizationNotFound,
     WriteAuthorizationStateError,
+    WriteAuthorizationStore,
 )
 
 TRUSTED_WRITE_INTERACTION_TTL_SECONDS = 1800
 
-class ControlledWriteExecutor:
-    """Shared service state; authorization and commit transaction boundaries are unchanged."""
 
-    def _prepare_trusted_write(
+class PendingBatchDefinition(Protocol):
+    def __call__(
+        self, *, task_id: str, user_subject: str, arguments: dict,
+    ) -> dict: ...
+
+
+@dataclass(frozen=True)
+class ControlledWriteDependencies:
+    """Existing stores and narrow callbacks; construction performs no I/O.
+
+    The skill guard must use the connection supplied by authorization consumption.
+    Neither it nor plan validation may move that guard outside the transaction.
+    """
+
+    registry: CapabilityRegistry
+    tasks: TaskHubStore
+    field_submissions: FieldSubmissionStore
+    write_authorizations: WriteAuthorizationStore
+    user_grants: UserGrants
+    task_plans: TaskPlanStore
+    governance_policies: GovernancePolicyStore
+    trusted_card_base_url: str
+    business_input_interaction: Callable[[dict], dict]
+    execution_authorization_interaction: Callable[[dict], dict]
+    pending_batch_definition: PendingBatchDefinition
+    guard_skill_authorization: Callable[[Connection, str, str], None]
+    validate_task_plan_execution: Callable[[dict], None]
+
+
+class ControlledWriteExecutor:
+    """Execute trusted writes using explicitly supplied collaborators."""
+
+    def __init__(self, dependencies: ControlledWriteDependencies) -> None:
+        self._dependencies = dependencies
+
+    def prepare(
         self,
         *,
         context: CapabilityContext,
@@ -56,7 +100,7 @@ class ControlledWriteExecutor:
         prepare_function = resolve_write_function(str(definition["prepare_function"]))
         if not callable(prepare_function):
             raise RuntimeError("trusted write prepare function is unavailable")
-        self._assert_write_allowed(context=context, system_id=session["system_id"])
+        self.assert_write_allowed(context=context, system_id=session["system_id"])
         prepared = prepare_function(adapter, worker, arguments)
         review_changed = False
         if field_submission is not None:
@@ -126,12 +170,12 @@ class ControlledWriteExecutor:
                 "请重新核对后再决定是否授权。"
             )
         if context.spec.name == PENDING_BATCH_PREPARE_CAPABILITY:
-            batch = self.tasks.get_batch_for_task(
+            batch = self._dependencies.tasks.get_batch_for_task(
                 parent_task_id=context.task_id, user_subject=session["user_subject"],
             )
             summary["title"] = f"{summary['title']}（第 {batch['current_ordinal']}/{batch['total_count']} 条）"
-        commit_spec = self.registry.get(str(definition["commit_capability"]))
-        authorization = self.write_authorizations.create(
+        commit_spec = self._dependencies.registry.get(str(definition["commit_capability"]))
+        authorization = self._dependencies.write_authorizations.create(
             user_subject=session["user_subject"],
             system_id=session["system_id"],
             session_id=session["session_id"],
@@ -141,13 +185,13 @@ class ControlledWriteExecutor:
             supersession_key=_trusted_write_supersession_key(resume_arguments),
             plan=plan,
             summary=summary,
-            card_base_url=self.trusted_card_base_url,
+            card_base_url=self._dependencies.trusted_card_base_url,
             ttl_seconds=TRUSTED_WRITE_INTERACTION_TTL_SECONDS,
         )
-        interaction = self._execution_authorization_interaction(authorization)
+        interaction = self._dependencies.execution_authorization_interaction(authorization)
         if field_submission is not None:
             try:
-                self.field_submissions.consume(
+                self._dependencies.field_submissions.consume(
                     field_submission["submission_id"],
                     user_subject=session["user_subject"],
                     system_id=session["system_id"],
@@ -185,7 +229,7 @@ class ControlledWriteExecutor:
             },
         )
 
-    def _resolve_trusted_field_input(
+    def resolve_field_input(
         self,
         *,
         context: CapabilityContext,
@@ -210,7 +254,7 @@ class ControlledWriteExecutor:
                 **_prefill_trusted_field_schema(selected_schema, arguments),
                 "_agentbridge_resume_arguments": context_arguments,
             }
-            submission = self.field_submissions.create(
+            submission = self._dependencies.field_submissions.create(
                 user_subject=session["user_subject"],
                 system_id=session["system_id"],
                 session_id=session["session_id"],
@@ -219,12 +263,12 @@ class ControlledWriteExecutor:
                 create_operation_id=context.operation_id,
                 supersession_key=_trusted_write_supersession_key(context_arguments),
                 form_schema=submission_schema,
-                card_base_url=self.trusted_card_base_url,
+                card_base_url=self._dependencies.trusted_card_base_url,
                 ttl_seconds=TRUSTED_WRITE_INTERACTION_TTL_SECONDS,
             )
             raise self._field_input_required(submission, definition)
         try:
-            submission = self.field_submissions.get(submission_id, include_values=True)
+            submission = self._dependencies.field_submissions.get(submission_id, include_values=True)
         except (FieldSubmissionNotFound, FieldSubmissionIntegrityError) as exc:
             raise self._field_input_unavailable(
                 "not_found",
@@ -259,7 +303,7 @@ class ControlledWriteExecutor:
         return submission, {**context_arguments, **submission["values"]}
 
     def _field_input_required(self, submission: dict, definition: dict) -> RequiresUserAction:
-        interaction = self._business_input_interaction(submission)
+        interaction = self._dependencies.business_input_interaction(submission)
         resume_arguments = {
             **dict(
                 submission.get("form_schema", {}).get("_agentbridge_resume_arguments")
@@ -300,7 +344,7 @@ class ControlledWriteExecutor:
             },
         )
 
-    def _commit_trusted_write(
+    def commit(
         self,
         *,
         context: CapabilityContext,
@@ -315,7 +359,7 @@ class ControlledWriteExecutor:
         if not authorization_id:
             raise ValueError("authorization_id is required")
         try:
-            authorization = self.write_authorizations.get(
+            authorization = self._dependencies.write_authorizations.get(
                 authorization_id,
                 include_plan=True,
             )
@@ -324,7 +368,7 @@ class ControlledWriteExecutor:
         if authorization["user_subject"] != session["user_subject"]:
             raise KeyError("write authorization not found")
         if authorization["state"] == "pending":
-            interaction = self._execution_authorization_interaction(authorization)
+            interaction = self._dependencies.execution_authorization_interaction(authorization)
             raise RequiresUserAction(
                 "WRITE_AUTHORIZATION_REQUIRED",
                 "The trusted action card has not been approved.",
@@ -343,10 +387,10 @@ class ControlledWriteExecutor:
             plan.get("prepare_capability") or prepare_capability
         )
         if trusted_prepare_capability == PENDING_BATCH_PREPARE_CAPABILITY:
-            batch_task_id = self.tasks.task_id_for_operation(
+            batch_task_id = self._dependencies.tasks.task_id_for_operation(
                 authorization["prepare_operation_id"], user_subject=session["user_subject"],
             )
-            checked = self._pending_batch_definition(
+            checked = self._dependencies.pending_batch_definition(
                 task_id=batch_task_id, user_subject=session["user_subject"],
                 arguments=plan.get("resume_arguments") or {},
             )
@@ -367,16 +411,16 @@ class ControlledWriteExecutor:
                 "the downstream session changed after the write plan was authorized"
             )
 
-        self._assert_write_allowed(context=context, system_id=session["system_id"])
+        self.assert_write_allowed(context=context, system_id=session["system_id"])
 
         boundary_entered = False
 
         def enter_commit_boundary() -> None:
             nonlocal boundary_entered
-            self.user_grants.require_capability(
+            self._dependencies.user_grants.require_capability(
                 context.user_subject, context.spec.name, arguments
             )
-            self.write_authorizations.consume(
+            self._dependencies.write_authorizations.consume(
                 authorization_id,
                 user_subject=session["user_subject"],
                 system_id=session["system_id"],
@@ -384,12 +428,12 @@ class ControlledWriteExecutor:
                 capability_name=context.spec.name,
                 capability_version=context.spec.version,
                 commit_operation_id=context.operation_id,
-                before_consume=lambda connection: (self.guard_skill_authorization(
+                before_consume=lambda connection: (self._dependencies.guard_skill_authorization(
                     connection, authorization_id, session["user_subject"]
-                ), self.task_plans.guard_authorization_consumption(
+                ), self._dependencies.task_plans.guard_authorization_consumption(
                     connection, authorization_id=authorization_id,
                     user_subject=session["user_subject"], operation_id=context.operation_id,
-                    validate=self.validate_task_plan_execution,
+                    validate=self._dependencies.validate_task_plan_execution,
                 )),
             )
             boundary_entered = True
@@ -448,7 +492,7 @@ class ControlledWriteExecutor:
                 *list(continued_summary.get("fields") or []),
                 {"label": "OA 提交提示", "value": validation["message"]},
             ]
-            continued_authorization = self.write_authorizations.create(
+            continued_authorization = self._dependencies.write_authorizations.create(
                 user_subject=session["user_subject"],
                 system_id=session["system_id"],
                 session_id=session["session_id"],
@@ -460,10 +504,10 @@ class ControlledWriteExecutor:
                 ),
                 plan=continued_plan,
                 summary=continued_summary,
-                card_base_url=self.trusted_card_base_url,
+                card_base_url=self._dependencies.trusted_card_base_url,
                 ttl_seconds=TRUSTED_WRITE_INTERACTION_TTL_SECONDS,
             )
-            interaction = self._execution_authorization_interaction(
+            interaction = self._dependencies.execution_authorization_interaction(
                 continued_authorization
             )
             raise RequiresUserAction(
@@ -516,11 +560,11 @@ class ControlledWriteExecutor:
                 ) from exc
             raise
 
-    def _assert_write_allowed(self, *, context: CapabilityContext, system_id: str) -> None:
+    def assert_write_allowed(self, *, context: CapabilityContext, system_id: str) -> None:
         if context.spec.effect == "read":
             return
         try:
-            self.governance_policies.assert_write_allowed(
+            self._dependencies.governance_policies.assert_write_allowed(
                 system_id=system_id,
                 user_subject=context.user_subject,
                 capability_name=context.spec.name,
