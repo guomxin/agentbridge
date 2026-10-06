@@ -130,6 +130,13 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
         error.rendered = true;
         throw error;
       }
+      if (!activeStream.terminal && !activeStream.timelineCompleted) {
+        const error = new Error("未收到完整处理结果，请刷新查看请求状态；系统不会自动重新发送。");
+        error.code = "WORKSPACE_STREAM_INCOMPLETE";
+        error.runId = runId;
+        error.safeToRetry = false;
+        throw error;
+      }
     } catch (error) {
       if (
         activeStream.timelineCompleted &&

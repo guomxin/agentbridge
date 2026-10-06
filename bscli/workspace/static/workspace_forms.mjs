@@ -87,7 +87,9 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
         totalBytes += file.size;
       } catch (error) {
         if (isCancellation(error)) return;
-        toast("图片读取失败，请重新选择。", true, "image-read");
+        toast(error.code === "IMAGE_CONTENT_UNSUPPORTED"
+          ? "图片内容不是 JPEG、PNG 或 WebP，请重新导出后添加。"
+          : "图片读取失败，请重新选择。", true, "image-read");
       }
     }
     renderComposerAttachments();
@@ -121,12 +123,27 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
           reject(new Error("image content is empty"));
           return;
         }
+        // A file picker's MIME type commonly comes from its suffix. Use the
+        // actual signature so a renamed PNG/JPEG remains a valid upload.
+        let actualType;
+        try {
+          const header = atob(content.slice(0, 16));
+          if (header.startsWith("\x89PNG\r\n\x1a\n")) actualType = "image/png";
+          else if (header.startsWith("\xff\xd8\xff")) actualType = "image/jpeg";
+          else if (header.startsWith("RIFF") && header.slice(8, 12) === "WEBP") actualType = "image/webp";
+        } catch { /* Invalid base64 is rejected like an unsupported signature. */ }
+        if (!actualType) {
+          const error = new Error("unsupported image content");
+          error.code = "IMAGE_CONTENT_UNSUPPORTED";
+          reject(error);
+          return;
+        }
         resolve({
           id: crypto.randomUUID(),
           fileName: String(file.name || "pasted-image").slice(0, 120),
-          mimeType,
+          mimeType: actualType,
           content,
-          dataUrl,
+          dataUrl: `data:${actualType};base64,${content}`,
           size: file.size,
         });
       });

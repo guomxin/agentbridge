@@ -12,6 +12,48 @@ const deferred = () => {
 const response = payload => ({ ok: true, json: async () => payload });
 const document = { cookie: "other=value; agentbridge_workspace_csrf=opaque-token" };
 
+test("EOF without a terminal result fails visibly and never replays even after acceptance", async () => {
+  for (const wire of ["retry: 1000\n\n", "retry: 1000\n\nHTTP/1.0 400 Bad Request\r\n\r\n{\"error\":{\"code\":\"INVALID_REQUEST\"}}",
+    'event: accepted\ndata: {"runId":"accepted"}\n\n',
+    'event: chat\ndata: {"state":"delta","text":"partial"}\n\n']) {
+    const scope = createLifecycle().scope();
+    const state = { activeStreams: new Map() };
+    let calls = 0;
+    let closed = 0;
+    let rendered = 0;
+    const { consumeChatStream } = createChatStream({state, getScope: () => scope,
+      fetchChatStreamResponse: async () => { calls++; return {ok: true, body: {getReader: () => ({
+        read: async () => ({done: true, value: new TextEncoder().encode(wire)}), cancel: async () => closed++,
+      })}}; },
+      adoptLiveMessage() {}, addLiveProgress() {}, ensureLiveMessage: () => ({actions: {replaceChildren() {}}}),
+      handleChatDelta: () => rendered++,
+    });
+    await assert.rejects(consumeChatStream({message: "do not replay", idempotencyKey: "local"}),
+      error => error.code === "WORKSPACE_STREAM_INCOMPLETE" && error.safeToRetry === false);
+    assert.equal(calls, 1);
+    assert.equal(closed, 1);
+    assert.equal(state.activeStreams.size, 0);
+    assert.equal(rendered, wire.includes('"delta"') ? 1 : 0);
+    scope.dispose();
+  }
+});
+
+test("a final result succeeds while a late server failure remains explicit and non-retryable", async () => {
+  for (const fail of [false, true]) {
+    const scope = createLifecycle().scope();
+    const { consumeChatStream } = createChatStream({state: {activeStreams: new Map()}, getScope: () => scope,
+      fetchChatStreamResponse: async () => new Response(fail
+        ? 'event: stream-error\ndata: {"code":"WORKSPACE_STREAM_FAILED","safeToRetry":false}\n\n'
+        : 'event: chat\ndata: {"state":"final","text":"completed"}\n\n'),
+      handleChatDelta() {},
+    });
+    const result = consumeChatStream({message: "test", idempotencyKey: "id"});
+    if (fail) await assert.rejects(result, e => e.code === "WORKSPACE_STREAM_FAILED" && !e.safeToRetry);
+    else await result;
+    scope.dispose();
+  }
+});
+
 test("JSON requests preserve credentials, CSRF, body and server error codes without replay", async () => {
   const scope = createLifecycle().scope();
   const calls = [];

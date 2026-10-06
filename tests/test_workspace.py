@@ -2687,6 +2687,62 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
 
 
 class WorkspaceHttpServerTests(unittest.TestCase):
+    def test_image_rejection_precedes_sse_and_late_failure_stays_sse(self) -> None:
+        with TemporaryDirectory() as tmp:
+            service = _service(tmp)
+            _create_account(service, user_subject="user-a", username="alice",
+                            endpoint_key="alice", client_type="web")
+            application = WorkspaceApplication(service=service, gateway=FakeGateway())
+            port = _free_port()
+            origin = f"http://127.0.0.1:{port}"
+            server = create_workspace_http_server(
+                config=validate_workspace_server_config(
+                    host="127.0.0.1", port=port, public_base_url=origin,
+                    tls_cert=None, tls_key=None), application=application)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, headers, _ = _request(port, "POST", "/api/login",
+                    body={"username": "alice", "password": PASSWORD}, origin=origin)
+                self.assertEqual(status, 200)
+                cookies = _cookies(headers)
+                args = dict(origin=origin, cookies=cookies,
+                            csrf=cookies["agentbridge_workspace_csrf"])
+                status, headers, payload = _request(port, "POST", "/api/chat/send-stream",
+                    body={"message": "image", "idempotencyKey": "invalid-image",
+                          "attachments": [{"mimeType": "image/jpeg", "fileName": "renamed.jpg",
+                                           "content": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}]}, **args)
+                self.assertEqual(status, 400)
+                self.assertEqual(headers.get_content_type(), "application/json")
+                self.assertEqual(payload["error"]["code"], "INVALID_REQUEST")
+                self.assertEqual(service.workspace.list_host_dispatches(user_subject="user-a"), [])
+
+                for failure in [ValueError("private-validation"), RuntimeError("private-storage"),
+                                GatewayRequestError("GATEWAY_CONNECTION_CLOSED", "private-gateway")]:
+                    with self.subTest(failure=type(failure).__name__):
+                        closed = []
+                        def broken_stream():
+                            try:
+                                yield {"type": "accepted", "runId": "accepted"}
+                                raise failure
+                            finally:
+                                closed.append(True)
+                        with patch.object(application, "send_chat_stream", return_value=broken_stream()):
+                            status, headers, wire = _raw_request(port, "POST", "/api/chat/send-stream",
+                                body={"message": "test"}, **args)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(headers.get_content_type(), "text/event-stream")
+                        self.assertIn("event: stream-error", wire)
+                        self.assertIn('"safeToRetry":false', wire)
+                        self.assertNotIn("HTTP/", wire)
+                        self.assertNotIn("private-", wire)
+                        self.assertEqual(closed, [True])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                application.close()
+
     def test_tls_eof_is_classified_as_a_normal_client_disconnect(self) -> None:
         self.assertIn(ssl.SSLEOFError, _CLIENT_DISCONNECT_ERRORS)
 

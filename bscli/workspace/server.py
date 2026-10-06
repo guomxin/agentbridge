@@ -795,7 +795,14 @@ def create_workspace_http_server(
         def _chat_send_stream(self, account: dict, body: dict) -> None:
             message = _required_string(body, "message")
             idempotency_key = _optional_string(body, "idempotencyKey")
-            stream = None
+            # Validation and durable acceptance can fail before an SSE response
+            # exists. Let do_POST return its normal JSON error in that case.
+            stream = application.send_chat_stream(
+                account,
+                message=message,
+                idempotency_key=idempotency_key,
+                attachments=body.get("attachments"),
+            )
             try:
                 self.close_connection = True
                 self.send_response(200)
@@ -810,12 +817,6 @@ def create_workspace_http_server(
                 self.end_headers()
                 self.wfile.write(b"retry: 1000\n\n")
                 self.wfile.flush()
-                stream = application.send_chat_stream(
-                    account,
-                    message=message,
-                    idempotency_key=idempotency_key,
-                    attachments=body.get("attachments"),
-                )
                 for item in stream:
                     event_name = {
                         "accepted": "accepted",
@@ -835,9 +836,15 @@ def create_workspace_http_server(
                     self.wfile.flush()
                 self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
-            except GatewayRequestError as exc:
+            except _CLIENT_DISCONNECT_ERRORS:
+                return
+            except Exception as exc:
+                # Once headers are sent, a second HTTP/JSON response would be
+                # swallowed by the SSE parser. Always finish with an SSE error.
                 payload = json.dumps(
-                    _public_gateway_stream_error(exc),
+                    _public_gateway_stream_error(exc)
+                    if isinstance(exc, GatewayRequestError)
+                    else {"code": "WORKSPACE_STREAM_FAILED", "safeToRetry": False},
                     separators=(",", ":"),
                 )
                 try:
@@ -850,8 +857,6 @@ def create_workspace_http_server(
                     self.wfile.flush()
                 except _CLIENT_DISCONNECT_ERRORS:
                     return
-            except _CLIENT_DISCONNECT_ERRORS:
-                return
             finally:
                 close = getattr(stream, "close", None)
                 if callable(close):

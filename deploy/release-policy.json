@@ -12,8 +12,9 @@
     "1d298fcceae4",
     "8687c1a712db",
     "1422644d87ca",
-    "52407ea1db3d"
+    "52407ea1db3d",
+    "cd9426193642"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Task state decisions and projections, independent host recovery policies, and browser module boundaries preserve public contracts, SQL, authorization and transaction semantics. No database migration or production configuration change is required."
+  "reason": "Workspace image format detection and stream error handling preserve request payloads, authorization and durable acceptance transactions. No database migration or production configuration change is required."
 }

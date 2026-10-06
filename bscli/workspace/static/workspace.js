@@ -1408,6 +1408,10 @@ function friendlyError(error) {
       "OpenClaw \u6682\u65f6\u65e0\u54cd\u5e94\uff0c\u672c\u6b21\u8bf7\u6c42\u672a\u7ee7\u7eed\u8fdb\u5165\u4e1a\u52a1\u7cfb\u7edf\u3002",
     PAIRING_REQUIRED: "AgentBridge 服务器尚未获准连接 OpenClaw。",
     AUTHENTICATION_REQUIRED: "网页会话已失效，请重新登录。",
+    INVALID_REQUEST: "请求未能提交，请检查图片格式、大小和文字长度。",
+    WORKSPACE_INTERNAL_ERROR: "请求提交异常，请刷新查看请求状态；系统不会自动重新发送。",
+    WORKSPACE_STREAM_FAILED: "结果连接中断，请刷新查看请求状态；系统不会自动重新发送。",
+    WORKSPACE_STREAM_INCOMPLETE: "未收到完整处理结果，请刷新查看请求状态；系统不会自动重新发送。",
   };
   return labels[error.code] || error.message || "操作没有完成。";
 }
