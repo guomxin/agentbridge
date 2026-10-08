@@ -13,7 +13,8 @@
     "8687c1a712db",
     "1422644d87ca",
     "52407ea1db3d",
-    "cd9426193642"
+    "cd9426193642",
+    "fb177641d8d7"
   ],
   "dataCompatibility": "no-migration",
   "reason": "Workspace image format detection and stream error handling preserve request payloads, authorization and durable acceptance transactions. No database migration or production configuration change is required."

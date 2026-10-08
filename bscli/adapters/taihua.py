@@ -36,6 +36,7 @@ _MY_LOGS_INPUT_SCHEMA = {
         "end_date": {"type": "string"},
         "keyword": {"type": "string"},
         "limit": {"type": "integer"},
+        "offset": {"type": "integer", "minimum": 0, "maximum": 100000},
     },
     "additionalProperties": False,
 }
@@ -282,9 +283,27 @@ class TaihuaCentralAdapter:
         if not isinstance(payload, list):
             raise TaihuaSessionCheckUnavailable("个人日志接口未返回列表。")
         limit = _bounded_int(arguments.get("limit"), default=100, minimum=1, maximum=500)
-        items = [_normalize_work_log(item) for item in payload[:limit] if isinstance(item, dict)]
+        offset = _bounded_int(arguments.get("offset"), default=0, minimum=0, maximum=100000)
+        for row in payload:
+            if not isinstance(row, dict) or not str(row.get("id") or "").strip():
+                raise TaihuaSessionCheckUnavailable("个人日志响应行缺少有效标识。")
+            try:
+                _normalize_date(row.get("logDate"), "logDate")
+            except (ValueError, TypeError):
+                raise TaihuaSessionCheckUnavailable("个人日志响应行日期无效。") from None
+        items = [_normalize_work_log(item) for item in payload[offset:offset + limit]]
+        has_more = offset + len(items) < len(payload)
         return {
             "count": len(items),
+            "total": len(payload),
+            "returnedCount": len(items),
+            "offset": offset,
+            "nextOffset": offset + len(items) if has_more and offset + len(items) <= 100000 else None,
+            "hasMore": has_more,
+            "truncated": offset > 0 or has_more,
+            "coverage": {"complete": offset == 0 and not has_more,
+                         "basis": "returned_records", "snapshot": False,
+                         "note": "合计仅针对本页；保持日期与筛选条件续取，跨请求源数据可能变化。"},
             "startDate": start_date,
             "endDate": end_date,
             "items": items,

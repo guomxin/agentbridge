@@ -2000,6 +2000,12 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                 token_file=token_file,
                 state_dir=root / "state",
             )
+            history_patch = patch.object(client, "call", return_value={"messages": [
+                {"role": "user", "idempotencyKey": "run-1:user"},
+                {"role": "assistant", "content": "已完成", "stopReason": "stop"},
+            ]})
+            history_patch.start()
+            self.addCleanup(history_patch.stop)
             input_pipe = _CaptureInput()
             with patch(
                 "bscli.workspace.gateway.subprocess.Popen"
@@ -2131,6 +2137,12 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                 state_dir=root / "state",
                 retry_sleep=lambda _seconds: None,
             )
+            history_patch = patch.object(client, "call", return_value={"messages": [
+                {"role": "user", "idempotencyKey": "run-retry-1:user"},
+                {"role": "assistant", "content": "done", "stopReason": "stop"},
+            ]})
+            history_patch.start()
+            self.addCleanup(history_patch.stop)
             payloads = []
 
             def stream_payload(payload):
@@ -2203,6 +2215,12 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                 state_dir=root / "state",
                 retry_sleep=retry_delays.append,
             )
+            history_patch = patch.object(client, "call", return_value={"messages": [
+                {"role": "user", "idempotencyKey": "run-tunnel-recovery-1:user"},
+                {"role": "assistant", "content": "done", "stopReason": "stop"},
+            ]})
+            history_patch.start()
+            self.addCleanup(history_patch.stop)
             payloads = []
 
             def stream_payload(payload):
@@ -2274,6 +2292,12 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                 state_dir=root / "state",
                 retry_sleep=lambda _seconds: None,
             )
+            history_patch = patch.object(client, "call", return_value={"messages": [
+                {"role": "user", "idempotencyKey": "run-fresh-grant-1:user"},
+                {"role": "assistant", "content": "done", "stopReason": "stop"},
+            ]})
+            history_patch.start()
+            self.addCleanup(history_patch.stop)
             payloads = []
             refreshed = iter(["h" * 48, "i" * 48, "j" * 48])
 
@@ -2399,6 +2423,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                         },
                         {
                             "role": "assistant",
+                            "stopReason": "stop",
                             "content": [
                                 {"type": "text", "text": "Authoritative answer"},
                             ],
@@ -2503,6 +2528,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                     messages.append(
                         {
                             "role": "assistant",
+                            "stopReason": "stop",
                             "content": [
                                 {
                                     "type": "text",

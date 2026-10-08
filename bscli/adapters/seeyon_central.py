@@ -509,6 +509,8 @@ _WORKFLOW_DETAIL_INPUT_SCHEMA = {
         "collection": {"type": "string"},
         "affair_id": {"type": "string"},
         "text_limit": {"type": "integer"},
+        "text_offset": {"type": "integer"},
+        "expected_text_revision": {"type": "string"},
     },
     "required": ["collection", "affair_id"],
     "additionalProperties": False,
@@ -1067,6 +1069,16 @@ class SeeyonCentralAdapter:
             collection=collection,
             affair_id=affair_id,
         )
+        import hashlib
+        text = str(parsed_detail.get("text") or "")
+        revision = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        expected_revision = arguments.get("expected_text_revision")
+        if expected_revision and expected_revision != revision:
+            raise ValueError("OA text changed; restart reading from text_offset=0")
+        text_offset = _validated_integer(arguments.get("text_offset"), "text_offset",
+                                         default=0, minimum=0, maximum=10000000)
+        returned_text = text[text_offset:text_offset + text_limit]
+        next_offset = text_offset + len(returned_text)
         opinions = _public_opinions(parsed_detail.get("workflow"))
         attachments = [
             {"name": _public_text(item.get("name"))}
@@ -1087,7 +1099,13 @@ class SeeyonCentralAdapter:
             "source_item": _public_workflow_item(source_item, collection),
             "detail": {
                 "title": _public_text(source_item.get("title") or parsed_detail.get("title")),
-                "text": str(parsed_detail.get("text") or "")[:text_limit],
+                "text": returned_text,
+                "textTruncated": text_offset > 0 or next_offset < len(text),
+                "textLength": len(text),
+                "returnedTextLength": len(returned_text),
+                "textOffset": text_offset,
+                "nextTextOffset": next_offset if returned_text and next_offset < len(text) else None,
+                "textRevision": revision,
                 "fields": fields,
                 "field_count": len(fields),
                 "attachments": attachments,

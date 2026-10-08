@@ -105,6 +105,18 @@ class MultiSourceTests(unittest.TestCase):
                     reports.export('a','equipment',{**args,'query_arguments':{'sql':'select 1'}})
             rid=result['report_id']
             delivery=reports.download('a','equipment',{'report_id':rid})
+            self.assertEqual(delivery['reportExpiresAt'], delivery['expires_at'])
+            self.assertEqual(delivery['downloadExpiresAt'], delivery['download_expires_at'])
+            self.assertLess(delivery['downloadExpiresAt'], delivery['reportExpiresAt'])
+            stored = reports.payloads.load(rid)
+            stored['download_expires_at'] = '2000-01-01T00:00:00+00:00'
+            reports.payloads.save(rid, stored)
+            with self.assertRaisesRegex(DatabaseRejected, 'DOWNLOAD_EXPIRED'):
+                reports.web_download('a', 'equipment', rid)
+            with patch.object(runtime, '_execute', side_effect=AssertionError('must not requery')):
+                renewed = reports.download('a', 'equipment', {'report_id': rid})
+            self.assertEqual(renewed['sha256'], delivery['sha256'])
+            self.assertEqual(renewed['file'], delivery['file'])
             text=base64.b64decode(delivery['file']['content_base64']).decode('utf-8-sig')
             self.assertIn("'=1+2",text)
             self.assertIn('中文设备',text)

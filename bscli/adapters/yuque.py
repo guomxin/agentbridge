@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 from urllib.parse import quote, urlencode, urljoin, urlparse
+from functools import wraps
 
 from bscli.adapters.base import (
     AdapterLoginContractMismatch,
@@ -37,7 +38,7 @@ _BOOK_SELECTOR_SCHEMA = {
         "type": "string",
         "description": (
             "Knowledge-base name, slug, or numeric id. Omit it to search or list "
-            "across every visible department knowledge base."
+            "across knowledge bases in the organization public area only."
         ),
     },
 }
@@ -52,6 +53,28 @@ class YuqueLoginContractMismatch(AdapterLoginContractMismatch):
 
 class YuqueSessionCheckUnavailable(AdapterSessionCheckUnavailable):
     pass
+
+
+def _public_output(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        result = method(self, *args, **kwargs)
+        result["searchScope"] = {"kind": "organization_public_area",
+                                 "organizationId": self.organization_id,
+                                 "includesPrivateSpaces": False}
+        original = result
+        result, categories = _redact_nested_strings(result)
+        locations = [key for key in original if original[key] != result[key]]
+        redaction = result.setdefault("redaction", {})
+        if redaction.get("applied"):
+            locations.extend(["content", "structure"])
+        redaction["locations"] = sorted(set(locations))
+        redaction.update({"applied": bool(categories) or redaction.get("applied", False),
+                          "count": len(categories) + redaction.get("count", 0),
+                          "categories": sorted(set(categories + redaction.get("categories", []))),
+                          "detection": "known_patterns_only; no match does not prove absence of secrets"})
+        return result
+    return wrapped
 
 
 class YuqueCentralAdapter:
@@ -150,6 +173,7 @@ class YuqueCentralAdapter:
             return self.read_document(worker, arguments)
         raise KeyError(f"unsupported Yuque capability: {capability_name}")
 
+    @_public_output
     def list_public_books(self, worker) -> dict:
         public_area, books = self._public_area(worker)
         return {
@@ -158,6 +182,7 @@ class YuqueCentralAdapter:
             "items": books,
         }
 
+    @_public_output
     def list_documents(self, worker, arguments: dict) -> dict:
         public_area, books = self._public_area(worker)
         selector = str(arguments.get("book") or "").strip()
@@ -220,6 +245,8 @@ class YuqueCentralAdapter:
             )
         offset = (page - 1) * limit
         items = normalized[offset : offset + limit]
+        for item in items:
+            item["sourceUrl"] = self._document_url(item, item["book"])
         selected_book = selected_books[0] if selector else None
         return {
             "scope": "book" if selected_book else "all_books",
@@ -239,6 +266,7 @@ class YuqueCentralAdapter:
             "items": items,
         }
 
+    @_public_output
     def search_documents(self, worker, arguments: dict) -> dict:
         query = str(arguments.get("query") or "").strip()
         if not query:
@@ -277,6 +305,7 @@ class YuqueCentralAdapter:
                 continue
             book = _book_for_search_hit(item, books, fallback=selected_book)
             normalized = _normalize_search_hit(item, book)
+            normalized["sourceUrl"] = self._document_url(normalized, book)
             if document_type and normalized["type"].casefold() != document_type.casefold():
                 continue
             items.append(normalized)
@@ -296,6 +325,7 @@ class YuqueCentralAdapter:
             "items": items,
         }
 
+    @_public_output
     def read_document(self, worker, arguments: dict) -> dict:
         selector = str(arguments.get("document") or "").strip()
         if not selector:
@@ -338,6 +368,9 @@ class YuqueCentralAdapter:
             rendered["structure"]
         )
         redactions.extend(structure_redactions)
+        redactions.extend(["table_credential"] * sum(
+            sheet.get("redactedCells", 0) for sheet in rendered["structure"].get("sheets", [])
+        ))
         max_chars = _bounded_int(
             arguments.get("max_chars"),
             default=12_000,
@@ -350,6 +383,7 @@ class YuqueCentralAdapter:
         return {
             "document": {
                 **_normalize_document_summary(raw, book),
+                "sourceUrl": self._document_url({**document, **raw}, book),
                 "author": _normalize_person(raw.get("user")),
                 "lastEditor": _normalize_person(raw.get("last_editor")),
                 "contributors": [
@@ -609,6 +643,8 @@ class YuqueCentralAdapter:
             raise YuqueLoginContractMismatch(
                 "Yuque public area has no stable login identifier."
             )
+        for book in books:
+            book["publicAreaLogin"] = public_area["login"]
         return public_area, books
 
     def _request_json(
@@ -634,6 +670,21 @@ class YuqueCentralAdapter:
             raise YuqueSessionCheckUnavailable("Yuque API did not return JSON.")
         return payload
 
+    def _document_url(self, document: dict, book: dict) -> str | None:
+        supplied = str(document.get("url") or "").strip()
+        if not supplied:
+            area = book.get("publicAreaLogin")
+            slug = document.get("slug")
+            if not area or not book.get("slug") or not slug:
+                return None
+            supplied = "/" + "/".join(quote(str(part), safe="") for part in (area, book["slug"], slug))
+        target = urljoin(self.base_url, supplied)
+        parsed = urlparse(target)
+        if (parsed.scheme != "https" or parsed.netloc != urlparse(self.base_url).netloc
+                or parsed.username or parsed.password):
+            return None
+        return target
+
     def _url(self, path: str) -> str:
         return urljoin(self.base_url, path.lstrip("/"))
 
@@ -655,7 +706,7 @@ def build_yuque_capability_registry() -> CapabilityRegistry:
             name=YUQUE_DOCUMENT_CATALOG_CAPABILITY,
             version="0.2.0",
             description=(
-                "List, filter, sort, and page documents across all visible Yuque "
+                "List, filter, sort, and page documents in the organization public area of Yuque "
                 "knowledge bases or one explicitly selected base."
             ),
             input_schema={
@@ -692,7 +743,7 @@ def build_yuque_capability_registry() -> CapabilityRegistry:
             name=YUQUE_DOCUMENT_SEARCH_CAPABILITY,
             version="0.2.0",
             description=(
-                "Search one or every visible Yuque knowledge base while omitting "
+                "Search knowledge bases in the organization public area; page and read relevant candidates to locate a target, while omitting "
                 "server snippets that may incidentally expose credentials."
             ),
             input_schema={
@@ -843,7 +894,8 @@ def _normalize_document_summary(item: dict, book: dict) -> dict:
         "title": str(item.get("title") or ""),
         "type": str(item.get("type") or ""),
         "format": str(item.get("format") or ""),
-        "book": {"id": book["id"], "slug": book["slug"], "name": book["name"]},
+        "book": {"id": book["id"], "slug": book["slug"], "name": book["name"],
+                 "publicAreaLogin": book.get("publicAreaLogin")},
         "author": _normalize_person(item.get("user")),
         "lastEditor": _normalize_person(item.get("last_editor")),
         "wordCount": item.get("word_count"),

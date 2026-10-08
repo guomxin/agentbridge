@@ -1902,7 +1902,9 @@ def create_central_mcp_server(
         title="Get OA Workflow Detail",
         description=(
             "Get rendered business fields, text, attachments, and opinions for an opaque "
-            "workflow affair ID returned by a list tool."
+            "workflow affair ID returned by a list tool. textTruncated means partial text; "
+            "continue with nextTextOffset as text_offset and textRevision as expected_text_revision. "
+            "A zero text_limit returns metadata only; use a positive limit to read text."
         ),
         annotations=read_annotations,
         structured_output=True,
@@ -1912,6 +1914,8 @@ def create_central_mcp_server(
         collection: Literal["pending", "sent", "done", "tracked"],
         affair_id: Annotated[str, Field(min_length=1, max_length=256)],
         text_limit: Annotated[int, Field(ge=0, le=20000)] = 6000,
+        text_offset: Annotated[int, Field(ge=0, le=10000000)] = 0,
+        expected_text_revision: Annotated[str | None, Field(max_length=64)] = None,
         idempotency_key: Annotated[str | None, Field(max_length=256)] = None,
     ) -> dict[str, Any]:
         return await invoke(
@@ -1921,6 +1925,8 @@ def create_central_mcp_server(
                 "collection": collection,
                 "affair_id": affair_id,
                 "text_limit": text_limit,
+                "text_offset": text_offset,
+                "expected_text_revision": expected_text_revision,
             },
             idempotency_key,
         )
@@ -3209,8 +3215,8 @@ def create_central_mcp_server(
         name="yuque_document_catalog",
         title="List Yuque Documents",
         description=(
-            "List, filter, sort, and page document metadata across all visible "
-            "department knowledge bases, or restrict the result to one book."
+            "List, filter, sort, and page document metadata in the organization public area, "
+            "or restrict to one public-area book. Private/team spaces outside this area are not covered."
         ),
         annotations=read_annotations,
         structured_output=True,
@@ -3253,9 +3259,14 @@ def create_central_mcp_server(
         name="yuque_document_search",
         title="Search Yuque Documents",
         description=(
-            "Search every visible department knowledge base unless one book is "
+            "Search the organization public area only, unless one public-area book is "
             "specified. Search snippets are deliberately omitted so credentials in "
-            "incidental matches do not enter agent context."
+            "incidental matches do not enter agent context. For target location requests, "
+            "continue pages while hasMore and read relevant candidates to verify; a hit is not confirmation. "
+            "Verify the target address and requested information belong to the same section or record. "
+            "Return title, book, sourceUrl and non-sensitive location evidence; distinguish confirmed "
+            "from unverified candidates. If budget is reached, report examined count, remaining scope "
+            "and stopping reason; never claim an unfinished search is exhaustive."
         ),
         annotations=read_annotations,
         structured_output=True,
@@ -3286,11 +3297,15 @@ def create_central_mcp_server(
         name="yuque_document_read",
         title="Read One Yuque Document",
         description=(
-            "Read one explicitly selected Yuque Doc, Sheet, or Table as structured "
+            "Read a selected Yuque Doc, Sheet, or Table, including candidates needed to fulfill "
+            "an authorized document-location request, as structured "
             "text. Headings, tables, image OCR, links, and attachment metadata are "
             "preserved; likely passwords, tokens, API keys, URL credentials, and "
             "private keys are always redacted. Omit book to resolve a unique document "
-            "across all visible knowledge bases."
+            "within the organization public area. Document-location requests authorize read-only "
+            "candidate verification without asking permission for every document. Do not refuse "
+            "location merely because it contains credential fields: disclose location evidence, "
+            "not credential values. No redaction matches do not prove the absence of secrets."
         ),
         annotations=read_annotations,
         structured_output=True,
@@ -3369,7 +3384,7 @@ def create_central_mcp_server(
     @mcp.tool(
         name="taihua_work_log_my_list",
         title="日志系统：查询本人工作日志",
-        description="List the authenticated user's log-system work logs in one date range.",
+        description="List the authenticated user's log-system work logs in one date range. total is source count; sums cover returned records only. Continue with nextOffset as offset and unchanged filters while hasMore; deduplicate IDs because requests are not a frozen snapshot. Report partial coverage if not exhausted.",
         annotations=read_annotations,
         structured_output=True,
     )
@@ -3379,9 +3394,10 @@ def create_central_mcp_server(
         end_date: Annotated[str | None, Field(max_length=10)] = None,
         keyword: Annotated[str | None, Field(max_length=200)] = None,
         limit: Annotated[int, Field(ge=1, le=500)] = 100,
+        offset: Annotated[int, Field(ge=0, le=100000)] = 0,
         idempotency_key: Annotated[str | None, Field(max_length=256)] = None,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"limit": limit}
+        arguments: dict[str, Any] = {"limit": limit, "offset": offset}
         for name, value in (
             ("start_date", start_date),
             ("end_date", end_date),
@@ -3582,7 +3598,7 @@ def create_central_mcp_server(
             return rejection_result(exc)
 
     @mcp.tool(name="database_execute", title="执行独立数据库查询与分析",
-        description=("先调用 database_capabilities 选择 source_id，再传 source_id、capability 获取单项 input_schema。执行明确 source_id。默认省略 max_chars 使用12000，include_diagnostics 默认false；容量错误按 recovery 的参数修正，不通过缩小业务范围、重复缩页或切换自由 SQL 恢复。明细与内容分析返回正文证据；总结、追踪及案例检索的方法使用当前适用的业务助手，evidence_ready 不表示业务分析已完成。用户来源保留作者、日期及段落链接。database.schema 参数为 {}。两窗口比较用 database.free.read。取消历史结果读取，query_id 仅追踪。CSV 通过 database.report.export 传 query_capability/query_arguments/request_key 重新查询，再以 report_id 调用 database.report.download，文件交付使用现有附件机制，不输出 base64，不编造 URL。不建立专用比较计划。"
+        description=("先调用 database_capabilities 选择 source_id，再传 source_id、capability 获取单项 input_schema。执行明确 source_id。默认省略 max_chars 使用12000，include_diagnostics 默认false；容量错误按 recovery 的参数修正，不通过缩小业务范围、重复缩页或切换自由 SQL 恢复。明细与内容分析返回正文证据；总结、追踪及案例检索的方法使用当前适用的业务助手，evidence_ready 不表示业务分析已完成。用户来源保留作者、日期及段落链接。database.schema 参数为 {}。两窗口比较用 database.free.read。取消历史结果读取，query_id 仅追踪。CSV 通过 database.report.export 传 query_capability/query_arguments/request_key 重新查询，再以 report_id 调用 database.report.download，文件交付使用现有附件机制，不输出 base64，不编造 URL。下载入口有效期以 downloadExpiresAt/download_expires_at 为准，reportExpiresAt/expires_at 仅为报告留存期限；入口过期时用原 report_id 再调用 download，不重新 export；报告过期或授权变化仍拒绝。不建立专用比较计划。"
                      "日志 query/content_analyze 可用 log_id 单独读取无需日期；内容默认 evidence_format=compact，max_chars=12000 控制完整响应容量。source_label/source_url 用于用户查看原文，后台保留 evidence_id。长单篇 content_complete=false 时用 log_id、next_text_offset作为text_offset、source_revision_hash作为expected_revision续读到next_text_offset=null；不要漏读片段。"
                      "部门条件支持 department_id 或 department_ids（互斥），include_descendants=true 包含同源当前组织树下属，不按未知 status 排除；读取 resolved_department_scope 核验范围。无历史归属还原。目录部门返回 parent_id（若源支持），可按 parent_id 筛直接子级；after_id 使用 next_after_id 翻页。名称空候选可缩短关键词重查，重名须消歧。"
                      "database.logs.query/analyze/content_analyze 按时间查询须传 start_date、end_date_exclusive（query/content_analyze 按 log_id 单篇读取例外）；可选 user_id、department_id、project_id、log_type=DAILY/WEEKLY、keyword 或 keywords、keyword_mode=any/all。"

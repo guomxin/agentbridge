@@ -9,35 +9,54 @@ import zlib
 
 from bscli.adapters.base import AdapterSessionCheckUnavailable
 
-_SECRET_PATTERNS = (
-    (
-        "credential",
-        re.compile(
-            r"(?im)(账号|用户名|user(?:name)?|密码|口令|password|passwd)"
-            r"(\s*[:：=]\s*)([^\s,，;；<>{}\[\]]{2,})"
-        ),
-    ),
-    (
-        "token",
-        re.compile(
-            r"(?im)(access[_ -]?key(?:[_ -]?id)?|secret(?:[_ -]?key)?|"
-            r"api[_ -]?key|token|bearer)"
-            r"(\s*[:：=]\s*)([A-Za-z0-9_./+=-]{6,})"
-        ),
-    ),
-    (
-        "url_credential",
-        re.compile(r"(?i)\b(https?://)([^/\s:@]+):([^@\s/]+)@"),
-    ),
-    (
-        "private_key",
-        re.compile(
-            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
-            r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
-            re.DOTALL,
-        ),
-    ),
+# Shared by text, OCR, metadata and structured field redaction.
+_SECRET_LABEL = (
+    r"(?:账号|帐号|用户名|帐密|账密|密码|口令|密钥|"
+    r"(?:[A-Za-z0-9]+[_-])*(?:user(?:name)?|password|passwd|pwd|"
+    r"access[_ -]?key(?:[_ -]?id)?|secret(?:[_ -]?key)?|api[_ -]?key|token|bearer))"
 )
+_SECRET_FIELD = re.compile(r"^" + _SECRET_LABEL + r"$", re.I)
+_SECRET_PATTERNS = (
+    ("credential", re.compile(
+        r"(?im)(?<![\w])(" + _SECRET_LABEL + r"[\"']?)([ \t]*[:：=][ \t]*)"
+        r'''(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,，;；<>{}\[\]|]+)'''
+    )),
+    ("url_credential", re.compile(
+        r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@")),
+    ("private_key", re.compile(
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
+        r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.DOTALL)),
+)
+
+
+def _redact_table_text(text: str) -> tuple[str, list[str]]:
+    lines = text.splitlines(keepends=True)
+    secret_columns: set[int] = set()
+    categories = []
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("|"):
+            secret_columns = set()
+            continue
+        cells = re.split(r"(?<!\\)\|", line.strip())[1:-1]
+        if not cells:
+            continue
+        if all(re.fullmatch(r"\s*:?-+:?\s*", cell) for cell in cells):
+            continue
+        header_columns = {i for i, cell in enumerate(cells)
+                          if _SECRET_FIELD.fullmatch(cell.strip().strip("*` "))}
+        # Both header/value tables and two-column field/value tables occur in Lake/OCR.
+        targets = set(secret_columns)
+        if len(cells) == 2 and 0 in header_columns and 1 not in header_columns:
+            targets.add(1)
+        for column in targets:
+            if (column < len(cells) and column not in header_columns
+                    and cells[column].strip() not in {"", "[REDACTED]"}):
+                cells[column] = " [REDACTED] "
+                categories.append("table_credential")
+        if header_columns and not (len(cells) == 2 and header_columns == {0}):
+            secret_columns = header_columns
+        lines[index] = "|" + "|".join(cells) + "|" + ("\n" if line.endswith("\n") else "")
+    return "".join(lines), categories
 
 
 def lake_to_plain_text(content: str) -> str:
@@ -67,15 +86,20 @@ def lake_to_structured_text(content: str) -> tuple[str, dict]:
 
 
 def redact_sensitive_text(text: str) -> tuple[str, list[str]]:
-    categories: list[str] = []
-    value = text
+    value, categories = _redact_table_text(text)
     for category, pattern in _SECRET_PATTERNS:
         if category == "url_credential":
             value, count = pattern.subn(r"\1[REDACTED]@", value)
         elif category == "private_key":
             value, count = pattern.subn("[REDACTED PRIVATE KEY]", value)
         else:
-            value, count = pattern.subn(r"\1\2[REDACTED]", value)
+            def replace(match):
+                label = match.group(1).lower()
+                categories.append("token" if any(part in label for part in
+                    ("token", "key", "secret", "bearer", "密钥")) else "credential")
+                return match.group(1) + match.group(2) + "[REDACTED]"
+            value = pattern.sub(replace, value)
+            continue
         categories.extend([category] * count)
     return value, categories
 
@@ -285,10 +309,14 @@ def _render_lake_sheet(content: str, *, row_offset: int, max_rows: int) -> dict:
         )
         returned_columns = column_indexes[:50]
         rows = []
-        for row_index in selected_indexes:
+        secret_columns: set[int] = set()
+        redacted_cells = 0
+        selected_set = set(selected_indexes)
+        for row_index in row_indexes:
+            if selected_indexes and row_index > selected_indexes[-1]:
+                break
             row = raw_data.get(str(row_index), raw_data.get(row_index, {}))
-            rows.append(
-                [
+            values = [
                     _display_sheet_cell(
                         row.get(str(column), row.get(column, {}))
                         if isinstance(row, dict)
@@ -296,7 +324,17 @@ def _render_lake_sheet(content: str, *, row_offset: int, max_rows: int) -> dict:
                     )
                     for column in returned_columns
                 ]
-            )
+            header_columns = {i for i, value in enumerate(values)
+                              if _SECRET_FIELD.fullmatch(value.strip())}
+            if header_columns:
+                secret_columns = header_columns
+            if row_index not in selected_set:
+                continue
+            for column in secret_columns - header_columns:
+                if values[column]:
+                    values[column] = "[REDACTED]"
+                    redacted_cells += 1
+            rows.append(values)
         name = str(sheet.get("name") or f"Sheet {index + 1}")
         headers = [_spreadsheet_column_name(column) for column in returned_columns]
         sections.append(_render_tabular_section(name, headers, rows))
@@ -310,6 +348,7 @@ def _render_lake_sheet(content: str, *, row_offset: int, max_rows: int) -> dict:
                 "rowOffset": row_offset,
                 "hasMore": row_offset + len(rows) < len(row_indexes),
                 "columnsTruncated": len(column_indexes) > len(returned_columns),
+                "redactedCells": redacted_cells,
             }
         )
     return {
@@ -444,7 +483,10 @@ def _redact_nested_strings(value: Any) -> tuple[Any, list[str]]:
         output = {}
         categories = []
         for key, item in value.items():
-            sanitized, found = _redact_nested_strings(item)
+            if _SECRET_FIELD.fullmatch(str(key)) and item is not None:
+                sanitized, found = "[REDACTED]", ["credential_field"]
+            else:
+                sanitized, found = _redact_nested_strings(item)
             output[key] = sanitized
             categories.extend(found)
         return output, categories

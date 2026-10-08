@@ -109,3 +109,12 @@ test("maps tool progress without exposing arguments or results", () => {
   });
   assert.equal(JSON.stringify(event).includes("secret"), false);
 });
+
+test("final snapshots always replace abandoned prefixes", () => {
+  const normalized = normalizeGatewayEvent({ type: "event", event: "chat", payload: {
+    sessionKey, runId: "run-a", state: "final", replace: false,
+    message: { role: "assistant", content: "Repeat\nRepeat" },
+  } }, sessionKey, "run-a");
+  assert.equal(normalized.replace, true);
+  assert.equal(normalized.text, "Repeat\nRepeat");
+});

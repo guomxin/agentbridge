@@ -220,6 +220,22 @@ class OpenClawGatewayClient:
                                     str(item.get("runId") or "").strip()
                                     or None
                                 )
+                            if item.get("type") == "chat" and item.get("state") == "final":
+                                # Stream snapshots may include abandoned generation prefixes.
+                                # Only the same accepted run's persisted final answer is authoritative.
+                                if not run_id or item.get("runId") != run_id:
+                                    continue
+                                authoritative, _ = self._reconcile_accepted_run(
+                                    session_key=normalized["sessionKey"], run_id=run_id,
+                                )
+                                if authoritative is None:
+                                    terminal = True  # host already ended; never abort/replay it
+                                    raise GatewayRequestError(
+                                        "GATEWAY_FINAL_HISTORY_PENDING",
+                                        "The final answer is awaiting authoritative history.",
+                                        {"safeToRetry": False, "reconciliationAttempted": True},
+                                    )
+                                item = {**authoritative, "replace": True}
                             if (
                                 item.get("type") == "chat"
                                 and item.get("state")
@@ -312,7 +328,7 @@ class OpenClawGatewayClient:
             },
             timeout_seconds=timeout_seconds,
         )
-        return _history_evidence_for_run(history, run_ref)
+        return _history_evidence_for_run(history, run_ref, session_key=session_key)
 
     def _reconcile_accepted_run(
         self,
@@ -336,7 +352,7 @@ class OpenClawGatewayClient:
                 )
             except GatewayRequestError:
                 continue
-            evidence = _history_evidence_for_run(history, run_id)
+            evidence = _history_evidence_for_run(history, run_id, session_key=session_key)
             observed_tool_activity = (
                 observed_tool_activity or evidence["had_tool_activity"]
             )
@@ -576,9 +592,10 @@ def _should_retry_before_accept(
     return error.code in {"GATEWAY_PROCESS_FAILED", "GATEWAY_RESPONSE_INVALID"}
 
 
-def _history_evidence_for_run(payload: Any, run_id: str) -> dict[str, Any]:
+def _history_evidence_for_run(payload: Any, run_id: str, *, session_key: str | None = None) -> dict[str, Any]:
     messages = payload.get("messages") if isinstance(payload, dict) else None
-    if not isinstance(messages, list):
+    if (not isinstance(messages, list) or (session_key and payload.get("sessionKey")
+                                          and payload["sessionKey"] != session_key)):
         return {
             "prompt_observed": False,
             "had_tool_activity": False,
@@ -614,9 +631,14 @@ def _history_evidence_for_run(payload: Any, run_id: str) -> dict[str, Any]:
             continue
         if value.get("role") == "user":
             break
+        if value.get("runId") and value["runId"] != run_id:
+            continue
         message_tool_activity = _history_message_has_tool_activity(value)
         had_tool_activity = had_tool_activity or message_tool_activity
-        if value.get("role") == "assistant" and not message_tool_activity:
+        if message_tool_activity:
+            final_text = ""
+        if (value.get("role") == "assistant" and not message_tool_activity
+                and value.get("stopReason", value.get("stop_reason")) in {"stop", "end_turn"}):
             text = _history_message_text(value.get("content"))
             if text:
                 final_text = text

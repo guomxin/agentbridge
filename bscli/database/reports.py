@@ -143,7 +143,7 @@ class Reports:
 
     def _public(self,value):
         return {**{k:value[k] for k in ('report_id','source_id','filename','expires_at','byte_size','row_count','sha256','queried_at')},
-                'download_capability':'database.report.download','authentication_required':True,'note':'本文件来自本次重新查询，仅供短期交付。'}
+                'reportExpiresAt':value['expires_at'],'download_capability':'database.report.download','authentication_required':True,'note':'报告留存期限见 reportExpiresAt；下载入口期限见 downloadExpiresAt。入口过期而报告仍留存时，以原 report_id 调用 database.report.download 续取，无需重新查询。'}
 
     def download(self,owner,sid,args):
         if not isinstance(args,dict) or set(args)!={'report_id'}: raise DatabaseRejected('INVALID_DATABASE_ARGUMENTS')
@@ -158,7 +158,7 @@ class Reports:
         self.payloads.save(value['report_id'],value)
         self.runtime.grants.audit(owner,'database.report.download','succeeded',{'source_id':sid,'report_id':value['report_id']})
         # Existing host delivery contract consumes this file and hides base64 from the model.
-        return {**self._public(value),'download_expires_at':value['download_expires_at'],'schemaVersion':'agentbridge.protected_csv_delivery.v1',
+        return {**self._public(value),'download_expires_at':value['download_expires_at'],'downloadExpiresAt':value['download_expires_at'],'schemaVersion':'agentbridge.protected_csv_delivery.v1',
                 'file':{k:value[k] for k in ('filename','content_type','content_base64')}}
 
     def web_download(self,owner,sid,rid):

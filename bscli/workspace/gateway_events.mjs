@@ -43,7 +43,8 @@ function normalizeChatEvent(payload) {
     state,
     ...(Number.isSafeInteger(payload.seq) ? { seq: payload.seq } : {}),
     ...(text ? { text } : {}),
-    ...(typeof payload.replace === "boolean"
+    ...(state === "final" ? { replace: true } : {}),
+    ...(state !== "final" && typeof payload.replace === "boolean"
       ? { replace: payload.replace }
       : {}),
   };
