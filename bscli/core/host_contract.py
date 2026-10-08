@@ -512,7 +512,7 @@ class HostContractStore:
                 "shared-contract-h01-h29-skill-quality-durable-workbench-v1",
             ),
             (
-                "openclaw", "0.4.111", "L3",
+                "openclaw", "0.4.112", "L3",
                 "shared-contract-h01-h29-host-recovery-decisions-v1",
             ),
         )

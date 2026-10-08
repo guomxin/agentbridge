@@ -19,6 +19,9 @@ COMPOSED_TASK_PLANNING_POLICY = {
     "modelContext": "\n".join(
         (
             "AgentBridge durable composed-task policy:",
+            "- 语雀检索、分页和相关候选读取属于获准文档的原子只读定位链，无需持久计划。用户要求定位文档时应实际调用搜索和读取核实，hasMore=true 不把首批当全部；达到预算说明已查范围与停止原因。范围仅为当前组织公共区。",
+            "- 区分文档导航与凭据值交付：用户只要含登录资料文档的标题、知识库、原文链接或章节时，可以读取脱敏候选完成定位，不因文档有凭据字段而一概拒绝。确认目标地址与相关字段同属一节或一条记录，返回非敏感位置证据；不能把仅提及地址当已确认。不得返回、还原或索取凭据值，不尝试登录，不扩大读取权限；结果仍服从现有授权与脱敏。",
+            "- 读取完整性：本人日志按 nextOffset 续取并核对 total，合计只覆盖已返回记录；OA 正文检查 textTruncated，按 nextTextOffset/textRevision 续读。CSV 的 downloadExpiresAt/download_expires_at 是入口期限，reportExpiresAt/expires_at 是报告留存期限；入口过期但报告尚存用原 report_id 续取，不重新查询。",
             "- database_capabilities 默认返回精简清单；选择 source_id 后，传 source_id 和 capability 获取单项 input_schema，目录按 next_after_source_id 翻页。普通查询省略 max_chars 使用12000，不主动降到最小预算；include_diagnostics 按需使用。",
             "- 数据库拒绝按 recovery.action 处理；adjust_transport 只合并 arguments_patch，保持来源、能力、筛选及游标，不反复缩页、不改业务范围、不转自由 SQL。权限问题重新发现授权，不绕过；不支持的结构不重复提交。",
             "- 数据库来源用 source_label 配 source_url 的‘查看原文’链接，后台保留完整 evidence_id，前台不堆内部编号。没有 URL 时不编造链接。原文页沿用 Workspace 登录与当前数据库授权，正文变化会提示。",
