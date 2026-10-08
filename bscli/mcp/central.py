@@ -1918,16 +1918,18 @@ def create_central_mcp_server(
         expected_text_revision: Annotated[str | None, Field(max_length=64)] = None,
         idempotency_key: Annotated[str | None, Field(max_length=256)] = None,
     ) -> dict[str, Any]:
+        arguments = {
+            "collection": collection,
+            "affair_id": affair_id,
+            "text_limit": text_limit,
+            "text_offset": text_offset,
+        }
+        if expected_text_revision is not None:
+            arguments["expected_text_revision"] = expected_text_revision
         return await invoke(
             ctx,
             "oa.workflow.detail.get",
-            {
-                "collection": collection,
-                "affair_id": affair_id,
-                "text_limit": text_limit,
-                "text_offset": text_offset,
-                "expected_text_revision": expected_text_revision,
-            },
+            arguments,
             idempotency_key,
         )
 

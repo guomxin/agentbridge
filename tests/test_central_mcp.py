@@ -38,6 +38,31 @@ from bscli.mcp.presentation import (
 
 
 class CentralMcpTests(unittest.TestCase):
+    def test_workflow_detail_optional_revision_matches_capability_contract(self):
+        from bscli.adapters.seeyon_central import build_central_capability_registry
+        from bscli.core.capability_runtime import _validate_json_object
+        schema = build_central_capability_registry().get("oa.workflow.detail.get").input_schema
+        with self._server() as (service, _store, token, client):
+            def checked_invoke(**kwargs):
+                _validate_json_object(kwargs["arguments"], schema)
+                return {"protocolVersion": "0.1", "requestId": "detail", "operationId": "detail",
+                        "status": "succeeded", "result": {}, "error": None,
+                        "evidenceRefs": [], "nextAction": None, "reused": False}
+            service.invoke.side_effect = checked_invoke
+            for index, extra in enumerate(({}, {"expected_text_revision": None},
+                                            {"expected_text_revision": "a" * 64, "text_offset": 6000})):
+                with self.subTest(extra=extra):
+                    response = self._request(client, "tools/call", request_id=4000 + index,
+                        token=token, params={"name": "oa_workflow_detail_get",
+                        "arguments": {"collection": "pending", "affair_id": "synthetic-affair", **extra}})
+                    self.assertFalse(response.json()["result"]["isError"], response.json())
+                    actual = service.invoke.call_args.kwargs["arguments"]
+                    if extra.get("expected_text_revision") is None:
+                        self.assertNotIn("expected_text_revision", actual)
+                    else:
+                        self.assertEqual(actual["expected_text_revision"], "a" * 64)
+                        self.assertEqual(actual["text_offset"], 6000)
+
     def test_missing_user_grant_never_falls_back_to_historical_token_scopes(self):
         from contextlib import closing
         import sqlite3
