@@ -16,8 +16,9 @@
     "cd9426193642",
     "fb177641d8d7",
     "05755c72ab4f",
-    "1fe0ae1a34c9"
+    "1fe0ae1a34c9",
+    "9e5888ef660d"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Read completeness, redaction, authoritative replies and optional continuation parameters preserve authorization and durable acceptance. No database migration or production configuration change is required."
+  "reason": "AgentBridge 0.2.0 renames the Python distribution/module and retires Windows maintenance. Existing production data and database schema are unchanged; reviewed service and backup units must switch to agentbridge.cli.main, with previous units retained for rollback."
 }
