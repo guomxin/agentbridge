@@ -83,7 +83,7 @@ def plan(root, *, mcp_app=False):
     # Resolving a venv's python symlink would silently leave that environment.
     python = str(Path(sys.executable).absolute())
     node = shutil.which("node") or "node"
-    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm") or "npm"
+    npm = shutil.which("npm") or "npm"
     stages = []
 
     def add(name, command, *, cwd=".", files=(), report=None, report_kind="junit", timeout=900):
@@ -96,7 +96,7 @@ def plan(root, *, mcp_app=False):
     add("python-full", [python, "-m", "pytest", "-q", "-n", "4", "--dist", "loadscope",
                         "--junitxml=output/release-validation/pytest.xml"],
         files=python_tests, report="output/release-validation/pytest.xml", timeout=3600)
-    add("compileall", [python, "-m", "compileall", "-q", "bscli"])
+    add("compileall", [python, "-m", "compileall", "-q", "agentbridge", "bscli"])
     add("pip-check", [python, "-m", "pip", "check"])
     add("workspace-node", [node, "--test", "--test-reporter=junit",
                            "--test-reporter-destination=output/release-validation/workspace-node.xml", *WORKSPACE_NODE],
@@ -206,8 +206,7 @@ def execute_stage(root, receipt, stage, *, env=None, run_id=None):
             directory = Path(tempfile.mkdtemp(prefix="agentbridge-validation-failure-"))
             diagnostic = directory / (stage["id"] + ".log")
             with diagnostic.open("xb") as stream:
-                if os.name != "nt":
-                    os.fchmod(stream.fileno(), 0o600)
+                os.fchmod(stream.fileno(), 0o600)
                 stream.write(output)
             record["diagnosticLog"] = str(diagnostic)
         record["elapsedSeconds"] = round(time.monotonic() - start, 3)
@@ -255,7 +254,7 @@ def verify_stages(root, receipt, data):
 
 @contextmanager
 def test_environment():
-    # Never pass a production session key into tests, including Windows CI.
+    # Never pass a production session key into tests, including local and CI runs.
     with tempfile.TemporaryDirectory(prefix="agentbridge-validation-") as folder:
         directory = Path(folder).resolve()
         key = directory / "session.key"

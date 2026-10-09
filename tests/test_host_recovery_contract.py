@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from bscli.core.host_contract import host_transport_recovery_strategy
-from bscli.mcp.presentation import build_server_profile
+from agentbridge.core.host_contract import host_transport_recovery_strategy
+from agentbridge.mcp.presentation import build_server_profile
 
 ROOT = Path(__file__).parents[1]
 REFERENCE_ROOT = str(ROOT / 'integrations' / 'reference-host')

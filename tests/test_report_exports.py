@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tests.authorization_fixtures import authorized_service, grant_permissions
-from bscli.core.user_grants import UserGrants
+from agentbridge.core.user_grants import UserGrants
 import csv
 from datetime import datetime, timezone
 from io import StringIO
@@ -9,12 +9,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.auth.document_download import TrustedDocumentDownloadApplication
-from bscli.core.document_downloads import DocumentDownloadStore
-from bscli.adapters.seeyon_addressbook import ADDRESSBOOK_EXPORT_CAPABILITY
-from bscli.adapters.smartlight import SMARTLIGHT_REPORT_EXPORT_CAPABILITY
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.report_exports import (
+from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
+from agentbridge.core.document_downloads import DocumentDownloadStore
+from agentbridge.adapters.seeyon_addressbook import ADDRESSBOOK_EXPORT_CAPABILITY
+from agentbridge.adapters.smartlight import SMARTLIGHT_REPORT_EXPORT_CAPABILITY
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.report_exports import (
     ADDRESSBOOK_REPORT_CONTENT_TYPE,
     ADDRESSBOOK_REPORT_DOCUMENT_TYPE,
     SMARTLIGHT_REPORT_CONTENT_TYPE,

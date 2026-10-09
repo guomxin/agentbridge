@@ -61,8 +61,8 @@
         ],
         "prepare_function": "prepare_smartlight_alarm_work_area_submit",
         "commit_function": "commit_smartlight_alarm_work_area_submit",
-        "contract_error": "bscli.adapters.smartlight.SmartlightAlarmActionContractMismatch",
-        "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
+        "contract_error": "agentbridge.adapters.smartlight.SmartlightAlarmActionContractMismatch",
+        "outcome_error": "agentbridge.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
         "authorization_message": "请在可信授权卡中确认把该 RTU 告警提交工区。"
       },
       "scopes": {
@@ -161,8 +161,8 @@
         ],
         "prepare_function": "prepare_smartlight_alarm_work_area_revoke",
         "commit_function": "commit_smartlight_alarm_work_area_revoke",
-        "contract_error": "bscli.adapters.smartlight.SmartlightAlarmActionContractMismatch",
-        "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
+        "contract_error": "agentbridge.adapters.smartlight.SmartlightAlarmActionContractMismatch",
+        "outcome_error": "agentbridge.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
         "authorization_message": "请在可信授权卡中确认撤回该 RTU 告警的工区提交。"
       },
       "scopes": {
@@ -261,8 +261,8 @@
         ],
         "prepare_function": "prepare_smartlight_rtu_alarm_dispose",
         "commit_function": "commit_smartlight_rtu_alarm_dispose",
-        "contract_error": "bscli.adapters.smartlight.SmartlightAlarmActionContractMismatch",
-        "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
+        "contract_error": "agentbridge.adapters.smartlight.SmartlightAlarmActionContractMismatch",
+        "outcome_error": "agentbridge.adapters.smartlight.SmartlightAlarmActionOutcomeUnknown",
         "authorization_message": "该 RTU 告警处置不可撤销，请在可信授权卡中明确确认。"
       },
       "scopes": {

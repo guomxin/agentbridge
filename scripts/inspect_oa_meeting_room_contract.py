@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from bscli.adapters.seeyon_system import SEEYON_OA_URL
-from bscli.core.central_service import CentralCapabilityService
+from agentbridge.adapters.seeyon_system import SEEYON_OA_URL
+from agentbridge.core.central_service import CentralCapabilityService
 
 
 _PAGES = (

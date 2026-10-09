@@ -16,12 +16,12 @@ def main():
     args = parser.parse_args()
     if args.candidate:
         for name in ('content', 'independent'):
-            key = 'bscli.database.' + name
+            key = 'agentbridge.database.' + name
             spec = importlib.util.spec_from_file_location(key, args.candidate / (name + '.py'))
             module = importlib.util.module_from_spec(spec)
             sys.modules[key] = module
             spec.loader.exec_module(module)
-    from bscli.database.independent import IndependentDatabase, DatabaseRejected
+    from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
     from datetime import date, timedelta
     runtime = IndependentDatabase(args.home)
     def call(cap, arguments):

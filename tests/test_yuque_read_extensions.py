@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import unittest
 import zlib
 
-from bscli.adapters.yuque import (
+from agentbridge.adapters.yuque import (
     YUQUE_DOCUMENT_CATALOG_CAPABILITY,
     YUQUE_DOCUMENT_READ_CAPABILITY,
     YUQUE_DOCUMENT_SEARCH_CAPABILITY,

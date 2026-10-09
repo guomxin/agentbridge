@@ -17,8 +17,8 @@ try:
 except ModuleNotFoundError:
     from scripts import validation_plan
 
-REQUIRED = ("bscli/adapters/seeyon_page_scripts/continue_submit.js",
-            "bscli/adapters/seeyon_page_scripts/launch_save_draft.js")
+REQUIRED = ("agentbridge/adapters/seeyon_page_scripts/continue_submit.js",
+            "agentbridge/adapters/seeyon_page_scripts/launch_save_draft.js")
 CHECKS = validation_plan.CHECKS
 
 
@@ -54,7 +54,7 @@ def inputs(root):
         "integrations/mcp-app/node_modules/.package-lock.json")}
     return {"commit": git(root, "rev-parse", "HEAD"), "tracked": tracked, "installedNodeLocks": installed_locks,
             "python": sys.version, "packages": packages,
-            "node": run(["node", "--version"], root), "npm": run(["npm.cmd" if os.name == "nt" else "npm", "--version"], root)}
+            "node": run(["node", "--version"], root), "npm": run(["npm", "--version"], root)}
 
 
 def clean(root):
@@ -77,9 +77,11 @@ def inspect_wheel(wheel, source):
             if name not in names or not archive.read(name):
                 raise ValueError(f"Missing required wheel resource: {name}")
         # All tracked package resources and Python modules must survive packaging.
-        expected = [p.relative_to(source).as_posix() for p in (source / "bscli").rglob("*")
+        expected = [p.relative_to(source).as_posix() for p in (source / "agentbridge").rglob("*")
                     if p.is_file() and p.suffix in {".py", ".js", ".mjs", ".html", ".css", ".svg"}]
-        expected += [p.relative_to(source).as_posix() for p in (source / "bscli/business_skills").rglob("*")
+        expected += [p.relative_to(source).as_posix() for p in (source / "bscli").rglob("*.py")
+                     if p.is_file()]
+        expected += [p.relative_to(source).as_posix() for p in (source / "agentbridge/business_skills").rglob("*")
                      if p.is_file() and p.suffix in {".json", ".md"}]
         for name in expected:
             if name not in names or archive.read(name) != (source / name).read_bytes():
@@ -91,15 +93,15 @@ def inspect_wheel(wheel, source):
 def installed_probe(wheel, directory):
     env = directory / "install-env"
     run([sys.executable, "-m", "venv", env], directory)
-    python = env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python = env / "bin/python"
     run([python, "-m", "pip", "install", "--no-index", "--no-deps", wheel], directory)
     code = """import json, pathlib, sys, importlib.metadata
-from bscli.adapters import page_scripts
+from agentbridge.adapters import page_scripts
 p = pathlib.Path(page_scripts.__file__).resolve()
 assert p.is_relative_to(pathlib.Path(sys.prefix).resolve()), str(p)
 loads = {a: len(page_scripts.load_seeyon_action_page_script(a)['script_source']) for a in ('ContinueSubmit','SaveDraft')}
 assert all(loads.values())
-print(json.dumps({'module': str(p), 'version': importlib.metadata.version('cli-helper'), 'loads': loads}))
+print(json.dumps({'module': str(p), 'version': importlib.metadata.version('agentbridge'), 'loads': loads}))
 """
     return json.loads(run([python, "-I", "-c", code], directory))
 

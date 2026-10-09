@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from bscli.core.central_service import CentralCapabilityService
+from agentbridge.core.central_service import CentralCapabilityService
 
 
 @pytest.fixture

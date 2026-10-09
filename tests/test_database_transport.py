@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bscli.database.independent import IndependentDatabase, DatabaseRejected, CAPABILITIES, rejection_result, validate_sql
-from bscli.database.evidence import response_chars
+from agentbridge.database.independent import IndependentDatabase, DatabaseRejected, CAPABILITIES, rejection_result, validate_sql
+from agentbridge.database.evidence import response_chars
 from tests.database_fixtures import configured_source
 from tests import test_database_scope as scopes
 
@@ -77,7 +77,7 @@ class TransportTests(unittest.TestCase):
                     args={**scopes.WINDOW,'department_id':'3','include_descendants':True,'max_chars':budget}
                     if mode is not None:
                         args['mode'] = mode
-                    with patch('bscli.database.sources.connect') as connect,patch('bscli.database.sources.check_role'):
+                    with patch('agentbridge.database.sources.connect') as connect,patch('agentbridge.database.sources.check_role'):
                         connect.return_value.__enter__.return_value=conn
                         result=runtime.execute('reader',capability,args)
                     self.assertLessEqual(response_chars({'status':'succeeded',**result}),budget)
@@ -100,7 +100,7 @@ class TransportTests(unittest.TestCase):
             conn.execute.side_effect=execute
             rows=[{'id':1,'log_date':'2026-09-01','content':'事项一；事项二。'}]
             args={**scopes.WINDOW,'department_id':'3','include_descendants':True,'max_chars':4000,'include_diagnostics':True}
-            with patch('bscli.database.sources.connect') as connect,patch('bscli.database.sources.check_role'):
+            with patch('agentbridge.database.sources.connect') as connect,patch('agentbridge.database.sources.check_role'):
                 connect.return_value.__enter__.return_value=conn
                 cursor.fetchmany.side_effect=[copy.deepcopy(rows),[]]
                 with self.assertRaises(DatabaseRejected) as caught:

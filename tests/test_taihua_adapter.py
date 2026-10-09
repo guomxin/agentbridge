@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from bscli.adapters.taihua import (
+from agentbridge.adapters.taihua import (
     TAIHUA_MY_LOGS_CAPABILITY,
     TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA,
     TaihuaBusinessRuleRejected,
@@ -20,12 +20,12 @@ from bscli.adapters.taihua import (
     commit_taihua_work_log_create,
     prepare_taihua_work_log_create,
 )
-from bscli.auth.field_card import TrustedFieldApplication
-from bscli.core.central_service import (
+from agentbridge.auth.field_card import TrustedFieldApplication
+from agentbridge.core.central_service import (
     CentralCapabilityService,
     capability_required_scopes,
 )
-from bscli.core.field_submissions import FieldSubmissionStore
+from agentbridge.core.field_submissions import FieldSubmissionStore
 
 
 class TaihuaCentralAdapterTests(unittest.TestCase):
@@ -605,7 +605,7 @@ class TaihuaCentralAdapterTests(unittest.TestCase):
             adapter.list_team_logs(worker, {"member": "刘大扬"})
 
     def test_unverified_date_and_department_filters_are_not_login_actions(self):
-        from bscli.adapters.taihua import _verify_team_log_filters
+        from agentbridge.adapters.taihua import _verify_team_log_filters
         for filters, department in (({"logDate": "2026-09-06"}, None),
                                     ({"startDate": "2026-09-01", "endDate": "2026-09-06"}, None),
                                     ({}, {"id": 10, "name": "测试部门"})):

@@ -7,7 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from bscli.core.runtime_backup import (
+from agentbridge.core.runtime_backup import (
     create_runtime_backup,
     run_runtime_restore_drill,
     validate_backup_manifest,

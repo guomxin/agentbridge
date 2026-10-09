@@ -8,13 +8,13 @@ from urllib.error import HTTPError
 
 import pytest
 
-from bscli.admin.application import AdminControlPlane
-from bscli.admin.server import create_admin_http_server, validate_admin_server_config
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.workspace.application import WorkspaceApplication
-from bscli.workspace.server import create_workspace_http_server, validate_workspace_server_config
-import bscli.workspace.server as workspace_server
+from agentbridge.admin.application import AdminControlPlane
+from agentbridge.admin.server import create_admin_http_server, validate_admin_server_config
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.workspace.application import WorkspaceApplication
+from agentbridge.workspace.server import create_workspace_http_server, validate_workspace_server_config
+import agentbridge.workspace.server as workspace_server
 from tests.test_workspace import _free_port
 
 

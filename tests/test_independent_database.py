@@ -4,14 +4,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
-from bscli.database.independent import DatabaseGrants, DatabaseRejected, IndependentDatabase, log_query, validate_sql
+from agentbridge.database.independent import DatabaseGrants, DatabaseRejected, IndependentDatabase, log_query, validate_sql
 
 
 class IndependentDatabaseTests(unittest.TestCase):
     def test_mcp_uses_authenticated_central_subject_not_model_identity(self):
         from starlette.testclient import TestClient
-        from bscli.core.mcp_identities import McpIdentityTokenStore
-        from bscli.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
+        from agentbridge.core.mcp_identities import McpIdentityTokenStore
+        from agentbridge.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
         with tempfile.TemporaryDirectory() as root:
             store = McpIdentityTokenStore(Path(root)/'tokens.db')
             identity = store.issue(user_subject='central-a',expected_principal_ref='unused')

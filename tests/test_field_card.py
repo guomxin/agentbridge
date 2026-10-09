@@ -5,10 +5,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
 
-from bscli.adapters.seeyon_business_trip import BUSINESS_TRIP_FIELD_CARD_SCHEMA
-from bscli.adapters.seeyon_meeting import MEETING_FIELD_CARD_SCHEMA
-from bscli.auth.field_card import TrustedFieldApplication
-from bscli.core.field_submissions import FieldSubmissionStore
+from agentbridge.adapters.seeyon_business_trip import BUSINESS_TRIP_FIELD_CARD_SCHEMA
+from agentbridge.adapters.seeyon_meeting import MEETING_FIELD_CARD_SCHEMA
+from agentbridge.auth.field_card import TrustedFieldApplication
+from agentbridge.core.field_submissions import FieldSubmissionStore
 
 
 class TrustedFieldCardTests(unittest.TestCase):

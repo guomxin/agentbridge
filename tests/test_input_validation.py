@@ -7,11 +7,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from bscli.adapters.smartlight import build_smartlight_capability_registry, _normalize_choice
-from bscli.core.capability_runtime import CapabilityEngine, _validate_json_object
-from bscli.core.operations import OperationStore
-from bscli.core.task_plan_validation import PlanValidationError, _validate_partial_input
-from bscli.core.transforms import (
+from agentbridge.adapters.smartlight import build_smartlight_capability_registry, _normalize_choice
+from agentbridge.core.capability_runtime import CapabilityEngine, _validate_json_object
+from agentbridge.core.operations import OperationStore
+from agentbridge.core.task_plan_validation import PlanValidationError, _validate_partial_input
+from agentbridge.core.transforms import (
     TransformRegistry, TransformSpec, TransformRejected, _validate_schema_value,
 )
 

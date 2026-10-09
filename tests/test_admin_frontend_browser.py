@@ -9,10 +9,10 @@ import threading
 
 import pytest
 
-from bscli.admin.application import AdminControlPlane
-from bscli.admin.server import create_admin_http_server, validate_admin_server_config
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.admin.application import AdminControlPlane
+from agentbridge.admin.server import create_admin_http_server, validate_admin_server_config
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
 from tests.database_fixtures import configured_source
 
 

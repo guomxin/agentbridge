@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.core.task_plans import (
+from agentbridge.core.task_plans import (
     TaskPlanConflict,
     TaskPlanNotFound,
     TaskPlanStore,

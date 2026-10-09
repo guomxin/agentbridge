@@ -3,7 +3,7 @@ from urllib.parse import parse_qs
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_meeting_room import (
+from agentbridge.adapters.seeyon_meeting_room import (
     MeetingRoomContractMismatch,
     list_meeting_room_availability,
     list_my_meeting_room_applications,
@@ -34,7 +34,7 @@ class SeeyonMeetingRoomTests(unittest.TestCase):
         ]
         for payloads, maximum, expected in cases:
             with self.subTest(payloads=payloads, maximum=maximum), patch(
-                "bscli.adapters.seeyon_meeting_room.meeting_ajax", side_effect=payloads,
+                "agentbridge.adapters.seeyon_meeting_room.meeting_ajax", side_effect=payloads,
             ):
                 result = query_my_meeting_room_applications(None, None, maximum_items=maximum)
                 self.assertEqual(result["complete"], expected)

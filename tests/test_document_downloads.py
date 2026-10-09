@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from tests.authorization_fixtures import authorized_service, grant_permissions
-from bscli.core.user_grants import UserGrants
+from agentbridge.core.user_grants import UserGrants
 from datetime import datetime, timedelta, timezone
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.auth.document_download import TrustedDocumentDownloadApplication
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.document_downloads import (
+from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.document_downloads import (
     DocumentDownloadAccessDenied,
     DocumentDownloadStateError,
     DocumentDownloadStore,
@@ -19,8 +19,8 @@ from bscli.core.document_downloads import (
 
 class DocumentDownloadStoreTests(unittest.TestCase):
     def test_report_download_checks_its_source_and_cached_certificate_obeys_revocation(self):
-        from bscli.core.user_grants import UserGrants
-        from bscli.core.document_downloads import ADDRESSBOOK_REPORT_DOCUMENT_TYPE, SMARTLIGHT_REPORT_DOCUMENT_TYPE
+        from agentbridge.core.user_grants import UserGrants
+        from agentbridge.core.document_downloads import ADDRESSBOOK_REPORT_DOCUMENT_TYPE, SMARTLIGHT_REPORT_DOCUMENT_TYPE
         with TemporaryDirectory() as tmp:
             store = DocumentDownloadStore(Path(tmp) / "agentbridge.db")
             grants = UserGrants(store.db_path)
@@ -175,7 +175,7 @@ class DocumentDownloadStoreTests(unittest.TestCase):
 
 class TrustedDocumentDownloadApplicationTests(unittest.TestCase):
     def test_prepared_file_rechecks_current_user_download_grant(self):
-        from bscli.core.user_grants import UserGrants
+        from agentbridge.core.user_grants import UserGrants
 
         with TemporaryDirectory() as tmp:
             store = DocumentDownloadStore(Path(tmp) / "agentbridge.db")

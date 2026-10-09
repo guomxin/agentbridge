@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier, Thread
 
-from bscli.core.write_authorizations import (
+from agentbridge.core.write_authorizations import (
     WriteAuthorizationAccessDenied,
     WriteAuthorizationNotFound,
     WriteAuthorizationStateError,

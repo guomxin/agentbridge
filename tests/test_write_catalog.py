@@ -1,4 +1,4 @@
-from bscli.core import write_catalog
+from agentbridge.core import write_catalog
 
 
 def test_every_registered_write_has_callable_bindings_and_scope_policy():

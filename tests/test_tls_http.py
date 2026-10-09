@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 
-from bscli.core.tls_http import ThreadedTLSHTTPServer
+from agentbridge.core.tls_http import ThreadedTLSHTTPServer
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -82,7 +82,7 @@ class ThreadedTLSHTTPServerTests(unittest.TestCase):
             thread.join(2)
 
     def test_stream_budget_is_per_authenticated_subject_and_released_on_failure(self):
-        from bscli.workspace.server import WorkspaceHTTPServer, _bounded_user_stream
+        from agentbridge.workspace.server import WorkspaceHTTPServer, _bounded_user_stream
         server = WorkspaceHTTPServer(('127.0.0.1', 0), _HealthHandler)
         try:
             for _ in range(6):

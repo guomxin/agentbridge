@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_cap4 import wait_for_cap4_interactive
+from agentbridge.adapters.seeyon_cap4 import wait_for_cap4_interactive
 
 
 class Cap4InteractiveWaitTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class Cap4InteractiveWaitTests(unittest.TestCase):
 
         with (
             patch(
-                "bscli.adapters.seeyon_cap4.time.monotonic",
+                "agentbridge.adapters.seeyon_cap4.time.monotonic",
                 side_effect=[0, 0, 2],
             ),
             self.assertRaisesRegex(FakeContractError, "business-trip form"),

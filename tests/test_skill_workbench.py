@@ -3,9 +3,9 @@ from contextlib import closing
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.skill_quality import grade_output, import_standard, validate_cases
-from bscli.core.user_grants import UserGrantConflict
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.skill_quality import grade_output, import_standard, validate_cases
+from agentbridge.core.user_grants import UserGrantConflict
 
 
 class SkillWorkbenchTests(unittest.TestCase):
@@ -180,7 +180,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.a.decide(actor={'role':'admin','username':'admin'},request_id=r['request_id'],decision='approve',reason='核对依据',reviewed_tests=True)
         binding = self.s.skills.bind('alice', d['skill_id'], 'use')
         self.assertEqual(self.w.resource('alice',binding_id=binding,path='references/extra.md')['content'],'旧资料')
-        from bscli.core.business_skills import SkillRejected
+        from agentbridge.core.business_skills import SkillRejected
         with self.assertRaises(SkillRejected): self.w.resource('bob',binding_id=binding,path='references/extra.md')
         with self.assertRaises(KeyError): self.w.resource('alice',binding_id=binding,path='../secret')
         self.w.feedback('alice',skill_id=d['skill_id'],profile='use',version='1.0.0',rating='useful')
@@ -209,8 +209,8 @@ class SkillWorkbenchTests(unittest.TestCase):
     def test_completed_workspace_capture_is_durable_and_opted_in(self):
         from unittest.mock import patch
         from tests.test_workspace import _create_account, FakeGateway
-        from bscli.workspace.application import WorkspaceApplication
-        from bscli.core.skill_workbench import SkillWorkbench
+        from agentbridge.workspace.application import WorkspaceApplication
+        from agentbridge.core.skill_workbench import SkillWorkbench
         account=_create_account(self.s,user_subject='alice',username='alice',endpoint_key='telegram:*:alice')
         self.a.preferences('alice',value={'auto_draft':True},expected_revision=0)
         self.w.scopes('alice',scope='workspace:'+account['account_id'],enabled=True)

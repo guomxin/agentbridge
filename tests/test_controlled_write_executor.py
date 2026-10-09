@@ -6,17 +6,17 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from bscli.admin.stores import GovernancePolicyStore
-from bscli.core.capability import CapabilityRegistry, CapabilitySpec
-from bscli.core.capability_runtime import CapabilityContext, CapabilityRejected, OutcomeUnknown, RequiresUserAction
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.controlled_write_executor import ControlledWriteDependencies, ControlledWriteExecutor
-from bscli.core.field_submissions import FieldSubmissionStore
-from bscli.core.task_plan_validation import PlanValidationError
-from bscli.core.task_plans import TaskPlanStore
-from bscli.core.tasks import TaskHubStore
-from bscli.core.user_grants import UserGrants
-from bscli.core.write_authorizations import WriteAuthorizationStore
+from agentbridge.admin.stores import GovernancePolicyStore
+from agentbridge.core.capability import CapabilityRegistry, CapabilitySpec
+from agentbridge.core.capability_runtime import CapabilityContext, CapabilityRejected, OutcomeUnknown, RequiresUserAction
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.controlled_write_executor import ControlledWriteDependencies, ControlledWriteExecutor
+from agentbridge.core.field_submissions import FieldSubmissionStore
+from agentbridge.core.task_plan_validation import PlanValidationError
+from agentbridge.core.task_plans import TaskPlanStore
+from agentbridge.core.tasks import TaskHubStore
+from agentbridge.core.user_grants import UserGrants
+from agentbridge.core.write_authorizations import WriteAuthorizationStore
 
 
 class DownstreamContractError(Exception):
@@ -78,7 +78,7 @@ class ControlledWriteExecutorTests(unittest.TestCase):
             enter_commit_boundary()
             self.effects.append('write')
             return {'verified': True}
-        with patch('bscli.core.controlled_write_executor.resolve_write_function', return_value=handler or successful):
+        with patch('agentbridge.core.controlled_write_executor.resolve_write_function', return_value=handler or successful):
             return self.executor.commit(context=self.context, session=self.session, adapter=object(), worker=object(),
                 arguments={'authorization_id': self.auth_id}, prepare_capability='test.record.save.prepare',
                 definition=self.definition)
@@ -170,7 +170,7 @@ class ControlledWriteExecutorTests(unittest.TestCase):
         prepared = {'plan': {'target': 'record-b'}, 'summary': {'title': 'Offline prepare'}}
         definition = dict(prepare_function='offline_prepare', commit_capability=self.spec.name,
                           context_fields=('target',), authorization_message='Approve test')
-        with patch('bscli.core.controlled_write_executor.resolve_write_function', return_value=lambda *_: prepared):
+        with patch('agentbridge.core.controlled_write_executor.resolve_write_function', return_value=lambda *_: prepared):
             with self.assertRaises(RequiresUserAction) as caught:
                 self.executor.prepare(context=context, session=self.session, adapter=object(), worker=object(),
                                       arguments={'target': 'record-b'}, field_submission=None, definition=definition)
@@ -195,7 +195,7 @@ class ControlledWriteExecutorTests(unittest.TestCase):
                           context_fields=('target',), authorization_message='Approve test')
         with patch.object(service, '_execution_authorization_interaction',
                           return_value={'interactionId': 'replacement'}) as interaction, \
-                patch('bscli.core.controlled_write_executor.resolve_write_function',
+                patch('agentbridge.core.controlled_write_executor.resolve_write_function',
                       return_value=lambda *_: {'plan': {}, 'summary': {}}):
             with self.assertRaises(RequiresUserAction) as caught:
                 service._controlled_writes().prepare(context=context, session=self.session,

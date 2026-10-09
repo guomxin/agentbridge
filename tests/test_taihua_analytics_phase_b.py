@@ -5,9 +5,9 @@ import sqlite3
 import tempfile
 import unittest
 from starlette.testclient import TestClient
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.mcp.central import create_central_mcp_server,validate_central_mcp_server_config
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.mcp.central import create_central_mcp_server,validate_central_mcp_server_config
 
 class RetirementTests(unittest.TestCase):
     def test_existing_token_authenticates_but_all_old_tools_are_absent_and_denied(self):
@@ -39,7 +39,7 @@ class RetirementTests(unittest.TestCase):
 
     def test_old_workspace_download_does_not_load_old_payload(self):
         from unittest.mock import MagicMock
-        from bscli.workspace.application import WorkspaceApplication,WorkspaceArtifactError
+        from agentbridge.workspace.application import WorkspaceApplication,WorkspaceArtifactError
         obj=MagicMock()
         with self.assertRaises(WorkspaceArtifactError):
             WorkspaceApplication.analytics_report(obj,{'user_subject':'a'},'a'*32)
@@ -49,8 +49,8 @@ class RetirementTests(unittest.TestCase):
         import argparse
         import importlib.util
         from pathlib import Path
-        from bscli.cli.main import build_parser
-        from bscli.core.sessions import SessionRegistry
+        from agentbridge.cli.main import build_parser
+        from agentbridge.core.sessions import SessionRegistry
         pending = [build_parser()]
         while pending:
             parser = pending.pop()
@@ -63,7 +63,7 @@ class RetirementTests(unittest.TestCase):
         self.assertFalse(hasattr(SessionRegistry, 'bind_analytics_principal'))
         for module in ('admin', 'central', 'comparison', 'results', 'reports', 'taihua_personal', 'visibility'):
             try:
-                spec = importlib.util.find_spec('bscli.analytics.' + module)
+                spec = importlib.util.find_spec('agentbridge.analytics.' + module)
             except ModuleNotFoundError:
                 spec = None
             self.assertIsNone(spec)

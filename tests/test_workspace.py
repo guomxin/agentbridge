@@ -16,24 +16,24 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.tasks import TaskNotFound
-from bscli.workspace.application import (
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.tasks import TaskNotFound
+from agentbridge.workspace.application import (
     WorkspaceApplication,
     _validated_chat_attachments,
     _workspace_gateway_failure_text,
 )
-from bscli.workspace.gateway import (
+from agentbridge.workspace.gateway import (
     GatewayRequestError,
     OpenClawGatewayClient,
 )
-from bscli.workspace.server import (
+from agentbridge.workspace.server import (
     _CLIENT_DISCONNECT_ERRORS,
     _public_gateway_stream_error,
     create_workspace_http_server,
     validate_workspace_server_config,
 )
-from bscli.workspace.stores import (
+from agentbridge.workspace.stores import (
     WorkspaceConflictError,
     WorkspaceLinkError,
     WorkspaceStore,
@@ -1892,7 +1892,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
     def test_gateway_client_advertises_tool_event_streaming(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
-            / "bscli"
+            / "agentbridge"
             / "workspace"
             / "gateway_client.mjs"
         ).read_text(encoding="utf-8")
@@ -1923,7 +1923,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                 script_path=root / "gateway_client.mjs",
             )
             with patch(
-                "bscli.workspace.gateway.subprocess.run"
+                "agentbridge.workspace.gateway.subprocess.run"
             ) as run:
                 run.return_value.stdout = json.dumps(
                     {"ok": True, "payload": {"version": "2026.7.1"}}
@@ -1963,7 +1963,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
                 state_dir=root / "state",
             )
             with patch(
-                "bscli.workspace.gateway.subprocess.run"
+                "agentbridge.workspace.gateway.subprocess.run"
             ) as run:
                 run.return_value.stdout = json.dumps(
                     {
@@ -2008,7 +2008,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
             self.addCleanup(history_patch.stop)
             input_pipe = _CaptureInput()
             with patch(
-                "bscli.workspace.gateway.subprocess.Popen"
+                "agentbridge.workspace.gateway.subprocess.Popen"
             ) as popen:
                 process = popen.return_value
                 process.stdin = input_pipe
@@ -2086,7 +2086,7 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
             )
             input_pipe = _CaptureInput()
             with (
-                patch("bscli.workspace.gateway.subprocess.Popen") as popen,
+                patch("agentbridge.workspace.gateway.subprocess.Popen") as popen,
                 patch.object(client, "abort_chat") as abort_chat,
             ):
                 process = popen.return_value
@@ -2909,7 +2909,7 @@ class WorkspaceHttpServerTests(unittest.TestCase):
                     self.assertEqual(original_headers.get('Cache-Control'), 'no-store')
                     self.assertEqual(body['author'], '测试作者')
                     self.assertEqual(original.call_args.args[0]['user_subject'], 'user-a')
-                    from bscli.database.independent import DatabaseRejected
+                    from agentbridge.database.independent import DatabaseRejected
                     for code, expected_status in [('DATABASE_LOG_NOT_FOUND', 404), ('DATABASE_CAPABILITY_DENIED', 403),
                                                   ('DATABASE_AUTHORIZATION_CHANGED', 403)]:
                         original.side_effect = DatabaseRejected(code)
@@ -3212,7 +3212,7 @@ class WorkspaceHttpServerTests(unittest.TestCase):
 
 class WorkspaceStaticAssetTests(unittest.TestCase):
     def test_assets_are_csp_clean_and_mobile_detail_has_back_control(self) -> None:
-        root = Path(__file__).resolve().parents[1] / "bscli" / "workspace" / "static"
+        root = Path(__file__).resolve().parents[1] / "agentbridge" / "workspace" / "static"
         page = (root / "index.html").read_text(encoding="utf-8")
         script = (root / "workspace.js").read_text(encoding="utf-8") + "\n" + "\n".join(
             path.read_text(encoding="utf-8") for path in sorted(root.glob("*.mjs"))

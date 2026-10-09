@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 
 
 const root = resolve(import.meta.dirname, "..");
-const helper = join(root, "bscli", "workspace", "gateway_client.mjs");
+const helper = join(root, "agentbridge", "workspace", "gateway_client.mjs");
 const fake = join(import.meta.dirname, "support", "fake_gateway_websocket.mjs");
 const sessionKey =
   "agent:main:agentbridge-workspace:direct:account-a";

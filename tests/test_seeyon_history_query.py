@@ -2,8 +2,8 @@ from datetime import date
 import unittest
 from unittest.mock import Mock, patch
 
-from bscli.adapters.seeyon_history_query import read_filtered_history, _HISTORY_QUERY_PAGE_SCRIPT
-from bscli.adapters.seeyon_central import SeeyonCentralAdapter, build_central_capability_registry
+from agentbridge.adapters.seeyon_history_query import read_filtered_history, _HISTORY_QUERY_PAGE_SCRIPT
+from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter, build_central_capability_registry
 
 
 def rows(count, *, start=0, day="2026-09-01", basis="processed_at"):
@@ -61,7 +61,7 @@ class HistoryQueryTests(unittest.TestCase):
             with self.subTest(total=total):
                 responses = [payload(rows(50, start=i * 50), total=total, page=i + 1)
                              for i in range(20)]
-                with patch("bscli.adapters.seeyon_history_query.time.monotonic", return_value=0):
+                with patch("agentbridge.adapters.seeyon_history_query.time.monotonic", return_value=0):
                     result = self.query(*responses)
                 self.assertEqual(len(result["items"]), 1000)
                 self.assertEqual(self.page.evaluate.call_count, 20)
@@ -98,10 +98,10 @@ class HistoryQueryTests(unittest.TestCase):
                 self.assertEqual(result["query_evidence"]["completionReason"], reason)
 
     def test_scan_and_time_budgets_stop_filtered_pages(self):
-        with patch("bscli.adapters.seeyon_history_query.HISTORY_QUERY_MAX_ROWS", 50):
+        with patch("agentbridge.adapters.seeyon_history_query.HISTORY_QUERY_MAX_ROWS", 50):
             result = self.query(payload(rows(50), total=60))
         self.assertEqual(result["query_evidence"]["completionReason"], "server_query_scan_budget_reached")
-        with patch("bscli.adapters.seeyon_history_query.time.monotonic", side_effect=[0, 21]):
+        with patch("agentbridge.adapters.seeyon_history_query.time.monotonic", side_effect=[0, 21]):
             result = self.query()
         self.assertEqual(result["query_evidence"]["completionReason"], "server_query_time_budget_reached")
 

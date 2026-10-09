@@ -13,9 +13,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.timeline_attachments import TimelineAttachmentIntegrityError
-from bscli.workspace.application import WorkspaceApplication
-from bscli.workspace.stores import WorkspaceConflictError
+from agentbridge.core.timeline_attachments import TimelineAttachmentIntegrityError
+from agentbridge.workspace.application import WorkspaceApplication
+from agentbridge.workspace.stores import WorkspaceConflictError
 from tests.test_workspace import FakeGateway, _create_account, _service
 
 
@@ -305,7 +305,7 @@ class WorkspaceAcceptanceTests(unittest.TestCase):
 import os, sys
 from unittest.mock import patch
 from tests.test_workspace import FakeGateway, _service
-from bscli.workspace.application import WorkspaceApplication
+from agentbridge.workspace.application import WorkspaceApplication
 service = _service(sys.argv[1])
 account = service.workspace.get_account(sys.argv[2])
 app = WorkspaceApplication(service=service, gateway=FakeGateway())

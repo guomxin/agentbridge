@@ -25,23 +25,23 @@ class ReleaseArtifactTests(unittest.TestCase):
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 [project]
-name = "cli-helper"
+name = "agentbridge"
 version = "0.1.0"
 [tool.setuptools.packages.find]
-include = ["bscli*"]
+include = ["agentbridge*"]
 [tool.setuptools.package-data]
-"bscli.adapters" = ["seeyon_page_scripts/*.js"]
+"agentbridge.adapters" = ["seeyon_page_scripts/*.js"]
 ''', encoding="utf-8")
-        for name in ("bscli/__init__.py", "bscli/adapters/__init__.py", "bscli/adapters/page_scripts.py", *artifact.REQUIRED):
+        for name in ("agentbridge/__init__.py", "agentbridge/adapters/__init__.py", "agentbridge/adapters/page_scripts.py", *artifact.REQUIRED):
             target = cls.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
         subprocess.run(["git", "init", str(cls.root)], check=True, capture_output=True)
         artifact.git(cls.root, "add", ".")
         artifact.git(cls.root, "-c", "user.name=Artifact Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
-        (cls.root / "bscli/untracked_sentinel.py").write_text("raise RuntimeError('must not ship')\n", encoding="utf-8")
+        (cls.root / "agentbridge/untracked_sentinel.py").write_text("raise RuntimeError('must not ship')\n", encoding="utf-8")
         # Also simulate old build products: neither may enter the new archive build.
-        stale = cls.root / "build/lib/bscli/stale.py"
+        stale = cls.root / "build/lib/agentbridge/stale.py"
         stale.parent.mkdir(parents=True)
         stale.write_text("stale = True\n", encoding="utf-8")
         cls.manifest_path = artifact.build(cls.root, Path(cls.temp.name) / "result")
@@ -53,8 +53,8 @@ include = ["bscli*"]
 
     def test_fixed_archive_excludes_untracked_and_stale_modules_and_loads_installed_resources(self):
         names = {x["path"] for x in self.manifest["files"]}
-        self.assertNotIn("bscli/untracked_sentinel.py", names)
-        self.assertNotIn("bscli/stale.py", names)
+        self.assertNotIn("agentbridge/untracked_sentinel.py", names)
+        self.assertNotIn("agentbridge/stale.py", names)
         self.assertTrue(set(artifact.REQUIRED).issubset(names))
         self.assertTrue(all(self.manifest["installedProbe"]["loads"].values()))
         self.assertIn("site-packages", self.manifest["installedProbe"]["module"])
@@ -100,7 +100,7 @@ include = ["bscli*"]
                 wheel.write_bytes(original)
 
     def test_dirty_tracked_input_rejected_without_touching_worktree(self):
-        target = self.root / "bscli/__init__.py"
+        target = self.root / "agentbridge/__init__.py"
         original = target.read_bytes()
         try:
             target.write_bytes(original + b"\n# local change\n")

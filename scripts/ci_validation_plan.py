@@ -102,7 +102,7 @@ def main():
         stream.write(f"profile={result['profile']}\n")
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
         stream.write('### Validation plan\n```json\n' + json.dumps(result, ensure_ascii=False, indent=2) + '\n```\n')
-    # Hosted Windows stdout may be cp1252; artifacts and summaries stay UTF-8.
+    # Caller stdout may use a legacy encoding; artifacts and summaries stay UTF-8.
     print(json.dumps(result, ensure_ascii=True))
 
 

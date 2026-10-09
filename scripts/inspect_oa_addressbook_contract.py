@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from urllib.parse import urljoin
 
-from bscli.adapters.seeyon_system import SEEYON_OA_URL
-from bscli.core.central_service import CentralCapabilityService
+from agentbridge.adapters.seeyon_system import SEEYON_OA_URL
+from agentbridge.core.central_service import CentralCapabilityService
 
 
 ADDRESSBOOK_ENTRY = "addressbook.do?method=homeEntry"

@@ -4,7 +4,7 @@
 OpenClaw。它是宿主兼容层，不包含协同办公、泰华、语雀或照明系统的业务实现，也不修改
 OpenClaw 核心源码。
 
-当前版本：`0.4.100`
+当前版本：`0.4.112`
 
 本版将组合任务规划检查提前至任务协调之前；独立填写不能绕过本轮来源约束。
 新增未提交任务取消入口，自动区分普通卡片和持久计划，不撤销已提交的业务流程。
@@ -70,7 +70,7 @@ Telegram 回答文本在 `message_sent` 确认发送成功后同步，覆盖普�
 
 插件工具被限制性工具配置过滤时，需要显式加入：
 
-```powershell
+```sh
 openclaw config set tools.alsoAllow '["agentbridge-interactions"]' --strict-json
 ```
 
@@ -78,43 +78,17 @@ openclaw config set tools.alsoAllow '["agentbridge-interactions"]' --strict-json
 
 ## 三、安装
 
-本地链接安装：
+在仓库根目录安装已核验的本地插件：
 
-```powershell
-openclaw plugins install --link D:\Codes\CLIExp\integrations\openclaw-agentbridge
-openclaw config set env.vars.NODE_EXTRA_CA_CERTS "$env:USERPROFILE\.agentbridge\pki\root-ca.crt"
-openclaw config set "plugins.entries.agentbridge-interactions.config.mcpUrl" https://10.10.50.213:8790/mcp
-openclaw config set "plugins.entries.agentbridge-interactions.config.allowedCardOrigins[0]" https://10.10.50.213:8780
-openclaw config set tools.alsoAllow '["agentbridge-interactions"]' --strict-json
+```sh
+openclaw plugins install --link ./integrations/openclaw-agentbridge
 openclaw plugins enable agentbridge-interactions
-openclaw gateway restart
 openclaw plugins inspect agentbridge-interactions --runtime --json
-openclaw gateway status --deep --require-rpc --json
 ```
 
-`NODE_EXTRA_CA_CERTS` 必须写入 OpenClaw 持久 `env.vars`，不能只在临时 PowerShell 环境中设置。
-重建托管任务后，深度状态应在 `environmentValueSources` 中显示该变量。
+正式宿主的 `NODE_EXTRA_CA_CERTS`、配置路径、状态目录与身份环境变量由审核后的 Mac profile 和 launchd 提供。保留现有工具授权列表，配置 Token 只引用环境变量，不在命令行明文填写。
 
-源码链接并不意味着 Node 会自动重新加载模块。修改插件源码后必须完整重启 Gateway，并从启动
-日志核对实际版本：
-
-```text
-AgentBridge interaction plugin registered (version=0.4.100, ...)
-```
-
-Windows 托管的 Gateway 重启可能超过两分钟。命令调用方超时不代表后台重启失败：
-
-1. 等待至少 120 秒；
-2. 不要重复执行重启；
-3. 不要提前结束 Node 进程；
-4. 最终检查 18789 监听、深度 RPC 和插件版本日志。
-
-切换 Node/NVM 后若 Windows 计划任务丢失，使用：
-
-```powershell
-openclaw gateway install --force --json
-openclaw gateway status --deep --require-rpc --json
-```
+修改插件后通过 `scripts/agentbridge-native host restart --kind gateway` 配合 `--profile` 与 `--authorization` 管理，不另用 OpenClaw 自带安装器建立第二套服务。验收当前进程的插件注册版本、RPC 和 `/readyz`，超时先检查进程与 pending，不能盲目重复重启。完整步骤见[原生维护](../../docs/部署运维/苹果系统原生维护.md)。
 
 ## 四、单用户与多用户配置
 
@@ -122,7 +96,7 @@ openclaw gateway status --deep --require-rpc --json
 
 旧的单用户安装可以让插件复用全局 `mcp.servers.agentbridge` 地址和环境变量授权头。
 
-```powershell
+```sh
 openclaw config set "mcp.servers.agentbridge.url" https://10.10.50.213:8790/mcp
 openclaw config set "mcp.servers.agentbridge.timeout" 150
 ```
@@ -258,8 +232,8 @@ MCP 请求尚未获得响应时，插件只对以下工具执行两次短时传�
 
 ## 十一、测试与打包
 
-```powershell
-Set-Location D:\Codes\CLIExp\integrations\openclaw-agentbridge
+```sh
+cd integrations/openclaw-agentbridge
 npm test
 npm run pack:check
 ```

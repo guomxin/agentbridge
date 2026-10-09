@@ -3,7 +3,7 @@ import unittest
 
 from mcp.types import CallToolResult
 
-from bscli.mcp.presentation import (
+from agentbridge.mcp.presentation import (
     MCP_APP_MIME_TYPE,
     MCP_APP_RESOURCE_URI,
     PRIVATE_INTERACTION_META_KEY,

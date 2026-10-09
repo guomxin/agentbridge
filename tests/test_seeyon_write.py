@@ -3,8 +3,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.adapters.page_scripts import load_seeyon_action_page_script
-from bscli.adapters.seeyon_write import (
+from agentbridge.adapters.page_scripts import load_seeyon_action_page_script
+from agentbridge.adapters.seeyon_write import (
     append_oa_write_audit,
     build_oa_write_plan,
     get_write_action_spec,
@@ -18,11 +18,11 @@ class SeeyonWriteTests(unittest.TestCase):
         save_draft = load_seeyon_action_page_script("SaveDraft")
 
         self.assertEqual(continue_submit["script_name"], "seeyon.continue_submit.v1")
-        self.assertIn("function bscliPageScript", continue_submit["script_source"])
-        self.assertEqual(continue_submit["outcome_key"], "__bscliContinueSubmitLast")
+        self.assertIn("function agentbridgePageScript", continue_submit["script_source"])
+        self.assertEqual(continue_submit["outcome_key"], "__agentbridgeContinueSubmitLast")
         self.assertEqual(save_draft["script_name"], "seeyon.launch_save_draft.v1")
-        self.assertIn("function bscliPageScript", save_draft["script_source"])
-        self.assertEqual(save_draft["outcome_key"], "__bscliLaunchSaveDraftLast")
+        self.assertIn("function agentbridgePageScript", save_draft["script_source"])
+        self.assertEqual(save_draft["outcome_key"], "__agentbridgeLaunchSaveDraftLast")
 
     def test_write_action_specs_centralize_promotion_and_verification(self):
         specs = {spec.code: spec for spec in list_write_action_specs()}

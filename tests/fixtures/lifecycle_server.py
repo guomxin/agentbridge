@@ -11,10 +11,10 @@ import threading
 import time
 
 import uvicorn
-from bscli.core.central_service import CentralCapabilityService
-import bscli.core.write_catalog as central_module
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
+from agentbridge.core.central_service import CentralCapabilityService
+import agentbridge.core.write_catalog as central_module
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
 
 
 class Worker:
@@ -55,7 +55,7 @@ def main():
         db.execute('CREATE TABLE IF NOT EXISTS fixture_calls(owner TEXT,system TEXT,capability TEXT,arguments TEXT)')
     store = McpIdentityTokenStore(service.db_path)
     from tests.authorization_fixtures import grant_permissions
-    from bscli.core.user_grants import PERMISSIONS
+    from agentbridge.core.user_grants import PERMISSIONS
     for user in ('alice', 'bob'):
         if service.user_grants.get(user) is None:
             grant_permissions(service.user_grants, user, PERMISSIONS)

@@ -8,9 +8,9 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bscli.database.independent import IndependentDatabase, DatabaseGrants, DatabaseRejected, validate_sql
-from bscli.database.sources import Sources, SourceConflict, validate
-from bscli.database.reports import Reports
+from agentbridge.database.independent import IndependentDatabase, DatabaseGrants, DatabaseRejected, validate_sql
+from agentbridge.database.sources import Sources, SourceConflict, validate
+from agentbridge.database.reports import Reports
 from tests.database_fixtures import configured_source
 
 
@@ -59,11 +59,11 @@ class MultiSourceTests(unittest.TestCase):
             sources.write('equipment','save',revision=1,actor='admin',reason='edit',config=config)
             self.assertEqual(sources.get('equipment')['active']['name'],'equipment')
             with self.assertRaises(ValueError): sources.write('equipment','enable',revision=2,actor='admin',reason='enable')
-            with patch('bscli.database.sources.preflight',side_effect=DatabaseRejected('DATABASE_ROLE_REJECTED')):
+            with patch('agentbridge.database.sources.preflight',side_effect=DatabaseRejected('DATABASE_ROLE_REJECTED')):
                 result=sources.write('equipment','preflight',revision=2,actor='admin',reason='check')
             self.assertEqual(result['preflight']['status'],'failed')
             self.assertEqual(result['active']['name'],'equipment')
-            with patch('bscli.database.sources.preflight',return_value=[]):
+            with patch('agentbridge.database.sources.preflight',return_value=[]):
                 sources.write('equipment','preflight',revision=3,actor='admin',reason='check')
             sources.write('equipment','enable',revision=4,actor='admin',reason='enable')
             self.assertEqual(sources.get('equipment')['active']['name'],'New name')
@@ -78,7 +78,7 @@ class MultiSourceTests(unittest.TestCase):
                 with self.subTest(changes=changes), self.assertRaises(ValueError): validate({**config,**changes})
 
     def test_cursor_bound_to_source_and_revision(self):
-        from bscli.database.content import compile_query
+        from agentbridge.database.content import compile_query
         args={'start_date':'2026-09-01','end_date_exclusive':'2026-09-02'}
         plan=compile_query('database.logs.query',args,source_scope='one:1:')
         args['after']={'id':'1','date':'2026-09-01','scope':plan.scope}
@@ -141,9 +141,9 @@ class MultiSourceTests(unittest.TestCase):
                 self.assertEqual(execute.call_count,1)
 
     def test_legacy_tools_registry_scopes_and_plan_are_retired(self):
-        from bscli.core.central_service import CentralCapabilityService
-        from bscli.core.mcp_identities import McpIdentityTokenStore
-        from bscli.core.transforms import build_transform_registry
+        from agentbridge.core.central_service import CentralCapabilityService
+        from agentbridge.core.mcp_identities import McpIdentityTokenStore
+        from agentbridge.core.transforms import build_transform_registry
         with tempfile.TemporaryDirectory() as home:
             service=CentralCapabilityService(home=home,base_url='http://127.0.0.1:1')
             self.assertFalse(any(x.name.startswith('taihua.analytics.') for x in service.registry.list()))

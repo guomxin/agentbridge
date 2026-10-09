@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bscli.core.discovered import DiscoveredApiStore
+from agentbridge.core.discovered import DiscoveredApiStore
 
 
 class DiscoveredApiStoreTests(unittest.TestCase):
@@ -14,7 +14,7 @@ class DiscoveredApiStoreTests(unittest.TestCase):
             (api_dir / "template-section.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "bscli.discovered_api.v1",
+                        "schema_version": "agentbridge.discovered_api.v1",
                         "name": "template-section",
                         "system": "oa",
                         "description": "Template section projection",
@@ -48,7 +48,7 @@ class DiscoveredApiStoreTests(unittest.TestCase):
             (api_dir / "search.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": "bscli.discovered_api.v1",
+                        "schema_version": "agentbridge.discovered_api.v1",
                         "name": "search",
                         "system": "oa",
                         "request": {

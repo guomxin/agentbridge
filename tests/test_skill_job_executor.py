@@ -4,9 +4,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.skill_job_executor import SkillJobExecutor
-from bscli.core.user_grants import UserGrantConflict
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.skill_job_executor import SkillJobExecutor
+from agentbridge.core.user_grants import UserGrantConflict
 
 
 class SkillJobExecutorTests(unittest.TestCase):

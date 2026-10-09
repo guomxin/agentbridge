@@ -1,4 +1,4 @@
-"""Linux release transaction. Invoked only by Deploy-AgentBridge.ps1.
+"""Linux release transaction. Invoked by scripts/agentbridge-native publish.
 
 An explicit predecessor contract AND unchanged SQLite schemas permit program
 rollback. A backup is evidence for manual recovery, never permission to rewind
@@ -136,6 +136,22 @@ class Release:
                         f"AGENTBRIDGE_SESSION_KEY_FILE={self.root / 'config/session.key'}",
                         self.python(previous), "-P", *args, capture=capture, timeout=timeout)
 
+    def previous_cli(self):
+        # The pre-switch backup runs in the OLD environment. Its module name
+        # cannot be inferred from this candidate's name, nor from an import error.
+        probe = """import importlib.util, pathlib, sys
+for name in ('agentbridge', 'bscli'):
+    spec = importlib.util.find_spec(name)
+    if spec is not None and spec.origin:
+        assert pathlib.Path(spec.origin).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())
+        print(name + '.cli.main')
+        break
+"""
+        module = self.user_python(True, "-c", probe)
+        if module not in ("agentbridge.cli.main", "bscli.cli.main"):
+            raise RuntimeError("Previous installed CLI could not be identified")
+        return module
+
     def prepare(self):
         self.directory.mkdir(mode=0o750, parents=True, exist_ok=True)
         self.run("chown", "root:agentbridge", self.directory)
@@ -170,6 +186,7 @@ class Release:
         self.stage("preparing", previousRelease=previous, previousPython=str(previous_python),
                    previousCurrent=os.readlink(self.current) if self.current.is_symlink() else None,
                    policy=policy)
+        self.state["previousCli"] = self.previous_cli()
         atomic_write(self.directory / "transaction.json", json.dumps(self.config).encode(), 0o600)
         shutil.copyfile(__file__, self.directory / "release.py")
         wheel = Path(self.config["wheel"])
@@ -186,11 +203,11 @@ class Release:
                  f"{target}[database-analysis]", timeout=900)
         self.run(self.python(), "-m", "pip", "check")
         self.run(self.python(), "-m", "compileall", "-q", self.directory / "venv")
-        self.user_python(False, "-c", "from bscli.adapters.page_scripts import load_seeyon_action_page_script as load; "
+        self.user_python(False, "-c", "from agentbridge.adapters.page_scripts import load_seeyon_action_page_script as load; "
                          "assert all(load(a)['script_source'] for a in ('ContinueSubmit','SaveDraft'))")
-        module = self.user_python(False, "-c", "import bscli; print(bscli.__file__)")
+        module = self.user_python(False, "-c", "import agentbridge; print(agentbridge.__file__)")
         if not Path(module).is_relative_to(self.directory / "venv"):
-            raise RuntimeError("service resolves unexpected bscli module")
+            raise RuntimeError("service resolves unexpected agentbridge module")
         staged_units = self.directory / "units"
         staged_units.mkdir(exist_ok=True)
         for name, encoded in self.config["units"].items():
@@ -238,6 +255,7 @@ class Release:
         raise RuntimeError("service readiness did not stabilize before backup")
 
     def switch(self):
+        previous_cli = self.state["previousCli"]
         # Timer is paused; an already running backup is allowed to finish first.
         self.state["timerWasActive"] = self.run("systemctl", "show", self.service + "-backup.timer",
                                               "-p", "ActiveState", "--value", capture=True) == "active"
@@ -254,7 +272,7 @@ class Release:
         self.run("systemctl", "stop", self.service)
         self.stage("stopped")
         self.state["schemaBefore"] = schemas(self.root / "data")
-        backup = json.loads(self.user_python(True, "-m", "bscli.cli.main", "--home", self.root / "data",
+        backup = json.loads(self.user_python(True, "-m", previous_cli, "--home", self.root / "data",
                                             "diagnostics", "backup-create", "--output-dir", self.root / "backups",
                                             "--release-id", self.state["previousRelease"]))
         if not backup.get("passed") or not backup.get("manifestPath"):

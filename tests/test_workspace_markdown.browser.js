@@ -1,5 +1,5 @@
 /* Browser regression fixture for a Playwright-compatible runner, while serving
-   bscli/workspace/static on 127.0.0.1:18763. No logged-in session is used.
+   agentbridge/workspace/static on 127.0.0.1:18763. No logged-in session is used.
    The evaluate callback can also be loaded into a local preview and inspected
    through the Chrome extension (the preferred interactive validation route). */
 async (page) => {

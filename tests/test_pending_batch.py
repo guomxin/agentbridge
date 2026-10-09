@@ -5,14 +5,14 @@ from functools import partial
 
 import pytest
 
-from bscli.adapters.seeyon_pending_batch import (
+from agentbridge.adapters.seeyon_pending_batch import (
     PENDING_BATCH_PREPARE_CAPABILITY as BATCH,
     PendingBatchSelectionError,
     select_pending_batch_items,
 )
-from bscli.adapters.seeyon_pending_actions import PendingActionOutcomeUnknown
-from bscli.adapters.seeyon_missed_punch import MissedPunchOutcomeUnknown
-from bscli.core.central_service import _TRUSTED_WRITE_DEFINITIONS
+from agentbridge.adapters.seeyon_pending_actions import PendingActionOutcomeUnknown
+from agentbridge.adapters.seeyon_missed_punch import MissedPunchOutcomeUnknown
+from agentbridge.core.central_service import _TRUSTED_WRITE_DEFINITIONS
 import tests.test_central_service as helpers
 
 
@@ -48,9 +48,9 @@ def run(tmp_path, monkeypatch):
 
     for definition in _TRUSTED_WRITE_DEFINITIONS.values():
         if "approval" in definition.get("prepare_function", "") or definition.get("prepare_function") == "prepare_weekly_report_acknowledgement":
-            monkeypatch.setattr("bscli.core.write_catalog." + definition["prepare_function"], prepare)
-            monkeypatch.setattr("bscli.core.write_catalog." + definition["commit_function"], commit)
-    monkeypatch.setattr("bscli.core.write_catalog.preflight_pending_action", lambda *_a, **_kw: None)
+            monkeypatch.setattr("agentbridge.core.write_catalog." + definition["prepare_function"], prepare)
+            monkeypatch.setattr("agentbridge.core.write_catalog." + definition["commit_function"], commit)
+    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action", lambda *_a, **_kw: None)
     monkeypatch.setattr(service.adapter, "list_workflows", lambda *_a, **_kw: pending(rows))
     return service, tid, rows, prepared, committed
 
@@ -122,10 +122,10 @@ def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run,
         committed.append((profile, plan["target"]["affair_id"]))
         return {"workflow_approved": True, "verification": {"confirmed": True}}
 
-    monkeypatch.setattr("bscli.core.write_catalog.preflight_pending_action", preflight)
+    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action", preflight)
     for profile, prepare_name, commit_name, _capability in cases:
-        monkeypatch.setattr("bscli.core.write_catalog." + prepare_name, partial(prepare, profile))
-        monkeypatch.setattr("bscli.core.write_catalog." + commit_name, partial(commit, profile))
+        monkeypatch.setattr("agentbridge.core.write_catalog." + prepare_name, partial(prepare, profile))
+        monkeypatch.setattr("agentbridge.core.write_catalog." + commit_name, partial(commit, profile))
 
     field = start(service, tid)
     for ordinal, (profile, _prepare_name, _commit_name, capability) in enumerate(cases, 1):
@@ -187,7 +187,7 @@ def test_unknown_second_item_stops_remaining_and_never_retries(run, monkeypatch)
         committed.append("unknown-second")
         raise PendingActionOutcomeUnknown("test response lost")
 
-    monkeypatch.setattr("bscli.core.write_catalog.approve_efficiency_data", unknown)
+    monkeypatch.setattr("agentbridge.core.write_catalog.approve_efficiency_data", unknown)
     auth = authorize(service, second)
     result = finish(service, auth)
     assert result["status"] == "unknown"
@@ -210,7 +210,7 @@ def test_shared_missed_punch_commit_unknown_stops_both_batch_entries(run, monkey
         committed.append("unknown-second")
         raise MissedPunchOutcomeUnknown("simulated lost shared-commit response")
 
-    monkeypatch.setattr("bscli.core.write_catalog.approve_missed_punch_request", unknown)
+    monkeypatch.setattr("agentbridge.core.write_catalog.approve_missed_punch_request", unknown)
     auth = authorize(service, second)
     result = finish(service, auth)
     assert result["status"] == "unknown"
@@ -297,7 +297,7 @@ def test_selection_limits_filters_and_fail_closed(tmp_path):
 
 
 def test_handover_batch_uses_real_pending_limit_and_trusted_authorization(run, monkeypatch):
-    from bscli.adapters.seeyon_central import SeeyonCentralAdapter
+    from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
 
     service, tid, rows, prepared, committed = run
     rows[:] = [row(1, "(自动发起)【HR】工作交接单-测试移交人-离职")]
@@ -319,7 +319,7 @@ def test_handover_batch_uses_real_pending_limit_and_trusted_authorization(run, m
 
 
 def test_real_pending_source_over_100_is_not_silently_batched(run, monkeypatch):
-    from bscli.adapters.seeyon_central import SeeyonCentralAdapter
+    from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
 
     service, tid, rows, prepared, committed = run
     rows[:] = [row(i) for i in range(101)]

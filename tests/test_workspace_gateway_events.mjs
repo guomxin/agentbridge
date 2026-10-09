@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeGatewayEvent } from "../bscli/workspace/gateway_events.mjs";
+import { normalizeGatewayEvent } from "../agentbridge/workspace/gateway_events.mjs";
 
 const sessionKey =
   "agent:main:agentbridge-workspace:direct:account-a";

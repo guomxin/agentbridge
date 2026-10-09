@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.session_secrets import (
+from agentbridge.core.session_secrets import (
     AesGcmSessionStateProtector,
     SESSION_KEY_FILE_ENV,
     SessionSecretError,

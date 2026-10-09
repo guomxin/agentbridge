@@ -11,7 +11,7 @@ from scripts import ci_validation_plan
 
 SHA = 'a' * 40
 BASE = 'b' * 40
-REPO = 'guomxin/cli-helper'
+REPO = 'guomxin/agentbridge'
 
 
 def run(sha=BASE, **overrides):
@@ -30,7 +30,7 @@ def environment(**overrides):
     (['docs/a.md', 'README.md'], 'docs'),
     (['docs/a.md', 'deploy/release-policy.json'], 'release'),
     (['deploy/systemd/agentbridge.service'], 'full'),
-    (['docs/a.md', 'bscli/core/tasks.py'], 'full'),
+    (['docs/a.md', 'agentbridge/core/tasks.py'], 'full'),
     (['docs/example.py'], 'full'),
     (['.github/workflows/validate.yml'], 'full'),
     (['scripts/ci_validation_plan.py'], 'full'),
@@ -69,7 +69,7 @@ def test_main_uses_only_a_verified_previous_main_run(tmp_path):
 
 
 def test_entire_baseline_diff_includes_earlier_code_commit(tmp_path):
-    with patch('scripts.ci_validation_plan.git', side_effect=[BASE, 'docs/latest.md\0bscli/core/tasks.py\0']) as git:
+    with patch('scripts.ci_validation_plan.git', side_effect=[BASE, 'docs/latest.md\0agentbridge/core/tasks.py\0']) as git:
         result = plan(tmp_path, environment(), {'before': BASE}, lambda *_: [run()])
     assert result['profile'] == 'full'
     assert git.call_args.args[1:] == ('diff', '--no-renames', '--name-only', '-z', BASE, SHA)
@@ -136,7 +136,7 @@ def test_real_history_detects_code_before_document_and_rename(tmp_path):
     assert set(result['changedPaths']) == {'runtime.py', 'renamed.md'}
 
 
-def test_entrypoint_handles_chinese_paths_on_english_windows(tmp_path, monkeypatch):
+def test_entrypoint_handles_chinese_paths_with_legacy_encoding(tmp_path, monkeypatch):
     event_path = tmp_path / 'event.json'
     event_path.write_text('{}')
     monkeypatch.setenv('GITHUB_EVENT_PATH', str(event_path))

@@ -1,6 +1,6 @@
 import unittest
 
-from bscli.integrations.openclaw import render_openclaw_interaction
+from agentbridge.integrations.openclaw import render_openclaw_interaction
 
 
 class OpenClawInteractionRendererTests(unittest.TestCase):

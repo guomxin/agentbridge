@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from bscli.adapters.seeyon_workflow_revoke import (
+from agentbridge.adapters.seeyon_workflow_revoke import (
     WorkflowRevokeContractMismatch,
     WorkflowRevokeOutcomeUnknown,
     _assert_revoked_wait_send_target,
@@ -35,11 +35,11 @@ class WorkflowRevokeTests(unittest.TestCase):
         page = object()
         with (
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._resolve_collection_row",
+                "agentbridge.adapters.seeyon_workflow_revoke._resolve_collection_row",
                 return_value=(row, page),
             ) as resolve,
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._check_revoke_eligibility"
+                "agentbridge.adapters.seeyon_workflow_revoke._check_revoke_eligibility"
             ) as precheck,
         ):
             prepared = prepare_workflow_revoke(
@@ -77,22 +77,22 @@ class WorkflowRevokeTests(unittest.TestCase):
 
         with (
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._resolve_collection_row",
+                "agentbridge.adapters.seeyon_workflow_revoke._resolve_collection_row",
                 return_value=(row, page),
             ),
-            patch("bscli.adapters.seeyon_workflow_revoke._check_revoke_eligibility"),
-            patch("bscli.adapters.seeyon_workflow_revoke._select_exact_sent_row"),
+            patch("agentbridge.adapters.seeyon_workflow_revoke._check_revoke_eligibility"),
+            patch("agentbridge.adapters.seeyon_workflow_revoke._select_exact_sent_row"),
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._open_revoke_dialog",
+                "agentbridge.adapters.seeyon_workflow_revoke._open_revoke_dialog",
                 return_value=frame,
             ),
-            patch("bscli.adapters.seeyon_workflow_revoke._fill_revoke_comment"),
+            patch("agentbridge.adapters.seeyon_workflow_revoke._fill_revoke_comment"),
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._confirm_revoke_dialog",
+                "agentbridge.adapters.seeyon_workflow_revoke._confirm_revoke_dialog",
                 side_effect=lambda _page: events.append("confirm"),
             ),
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._wait_for_revoke_readback",
+                "agentbridge.adapters.seeyon_workflow_revoke._wait_for_revoke_readback",
                 side_effect=lambda *_args, **_kwargs: events.append("verify")
                 or {"state": 2, "sub_state": 3, "sub_state_name": "撤销"},
             ),
@@ -113,7 +113,7 @@ class WorkflowRevokeTests(unittest.TestCase):
         changed = {**_sent_row(), "summary_id": "summary-2"}
         boundary = Mock()
         with patch(
-            "bscli.adapters.seeyon_workflow_revoke._resolve_collection_row",
+            "agentbridge.adapters.seeyon_workflow_revoke._resolve_collection_row",
             return_value=(changed, object()),
         ):
             with self.assertRaises(WorkflowRevokeContractMismatch):
@@ -130,18 +130,18 @@ class WorkflowRevokeTests(unittest.TestCase):
         boundary = Mock()
         with (
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._resolve_collection_row",
+                "agentbridge.adapters.seeyon_workflow_revoke._resolve_collection_row",
                 return_value=(row, object()),
             ),
-            patch("bscli.adapters.seeyon_workflow_revoke._check_revoke_eligibility"),
-            patch("bscli.adapters.seeyon_workflow_revoke._select_exact_sent_row"),
+            patch("agentbridge.adapters.seeyon_workflow_revoke._check_revoke_eligibility"),
+            patch("agentbridge.adapters.seeyon_workflow_revoke._select_exact_sent_row"),
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._open_revoke_dialog",
+                "agentbridge.adapters.seeyon_workflow_revoke._open_revoke_dialog",
                 return_value=object(),
             ),
-            patch("bscli.adapters.seeyon_workflow_revoke._fill_revoke_comment"),
+            patch("agentbridge.adapters.seeyon_workflow_revoke._fill_revoke_comment"),
             patch(
-                "bscli.adapters.seeyon_workflow_revoke._confirm_revoke_dialog",
+                "agentbridge.adapters.seeyon_workflow_revoke._confirm_revoke_dialog",
                 side_effect=RuntimeError("transport closed"),
             ),
         ):
@@ -164,7 +164,7 @@ class WorkflowRevokeTests(unittest.TestCase):
             "sub_state_name": "撤销",
         }
         with patch(
-            "bscli.adapters.seeyon_workflow_revoke._resolve_collection_row",
+            "agentbridge.adapters.seeyon_workflow_revoke._resolve_collection_row",
             side_effect=[(None, object()), (revoked, object())],
         ):
             result = _wait_for_revoke_readback(

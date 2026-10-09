@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_leave import (
+from agentbridge.adapters.seeyon_leave import (
     LEAVE_CONTRACT_VERSION,
     LEAVE_FORM_APP_ID,
     LEAVE_TEMPLATE_ID,
@@ -49,13 +49,13 @@ class SeeyonLeaveTests(unittest.TestCase):
         frame = FakeFrame()
         with (
             patch(
-                "bscli.adapters.seeyon_leave._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave._read_leave_form",
+                "agentbridge.adapters.seeyon_leave._read_leave_form",
                 return_value={
                     **normalize_leave_inputs(_inputs()),
                     "subject": "【HR】请假申请单-Alice",
@@ -87,17 +87,17 @@ class SeeyonLeaveTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_leave._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave._read_leave_form",
+                "agentbridge.adapters.seeyon_leave._read_leave_form",
                 side_effect=[readback, readback],
             ),
-            patch("bscli.adapters.seeyon_leave._wait_for_cap4_frame", return_value=frame),
-            patch("bscli.adapters.seeyon_leave._validate_form_controls"),
+            patch("agentbridge.adapters.seeyon_leave._wait_for_cap4_frame", return_value=frame),
+            patch("agentbridge.adapters.seeyon_leave._validate_form_controls"),
         ):
             result = save_leave_draft(
                 FakeAdapter(),
@@ -129,17 +129,17 @@ class SeeyonLeaveTests(unittest.TestCase):
         mismatched = {**precommit, "reason": "Wrong"}
         with (
             patch(
-                "bscli.adapters.seeyon_leave._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave._read_leave_form",
+                "agentbridge.adapters.seeyon_leave._read_leave_form",
                 side_effect=[precommit, mismatched],
             ),
-            patch("bscli.adapters.seeyon_leave._wait_for_cap4_frame", return_value=frame),
-            patch("bscli.adapters.seeyon_leave._validate_form_controls"),
+            patch("agentbridge.adapters.seeyon_leave._wait_for_cap4_frame", return_value=frame),
+            patch("agentbridge.adapters.seeyon_leave._validate_form_controls"),
         ):
             with self.assertRaises(LeaveOutcomeUnknown):
                 save_leave_draft(
@@ -164,17 +164,17 @@ class SeeyonLeaveTests(unittest.TestCase):
         }
         with (
             patch(
-                "bscli.adapters.seeyon_leave._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave._read_leave_form",
+                "agentbridge.adapters.seeyon_leave._read_leave_form",
                 side_effect=[readback, readback],
             ),
-            patch("bscli.adapters.seeyon_leave._wait_for_cap4_frame", return_value=frame),
-            patch("bscli.adapters.seeyon_leave._validate_form_controls"),
+            patch("agentbridge.adapters.seeyon_leave._wait_for_cap4_frame", return_value=frame),
+            patch("agentbridge.adapters.seeyon_leave._validate_form_controls"),
         ):
             result = save_leave_draft(
                 FakeAdapter(),

@@ -9,9 +9,9 @@ from uuid import uuid4
 
 import pytest
 
-from bscli.core.skill_authoring import text
-from bscli.core.skill_job_queue import SkillJobQueue
-from bscli.core.user_grants import UserGrantConflict
+from agentbridge.core.skill_authoring import text
+from agentbridge.core.skill_job_queue import SkillJobQueue
+from agentbridge.core.user_grants import UserGrantConflict
 
 
 class QueueFixture:

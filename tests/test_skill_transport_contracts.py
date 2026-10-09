@@ -7,9 +7,9 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.workspace.application import WorkspaceApplication
-from bscli.workspace.server import create_workspace_http_server, validate_workspace_server_config
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.workspace.application import WorkspaceApplication
+from agentbridge.workspace.server import create_workspace_http_server, validate_workspace_server_config
 import tests.test_central_mcp as mcp_support
 import tests.test_workspace as workspace_support
 

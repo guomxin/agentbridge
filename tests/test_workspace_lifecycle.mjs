@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLifecycle, abortableDelay, isCancellation } from "../bscli/workspace/static/workspace_lifecycle.mjs";
+import { createLifecycle, abortableDelay, isCancellation } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
 
 function clock() {
   let next = 0;

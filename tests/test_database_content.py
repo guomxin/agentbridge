@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bscli.database.content import compile_query, add_evidence, plain_text, INPUT_SCHEMAS, CONTENT_MODES
-from bscli.database.independent import IndependentDatabase, DatabaseRejected, CAPABILITIES
+from agentbridge.database.content import compile_query, add_evidence, plain_text, INPUT_SCHEMAS, CONTENT_MODES
+from agentbridge.database.independent import IndependentDatabase, DatabaseRejected, CAPABILITIES
 
 
 WINDOW = {'start_date': '2026-09-01', 'end_date_exclusive': '2026-09-12'}
@@ -143,7 +143,7 @@ class ContentExecutionTests(unittest.TestCase):
             cursor = connection.cursor.return_value.__enter__.return_value
             cursor.description = [SimpleNamespace(name=n) for n in ('id','log_date','content')]
             cursor.fetchmany.return_value = [{'id': i, 'log_date': '2026-09-01', 'content': '计划完成\n未找到结果'} for i in (1,2,3)]
-            with patch('bscli.database.sources.connect') as connect:
+            with patch('agentbridge.database.sources.connect') as connect:
                 connect.return_value.__enter__.return_value = connection
                 first = runtime.execute('a', 'database.logs.content_analyze', {**WINDOW, 'page_size': 2})
                 self.assertEqual(first['returned'], 2)

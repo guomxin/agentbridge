@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createChatProgress } from "../bscli/workspace/static/workspace_progress.mjs";
-import { createResultView } from "../bscli/workspace/static/workspace_results.mjs";
-import { createChatStream } from "../bscli/workspace/static/workspace_stream.mjs";
-import { createLifecycle } from "../bscli/workspace/static/workspace_lifecycle.mjs";
+import { createChatProgress } from "../agentbridge/workspace/static/workspace_progress.mjs";
+import { createResultView } from "../agentbridge/workspace/static/workspace_results.mjs";
+import { createChatStream } from "../agentbridge/workspace/static/workspace_stream.mjs";
+import { createLifecycle } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
 
 class Element {
   children = [];

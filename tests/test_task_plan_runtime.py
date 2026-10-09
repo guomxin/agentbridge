@@ -2,13 +2,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.core.capability import CapabilityRegistry, CapabilitySpec
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.operations import OperationStore
-from bscli.core.task_plan_runtime import TaskPlanRuntime
-from bscli.core.task_plan_validation import PlanValidationError, validate_and_compile_task_plan
-from bscli.core.task_plans import TaskPlanStore
-from bscli.core.transforms import TransformSpec, build_transform_registry
+from agentbridge.core.capability import CapabilityRegistry, CapabilitySpec
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.operations import OperationStore
+from agentbridge.core.task_plan_runtime import TaskPlanRuntime
+from agentbridge.core.task_plan_validation import PlanValidationError, validate_and_compile_task_plan
+from agentbridge.core.task_plans import TaskPlanStore
+from agentbridge.core.transforms import TransformSpec, build_transform_registry
 
 
 class FakeTaskHub:
@@ -55,7 +55,7 @@ class FakeTaskHub:
 
 class FakePlanService:
     def __init__(self, db_path):
-        from bscli.core.user_grants import UserGrants
+        from agentbridge.core.user_grants import UserGrants
         self.user_grants = UserGrants(db_path)
         self.registry = CapabilityRegistry()
         self.registry.register(

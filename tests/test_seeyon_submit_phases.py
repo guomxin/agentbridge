@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from bscli.adapters.seeyon_submit_phases import (
+from agentbridge.adapters.seeyon_submit_phases import (
     SubmissionPhaseTracker,
     pump_browser_events,
 )

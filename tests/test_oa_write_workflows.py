@@ -9,19 +9,20 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from bscli.adapters import seeyon_central
-from bscli.adapters.seeyon_write_workflows import (
+from agentbridge.adapters import seeyon_central
+from agentbridge.adapters.seeyon_write_workflows import (
     OA_WRITE_DECLARATIONS,
     oa_write_capability_specs_by_name,
 )
-from bscli.core import write_catalog
-from bscli.core.planning_policy import planning_descriptor
-from bscli.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
-from bscli.core.write_workflow import WritePrepareAliasDefinition, WriteWorkflowDefinition
+from agentbridge.core import write_catalog
+from agentbridge.core.planning_policy import planning_descriptor
+from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
+from agentbridge.core.write_workflow import WritePrepareAliasDefinition, WriteWorkflowDefinition
 
 
 CONTRACT_BYTES = (Path(__file__).parent / "fixtures/oa_write_workflows_contract.json").read_bytes()
-CONTRACT = json.loads(CONTRACT_BYTES)
+# Keep the signed-off bytes/hash frozen; adapt only the retired Python exception namespace.
+CONTRACT = json.loads(CONTRACT_BYTES.replace(b'"bscli.adapters.', b'"agentbridge.adapters.'))
 DEFINITIONS = dict(CONTRACT["definitions"])
 SPECS = {spec["name"]: spec for spec in CONTRACT["capabilities"]}
 SCOPES = {name: frozenset(scopes) for name, scopes in CONTRACT["scopes"]}
@@ -128,7 +129,7 @@ def test_all_oa_scopes_permissions_and_planning_remain_unchanged():
 
 def test_original_leaf_aliases_and_all_sixty_function_bridges_remain_late_bound():
     assert sorted(write_catalog.WRITE_FUNCTION_NAMES) == CONTRACT["function_names"]
-    modules = [import_module(f"bscli.adapters.{name}") for name in LEAF_MODULES]
+    modules = [import_module(f"agentbridge.adapters.{name}") for name in LEAF_MODULES]
     for name in CONTRACT["function_names"]:
         originals = [
             getattr(module, name) for module in modules

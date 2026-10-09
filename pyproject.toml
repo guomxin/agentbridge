@@ -3,10 +3,14 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cli-helper"
-version = "0.1.0"
+name = "agentbridge"
+version = "0.2.0"
 description = "Agent-oriented command capabilities for legacy B/S systems"
 requires-python = ">=3.12"
+classifiers = [
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+]
 dependencies = [
   "cryptography==49.0.0",
   "mcp==1.23.2",
@@ -15,6 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
+agentbridge = "agentbridge.cli.main:main"
 bscli = "bscli.cli.main:main"
 
 [project.optional-dependencies]
@@ -22,15 +27,15 @@ postgresql = ["psycopg[binary]==3.3.5"]
 database-analysis = ["psycopg[binary]==3.3.5", "pglast==7.18"]
 
 [tool.setuptools.packages.find]
-include = ["bscli*"]
+include = ["agentbridge*", "bscli", "bscli.cli"]
 
 [tool.setuptools.package-data]
-"bscli.business_skills" = ["*/manifest.json", "*/SKILL.md", "*/references/*.md"]
-"bscli.core" = ["user_permission_catalog.json"]
-"bscli.adapters" = ["seeyon_page_scripts/*.js"]
-"bscli.mcp" = ["static/*.html"]
-"bscli.admin" = ["static/*.html", "static/*.css", "static/*.js", "static/*.mjs", "static/*.svg", "static/*LICENSE.txt"]
-"bscli.workspace" = ["static/*.html", "static/*.css", "static/*.js", "static/*.mjs", "static/vendor/*", "*.mjs"]
+"agentbridge.business_skills" = ["*/manifest.json", "*/SKILL.md", "*/references/*.md"]
+"agentbridge.core" = ["user_permission_catalog.json"]
+"agentbridge.adapters" = ["seeyon_page_scripts/*.js"]
+"agentbridge.mcp" = ["static/*.html"]
+"agentbridge.admin" = ["static/*.html", "static/*.css", "static/*.js", "static/*.mjs", "static/*.svg", "static/*LICENSE.txt"]
+"agentbridge.workspace" = ["static/*.html", "static/*.css", "static/*.js", "static/*.mjs", "static/vendor/*", "*.mjs"]
 
 [tool.setuptools.data-files]
 "share/agentbridge/schemas/agent-host/v1" = ["schemas/agent-host/v1/*.json"]

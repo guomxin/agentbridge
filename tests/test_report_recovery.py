@@ -10,8 +10,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from bscli.database.independent import IndependentDatabase, DatabaseRejected
-from bscli.database.reports import Reports
+from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
+from agentbridge.database.reports import Reports
 from tests.process_helpers import kill_fixture_process
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -41,7 +41,7 @@ class ReportRecoveryTests(unittest.TestCase):
                             rid,status=db.execute('SELECT id,status FROM reports').fetchone()
                         self.assertEqual(status,'ready' if stage=='ready' else 'running')
                         kill_fixture_process(process)
-                        # Windows taskkill can return before the child interpreter
+                        # Process termination can precede file-system cleanup
                         # has released its OS lease. Observe bounded convergence.
                         deadline = time.monotonic() + 5
                         while True:

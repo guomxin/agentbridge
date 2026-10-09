@@ -4,9 +4,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.business_skills import skill_catalog, SkillRejected, SkillStore
-from bscli.core.user_grants import UserGrantConflict
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.business_skills import skill_catalog, SkillRejected, SkillStore
+from agentbridge.core.user_grants import UserGrantConflict
 
 
 class SkillAuthoringTests(unittest.TestCase):
@@ -149,7 +149,7 @@ class SkillAuthoringTests(unittest.TestCase):
         self.assertEqual(self.s.skills.load_history('bob')[0]['name'],'未知业务助手')
 
     def test_shared_publication_to_identity_without_grants_and_audience_reduction(self):
-        from bscli.core.mcp_identities import McpIdentityTokenStore
+        from agentbridge.core.mcp_identities import McpIdentityTokenStore
         McpIdentityTokenStore(self.s.db_path).issue(user_subject='bob',expected_principal_ref='Bob')
         d=self.draft();self.sample(d)
         r=self.a.submit('alice',draft_id=d['draft_id'],expected_revision=1,request_key='share',reason='共享方法',audience=['alice','bob'])

@@ -21,9 +21,9 @@ class DocumentationTests(unittest.TestCase):
             self.assertEqual(facts[field], 'not_asserted')
 
     def test_current_inventory_matches_constructed_capability_and_mcp_registries(self):
-        from bscli.core.central_service import CentralCapabilityService
-        from bscli.core.mcp_identities import McpIdentityTokenStore
-        from bscli.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
+        from agentbridge.core.central_service import CentralCapabilityService
+        from agentbridge.core.mcp_identities import McpIdentityTokenStore
+        from agentbridge.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
 
         text = (ROOT / "docs" / "项目当前状态.md").read_text(encoding="utf-8")
         with TemporaryDirectory() as tmp:
@@ -95,8 +95,8 @@ class DocumentationTests(unittest.TestCase):
 
     def test_retired_documents_are_archived(self):
         for retired_path in (
-            ROOT / "BSCLI_DESIGN.md",
-            ROOT / "BSCLI_DESIGN_ZH.md",
+            ROOT / "AgentBridge_DESIGN.md",
+            ROOT / "AgentBridge_DESIGN_ZH.md",
             ROOT / "docs" / "oa-write-safety.md",
             ROOT / "docs" / "oa-write-discovery.md",
         ):
@@ -121,7 +121,7 @@ class DocumentationTests(unittest.TestCase):
             text = (ROOT / relative_path).read_text(encoding="utf-8")
             for forbidden in (
                 "oa__",
-                "bscli daemon",
+                "agentbridge daemon",
                 "chrome_extension",
                 "browser_bridge_used",
             ):

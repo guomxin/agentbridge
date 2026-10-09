@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createResultView } from "../bscli/workspace/static/workspace_results.mjs";
+import { createResultView } from "../agentbridge/workspace/static/workspace_results.mjs";
 
 function element(tag = "article", dataset = {}) {
   return { tag, dataset, children: [], events: {}, classList: { add() {} },

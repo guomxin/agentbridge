@@ -1,6 +1,6 @@
 import unittest
 
-from bscli.core.api_discovery import extract_api_candidates
+from agentbridge.core.api_discovery import extract_api_candidates
 
 
 class ApiCandidateTests(unittest.TestCase):

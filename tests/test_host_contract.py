@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.core.host_contract import (
+from agentbridge.core.host_contract import (
     HOST_CONTEXT_META_KEY,
     HOST_PROFILE_META_KEY,
     HostContractError,

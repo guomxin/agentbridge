@@ -9,14 +9,14 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bscli.adapters import taihua, smartlight
-from bscli.core.capability import CapabilityRegistry
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.field_submissions import FieldSubmissionStateError
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.core.task_plan_runtime import TaskPlanRuntime
-from bscli.core.task_plans import step_idempotency_key
-from bscli.core.tasks import TaskNotFound
+from agentbridge.adapters import taihua, smartlight
+from agentbridge.core.capability import CapabilityRegistry
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.field_submissions import FieldSubmissionStateError
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.core.task_plan_runtime import TaskPlanRuntime
+from agentbridge.core.task_plans import step_idempotency_key
+from agentbridge.core.tasks import TaskNotFound
 from tests import test_central_service as central_fixtures
 from tests import test_taihua_adapter as taihua_fixtures
 from tests import test_task_plan_runtime as runtime_fixtures
@@ -224,7 +224,7 @@ class PlanWriteBoundaryTests(unittest.TestCase):
 
         with patch.object(self.service, "guard_skill_authorization", side_effect=guard_skill) as skill, \
                 patch.object(self.service.task_plans, "guard_authorization_consumption", side_effect=guard_plan) as plan, \
-                patch("bscli.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
+                patch("agentbridge.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
             result = self.resume(self.authorization)
         self.assertEqual(result["status"], "succeeded")
         skill.assert_called_once()
@@ -239,7 +239,7 @@ class PlanWriteBoundaryTests(unittest.TestCase):
             self.assertEqual(self.cancel_from_other_thread()["status"], "canceled")
             enter_commit_boundary()
             effects.append(True)
-        with patch("bscli.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
+        with patch("agentbridge.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
             result = self.resume(self.authorization)
         self.assertEqual(result["status"], "canceled")
         self.assertEqual(effects, [])
@@ -255,7 +255,7 @@ class PlanWriteBoundaryTests(unittest.TestCase):
             canceled = self.cancel_from_other_thread()
             self.assertEqual(canceled["error"]["code"], "PLAN_COMMIT_IN_PROGRESS")
             return {"status": "created", "verification": {"matched": True}}
-        with patch("bscli.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
+        with patch("agentbridge.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
             result = self.resume(self.authorization)
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(self.service.write_authorizations.get(self.auth_id)["state"], "consumed")
@@ -307,7 +307,7 @@ class PlanWriteBoundaryTests(unittest.TestCase):
             self.tokens.revoke(self.origin["token_id"])
             enter_commit_boundary()
             self.fail("revoked authority crossed the effect boundary")
-        with patch("bscli.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
+        with patch("agentbridge.core.write_catalog.commit_taihua_work_log_create", side_effect=commit):
             result = self.resume(self.authorization)
         self.assertEqual(result["error"]["code"], "PLAN_AUTHORITY_INVALID")
         self.assertNotEqual(self.service.write_authorizations.get(self.auth_id)["state"], "consumed")
@@ -335,7 +335,7 @@ class PlanWriteBoundaryTests(unittest.TestCase):
         def commit(*_, enter_commit_boundary):
             enter_commit_boundary()
             raise ConnectionError("response lost")
-        with patch("bscli.core.write_catalog.commit_taihua_work_log_create", side_effect=commit) as call:
+        with patch("agentbridge.core.write_catalog.commit_taihua_work_log_create", side_effect=commit) as call:
             result = self.resume(self.authorization)
             self.assertEqual(result["status"], "outcome_unknown")
             self.assertEqual(result["error"]["code"], "RESULT_UNKNOWN")

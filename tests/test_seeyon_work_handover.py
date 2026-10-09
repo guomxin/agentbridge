@@ -4,12 +4,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from bscli.adapters.seeyon_pending_actions import (
+from agentbridge.adapters.seeyon_pending_actions import (
     PendingActionContractMismatch, PendingActionOutcomeUnknown,
     approve_work_handover, prepare_work_handover_approval,
     pending_action_profile_for_title,
 )
-from bscli.adapters.seeyon_work_handover import (
+from agentbridge.adapters.seeyon_work_handover import (
     FIELD_LABELS, WORK_FIELDS, FINANCE_FIELDS, WORK_HANDOVER_SNAPSHOT_SCRIPT,
     work_handover_business_snapshot,
 )
@@ -57,7 +57,7 @@ def target(monkeypatch):
     worker.page.frames = [HandoverFrame(data)]
     adapter = FakeAdapter(worker)
     adapter.list_workflows = Mock(return_value={"items": [], "coverage": {"status": "complete"}})
-    monkeypatch.setattr("bscli.adapters.seeyon_pending_actions.time.sleep", lambda _: None)
+    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_actions.time.sleep", lambda _: None)
     return fixture, data, worker, adapter
 
 

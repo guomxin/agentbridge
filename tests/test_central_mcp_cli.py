@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from bscli.cli.main import build_parser, main
-from bscli.core.sessions import SessionRegistry
+from agentbridge.cli.main import build_parser, main
+from agentbridge.core.sessions import SessionRegistry
 
 
 class CentralMcpCliTests(unittest.TestCase):
@@ -159,7 +159,7 @@ class CentralMcpCliTests(unittest.TestCase):
     def test_central_server_starts_mcp_and_auth_card_in_one_runtime(self):
         with TemporaryDirectory() as tmp:
             with (
-                patch("bscli.cli.main.serve_central_mcp") as serve,
+                patch("agentbridge.cli.main.serve_central_mcp") as serve,
                 redirect_stdout(io.StringIO()) as stdout,
             ):
                 exit_code = main(
@@ -198,7 +198,7 @@ class CentralMcpCliTests(unittest.TestCase):
             token_file = Path(tmp) / "gateway.token"
             token_file.write_text("gateway-token-value", encoding="utf-8")
             with (
-                patch("bscli.cli.main.serve_central_mcp") as serve,
+                patch("agentbridge.cli.main.serve_central_mcp") as serve,
                 redirect_stdout(io.StringIO()) as stdout,
             ):
                 exit_code = main(
@@ -271,7 +271,7 @@ class CentralMcpCliTests(unittest.TestCase):
     def test_central_server_enables_bounded_session_keepalive(self):
         with TemporaryDirectory() as tmp:
             with (
-                patch("bscli.cli.main.serve_central_mcp") as serve,
+                patch("agentbridge.cli.main.serve_central_mcp") as serve,
                 redirect_stdout(io.StringIO()) as stdout,
             ):
                 exit_code = main(
@@ -352,7 +352,7 @@ class CentralMcpCliTests(unittest.TestCase):
     def test_central_server_allows_explicit_private_http_and_warns(self):
         with TemporaryDirectory() as tmp:
             with (
-                patch("bscli.cli.main.serve_central_mcp") as serve,
+                patch("agentbridge.cli.main.serve_central_mcp") as serve,
                 redirect_stdout(io.StringIO()) as stdout,
                 redirect_stderr(io.StringIO()) as stderr,
             ):
@@ -391,7 +391,7 @@ class CentralMcpCliTests(unittest.TestCase):
     def test_standalone_auth_server_allows_explicit_private_http_and_warns(self):
         with TemporaryDirectory() as tmp:
             with (
-                patch("bscli.cli.main.serve_auth_cards") as serve,
+                patch("agentbridge.cli.main.serve_auth_cards") as serve,
                 redirect_stdout(io.StringIO()) as stdout,
                 redirect_stderr(io.StringIO()) as stderr,
             ):

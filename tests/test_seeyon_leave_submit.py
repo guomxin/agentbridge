@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from bscli.adapters.seeyon_leave import (
+from agentbridge.adapters.seeyon_leave import (
     LEAVE_FORM_APP_ID,
     LEAVE_TEMPLATE_ID,
     LEAVE_TEMPLATE_TITLE,
@@ -9,7 +9,7 @@ from bscli.adapters.seeyon_leave import (
     LeaveOutcomeUnknown,
     normalize_leave_inputs,
 )
-from bscli.adapters.seeyon_leave_submit import (
+from agentbridge.adapters.seeyon_leave_submit import (
     LEAVE_SUBMIT_CONTRACT_VERSION,
     LeaveBusinessValidationRequired,
     LeaveSubmissionBlocked,
@@ -35,13 +35,13 @@ class SeeyonLeaveSubmitTests(unittest.TestCase):
         adapter = FakeAdapter(sent_items=[{"affair_id": "sent-old", "title": "Old"}])
         with (
             patch(
-                "bscli.adapters.seeyon_leave_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave_submit._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave_submit._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave_submit._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave_submit._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave_submit._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave_submit._read_leave_form",
+                "agentbridge.adapters.seeyon_leave_submit._read_leave_form",
                 return_value=readback,
             ),
         ):
@@ -72,17 +72,17 @@ class SeeyonLeaveSubmitTests(unittest.TestCase):
         worker = FakeForkingWorker()
         with (
             patch(
-                "bscli.adapters.seeyon_leave_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave_submit._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave_submit._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave_submit._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave_submit._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave_submit._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave_submit._read_leave_form",
+                "agentbridge.adapters.seeyon_leave_submit._read_leave_form",
                 return_value=readback,
             ),
             patch(
-                "bscli.adapters.seeyon_leave_submit._wait_for_sent_readback",
+                "agentbridge.adapters.seeyon_leave_submit._wait_for_sent_readback",
                 return_value={
                     "affair_id": "sent-new",
                     "title": "【HR】请假申请单-Alice-年休",
@@ -124,17 +124,17 @@ class SeeyonLeaveSubmitTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_leave_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_leave_submit._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_leave_submit._validate_supported_option"),
-            patch("bscli.adapters.seeyon_leave_submit._fill_leave_form"),
+            patch("agentbridge.adapters.seeyon_leave_submit._validate_supported_option"),
+            patch("agentbridge.adapters.seeyon_leave_submit._fill_leave_form"),
             patch(
-                "bscli.adapters.seeyon_leave_submit._read_leave_form",
+                "agentbridge.adapters.seeyon_leave_submit._read_leave_form",
                 return_value=readback,
             ),
             patch(
-                "bscli.adapters.seeyon_leave_submit._wait_for_sent_readback",
+                "agentbridge.adapters.seeyon_leave_submit._wait_for_sent_readback",
                 side_effect=LeaveOutcomeUnknown("not confirmed"),
             ),
         ):

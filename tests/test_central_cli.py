@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
-from bscli.cli.main import main
-from bscli.core.tasks import TaskHubStore
+from agentbridge.cli.main import main
+from agentbridge.core.tasks import TaskHubStore
 
 
 class CentralCliTests(unittest.TestCase):
@@ -224,7 +224,7 @@ class CentralCliTests(unittest.TestCase):
 
     def test_capability_invoke_without_session_returns_login_action_and_operation(self):
         with TemporaryDirectory() as tmp:
-            from bscli.core.user_grants import UserGrants
+            from agentbridge.core.user_grants import UserGrants
             UserGrants(Path(tmp) / "agentbridge.db").save("user-a", ["oa.leave.draft"],
                 expected_revision=0, actor="test-admin", reason="Authorize form catalog test")
             with redirect_stdout(io.StringIO()) as stdout:
@@ -273,7 +273,7 @@ class CentralCliTests(unittest.TestCase):
             }
 
             with (
-                patch("bscli.cli.main.CentralCapabilityService", return_value=service),
+                patch("agentbridge.cli.main.CentralCapabilityService", return_value=service),
                 redirect_stdout(io.StringIO()) as stdout,
             ):
                 exit_code = main(
@@ -324,7 +324,7 @@ class CentralCliTests(unittest.TestCase):
             }
 
             with (
-                patch("bscli.cli.main.CentralCapabilityService", return_value=service),
+                patch("agentbridge.cli.main.CentralCapabilityService", return_value=service),
                 redirect_stdout(io.StringIO()) as stdout,
             ):
                 exit_code = main(
@@ -392,7 +392,7 @@ class CentralCliTests(unittest.TestCase):
                 "reused": True,
             }
             with (
-                patch("bscli.cli.main.CentralCapabilityService", return_value=service),
+                patch("agentbridge.cli.main.CentralCapabilityService", return_value=service),
                 redirect_stdout(io.StringIO()) as stdout,
             ):
                 exit_code = main(
@@ -435,7 +435,7 @@ class CentralCliTests(unittest.TestCase):
                 "resumedFromInteractionId": "interaction-123456",
             }
             with (
-                patch("bscli.cli.main.CentralCapabilityService", return_value=service),
+                patch("agentbridge.cli.main.CentralCapabilityService", return_value=service),
                 redirect_stdout(io.StringIO()) as get_stdout,
             ):
                 get_exit = main(
@@ -450,7 +450,7 @@ class CentralCliTests(unittest.TestCase):
                     ]
                 )
             with (
-                patch("bscli.cli.main.CentralCapabilityService", return_value=service),
+                patch("agentbridge.cli.main.CentralCapabilityService", return_value=service),
                 redirect_stdout(io.StringIO()) as resume_stdout,
             ):
                 resume_exit = main(

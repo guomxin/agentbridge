@@ -4,11 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from bscli.adapters.taihua import TaihuaCentralAdapter, TaihuaSessionCheckUnavailable
-from bscli.adapters.seeyon_central import SeeyonCentralAdapter
-from bscli.adapters.yuque import YuqueCentralAdapter
-from bscli.adapters.yuque_content import redact_sensitive_text, _redact_nested_strings
-from bscli.workspace.gateway import OpenClawGatewayClient, GatewayRequestError, _history_evidence_for_run
+from agentbridge.adapters.taihua import TaihuaCentralAdapter, TaihuaSessionCheckUnavailable
+from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
+from agentbridge.adapters.yuque import YuqueCentralAdapter
+from agentbridge.adapters.yuque_content import redact_sensitive_text, _redact_nested_strings
+from agentbridge.workspace.gateway import OpenClawGatewayClient, GatewayRequestError, _history_evidence_for_run
 from tests.test_yuque_adapter import FakeYuqueWorker
 
 
@@ -142,7 +142,7 @@ def test_missing_final_history_does_not_replay_or_abort(tmp_path):
 
 def test_sheet_secret_columns_remain_redacted_on_later_pages():
     import zlib
-    from bscli.adapters.yuque_content import _render_lake_sheet
+    from agentbridge.adapters.yuque_content import _render_lake_sheet
     rows = [{'name': 'Synthetic', 'data': {
         '0': {'0': {'v': '地址'}, '1': {'v': '密码'}},
         '1': {'0': {'v': 'server.example:5432'}, '1': {'v': 'synthetic-first'}},

@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.capability_runtime import RequiresUserAction
-from bscli.core.login_continuation import read_continuation_message
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.capability_runtime import RequiresUserAction
+from agentbridge.core.login_continuation import read_continuation_message
 
 
 def service_at(home):

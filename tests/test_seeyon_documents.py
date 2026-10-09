@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_documents import (
+from agentbridge.adapters.seeyon_documents import (
     SeeyonDocumentAccessDenied,
     _certificate_content_type,
     _certificate_search_queries,
@@ -40,11 +40,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
         copyright_rows = []
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ),
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 side_effect=[patent_rows, copyright_rows],
             ),
         ):
@@ -93,11 +93,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
         second_rows = [_row(resource_id="soft-2", filename="系统乙V1.0.pdf")]
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ) as open_category,
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 side_effect=[first_rows, second_rows],
             ) as search_folder,
         ):
@@ -116,7 +116,7 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
             [call.kwargs["query"] for call in search_folder.call_args_list],
             ["系统甲", "系统乙"],
         )
-        self.assertEqual(result["schema_version"], "bscli.oa_certificate_search.v2")
+        self.assertEqual(result["schema_version"], "agentbridge.oa_certificate_search.v2")
         self.assertEqual(result["queries"], ["系统甲V1.0", "系统乙Ｖ 1.0"])
         self.assertEqual(result["matched_queries"], result["queries"])
         self.assertEqual(result["unmatched_queries"], [])
@@ -132,11 +132,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
         ]
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ),
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 return_value=rows,
             ) as search_folder,
         ):
@@ -172,11 +172,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
         ]
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ),
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 return_value=rows,
             ),
         ):
@@ -209,11 +209,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
         )
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ) as open_category,
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 side_effect=[
                     [],
                     [
@@ -265,11 +265,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
         }
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ) as open_category,
             patch(
-                "bscli.adapters.seeyon_documents._fetch_certificate_document_from_frame",
+                "agentbridge.adapters.seeyon_documents._fetch_certificate_document_from_frame",
                 side_effect=[{"filename": first["filename"]}, {"filename": second["filename"]}],
             ) as fetch_one,
         ):
@@ -289,11 +289,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
     def test_batch_reports_unmatched_queries_and_keeps_one_slot_per_name(self):
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ),
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 side_effect=[
                     [
                         _row(resource_id="patent-1", filename="专利甲.pdf"),
@@ -326,11 +326,11 @@ class SeeyonCertificateSearchTests(unittest.TestCase):
     def test_patent_search_preserves_trailing_version_like_text(self):
         with (
             patch(
-                "bscli.adapters.seeyon_documents._open_certificate_category",
+                "agentbridge.adapters.seeyon_documents._open_certificate_category",
                 return_value=object(),
             ),
             patch(
-                "bscli.adapters.seeyon_documents._search_current_folder",
+                "agentbridge.adapters.seeyon_documents._search_current_folder",
                 return_value=[_row(resource_id="patent-1", filename="专利V1.0.pdf")],
             ) as search_folder,
         ):

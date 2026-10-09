@@ -3,8 +3,8 @@ import threading
 import unittest
 from unittest.mock import patch
 import zlib
-from bscli.browser.http import CentralHttpWorker
-from bscli.core.capability_runtime import CapabilityRejected
+from agentbridge.browser.http import CentralHttpWorker
+from agentbridge.core.capability_runtime import CapabilityRejected
 
 class Assertions(unittest.TestCase):
     def error(self, code, function):

@@ -21,15 +21,15 @@ def main():
     args = parser.parse_args()
     if args.candidate:
         for name in ('content', 'evidence', 'independent'):
-            key = 'bscli.database.' + name
+            key = 'agentbridge.database.' + name
             spec = importlib.util.spec_from_file_location(key, args.candidate / (name + '.py'))
             module = importlib.util.module_from_spec(spec)
             sys.modules[key] = module
             spec.loader.exec_module(module)
-    from bscli.database.independent import IndependentDatabase
+    from agentbridge.database.independent import IndependentDatabase
     from datetime import date, timedelta
     runtime = IndependentDatabase(args.home, original_base_url=args.base_url)
-    from bscli.database.evidence import response_chars
+    from agentbridge.database.evidence import response_chars
     discovery = runtime.discover(args.subject)
     assert response_chars(discovery) < 14000
     detail = runtime.discover(args.subject, args.source_id, args.capability)

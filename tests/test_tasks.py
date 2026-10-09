@@ -7,10 +7,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.interactions import InteractionStore
-from bscli.core.operations import OperationStore
-from bscli.core.tasks import TaskHubStore, TaskIntegrityError, TaskNotFound
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.interactions import InteractionStore
+from agentbridge.core.operations import OperationStore
+from agentbridge.core.tasks import TaskHubStore, TaskIntegrityError, TaskNotFound
 
 
 class TaskHubStoreTests(unittest.TestCase):
@@ -1193,20 +1193,20 @@ class TaskHubStoreTests(unittest.TestCase):
                 endpoint, _ = self._endpoint()
                 self._task(endpoint["endpoint_id"])
                 args = dict(user_subject="user-a", endpoint_id=endpoint["endpoint_id"])
-                with patch("bscli.core.tasks._utc_now", return_value="2099-01-01T00:00:00+00:00"):
+                with patch("agentbridge.core.tasks._utc_now", return_value="2099-01-01T00:00:00+00:00"):
                     claimed = self.store.claim_outbox(**args, limit=1)
                 self.assertEqual(len(claimed), 1)
                 delivery_id = claimed[0]["delivery_id"]
-                with patch("bscli.core.tasks._utc_after", return_value="2099-01-01T00:01:00+00:00"):
+                with patch("agentbridge.core.tasks._utc_after", return_value="2099-01-01T00:01:00+00:00"):
                     self.store.acknowledge_outbox(
                         **args, delivery_id=delivery_id, succeeded=False,
                         retry_after_seconds=60, defer_until_activity=deferred,
                     )
                     if deferred:
                         self.store.reactivate_deferred_outbox(**args, delay_seconds=60)
-                with patch("bscli.core.tasks._utc_now", return_value="2099-01-01T00:00:59+00:00"):
+                with patch("agentbridge.core.tasks._utc_now", return_value="2099-01-01T00:00:59+00:00"):
                     self.assertEqual(self.store.claim_outbox(**args), [])
-                with patch("bscli.core.tasks._utc_now", return_value="2099-01-01T00:01:00+00:00"):
+                with patch("agentbridge.core.tasks._utc_now", return_value="2099-01-01T00:01:00+00:00"):
                     reclaimed = self.store.claim_outbox(**args)
                 self.assertEqual([row["delivery_id"] for row in reclaimed], [delivery_id])
                 self.store.acknowledge_outbox(**args, delivery_id=delivery_id, succeeded=True)

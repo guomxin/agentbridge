@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from bscli.adapters import smartlight, taihua
-from bscli.core import write_catalog
-from bscli.core.planning_policy import planning_descriptor
-from bscli.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
-from bscli.core.write_workflow import WriteWorkflowDefinition
+from agentbridge.adapters import smartlight, taihua
+from agentbridge.core import write_catalog
+from agentbridge.core.planning_policy import planning_descriptor
+from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
+from agentbridge.core.write_workflow import WriteWorkflowDefinition
 
 
 WORKFLOW = taihua.TAIHUA_WORK_LOG_CREATE_WORKFLOW

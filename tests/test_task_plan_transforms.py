@@ -1,6 +1,6 @@
 import unittest
 
-from bscli.core.transforms import (
+from agentbridge.core.transforms import (
     MERGE_WORK_ITEMS,
     WORK_ITEMS_TO_LOG_DRAFT,
     WORK_ITEMS_TO_LOG_DRAFT_V2,

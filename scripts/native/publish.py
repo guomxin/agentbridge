@@ -74,7 +74,8 @@ class Publisher:
         branch = git('rev-parse', '--abbrev-ref', 'HEAD')
         remote = git('remote', 'get-url', '--push', 'origin')
         # Fixed repository allowlist, HTTPS clone and SSH release are both supported.
-        if remote not in ('https://github.com/guomxin/cli-helper.git', 'git@github.com:guomxin/cli-helper.git'):
+        if remote not in ('https://github.com/guomxin/agentbridge.git', 'git@github.com:guomxin/agentbridge.git',
+                          'https://github.com/guomxin/cli-helper.git', 'git@github.com:guomxin/cli-helper.git'):
             raise ValueError('Release remote mismatch')
         try:
             main = git('rev-parse', 'refs/heads/main')
@@ -151,7 +152,7 @@ class Publisher:
                 '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'UserKnownHostsFile=' + str(known), '-o', 'ConnectTimeout=15'])
         host = lifecycle.settings(self.args.host_profile)
-        lifecycle.authorize(host, self.args.cutover)
+        lifecycle.authorize(host, self.args.authorization)
         if self.args.identity_label and (len(set(x.lower() for x in self.args.identity_label)) < 2
                 or not self.args.expect_endpoint):
             raise ValueError('Isolation requires two distinct identities and expected endpoints')
@@ -167,6 +168,11 @@ class Publisher:
             raise ValueError('Candidate changed during validation')
         if environment(self.args.profile, self.args.host, self.args.remote_root) != self.units:
             raise ValueError('Environment changed during validation')
+        reviewed_host = lifecycle.settings(self.args.host_profile)
+        lifecycle.authorize(reviewed_host, self.args.authorization)
+        if (reviewed_host.get('profileSha256') != host.get('profileSha256')
+                or lifecycle.fingerprint(reviewed_host) != before):
+            raise ValueError('Host configuration changed during validation')
         self.deploy(artifact)
         if lifecycle.fingerprint(host) != before:
             raise ValueError('Host inputs changed during deployment')
@@ -180,7 +186,7 @@ class Publisher:
         if restart['required']:
             if self.args.resume:
                 raise ValueError('Resume requires verified unchanged Gateway; restart forbidden')
-            lifecycle.manage(host, 'restart', 'gateway', self.args.cutover)
+            lifecycle.manage(host, 'restart', 'gateway', self.args.authorization)
         warmup(host)
         result = acceptance(self, host, self.args.identity_label, self.args.expect_endpoint)
         # Push is the last step; no push on any failed acceptance or changed candidate.

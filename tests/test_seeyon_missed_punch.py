@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_missed_punch import (
+from agentbridge.adapters.seeyon_missed_punch import (
     MISSED_PUNCH_APPROVAL_CONTRACT_VERSION,
     MISSED_PUNCH_DRAFT_CONTRACT_VERSION,
     MISSED_PUNCH_FORM_APP_ID,
@@ -90,7 +90,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         page = FakePage()
         frame = FakeFrame()
         with patch(
-            "bscli.adapters.seeyon_missed_punch._open_and_validate_draft_form",
+            "agentbridge.adapters.seeyon_missed_punch._open_and_validate_draft_form",
             return_value=(page, frame),
         ):
             prepared = prepare_missed_punch_draft(FakeAdapter(), object(), _inputs())
@@ -112,19 +112,19 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_missed_punch._open_and_validate_draft_form",
+                "agentbridge.adapters.seeyon_missed_punch._open_and_validate_draft_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_missed_punch._fill_missed_punch_form"),
+            patch("agentbridge.adapters.seeyon_missed_punch._fill_missed_punch_form"),
             patch(
-                "bscli.adapters.seeyon_missed_punch._read_missed_punch_form",
+                "agentbridge.adapters.seeyon_missed_punch._read_missed_punch_form",
                 side_effect=[readback, readback],
             ),
             patch(
-                "bscli.adapters.seeyon_missed_punch._wait_for_draft_frame",
+                "agentbridge.adapters.seeyon_missed_punch._wait_for_draft_frame",
                 return_value=frame,
             ),
-            patch("bscli.adapters.seeyon_missed_punch._validate_draft_controls"),
+            patch("agentbridge.adapters.seeyon_missed_punch._validate_draft_controls"),
         ):
             result = save_missed_punch_draft(
                 FakeAdapter(),
@@ -168,7 +168,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         self.assertIn("忘记打卡", summary_fields["补签原因"])
 
         boundary = []
-        with patch("bscli.adapters.seeyon_missed_punch.time.sleep", return_value=None):
+        with patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None):
             result = approve_missed_punch_request(
                 adapter,
                 worker,
@@ -191,7 +191,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         )
 
         with (
-            patch("bscli.adapters.seeyon_missed_punch.time.sleep", return_value=None),
+            patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None),
             patch.object(
                 adapter,
                 "list_workflows",
@@ -220,9 +220,9 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         )
 
         with (
-            patch("bscli.adapters.seeyon_missed_punch.time.sleep", return_value=None),
+            patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None),
             patch(
-                "bscli.adapters.seeyon_missed_punch.time.monotonic",
+                "agentbridge.adapters.seeyon_missed_punch.time.monotonic",
                 side_effect=[0, 0, 6],
             ),
             patch.object(
@@ -287,19 +287,19 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         bad = {**readback, "location": "错误地点"}
         with (
             patch(
-                "bscli.adapters.seeyon_missed_punch._open_and_validate_draft_form",
+                "agentbridge.adapters.seeyon_missed_punch._open_and_validate_draft_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_missed_punch._fill_missed_punch_form"),
+            patch("agentbridge.adapters.seeyon_missed_punch._fill_missed_punch_form"),
             patch(
-                "bscli.adapters.seeyon_missed_punch._read_missed_punch_form",
+                "agentbridge.adapters.seeyon_missed_punch._read_missed_punch_form",
                 side_effect=[readback, bad],
             ),
             patch(
-                "bscli.adapters.seeyon_missed_punch._wait_for_draft_frame",
+                "agentbridge.adapters.seeyon_missed_punch._wait_for_draft_frame",
                 return_value=frame,
             ),
-            patch("bscli.adapters.seeyon_missed_punch._validate_draft_controls"),
+            patch("agentbridge.adapters.seeyon_missed_punch._validate_draft_controls"),
         ):
             with self.assertRaises(MissedPunchOutcomeUnknown):
                 save_missed_punch_draft(

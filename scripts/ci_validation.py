@@ -54,8 +54,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True, choices=["docs", "release", "full"])
     args = parser.parse_args()
-    if os.name == "nt":
-        parser.error("CI validation targets macOS/Linux; use the legacy Windows entrypoint separately")
+    if os.name != "posix":
+        parser.error("CI validation requires macOS/Linux")
     run_profile(args.profile, Path(__file__).resolve().parents[1])
 
 

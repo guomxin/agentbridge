@@ -99,8 +99,8 @@
     ],
     "prepare_function": "prepare_smartlight_alarm_remark_update",
     "commit_function": "commit_smartlight_alarm_remark_update",
-    "contract_error": "bscli.adapters.smartlight.SmartlightAlarmRemarkContractMismatch",
-    "outcome_error": "bscli.adapters.smartlight.SmartlightAlarmRemarkOutcomeUnknown",
+    "contract_error": "agentbridge.adapters.smartlight.SmartlightAlarmRemarkContractMismatch",
+    "outcome_error": "agentbridge.adapters.smartlight.SmartlightAlarmRemarkOutcomeUnknown",
     "field_message": "请在可信字段卡中核对告警备注。",
     "authorization_message": "照明告警备注修改计划需要在可信授权卡中确认。"
   },

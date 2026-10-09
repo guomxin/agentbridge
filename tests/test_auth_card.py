@@ -4,8 +4,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import urlencode
 
-from bscli.auth.card import TrustedAuthApplication, _safe_failure_message
-from bscli.core.auth_challenges import AuthChallengeStore
+from agentbridge.auth.card import TrustedAuthApplication, _safe_failure_message
+from agentbridge.core.auth_challenges import AuthChallengeStore
 
 
 class TrustedAuthCardTests(unittest.TestCase):

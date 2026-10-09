@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createResultView, completedInteractionPresentation as presentation,
   taskCardStatusMessage as batchMessage, taskCardStatusForInteraction as cardStatus,
-  taskPlanFailurePresentation as failurePresentation } from "../bscli/workspace/static/workspace_results.mjs";
-import { createTaskCards } from "../bscli/workspace/static/workspace_cards.mjs";
+  taskPlanFailurePresentation as failurePresentation } from "../agentbridge/workspace/static/workspace_results.mjs";
+import { createTaskCards } from "../agentbridge/workspace/static/workspace_cards.mjs";
 
 test("database CSV artifacts expose only valid authenticated download paths", () => {
   const node = (tag = "div") => ({tag, children: [], append(...items) { this.children.push(...items); }});

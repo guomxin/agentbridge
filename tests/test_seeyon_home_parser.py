@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from bscli.adapters.seeyon_home import (
+from agentbridge.adapters.seeyon_home import (
     extract_history_sections,
     parse_launch_page,
     parse_navigation_inventory,
@@ -324,7 +324,7 @@ class SeeyonHomeParserTests(unittest.TestCase):
             base_url="http://10.10.50.110/seeyon/collaboration/collaboration.do?method=newColl&templateId=tpl-1",
         )
 
-        self.assertEqual(result["schema_version"], "bscli.oa_launch_inspection.v1")
+        self.assertEqual(result["schema_version"], "agentbridge.oa_launch_inspection.v1")
         self.assertEqual(result["title"], "Seal launch")
         self.assertEqual(result["form_count"], 1)
         self.assertEqual(
@@ -829,7 +829,7 @@ class SeeyonHomeParserTests(unittest.TestCase):
 
         result = extract_history_sections(inventory)
 
-        self.assertEqual(result["schema_version"], "bscli.oa_history_sections.v1")
+        self.assertEqual(result["schema_version"], "agentbridge.oa_history_sections.v1")
         self.assertEqual(result["count"], 3)
         self.assertEqual(
             [(item["kind"], item["tab_id"], item["section_bean_id"]) for item in result["items"]],

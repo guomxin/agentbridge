@@ -26,30 +26,31 @@ def main():
     publish.add_argument('--github-identity')
     publish.add_argument('--github-known-hosts')
     publish.add_argument('--host-profile')
-    publish.add_argument('--cutover')
+    publish.add_argument('--authorization')
     publish.add_argument('--identity-label', action='append', default=[])
     publish.add_argument('--expect-endpoint', action='append', default=[])
     publish.add_argument('--offline', action='store_true', help='No network, predecessor remains unverified')
-    publish.add_argument('--apply', action='store_true', help='Explicit production operation, requires final cutover evidence')
+    publish.add_argument('--apply', action='store_true', help='Explicit production operation, requires reviewed host authorization')
     publish.add_argument('--resume', action='store_true')
     publish.add_argument('--reuse-validation', action='store_true')
     host = commands.add_parser('host')
-    host.add_argument('action', choices=['render', 'status', 'start', 'stop', 'restart'])
+    host.add_argument('action', choices=['render', 'review', 'register', 'status', 'start', 'stop', 'restart'])
     host.add_argument('--profile', required=True)
     host.add_argument('--destination')
+    host.add_argument('--ownership-evidence')
     host.add_argument('--kind', choices=['gateway', 'tunnel'], default='gateway')
-    host.add_argument('--cutover')
+    host.add_argument('--authorization')
     args = parser.parse_args()
     if sys.version_info < (3, 12):
         parser.error('Python 3.12+ required')
-    report = external(args.report) if args.report else Path.home() / 'AgentBridgeMigration' / ('native-run-' + uuid.uuid4().hex + '.json')
+    report = external(args.report) if args.report else Path.home() / '.local/state/agentbridge/maintenance' / ('native-run-' + uuid.uuid4().hex + '.json')
     try:
         if args.command == 'validate':
             from validation import validate
             result = validate(full=args.full, tests=args.test, plugin=args.plugin)
         elif args.command == 'publish':
-            if args.apply and (not args.host_profile or not args.cutover):
-                raise ValueError('--apply requires --host-profile and --cutover')
+            if args.apply and (not args.host_profile or not args.authorization):
+                raise ValueError('--apply requires --host-profile and --authorization')
             from publish import Publisher
             publisher = Publisher(args)
             result = publisher.execute() if args.apply else publisher.plan(offline=args.offline)
@@ -60,10 +61,16 @@ def main():
                 if not args.destination:
                     raise ValueError('render requires a new --destination')
                 result = lifecycle.render(config, args.destination)
+            elif args.action == 'review':
+                result = lifecycle.review(config)
+            elif args.action == 'register':
+                if not args.destination or not args.ownership_evidence:
+                    raise ValueError('Registration requires --destination and --ownership-evidence')
+                result = lifecycle.register(config, args.ownership_evidence, args.destination)
             else:
-                if args.action in ('start', 'restart') and not args.cutover:
-                    raise ValueError('Activation requires final --cutover evidence')
-                result = lifecycle.manage(config, args.action, args.kind, args.cutover)
+                if args.action in ('start', 'restart') and not args.authorization:
+                    raise ValueError('Activation requires --authorization')
+                result = lifecycle.manage(config, args.action, args.kind, args.authorization)
         result.update(checkedAt=timestamp(), exitCode=0)
         code = 0
     except (ValueError, RuntimeError, OSError, KeyError) as error:

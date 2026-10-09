@@ -80,7 +80,7 @@ def main() -> int:
         }
     ]
     if not arguments.skip_openclaw:
-        npm = shutil.which("npm.cmd" if sys.platform == "win32" else "npm")
+        npm = shutil.which("npm")
         if not npm:
             raise RuntimeError("npm is required for OpenClaw compatibility tests")
         commands.append(
@@ -114,7 +114,7 @@ def main() -> int:
     for path in REFERENCE_SOURCE.rglob("*.py"):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
-            if stripped.startswith("from bscli") or stripped.startswith("import bscli"):
+            if stripped.startswith(("from agentbridge", "import agentbridge", "from bscli", "import bscli")):
                 forbidden_imports.append(f"{path.relative_to(ROOT)}:{number}")
     import_boundary_passed = not forbidden_imports
     passed = passed and import_boundary_passed

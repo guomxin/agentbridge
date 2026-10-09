@@ -18,24 +18,9 @@ import sys
 import tempfile
 import time
 def peak_rss_mib():
-    if os.name != 'nt':
-        import resource
-        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 2)
-    import ctypes
-    from ctypes import wintypes
-    class Counters(ctypes.Structure):
-        _fields_ = [('cb', wintypes.DWORD), ('faults', wintypes.DWORD)] + [
-            (name, ctypes.c_size_t) for name in ('peak', 'working', 'paged_peak', 'paged', 'nonpaged_peak', 'nonpaged', 'pagefile', 'pagefile_peak')]
-    counters = Counters()
-    counters.cb = ctypes.sizeof(counters)
-    current = ctypes.windll.kernel32.GetCurrentProcess
-    current.restype = wintypes.HANDLE
-    memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
-    memory_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
-    memory_info.restype = wintypes.BOOL
-    if not memory_info(current(), ctypes.byref(counters), counters.cb):
-        return None
-    return round(counters.peak / 1024**2, 2)
+    import resource
+    scale = 1024**2 if sys.platform == 'darwin' else 1024
+    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale, 2)
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,9 +30,9 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from pydantic import AnyHttpUrl
 
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.mcp.central import StoredIdentityTokenVerifier
-from bscli.mcp.resource_budget import BoundedMcpProtocol, bounded_mcp_app
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.mcp.central import StoredIdentityTokenVerifier
+from agentbridge.mcp.resource_budget import BoundedMcpProtocol, bounded_mcp_app
 
 
 async def measure(rounds, levels):
@@ -129,7 +114,7 @@ async def measure(rounds, levels):
             source_root = Path(__file__).resolve().parents[1]
             return {'schema': 'agentbridge.capacity.v1', 'measured_at': datetime.now(timezone.utc).isoformat(),
                 'source_sha256': {name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
-                    for name in ('bscli/mcp/resource_budget.py', 'bscli/mcp/central.py', 'scripts/measure_mcp_capacity.py')},
+                    for name in ('agentbridge/mcp/resource_budget.py', 'agentbridge/mcp/central.py', 'scripts/measure_mcp_capacity.py')},
                 'environment': {
                 'platform': platform.platform(), 'python': platform.python_version(), 'logical_cpus': os.cpu_count(),
                 'uvicorn': uvicorn.__version__}, 'scope': 'isolated loopback MCP/auth/SQLite; 16 synthetic subjects; 50ms fake downstream; client and server share process; RSS includes client and server; no TLS or production/model load',

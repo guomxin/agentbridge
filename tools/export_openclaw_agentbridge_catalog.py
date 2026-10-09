@@ -8,9 +8,9 @@ from unittest.mock import MagicMock
 
 from starlette.testclient import TestClient
 
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.core.planning_policy import planning_capability_for_tool, planning_descriptor
-from bscli.mcp.central import (
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.core.planning_policy import planning_capability_for_tool, planning_descriptor
+from agentbridge.mcp.central import (
     create_central_mcp_server,
     validate_central_mcp_server_config,
 )

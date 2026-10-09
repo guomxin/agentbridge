@@ -5,11 +5,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from bscli.adapters.seeyon_flight_application import (
+from agentbridge.adapters.seeyon_flight_application import (
     FIELD_LABELS, LEG_FIELDS, FLIGHT_APPLICATION_SNAPSHOT_SCRIPT,
     flight_application_business_snapshot,
 )
-from bscli.adapters.seeyon_pending_actions import (
+from agentbridge.adapters.seeyon_pending_actions import (
     PendingActionContractMismatch, PendingActionOutcomeUnknown,
     approve_flight_application, pending_action_profile_for_title,
     preflight_pending_action, prepare_flight_application_approval,
@@ -74,7 +74,7 @@ def target(monkeypatch):
     worker.page.frames = [FlightFrame(data)]
     adapter = FakeAdapter(worker)
     adapter.list_workflows = Mock(return_value={"items": [], "coverage": {"status": "complete"}})
-    monkeypatch.setattr("bscli.adapters.seeyon_pending_actions.time.sleep", lambda _: None)
+    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_actions.time.sleep", lambda _: None)
     return fixture, data, worker, adapter
 
 

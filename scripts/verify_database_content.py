@@ -8,7 +8,7 @@ import tempfile
 
 
 def load_candidate(path):
-    for name, file in [('bscli.database.content', path.with_name('content.py')),
+    for name, file in [('agentbridge.database.content', path.with_name('content.py')),
                        ('database_content_candidate', path)]:
         spec = importlib.util.spec_from_file_location(name, file)
         module = importlib.util.module_from_spec(spec)
@@ -25,7 +25,7 @@ def main():
     if args.module:
         module = load_candidate(args.module)
     else:
-        from bscli.database import independent as module
+        from agentbridge.database import independent as module
     with tempfile.TemporaryDirectory(prefix='database-content-acceptance-') as root:
         runtime = module.IndependentDatabase.__new__(module.IndependentDatabase)
         runtime.home = args.home

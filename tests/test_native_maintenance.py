@@ -130,16 +130,6 @@ def test_content_fingerprint_ignores_docs_but_tracks_host_env(host, tmp_path):
         assert lifecycle.fingerprint(host) != original
 
 
-def test_snapshot_cannot_activate(private, host):
-    receipt = private('receipt.json', {'kind': 'snapshot'})
-    manifest = private('manifest.json', {'kind': 'snapshot'})
-    evidence = private('cutover.json', {'schema': 'agentbridge.mac-cutover.v1',
-        **{n: True for n in ('windowsGatewayStopped', 'windowsGuardDisabled', 'windowsTunnelStopped', 'serverForwardReleased', 'm2Accepted')},
-        'stagedManifest': str(manifest), 'bundleReceipt': str(receipt)})
-    with mock.patch.object(lifecycle, 'run') as execute:
-        with pytest.raises(ValueError):
-            lifecycle.manage(host, 'start', 'tunnel', evidence)
-    execute.assert_not_called()
 
 
 def test_full_validation_stops_before_receipt_on_failure():
@@ -179,7 +169,7 @@ def test_offline_plan_never_connects_and_reports_branch_blocker():
         if args[:2] == ('rev-parse', '--abbrev-ref'):
             return 'codex/macos-native-migration'
         if args[0] == 'remote':
-            return 'https://github.com/guomxin/cli-helper.git'
+            return 'https://github.com/guomxin/agentbridge.git'
         if args[0] == 'status':
             return ''
         return 'a' * 40
@@ -216,11 +206,11 @@ def test_failed_warmup_retains_pending(host):
 def test_failed_deployment_cannot_push(host):
     publisher = object.__new__(publish.Publisher)
     publisher.args = argparse.Namespace(offline=False, reuse_validation=True, resume=False,
-        host_profile='private', cutover='private', identity_label=[], expect_endpoint=[],
+        host_profile='private', authorization='private', identity_label=[], expect_endpoint=[],
         profile='private', host='example.invalid', remote_root='/home/test')
     publisher.commit = 'a' * 40
     publisher.units = {'unit': b'x'}
-    plan = {'blockers': [], 'remoteUrl': 'https://github.com/guomxin/cli-helper.git'}
+    plan = {'blockers': [], 'remoteUrl': 'https://github.com/guomxin/agentbridge.git'}
     with mock.patch.object(publisher, 'plan', return_value=plan), \
          mock.patch.object(lifecycle, 'settings', return_value=host), \
          mock.patch.object(lifecycle, 'authorize'), \
@@ -235,24 +225,8 @@ def test_failed_deployment_cannot_push(host):
     assert not any('push' in c.args[0] for c in execute.call_args_list)
 
 
-def test_preparation_profile_cannot_activate_with_cutover_flags(host):
-    host['preparationOnly'] = True
-    with mock.patch.object(lifecycle, 'cutover') as verify:
-        with pytest.raises(ValueError, match='Preparation'):
-            lifecycle.authorize(host, 'unused')
-    verify.assert_not_called()
 
 
-def test_reviewed_profile_and_final_source_binding(host):
-    host.update(preparationOnly=False, profileSha256='reviewed', sourceManifestSha256='final', sourceCommit='commit')
-    evidence={'reviewedHostProfileSha256':'reviewed','transferMode':'ssh-direct',
-              'expectedManifestSha256':'final','expectedSourceCommit':'commit'}
-    with mock.patch.object(lifecycle,'cutover',return_value=evidence):
-        assert lifecycle.authorize(host,'unused') == evidence
-        host['sourceManifestSha256']='snapshot'
-        with pytest.raises(ValueError,match='final handoff'): lifecycle.authorize(host,'unused')
-        host['sourceManifestSha256']='final';host['profileSha256']='changed'
-        with pytest.raises(ValueError,match='reviewed'): lifecycle.authorize(host,'unused')
 
 
 def test_observe_normalizes_localized_process_start(host, monkeypatch):
@@ -288,3 +262,97 @@ def test_runtime_uses_normalized_observation_without_second_ps(host, tmp_path):
          mock.patch.object(acceptance, 'host_run', side_effect=responses), \
          mock.patch.object(acceptance, 'run', side_effect=AssertionError('Unexpected second ps')):
         assert acceptance.runtime(host)['rpc'] == 'ok'
+
+
+def registered_host(host, private):
+    from datetime import datetime, timezone
+    host.update(preparationOnly=False, profileSha256='a' * 64)
+    ownership = private('ownership.json', {
+        'schema': 'agentbridge.host-ownership.v1', 'bindings': lifecycle.authorization_bindings(host),
+        'gatewaySingleOwner': True, 'tunnelSingleOwner': True, 'identityBindingsReviewed': True,
+        'checkedAt': datetime.now(timezone.utc).isoformat(),
+    })
+    path = ownership.parent / 'authorization.json'
+    result = lifecycle.register(host, ownership, path)
+    assert result['productionActions'] is False
+    return path, ownership
+
+
+def test_host_registration_binding_and_changed_ownership(host, private):
+    path, ownership = registered_host(host, private)
+    assert lifecycle.authorize(host, path)['schema'] == 'agentbridge.host-authorization.v1'
+    host['profileSha256'] = 'changed'
+    with pytest.raises(ValueError, match='reviewed'):
+        lifecycle.authorize(host, path)
+    host['profileSha256'] = 'a' * 64
+    original = Path(host['caCertificate']).read_bytes()
+    Path(host['caCertificate']).write_bytes(b'new CA')
+    with pytest.raises(ValueError, match='reviewed'):
+        lifecycle.authorize(host, path)
+    Path(host['caCertificate']).write_bytes(original)
+    with mock.patch.object(lifecycle, 'host_id', return_value='another login'):
+        with pytest.raises(ValueError, match='reviewed'):
+            lifecycle.authorize(host, path)
+    ownership.write_text('{}')
+    with pytest.raises(ValueError, match='ownership'):
+        lifecycle.authorize(host, path)
+
+
+def test_preparation_missing_and_legacy_evidence_never_start(host, private):
+    path, _ = registered_host(host, private)
+    host['preparationOnly'] = True
+    with mock.patch.object(lifecycle, 'run') as execute:
+        with pytest.raises(ValueError, match='Preparation'):
+            lifecycle.manage(host, 'start', 'gateway', path)
+    execute.assert_not_called()
+    host['preparationOnly'] = False
+    legacy = private('old.json', {'schema': 'agentbridge.mac-cutover.v1'})
+    with pytest.raises(ValueError, match='authorization'):
+        lifecycle.authorize(host, legacy)
+    path.chmod(0o644)
+    with pytest.raises(ValueError, match='Private file'):
+        lifecycle.authorize(host, path)
+
+
+def test_registration_refuses_incomplete_stale_and_overwrite(host, private):
+    path, ownership = registered_host(host, private)
+    with pytest.raises(FileExistsError):
+        lifecycle.register(host, ownership, path)
+    value = common.read(ownership)
+    value['checkedAt'] = '2000-01-01T00:00:00+00:00'
+    ownership.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match='last 24 hours'):
+        lifecycle.register(host, ownership, ownership.parent / 'new.json')
+    value['gatewaySingleOwner'] = False
+    ownership.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match='ownership'):
+        lifecycle.register(host, ownership, ownership.parent / 'new.json')
+
+
+def test_private_file_symlink_is_rejected(private):
+    target = private('source-secret', 'fixture')
+    link = target.parent / 'alias'
+    link.symlink_to(target)
+    with pytest.raises(ValueError, match='symbolic'):
+        common.private_file(link)
+
+
+def test_host_changes_during_validation_refuse_before_deploy(host):
+    publisher = object.__new__(publish.Publisher)
+    publisher.args = argparse.Namespace(offline=False, reuse_validation=True, resume=False,
+        host_profile='private', authorization='private', identity_label=[], expect_endpoint=[],
+        profile='private', host='example.invalid', remote_root='/home/test')
+    publisher.commit = 'a' * 40
+    publisher.units = {'unit': b'x'}
+    with mock.patch.object(publisher, 'plan', return_value={'blockers': [], 'remoteUrl': 'https://github.com/guomxin/agentbridge.git'}), \
+         mock.patch.object(lifecycle, 'settings', return_value=host), \
+         mock.patch.object(lifecycle, 'authorize'), \
+         mock.patch.object(lifecycle, 'fingerprint', side_effect=['before', 'changed']), \
+         mock.patch.object(publish, 'environment', return_value=publisher.units), \
+         mock.patch.object(publish, 'git', return_value=publisher.commit), \
+         mock.patch.object(publish, 'test_run'), \
+         mock.patch.object(publish, 'run', return_value='{}'), \
+         mock.patch.object(publisher, 'deploy') as deploy:
+        with pytest.raises(ValueError, match='changed during validation'):
+            publisher.execute()
+    deploy.assert_not_called()

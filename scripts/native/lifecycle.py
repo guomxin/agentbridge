@@ -1,4 +1,4 @@
-"""Single launchd owner, explicit cutover gate, content-based conditional restart."""
+"""Single launchd owner, explicit host authorization, content-based conditional restart."""
 from __future__ import annotations
 from contextlib import contextmanager
 import fcntl
@@ -10,7 +10,6 @@ import re
 import shutil
 import socket
 import time
-import sys
 import urllib.request
 from common import ROOT, environment_file, external, private_file, read, run, save, sha
 
@@ -99,51 +98,76 @@ def render(config, destination):
     return {'status': 'rendered-only', 'directory': str(destination), 'loaded': False}
 
 
-def cutover(path):
-    """Local operator evidence; not a substitute for live source/server inspection."""
-    value = read(private_file(path))
-    if value.get('schema') != 'agentbridge.mac-cutover.v1':
-        raise ValueError('Explicit cutover evidence required')
-    for name in ('windowsGatewayStopped', 'windowsGuardDisabled', 'windowsTunnelStopped',
-                 'serverForwardReleased', 'm2Accepted'):
-        if value.get(name) is not True:
-            raise ValueError('Cutover blocked: ' + name)
-    if value.get('transferMode') == 'ssh-direct':
-        sys.path.insert(0, str(ROOT / 'scripts/migration'))
-        from direct_transfer import verify
-        verify(external(value['stagedDirectory']), external(value['transferReceipt']),
-               value['expectedManifestSha256'], value['expectedSourceCommit'], require_final=True)
-        return value
-    manifest = read(external(value['stagedManifest']))
-    receipt = read(external(value['bundleReceipt']))
-    if (manifest.get('schema') != 'agentbridge.mac-migration.bundle.v1'
-            or manifest.get('kind') != 'final' or receipt.get('kind') != 'final'
-            or not re.fullmatch(r'[0-9a-f]{64}', value.get('expectedSha256', ''))
-            or receipt.get('sha256') != value['expectedSha256']
-            or receipt.get('sourceCommit') != manifest.get('sourceCommit')
-            or receipt.get('planSha256') != manifest.get('planSha256')):
-        raise ValueError('Final bundle evidence mismatch; snapshot cannot activate production')
-    bundle = external(value['bundlePath'])
-    if sha(bundle.read_bytes()) != value['expectedSha256']:
-        raise ValueError('Final encrypted bundle hash mismatch')
-    stage = external(value['stagedManifest']).parent
-    for row in manifest['files']:
-        p = (stage / row['name']).resolve()
-        if not p.is_relative_to(stage) or sha(p.read_bytes()) != row['sha256']:
-            raise ValueError('Final staging contents changed')
-    return value
+def host_id():
+    # A registration belongs to this login on this host, never to a copied profile alone.
+    return sha((socket.gethostname() + ":" + str(os.getuid())).encode())
+
+
+def authorization_bindings(config):
+    return {"hostId": host_id(), "profileSha256": config['profileSha256'],
+            "stateDir": str(external(config['stateDir'])),
+            "caSha256": sha(Path(config['caCertificate']).read_bytes())}
+
+
+def register(config, ownership_path, destination):
+    """Record reviewed ownership evidence without starting or stopping a process.
+
+    Ownership statements are local operator evidence, not remote attestation.
+    Runtime observation and listener conflict checks still run during activation.
+    """
+    from datetime import datetime, timezone, timedelta
+    if config.get('preparationOnly') is not False:
+        raise ValueError('Preparation or unclassified host profile cannot register')
+    evidence_path = private_file(ownership_path)
+    evidence = read(evidence_path)
+    bindings = authorization_bindings(config)
+    if (evidence.get('schema') != 'agentbridge.host-ownership.v1'
+            or evidence.get('bindings') != bindings
+            or any(evidence.get(n) is not True for n in
+                   ('gatewaySingleOwner', 'tunnelSingleOwner', 'identityBindingsReviewed'))):
+        raise ValueError('Reviewed host ownership evidence required')
+    checked = datetime.fromisoformat(evidence.get('checkedAt', ''))
+    now = datetime.now(timezone.utc)
+    if checked.tzinfo is None or not now - timedelta(hours=24) <= checked <= now:
+        raise ValueError('Ownership review must be from the last 24 hours')
+    destination = external(destination)
+    value = {'schema': 'agentbridge.host-authorization.v1', 'bindings': bindings,
+             'ownershipEvidence': str(evidence_path), 'ownershipSha256': sha(evidence_path.read_bytes()),
+             'registeredAt': now.isoformat()}
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as stream:
+        json.dump(value, stream, indent=2)
+        stream.write('\n')
+    return {'status': 'registered', 'authorization': str(destination), 'productionActions': False}
+
+
+def review(config):
+    """Read-only local observations; never certify remote ownership automatically."""
+    try:
+        gateway = observe(config)
+    except (RuntimeError, ValueError, OSError):
+        gateway = None
+    return {'status': 'review-required', 'bindings': authorization_bindings(config),
+            'gatewayObservation': gateway, 'remoteOwnership': 'operator-review-required',
+            'productionActions': False}
 
 
 def authorize(config, evidence):
     if config.get('preparationOnly') is not False:
         raise ValueError('Preparation or unclassified host profile cannot activate production')
-    value = cutover(evidence)
-    if value.get('reviewedHostProfileSha256') != config.get('profileSha256'):
-        raise ValueError('Host profile differs from reviewed cutover configuration')
-    if value.get('transferMode') == 'ssh-direct':
-        if (config.get('sourceManifestSha256') != value['expectedManifestSha256']
-                or config.get('sourceCommit') != value['expectedSourceCommit']):
-            raise ValueError('Host configuration was not adapted from this final handoff')
+    value = read(private_file(evidence))
+    if (value.get('schema') != 'agentbridge.host-authorization.v1'
+            or value.get('bindings') != authorization_bindings(config)):
+        raise ValueError('Host authorization differs from reviewed host/profile/CA/state')
+    ownership_path = private_file(value['ownershipEvidence'])
+    ownership = read(ownership_path)
+    if (sha(ownership_path.read_bytes()) != value.get('ownershipSha256')
+            or ownership.get('schema') != 'agentbridge.host-ownership.v1'
+            or ownership.get('bindings') != value['bindings']
+            or any(ownership.get(n) is not True for n in
+                   ('gatewaySingleOwner', 'tunnelSingleOwner', 'identityBindingsReviewed'))):
+        raise ValueError('Reviewed ownership evidence changed or incomplete')
     return value
 
 

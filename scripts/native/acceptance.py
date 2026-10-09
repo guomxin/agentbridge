@@ -163,7 +163,7 @@ def acceptance(publisher, host, labels=(), endpoints=()):
                 time.sleep(1)
         if not endpoints:
             raise ValueError('Explicit expected omnichannel endpoints required')
-        args = [root + '/current/venv/bin/python', '-P', '-m', 'bscli.cli.main', '--home', root + '/data', 'diagnostics', 'omnichannel']
+        args = [root + '/current/venv/bin/python', '-P', '-m', 'agentbridge.cli.main', '--home', root + '/data', 'diagnostics', 'omnichannel']
         for endpoint in endpoints:
             if not re.fullmatch(r'[A-Za-z0-9_.@-]+=[A-Za-z0-9_.-]+', endpoint):
                 raise ValueError('Invalid endpoint expectation')

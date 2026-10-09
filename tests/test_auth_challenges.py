@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.core.auth_challenges import (
+from agentbridge.core.auth_challenges import (
     AuthChallengeStore,
     ChallengeAccessDenied,
     ChallengeStateError,

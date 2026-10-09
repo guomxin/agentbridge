@@ -13,9 +13,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.admin.application import AdminControlPlane
-from bscli.admin.server import create_admin_http_server, validate_admin_server_config
-from bscli.admin.stores import (
+from agentbridge.admin.application import AdminControlPlane
+from agentbridge.admin.server import create_admin_http_server, validate_admin_server_config
+from agentbridge.admin.stores import (
     ADMIN_SESSION_IDLE_SECONDS,
     ADMIN_SESSION_TTL_SECONDS,
     AdminAccountStore,
@@ -24,10 +24,10 @@ from bscli.admin.stores import (
     GovernancePolicyDenied,
     GovernancePolicyStore,
 )
-from bscli.core.capability import CapabilityRegistry, CapabilitySpec
-from bscli.core.central_service import CentralCapabilityService
-from bscli.cli.main import main
-from bscli.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.core.capability import CapabilityRegistry, CapabilitySpec
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.cli.main import main
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
 
 
 PASSWORD = "AgentBridge!Admin9"
@@ -263,7 +263,7 @@ class GovernanceRuntimeTests(unittest.TestCase):
             )
             from tests.authorization_fixtures import grant_permissions
             grant_permissions(service.user_grants, "user-a", ["oa.leave.submit"])
-            with patch.dict("bscli.core.user_grants.CAPABILITY_PERMISSIONS", {"oa.test.write": "oa.leave.submit"}):
+            with patch.dict("agentbridge.core.user_grants.CAPABILITY_PERMISSIONS", {"oa.test.write": "oa.leave.submit"}):
                 result = service.invoke(user_subject="user-a", capability_name="oa.test.write", arguments={})
 
             self.assertEqual(result["status"], "failed")
@@ -1006,8 +1006,8 @@ class AdminHttpServerTests(unittest.TestCase):
 
     def test_database_grants_http_change_existing_mcp_tokens_immediately(self) -> None:
         from starlette.testclient import TestClient
-        from bscli.database.independent import CAPABILITIES, IndependentDatabase
-        from bscli.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
+        from agentbridge.database.independent import CAPABILITIES, IndependentDatabase
+        from agentbridge.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
 
         with TemporaryDirectory() as tmp:
             service = CentralCapabilityService(home=tmp, base_url="http://127.0.0.1:1/seeyon")
@@ -1373,7 +1373,7 @@ class AdminStaticAssetTests(unittest.TestCase):
         import xml.etree.ElementTree as ET
 
         root = Path(__file__).resolve().parents[1]
-        static = root / "bscli/admin/static"
+        static = root / "agentbridge/admin/static"
         page = (static / "index.html").read_text(encoding="utf-8")
         script = (static / "admin.js").read_text(encoding="utf-8") + "\n" + "\n".join(
             path.read_text(encoding="utf-8") for path in sorted(static.glob("*.mjs"))
@@ -1386,7 +1386,7 @@ class AdminStaticAssetTests(unittest.TestCase):
                 self.assertTrue((static / name).is_file())
                 self.assertTrue(ET.parse(static / name).getroot().tag.endswith("svg"))
         package = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertIn("static/*.svg", package["tool"]["setuptools"]["package-data"]["bscli.admin"])
+        self.assertIn("static/*.svg", package["tool"]["setuptools"]["package-data"]["agentbridge.admin"])
         self.assertTrue((static / "lucide-LICENSE.txt").is_file())
         self.assertNotIn("https://", page)
         self.assertIn('id="navigation-toggle"', page)
@@ -1394,12 +1394,12 @@ class AdminStaticAssetTests(unittest.TestCase):
 
     def test_login_form_survives_async_submit_and_assets_are_csp_clean(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        static = root / "bscli/admin/static"
+        static = root / "agentbridge/admin/static"
         script = (static / "admin.js").read_text(encoding="utf-8") + "\n" + "\n".join(
             path.read_text(encoding="utf-8") for path in sorted(static.glob("*.mjs"))
         )
-        page = (root / "bscli/admin/static/index.html").read_text(encoding="utf-8")
-        stylesheet = (root / "bscli/admin/static/admin.css").read_text(encoding="utf-8")
+        page = (root / "agentbridge/admin/static/index.html").read_text(encoding="utf-8")
+        stylesheet = (root / "agentbridge/admin/static/admin.css").read_text(encoding="utf-8")
 
         self.assertIn("const loginForm = event.currentTarget;", script)
         self.assertIn("loginForm.reset();", script)

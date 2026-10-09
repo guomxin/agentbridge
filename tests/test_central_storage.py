@@ -10,11 +10,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.session_secrets import AesGcmSessionStateProtector, SessionStateStore
-from bscli.core.sessions import SessionRegistry
-from bscli.core.tasks import TaskHubStore
-from bscli.core.user_grants import PERMISSIONS
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.session_secrets import AesGcmSessionStateProtector, SessionStateStore
+from agentbridge.core.sessions import SessionRegistry
+from agentbridge.core.tasks import TaskHubStore
+from agentbridge.core.user_grants import PERMISSIONS
 
 
 class CentralStorageTests(unittest.TestCase):

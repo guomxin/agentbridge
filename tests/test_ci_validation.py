@@ -13,7 +13,6 @@ import pytest
 from scripts import ci_validation
 
 ROOT = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="Current CI maintenance targets macOS/Linux")
 
 
 def test_workflow_uses_linux_native_profiles_and_keeps_permissions_and_evidence():
@@ -129,21 +128,3 @@ def test_unknown_profile_runs_nothing(dispatch_root):
     with pytest.raises(ValueError, match="Unknown validation profile"):
         ci_validation.run_profile("reuse", dispatch_root)
     assert not (dispatch_root / "dispatch.jsonl").exists()
-
-
-def test_legacy_powershell_checks_are_windows_only_even_when_pwsh_exists(monkeypatch):
-    # Guarded methods/classes must be skipped before runtime discovery or script
-    # execution. The non-PowerShell policy/scanner tests remain collectable.
-    from tests.test_environment_profile import EnvironmentProfileTests, test_secret_scanner_detects_patterns_without_returning_secret_values
-    from tests.test_openclaw_lifecycle_lease import OpenClawLifecycleLeaseTests
-    from tests.test_openclaw_restart_policy import OpenClawRestartPolicyTests
-    from tests import test_release_policy
-
-    monkeypatch.setattr(shutil, "which", lambda _: "/fake/installed/pwsh")
-    assert EnvironmentProfileTests.test_explicit_profile_binds_target_and_unit_bytes.__unittest_skip__
-    assert OpenClawLifecycleLeaseTests.__unittest_skip__
-    assert OpenClawRestartPolicyTests.__unittest_skip__
-    marks = test_release_policy.test_preflight_checks_real_powershell_contract.pytestmark
-    assert any(m.name == "skipif" and m.args == (True,) for m in marks)
-    assert not getattr(test_release_policy.test_checked_in_release_policy_has_exact_existing_predecessors, "pytestmark", [])
-    assert not getattr(test_secret_scanner_detects_patterns_without_returning_secret_values, "__unittest_skip__", False)

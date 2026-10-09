@@ -1,4 +1,4 @@
-"""Native equivalent of Invoke-AgentBridgeValidation.ps1."""
+"""Native macOS/Linux validation entry point."""
 from __future__ import annotations
 import sys
 import os
@@ -9,7 +9,7 @@ from common import ROOT, run
 
 
 def test_run(argv, **kwargs):
-    # Windows uses DPAPI; POSIX fixture sessions need an isolated ephemeral key.
+    # Fixture sessions use an isolated ephemeral key.
     # Never inherit a production session key into a test suite.
     with tempfile.TemporaryDirectory(prefix='agentbridge-native-tests-') as folder:
         directory = Path(folder).resolve()
@@ -18,7 +18,7 @@ def test_run(argv, **kwargs):
         key.chmod(0o600)
         env = {**os.environ, 'AGENTBRIDGE_SESSION_KEY_FILE': str(key),
                'TMPDIR': str(directory)}
-        log = Path.home() / 'AgentBridgeMigration' / ('native-test-' + uuid.uuid4().hex + '.json')
+        log = Path.home() / '.local/state/agentbridge/maintenance' / ('native-test-' + uuid.uuid4().hex + '.json')
         return run(argv, env=env, diagnostics=log, **kwargs)
 
 

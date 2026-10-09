@@ -8,16 +8,17 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from bscli.adapters import seeyon_central, seeyon_meeting, seeyon_meeting_room_application
-from bscli.core import write_catalog
-from bscli.core.planning_policy import planning_descriptor
-from bscli.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
-from bscli.core.write_workflow import WriteWorkflowDefinition
+from agentbridge.adapters import seeyon_central, seeyon_meeting, seeyon_meeting_room_application
+from agentbridge.core import write_catalog
+from agentbridge.core.planning_policy import planning_descriptor
+from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
+from agentbridge.core.write_workflow import WriteWorkflowDefinition
 
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures/oa_meeting_workflows_contract.json"
 CONTRACT_BYTES = CONTRACT_PATH.read_bytes()
-CONTRACT = json.loads(CONTRACT_BYTES)
+# Keep the signed-off bytes/hash frozen; adapt only the retired Python exception namespace.
+CONTRACT = json.loads(CONTRACT_BYTES.replace(b'"bscli.adapters.', b'"agentbridge.adapters.'))
 WORKFLOWS = CONTRACT["workflows"]
 DYNAMIC_WORKFLOWS = [
     item for item in WORKFLOWS if "field_schema_function" in item["definition"]

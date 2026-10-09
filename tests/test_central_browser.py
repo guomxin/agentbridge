@@ -3,12 +3,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_central import (
+from agentbridge.adapters.seeyon_central import (
     SeeyonCentralAdapter,
     SeeyonLoginRequired,
     SeeyonSessionCheckUnavailable,
 )
-from bscli.browser.central import (
+from agentbridge.browser.central import (
     AttachedCentralBrowserWorker,
     CentralBrowserWorker,
     CentralProfileInUseError,

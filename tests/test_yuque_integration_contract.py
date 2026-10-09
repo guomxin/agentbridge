@@ -6,9 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.auth.interactive_browser import _challenge_ttl_seconds
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.auth_challenges import AuthChallengeStore
+from agentbridge.auth.interactive_browser import _challenge_ttl_seconds
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.auth_challenges import AuthChallengeStore
 
 
 class YuqueIntegrationContractTests(unittest.TestCase):

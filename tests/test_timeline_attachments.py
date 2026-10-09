@@ -4,8 +4,8 @@ from tempfile import TemporaryDirectory
 import base64
 import unittest
 
-from bscli.auth.timeline_attachment import TrustedTimelineAttachmentApplication
-from bscli.core.timeline_attachments import (
+from agentbridge.auth.timeline_attachment import TrustedTimelineAttachmentApplication
+from agentbridge.core.timeline_attachments import (
     TimelineAttachmentExpired,
     TimelineAttachmentIntegrityError,
     TimelineAttachmentStore,

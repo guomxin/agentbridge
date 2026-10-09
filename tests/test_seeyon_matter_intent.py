@@ -1,6 +1,6 @@
 import unittest
 
-from bscli.adapters.seeyon_matter_intent import build_matter_intent_preflight, normalize_matter_intent
+from agentbridge.adapters.seeyon_matter_intent import build_matter_intent_preflight, normalize_matter_intent
 
 
 class SeeyonMatterIntentTests(unittest.TestCase):

@@ -44,8 +44,8 @@ class QualityTests(unittest.TestCase):
         self.assertFalse(quality.evaluate(empty,answer)['passed'])
 
     def test_fixed_cases_pass_through_real_query_and_evidence_contracts(self):
-        from bscli.database.content import compile_query, add_evidence
-        from bscli.database.evidence import prepare_evidence_page
+        from agentbridge.database.content import compile_query, add_evidence
+        from agentbridge.database.evidence import prepare_evidence_page
         for case in CASES:
             with self.subTest(case=case['id']):
                 args=copy.deepcopy(case['scope'])

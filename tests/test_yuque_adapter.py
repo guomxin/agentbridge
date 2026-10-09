@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from urllib.parse import parse_qs, urlparse
 
-from bscli.adapters.yuque import (
+from agentbridge.adapters.yuque import (
     YUQUE_DOCUMENT_CATALOG_CAPABILITY,
     YUQUE_DOCUMENT_READ_CAPABILITY,
     YUQUE_DOCUMENT_SEARCH_CAPABILITY,

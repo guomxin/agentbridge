@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bscli.core.user_grants import UserGrantConflict, UserGrants
+from agentbridge.core.user_grants import UserGrantConflict, UserGrants
 
 
 class UserGrantTests(unittest.TestCase):
@@ -18,8 +18,8 @@ class UserGrantTests(unittest.TestCase):
             self.assertEqual(grants.effective_scopes("missing"), ["agentbridge:connect"])
 
     def test_unconfigured_service_denies_execution_and_historical_operation(self):
-        from bscli.core.central_service import CentralCapabilityService
-        from bscli.core.document_downloads import DocumentDownloadStore
+        from agentbridge.core.central_service import CentralCapabilityService
+        from agentbridge.core.document_downloads import DocumentDownloadStore
         with TemporaryDirectory() as temporary:
             service = CentralCapabilityService(home=temporary, base_url="http://oa.test/seeyon")
             with self.assertRaises(PermissionError):
@@ -45,7 +45,7 @@ class UserGrantTests(unittest.TestCase):
             self.assertIsNone(grants.get("user-a"))
 
     def test_template_filter_uses_exact_contract_and_no_private_tool_discovery(self):
-        from bscli.adapters.seeyon_leave import LEAVE_TEMPLATE_ID, LEAVE_FORM_APP_ID
+        from agentbridge.adapters.seeyon_leave import LEAVE_TEMPLATE_ID, LEAVE_FORM_APP_ID
         with TemporaryDirectory() as temporary:
             grants = UserGrants(Path(temporary) / "agentbridge.db")
             grants.save("user-a", ["oa.leave.draft"], expected_revision=0, actor="admin", reason="test")
@@ -58,7 +58,7 @@ class UserGrantTests(unittest.TestCase):
             self.assertNotIn("oa_leave_save_draft", tools)
 
     def test_service_execution_and_plan_catalog_follow_current_user_grant(self):
-        from bscli.core.central_service import CentralCapabilityService
+        from agentbridge.core.central_service import CentralCapabilityService
 
         with TemporaryDirectory() as temporary:
             service = CentralCapabilityService(

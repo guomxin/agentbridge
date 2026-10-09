@@ -6,16 +6,16 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 
-from bscli.adapters.seeyon_business_trip_submit import (
+from agentbridge.adapters.seeyon_business_trip_submit import (
     prepare_business_trip_submission,
 )
-from bscli.adapters.seeyon_central import SeeyonCentralAdapter
-from bscli.adapters.seeyon_leave import prepare_leave_draft
-from bscli.adapters.seeyon_leave_submit import prepare_leave_submission
-from bscli.browser.central import CentralBrowserWorker
-from bscli.core.config import ConfigStore
-from bscli.core.session_secrets import SessionStateStore
-from bscli.core.sessions import SessionRegistry
+from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
+from agentbridge.adapters.seeyon_leave import prepare_leave_draft
+from agentbridge.adapters.seeyon_leave_submit import prepare_leave_submission
+from agentbridge.browser.central import CentralBrowserWorker
+from agentbridge.core.config import ConfigStore
+from agentbridge.core.session_secrets import SessionStateStore
+from agentbridge.core.sessions import SessionRegistry
 
 
 def main() -> int:

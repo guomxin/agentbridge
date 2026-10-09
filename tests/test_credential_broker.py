@@ -2,12 +2,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.adapters.base import AdapterAuthenticationRejected, AdapterSessionCheckUnavailable
-from bscli.broker.credential import CredentialBroker
-from bscli.browser.central import CentralProfileUnavailableError
-from bscli.core.auth_challenges import AuthChallengeStore, ChallengeAccessDenied
-from bscli.core.session_secrets import SessionStateStore
-from bscli.core.sessions import SessionRegistry
+from agentbridge.adapters.base import AdapterAuthenticationRejected, AdapterSessionCheckUnavailable
+from agentbridge.broker.credential import CredentialBroker
+from agentbridge.browser.central import CentralProfileUnavailableError
+from agentbridge.core.auth_challenges import AuthChallengeStore, ChallengeAccessDenied
+from agentbridge.core.session_secrets import SessionStateStore
+from agentbridge.core.sessions import SessionRegistry
 
 
 class CredentialBrokerTests(unittest.TestCase):

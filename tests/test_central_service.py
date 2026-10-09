@@ -10,36 +10,36 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from bscli.adapters.seeyon_business_trip import BusinessTripOutcomeUnknown
-from bscli.adapters.smartlight import (
+from agentbridge.adapters.seeyon_business_trip import BusinessTripOutcomeUnknown
+from agentbridge.adapters.smartlight import (
     SMARTLIGHT_ALARM_REMARK_FIELD_CARD_SCHEMA,
     SmartlightBusinessRuleRejected,
 )
-from bscli.adapters.seeyon_business_trip_submit import (
+from agentbridge.adapters.seeyon_business_trip_submit import (
     BusinessTripBusinessValidationRequired,
     BusinessTripSubmissionBlocked,
 )
-from bscli.adapters.seeyon_leave_submit import LeaveBusinessValidationRequired
-from bscli.adapters.seeyon_meeting import MEETING_FIELD_CARD_SCHEMA, MeetingOutcomeUnknown
-from bscli.adapters.seeyon_meeting_room_application import (
+from agentbridge.adapters.seeyon_leave_submit import LeaveBusinessValidationRequired
+from agentbridge.adapters.seeyon_meeting import MEETING_FIELD_CARD_SCHEMA, MeetingOutcomeUnknown
+from agentbridge.adapters.seeyon_meeting_room_application import (
     MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA,
     MeetingRoomApplicationOutcomeUnknown,
 )
-from bscli.adapters.seeyon_pending_actions import PendingActionContractMismatch
-from bscli.adapters.seeyon_central import (
+from agentbridge.adapters.seeyon_pending_actions import PendingActionContractMismatch
+from agentbridge.adapters.seeyon_central import (
     SeeyonLoginRequired,
     SeeyonSessionCheckUnavailable,
 )
-from bscli.core.central_service import (
+from agentbridge.core.central_service import (
     CentralCapabilityService,
     _task_notification_message,
     capability_required_scopes,
     session_response,
 )
-from bscli.core.interactions import InteractionNotFound
-from bscli.core.operations import OperationStore
-from bscli.core.session_secrets import SessionStateAccessDenied
-from bscli.core.tasks import TaskIntegrityError, TaskNotFound
+from agentbridge.core.interactions import InteractionNotFound
+from agentbridge.core.operations import OperationStore
+from agentbridge.core.session_secrets import SessionStateAccessDenied
+from agentbridge.core.tasks import TaskIntegrityError, TaskNotFound
 from tests.test_smartlight_adapter import FakeSmartlightWorker
 
 
@@ -377,7 +377,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 },
             }
             with patch(
-                "bscli.core.write_catalog.prepare_smartlight_alarm_remark_update",
+                "agentbridge.core.write_catalog.prepare_smartlight_alarm_remark_update",
                 return_value=prepared_payload,
             ) as prepare:
                 replaced_target = service.invoke(
@@ -436,7 +436,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 }
 
             with patch(
-                "bscli.core.write_catalog.commit_smartlight_alarm_remark_update",
+                "agentbridge.core.write_catalog.commit_smartlight_alarm_remark_update",
                 side_effect=commit,
             ) as commit_handler:
                 committed = service.invoke(
@@ -574,7 +574,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 values={"remark": "相同备注"},
             )
             with patch(
-                "bscli.core.write_catalog.prepare_smartlight_alarm_remark_update",
+                "agentbridge.core.write_catalog.prepare_smartlight_alarm_remark_update",
                 side_effect=SmartlightBusinessRuleRejected("备注没有变化。"),
             ):
                 response = service.invoke(
@@ -633,7 +633,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 },
             }
             with patch(
-                "bscli.core.write_catalog.prepare_smartlight_alarm_work_area_submit",
+                "agentbridge.core.write_catalog.prepare_smartlight_alarm_work_area_submit",
                 return_value=prepared_payload,
             ) as prepare:
                 started = service.invoke(
@@ -683,7 +683,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 }
 
             with patch(
-                "bscli.core.write_catalog.commit_smartlight_alarm_work_area_submit",
+                "agentbridge.core.write_catalog.commit_smartlight_alarm_work_area_submit",
                 side_effect=commit,
             ):
                 committed = service.invoke(
@@ -902,7 +902,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             service = self._service(tmp, FakeWorker())
             self._activate(service)
             with patch(
-                "bscli.core.write_catalog.preflight_pending_action",
+                "agentbridge.core.write_catalog.preflight_pending_action",
                 side_effect=PendingActionContractMismatch(
                     "The selected pending workflow is not a registered standard_collaboration item."
                 ),
@@ -923,7 +923,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             service = self._service(tmp, FakeWorker())
             self._activate(service)
             with patch(
-                "bscli.core.write_catalog.preflight_pending_action",
+                "agentbridge.core.write_catalog.preflight_pending_action",
                 return_value={
                     "matched": True,
                     "review_fingerprint": "sha256:review-one",
@@ -971,7 +971,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             service = self._service(tmp, FakeWorker())
             self._activate(service)
             with patch(
-                "bscli.core.write_catalog.preflight_pending_action",
+                "agentbridge.core.write_catalog.preflight_pending_action",
                 return_value={
                     "matched": True,
                     "review_fingerprint": "sha256:before-opinion",
@@ -1010,7 +1010,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "bscli.core.write_catalog.prepare_attendance_confirmation",
+                "agentbridge.core.write_catalog.prepare_attendance_confirmation",
                 return_value=prepared_payload,
             ):
                 prepared = service.invoke(
@@ -1058,8 +1058,8 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 with (
                     patch.object(service.field_submissions, "create", wraps=service.field_submissions.create) as create_field,
                     patch.object(service.write_authorizations, "create", wraps=service.write_authorizations.create) as create_authorization,
-                    patch("bscli.core.write_catalog.preflight_pending_action", side_effect=preflight_result) as preflight,
-                    patch("bscli.core.write_catalog." + definition["prepare_function"], return_value=prepared_payload) as prepare,
+                    patch("agentbridge.core.write_catalog.preflight_pending_action", side_effect=preflight_result) as preflight,
+                    patch("agentbridge.core.write_catalog." + definition["prepare_function"], return_value=prepared_payload) as prepare,
                 ):
                     started = service.invoke(
                         user_subject="user-a", capability_name=capability,
@@ -1121,11 +1121,11 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 service = self._service(tmp, FakeWorker())
                 self._activate(service)
                 with (
-                    patch("bscli.core.write_catalog.preflight_pending_action",
+                    patch("agentbridge.core.write_catalog.preflight_pending_action",
                           side_effect=PendingActionContractMismatch("unsupported pending target")) as preflight,
                     patch.object(service.field_submissions, "create", wraps=service.field_submissions.create) as create_field,
                     patch.object(service.write_authorizations, "create", wraps=service.write_authorizations.create) as create_authorization,
-                    patch("bscli.core.write_catalog." + definition["prepare_function"]) as prepare,
+                    patch("agentbridge.core.write_catalog." + definition["prepare_function"]) as prepare,
                 ):
                     response = service.invoke(
                         user_subject="user-a", capability_name=capability,
@@ -2042,7 +2042,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 },
             }
             with patch(
-                "bscli.core.write_catalog.prepare_business_trip_draft",
+                "agentbridge.core.write_catalog.prepare_business_trip_draft",
                 return_value=prepared_payload,
             ) as prepare_draft:
                 started = service.invoke(
@@ -2109,7 +2109,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 }
 
             with patch(
-                "bscli.core.write_catalog.save_business_trip_draft",
+                "agentbridge.core.write_catalog.save_business_trip_draft",
                 side_effect=save,
             ):
                 committed = service.invoke(
@@ -2171,7 +2171,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 },
             }
             with patch(
-                "bscli.core.write_catalog.prepare_business_trip_draft",
+                "agentbridge.core.write_catalog.prepare_business_trip_draft",
                 return_value=prepared_payload,
             ) as prepare_draft:
                 prepared = service.resume_interaction(
@@ -2217,7 +2217,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 }
 
             with patch(
-                "bscli.core.write_catalog.save_business_trip_draft",
+                "agentbridge.core.write_catalog.save_business_trip_draft",
                 side_effect=save,
             ) as save_draft:
                 committed = service.resume_interaction(
@@ -2269,7 +2269,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "Draft", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_business_trip_draft",
+                "agentbridge.core.write_catalog.prepare_business_trip_draft",
                 return_value=prepared_payload,
             ) as prepare_draft:
                 resumed = service.resume_interaction(
@@ -2299,7 +2299,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "Draft", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_business_trip_draft",
+                "agentbridge.core.write_catalog.prepare_business_trip_draft",
                 return_value=prepared_payload,
             ):
                 started = service.invoke(
@@ -2316,7 +2316,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 )
             authorization_id = prepared["nextAction"]["authorizationId"]
 
-            with patch("bscli.core.write_catalog.save_business_trip_draft") as save:
+            with patch("agentbridge.core.write_catalog.save_business_trip_draft") as save:
                 blocked = service.invoke(
                     user_subject="user-a",
                     capability_name="oa.business_trip.save_draft",
@@ -2338,7 +2338,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 raise BusinessTripOutcomeUnknown("readback failed")
 
             with patch(
-                "bscli.core.write_catalog.save_business_trip_draft",
+                "agentbridge.core.write_catalog.save_business_trip_draft",
                 side_effect=uncertain,
             ):
                 unknown = service.invoke(
@@ -2415,7 +2415,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 raise LeaveBusinessValidationRequired(validation)
 
             with patch(
-                "bscli.core.write_catalog.submit_leave_request",
+                "agentbridge.core.write_catalog.submit_leave_request",
                 side_effect=needs_confirmation,
             ):
                 response = service.invoke(
@@ -2468,7 +2468,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 return {"workflow_submitted": True}
 
             with patch(
-                "bscli.core.write_catalog.submit_leave_request",
+                "agentbridge.core.write_catalog.submit_leave_request",
                 side_effect=completes_after_confirmation,
             ):
                 resumed = service.invoke(
@@ -2536,7 +2536,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 raise BusinessTripBusinessValidationRequired(validation)
 
             with patch(
-                "bscli.core.write_catalog.submit_business_trip_request",
+                "agentbridge.core.write_catalog.submit_business_trip_request",
                 side_effect=needs_confirmation,
             ):
                 response = service.invoke(
@@ -2614,7 +2614,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 raise BusinessTripSubmissionBlocked(reason)
 
             with patch(
-                "bscli.core.write_catalog.submit_business_trip_request",
+                "agentbridge.core.write_catalog.submit_business_trip_request",
                 side_effect=blocked,
             ):
                 response = service.invoke(
@@ -2721,7 +2721,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "审批补签申请", "system": "致远 OA", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_missed_punch_approval",
+                "agentbridge.core.write_catalog.prepare_missed_punch_approval",
                 return_value=prepared_payload,
             ) as prepare:
                 prepared = service.invoke(
@@ -2762,7 +2762,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             service.write_authorizations.decide(
                 authorization_id, decision="reject", csrf_token=csrf, csrf_cookie=csrf,
             )
-            with patch("bscli.core.write_catalog.approve_missed_punch_request") as commit:
+            with patch("agentbridge.core.write_catalog.approve_missed_punch_request") as commit:
                 response = service.invoke(
                     user_subject="user-a", capability_name="oa.missed_punch.approve",
                     arguments={"authorization_id": authorization_id},
@@ -2846,11 +2846,11 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                     return_value={"count": 3, "items": pending_items},
                 ) as list_pending,
                 patch(
-                    "bscli.core.write_catalog.prepare_missed_punch_approval",
+                    "agentbridge.core.write_catalog.prepare_missed_punch_approval",
                     side_effect=prepare,
                 ),
                 patch(
-                    "bscli.core.write_catalog.approve_missed_punch_request",
+                    "agentbridge.core.write_catalog.approve_missed_punch_request",
                     side_effect=commit,
                 ),
             ):
@@ -2958,7 +2958,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "撤销已发流程", "system": "致远 OA", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_workflow_revoke",
+                "agentbridge.core.write_catalog.prepare_workflow_revoke",
                 return_value=prepared_payload,
             ) as prepare:
                 prepared = service.invoke(
@@ -2991,7 +2991,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "end_time": "2026-07-20 16:00",
             }
             prepare_before_fields = self.enterContext(patch(
-                "bscli.core.write_catalog.prepare_meeting_create",
+                "agentbridge.core.write_catalog.prepare_meeting_create",
             ))
             dynamic_schema = deepcopy(MEETING_FIELD_CARD_SCHEMA)
             room_field = next(field for field in dynamic_schema["fields"] if field["name"] == "room")
@@ -2999,7 +2999,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 {"value": "3号会议室", "label": "3号会议室（当前可用）"},
             ])
             build_schema = self.enterContext(patch(
-                "bscli.core.write_catalog.build_meeting_field_card_schema",
+                "agentbridge.core.write_catalog.build_meeting_field_card_schema",
                 return_value=dynamic_schema,
             ))
             started = service.invoke(
@@ -3050,7 +3050,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "创建并发送会议", "system": "致远 OA", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_meeting_create",
+                "agentbridge.core.write_catalog.prepare_meeting_create",
                 return_value=prepared_payload,
             ) as prepare:
                 prepared = service.invoke(
@@ -3070,7 +3070,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 ),
                 frozenset({"oa:write:meeting"}),
             )
-            with patch("bscli.core.write_catalog.create_meeting") as before_approval:
+            with patch("agentbridge.core.write_catalog.create_meeting") as before_approval:
                 waiting = service.invoke(
                     user_subject="user-a", capability_name="oa.meeting.create",
                     arguments={"authorization_id": authorization_id},
@@ -3089,7 +3089,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 enter_commit_boundary()
                 return {"meeting_created": True, "meeting_sent": True, "submitted_count": 1}
 
-            with patch("bscli.core.write_catalog.create_meeting", side_effect=create) as commit:
+            with patch("agentbridge.core.write_catalog.create_meeting", side_effect=create) as commit:
                 committed = service.invoke(
                     user_subject="user-a",
                     capability_name="oa.meeting.create",
@@ -3120,7 +3120,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "end_time": "2026-09-10 15:00",
             }
             prepare_before_fields = self.enterContext(patch(
-                "bscli.core.write_catalog.prepare_meeting_room_application",
+                "agentbridge.core.write_catalog.prepare_meeting_room_application",
             ))
             dynamic_schema = deepcopy(MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA)
             room_field = next(field for field in dynamic_schema["fields"] if field["name"] == "room")
@@ -3128,7 +3128,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 {"value": "3号会议室", "label": "3号会议室（当前可用）"},
             ])
             build_schema = self.enterContext(patch(
-                "bscli.core.write_catalog.build_meeting_room_application_field_card_schema",
+                "agentbridge.core.write_catalog.build_meeting_room_application_field_card_schema",
                 return_value=dynamic_schema,
             ))
             started = service.invoke(
@@ -3180,7 +3180,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "申请会议室", "system": "致远 OA", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_meeting_room_application",
+                "agentbridge.core.write_catalog.prepare_meeting_room_application",
                 return_value=prepared_payload,
             ) as prepare:
                 prepared = service.invoke(
@@ -3192,7 +3192,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             self.assertEqual(prepare.call_args.args[2], fields)
             self.assertEqual(service.field_submissions.get(submission_id)["state"], "consumed")
             authorization_id = prepared["nextAction"]["authorizationId"]
-            with patch("bscli.core.write_catalog.create_meeting_room_application") as before_approval:
+            with patch("agentbridge.core.write_catalog.create_meeting_room_application") as before_approval:
                 waiting = service.invoke(
                     user_subject="user-a", capability_name="oa.meeting_room.application.create",
                     arguments={"authorization_id": authorization_id},
@@ -3216,7 +3216,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 }
 
             with patch(
-                "bscli.core.write_catalog.create_meeting_room_application",
+                "agentbridge.core.write_catalog.create_meeting_room_application",
                 side_effect=create,
             ) as commit:
                 committed = service.invoke(
@@ -3245,7 +3245,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             self._activate(service)
             for builder in ("build_meeting_field_card_schema", "build_meeting_room_application_field_card_schema"):
                 self.enterContext(patch(
-                    "bscli.core.write_catalog." + builder,
+                    "agentbridge.core.write_catalog." + builder,
                     side_effect=AssertionError("cancellation must not query room choices"),
                 ))
             prepared_payload = {
@@ -3257,7 +3257,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "summary": {"title": "撤销会议室申请", "system": "致远 OA", "fields": []},
             }
             with patch(
-                "bscli.core.write_catalog.prepare_meeting_room_application_cancel",
+                "agentbridge.core.write_catalog.prepare_meeting_room_application_cancel",
                 return_value=prepared_payload,
             ) as prepare:
                 started = service.invoke(
@@ -3302,7 +3302,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 enter_commit_boundary()
                 return {"meeting_room_application_canceled": True, "canceled_count": 1}
 
-            with patch("bscli.core.write_catalog.cancel_meeting_room_application", side_effect=cancel) as commit:
+            with patch("agentbridge.core.write_catalog.cancel_meeting_room_application", side_effect=cancel) as commit:
                 waiting = service.invoke(
                     user_subject="user-a", capability_name="oa.meeting_room.application.cancel",
                     arguments={"authorization_id": authorization_id},
@@ -3364,7 +3364,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                     raise outcome_error("simulated authoritative result unavailable")
 
                 arguments = {"authorization_id": authorization_id}
-                with patch("bscli.core.write_catalog." + function, side_effect=lose_result) as commit:
+                with patch("agentbridge.core.write_catalog." + function, side_effect=lose_result) as commit:
                     unknown = service.invoke(
                         user_subject="user-a", capability_name=capability,
                         arguments=arguments, idempotency_key="meeting-unknown",
@@ -3481,7 +3481,7 @@ class InaccessibleSessionStateStore:
         self.deleted = False
 
     def load(self, _session_id):
-        raise SessionStateAccessDenied("different Windows security principal")
+        raise SessionStateAccessDenied("different OS security principal")
 
     def delete(self, _session_id):
         self.deleted = True

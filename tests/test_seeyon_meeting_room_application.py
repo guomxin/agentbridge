@@ -3,7 +3,7 @@ from urllib.parse import parse_qs
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_meeting_room_application import (
+from agentbridge.adapters.seeyon_meeting_room_application import (
     MEETING_ROOM_APPLICATION_CANCEL_CONTRACT_VERSION,
     MEETING_ROOM_APPLICATION_CONTRACT_VERSION,
     MeetingRoomApplicationContractMismatch,
@@ -216,7 +216,7 @@ class SeeyonMeetingRoomApplicationTests(unittest.TestCase):
         )
 
         with patch(
-            "bscli.adapters.seeyon_meeting_room_application.time.sleep"
+            "agentbridge.adapters.seeyon_meeting_room_application.time.sleep"
         ) as sleep:
             with self.assertRaises(MeetingRoomApplicationOutcomeUnknown):
                 cancel_meeting_room_application(
@@ -249,7 +249,7 @@ class SeeyonMeetingRoomApplicationTests(unittest.TestCase):
 
     def test_cancel_bad_response_and_active_readback_remain_unknown_without_retry(self):
         for response in ("null", "unexpected response", "transport-error", "http-error", "rejected"):
-            with self.subTest(response=response), patch("bscli.adapters.seeyon_meeting_room_application.time.sleep"):
+            with self.subTest(response=response), patch("agentbridge.adapters.seeyon_meeting_room_application.time.sleep"):
                 worker = FakeWorker(
                     initial_apps=[_application("cancel-me")], cancel_response=response,
                     stale_cancel_readback=True,
@@ -266,7 +266,7 @@ class SeeyonMeetingRoomApplicationTests(unittest.TestCase):
                     {"data": [], "total": 10, "pages": 1},
                     {"data": [], "pages": 1})
         for payload in payloads:
-            with self.subTest(payload=payload), patch("bscli.adapters.seeyon_meeting_room_application.time.sleep"):
+            with self.subTest(payload=payload), patch("agentbridge.adapters.seeyon_meeting_room_application.time.sleep"):
                 worker = FakeWorker(initial_apps=[_application("cancel-me")], cancel_listing=payload)
                 with self.assertRaisesRegex(MeetingRoomApplicationOutcomeUnknown, "my_applications=MeetingRoomContractMismatch"):
                     cancel_meeting_room_application(
@@ -279,7 +279,7 @@ class SeeyonMeetingRoomApplicationTests(unittest.TestCase):
                     {"roomsInfo": [_room()], "roomAppsInfo": [None]},
                     {"roomsInfo": [], "roomAppsInfo": []})
         for payload in payloads:
-            with self.subTest(payload=payload), patch("bscli.adapters.seeyon_meeting_room_application.time.sleep"):
+            with self.subTest(payload=payload), patch("agentbridge.adapters.seeyon_meeting_room_application.time.sleep"):
                 worker = FakeWorker(
                     initial_apps=[_application("cancel-me")], stale_cancel_readback=True,
                     expose_apps_in_room_snapshot=True, cancel_snapshot=payload,
@@ -318,7 +318,7 @@ class SeeyonMeetingRoomApplicationTests(unittest.TestCase):
         )
 
         with patch(
-            "bscli.adapters.seeyon_meeting_room_application.time.sleep"
+            "agentbridge.adapters.seeyon_meeting_room_application.time.sleep"
         ) as sleep:
             result = cancel_meeting_room_application(
                 FakeAdapter(),
@@ -377,7 +377,7 @@ class SeeyonMeetingRoomApplicationTests(unittest.TestCase):
         )
 
         with patch(
-            "bscli.adapters.seeyon_meeting_room_application.time.sleep"
+            "agentbridge.adapters.seeyon_meeting_room_application.time.sleep"
         ) as sleep:
             with self.assertRaisesRegex(
                 MeetingRoomApplicationOutcomeUnknown,

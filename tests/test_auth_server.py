@@ -4,17 +4,17 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
 
-from bscli.auth.action_card import TrustedActionApplication
-from bscli.auth.card import TrustedAuthApplication
-from bscli.auth.field_card import TrustedFieldApplication
-from bscli.auth.server import (
+from agentbridge.auth.action_card import TrustedActionApplication
+from agentbridge.auth.card import TrustedAuthApplication
+from agentbridge.auth.field_card import TrustedFieldApplication
+from agentbridge.auth.server import (
     _request_origin_allowed,
     create_auth_http_server,
     validate_auth_server_config,
 )
-from bscli.core.auth_challenges import AuthChallengeStore
-from bscli.core.field_submissions import FieldSubmissionStore
-from bscli.core.write_authorizations import WriteAuthorizationStore
+from agentbridge.core.auth_challenges import AuthChallengeStore
+from agentbridge.core.field_submissions import FieldSubmissionStore
+from agentbridge.core.write_authorizations import WriteAuthorizationStore
 
 
 class AuthServerConfigTests(unittest.TestCase):

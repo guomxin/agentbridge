@@ -2,7 +2,7 @@
 import json
 import sqlite3
 from contextlib import closing
-from bscli.database.sources import Sources,TAIHUA_RELATIONS
+from agentbridge.database.sources import Sources,TAIHUA_RELATIONS
 
 def configured_source(home,sid='taihua_primary', *, pack='taihua_logs'):
     sources=Sources(home)

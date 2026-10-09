@@ -11,11 +11,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bscli.core.data_source_secrets import DataSourceSecretStore
-from bscli.core.session_secrets import SESSION_KEY_FILE_ENV, SessionSecretError
-from bscli.database.independent import IndependentDatabase, DatabaseRejected
-from bscli.database.legacy_source import LegacySourceConfig
-from bscli.database.sources import Sources
+from agentbridge.core.data_source_secrets import DataSourceSecretStore
+from agentbridge.core.session_secrets import SESSION_KEY_FILE_ENV, SessionSecretError
+from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
+from agentbridge.database.legacy_source import LegacySourceConfig
+from agentbridge.database.sources import Sources
 from tests.database_fixtures import configured_source
 
 
@@ -38,7 +38,7 @@ class SourceLifecycleTests(unittest.TestCase):
             connection = connect(*args, **kwargs)
             connection.set_trace_callback(sql.append)
             return connection
-        with patch('bscli.database.sources.sqlite3.connect', side_effect=traced):
+        with patch('agentbridge.database.sources.sqlite3.connect', side_effect=traced):
             for _ in range(20):
                 self.snapshot()
         ddl = [s for s in sql if s.lstrip().upper().startswith('CREATE TABLE')]
@@ -130,7 +130,7 @@ class SourceLifecycleTests(unittest.TestCase):
                             control.write('equipment', 'save', revision=1, actor='test', reason='fixture', config={**config, 'name': 'changed draft'})
                         return [] if empty_final else [{'name': 'must not be returned'}]
                     cursor.fetchmany.side_effect = fetch
-                    with patch('bscli.database.sources.connect') as connect, patch('bscli.database.sources.check_role'):
+                    with patch('agentbridge.database.sources.connect') as connect, patch('agentbridge.database.sources.check_role'):
                         connect.return_value.__enter__.return_value = connection
                         with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_AUTHORIZATION_CHANGED'):
                             runtime.execute('a', 'database.free.read', {'sql': 'SELECT name FROM public.devices'}, 'equipment')

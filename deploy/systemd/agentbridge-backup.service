@@ -12,7 +12,7 @@ Environment=HOME=/home/agentbridge/service/data
 Environment=PYTHONUNBUFFERED=1
 Environment=AGENTBRIDGE_SESSION_KEY_FILE=/home/agentbridge/service/config/session.key
 EnvironmentFile=-/home/agentbridge/service/config/release.env
-ExecStart=/home/agentbridge/service/current/venv/bin/python -P -m bscli.cli.main --home /home/agentbridge/service/data diagnostics backup-create --output-dir /home/agentbridge/service/backups
+ExecStart=/home/agentbridge/service/current/venv/bin/python -P -m agentbridge.cli.main --home /home/agentbridge/service/data diagnostics backup-create --output-dir /home/agentbridge/service/backups
 ExecStart=/usr/bin/find /home/agentbridge/service/backups -maxdepth 1 -type f -mtime +30 -delete
 UMask=0077
 TimeoutStartSec=360

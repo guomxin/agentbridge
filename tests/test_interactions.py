@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bscli.core.interactions import (
+from agentbridge.core.interactions import (
     InteractionIntegrityError,
     InteractionNotFound,
     InteractionStore,

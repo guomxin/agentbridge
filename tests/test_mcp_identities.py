@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bscli.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
 
 
 class McpIdentityTokenStoreTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class McpIdentityTokenStoreTests(unittest.TestCase):
             self.assertIsNone(store.verify(token["token"]))
 
     def test_renew_expired_token_keeps_secret_and_revocation_cannot_be_reversed(self):
-        from bscli.core.mcp_identities import TokenEditConflict
+        from agentbridge.core.mcp_identities import TokenEditConflict
 
         now = datetime(2026, 9, 23, tzinfo=timezone.utc)
         clock = [now]
@@ -65,7 +65,7 @@ class McpIdentityTokenStoreTests(unittest.TestCase):
         import json
         import sqlite3
         from contextlib import closing
-        from bscli.admin.application import AdminControlPlane
+        from agentbridge.admin.application import AdminControlPlane
 
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "agentbridge.db"

@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bscli.database.content import add_evidence, compile_query
-from bscli.database.evidence import prepare_evidence_page, text_revision
-from bscli.database.independent import DatabaseRejected
+from agentbridge.database.content import add_evidence, compile_query
+from agentbridge.database.evidence import prepare_evidence_page, text_revision
+from agentbridge.database.independent import DatabaseRejected
 from tests import test_database_scope as scope_tests
 
 WINDOW = scope_tests.WINDOW
@@ -76,7 +76,7 @@ class EvidenceTests(unittest.TestCase):
     def test_original_permission_current_content_and_missing(self):
         with tempfile.TemporaryDirectory() as root:
             runtime, conn, cursor = scope_tests.ScopeTests().fixture(root)
-            with patch('bscli.database.sources.connect') as connect, patch('bscli.database.sources.check_role'):
+            with patch('agentbridge.database.sources.connect') as connect, patch('agentbridge.database.sources.check_role'):
                 connect.return_value.__enter__.return_value = conn
                 cursor.fetchmany.side_effect = [[{'id': 1, 'log_date': '2026-09-01', 'type_code': 'WEEKLY',
                     'fullname': '测试作者', 'content': '<p>计划开展验收</p><script>evil()</script><p>已提交材料</p>'}], []]
@@ -97,7 +97,7 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             runtime, conn, cursor = scope_tests.ScopeTests().fixture(root)
             body = '施工进展'*6000
-            with patch('bscli.database.sources.connect') as connect, patch('bscli.database.sources.check_role'):
+            with patch('agentbridge.database.sources.connect') as connect, patch('agentbridge.database.sources.check_role'):
                 connect.return_value.__enter__.return_value = conn
                 cursor.fetchmany.side_effect = [[{'id': i, 'log_date':'2026-09-01', 'content':body}]
                                                for i in range(1, 201)]

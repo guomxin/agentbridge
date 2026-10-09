@@ -5,8 +5,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bscli.cli.main import main
-from bscli.core.config import ConfigStore
+from agentbridge.cli.main import main
+from agentbridge.core.config import ConfigStore
 
 
 class BridgeRetirementTests(unittest.TestCase):
@@ -30,9 +30,9 @@ class BridgeRetirementTests(unittest.TestCase):
             "extension/manifest.json",
             "extension/background.js",
             "extension/content.js",
-            "bscli/browser/bridge.py",
-            "bscli/daemon/app.py",
-            "bscli/mcp/server.py",
+            "agentbridge/browser/bridge.py",
+            "agentbridge/daemon/app.py",
+            "agentbridge/mcp/server.py",
         ):
             with self.subTest(path=relative_path):
                 self.assertFalse((root / relative_path).exists())
@@ -69,7 +69,7 @@ class BridgeRetirementTests(unittest.TestCase):
                 ConfigStore(Path(tmp)).load_system("oa")
 
     def test_legacy_bridge_result_flag_is_absent(self):
-        root = Path(__file__).resolve().parents[1] / "bscli"
+        root = Path(__file__).resolve().parents[1] / "agentbridge"
         for path in root.rglob("*.py"):
             with self.subTest(path=path.relative_to(root)):
                 self.assertNotIn(

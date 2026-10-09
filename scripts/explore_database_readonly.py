@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 import argparse
-from bscli.database.sources import Sources, connect
+from agentbridge.database.sources import Sources, connect
 from psycopg import sql
 
 def main():

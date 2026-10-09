@@ -1,6 +1,6 @@
 import unittest
 
-from bscli.core.api_discovery import inspect_api_response
+from agentbridge.core.api_discovery import inspect_api_response
 
 
 class ApiInspectionTests(unittest.TestCase):

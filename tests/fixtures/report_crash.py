@@ -4,9 +4,9 @@ from pathlib import Path
 import sys
 from datetime import datetime, timezone
 
-from bscli.database.independent import IndependentDatabase
-from bscli.database.reports import Reports
-import bscli.database.reports as report_module
+from agentbridge.database.independent import IndependentDatabase
+from agentbridge.database.reports import Reports
+import agentbridge.database.reports as report_module
 from tests.database_fixtures import configured_source
 
 home, stage = sys.argv[1:]

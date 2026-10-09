@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import urlencode
 
-from bscli.auth.interactive_browser import TrustedInteractiveBrowserApplication
-from bscli.core.auth_challenges import AuthChallengeStore
+from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
+from agentbridge.core.auth_challenges import AuthChallengeStore
 
 
 class TrustedInteractiveBrowserTests(unittest.TestCase):
@@ -118,7 +118,7 @@ class StubRemoteBrowserBroker:
         }
 
     def status(self, *, challenge_id, control_token):
-        from bscli.broker.remote_browser import RemoteBrowserAccessDenied
+        from agentbridge.broker.remote_browser import RemoteBrowserAccessDenied
 
         if control_token != "short-lived-control":
             raise RemoteBrowserAccessDenied("wrong token")

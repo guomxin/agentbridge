@@ -39,12 +39,15 @@ class FixtureRelease(release.Release):
         return ""
 
     def user_python(self, previous, *args, **kwargs):
+        if previous and args[0] == "-c" and "find_spec" in args[1]:
+            return "bscli.cli.main"
         if "backup-create" in args:
+            self.commands.append(("backup-cli", args[1]))
             if self.fail_backup:
                 raise RuntimeError("injected recovery point failure")
             return json.dumps({"passed": True, "manifestPath": "fixture-backup.manifest.json"})
-        if "import bscli; print(bscli.__file__)" in args:
-            return str(self.directory / "venv/lib/site-packages/bscli/__init__.py")
+        if "import agentbridge; print(agentbridge.__file__)" in args:
+            return str(self.directory / "venv/lib/site-packages/agentbridge/__init__.py")
         return ""
 
     def ready(self, previous=False):
@@ -57,6 +60,16 @@ class FixtureRelease(release.Release):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def test_renamed_candidate_backs_up_with_previous_cli(self):
+        self.subject.execute()
+        self.assertIn(("backup-cli", "bscli.cli.main"), self.subject.commands)
+
+    def test_unknown_previous_cli_refuses_before_stopping(self):
+        subject = self.subject
+        with patch.object(subject, "previous_cli", side_effect=RuntimeError("Unknown previous CLI")):
+            with self.assertRaisesRegex(RuntimeError, "Unknown previous CLI"):
+                subject.execute()
+        self.assertFalse(any(c[:2] == ("systemctl", "stop") for c in subject.commands))
     def test_reviewed_transition_requires_exact_before_and_after(self):
         before = {"agentbridge.db": {"schema": ["old"]}, "other.db": {"schema": []}}
         after = {"agentbridge.db": {"schema": ["new"]}, "other.db": {"schema": []}}
@@ -137,7 +150,6 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(s.state["status"], "rolled_back")
         self.assertIn(("ready", True), s.commands)
 
-    @unittest.skipIf(os.name == "nt", "POSIX symlink transaction is also executed on Linux")
     def test_health_failure_restores_units_pointer_and_identity_not_data(self):
         s = self.subject
         s.fail_health = True
@@ -147,7 +159,6 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(s.state["status"], "rolled_back")
         self.assertFalse(s.state["automaticDataRestore"])
 
-    @unittest.skipIf(os.name == "nt", "POSIX symlink transaction is also executed on Linux")
     def test_schema_change_stops_service_and_forbids_automatic_rollback(self):
         s = self.subject
         s.change_schema = True
@@ -158,7 +169,6 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertNotIn(("ready", True), s.commands)
         self.assertEqual(s.commands[-1], ("systemctl", "stop", "agentbridge"))
 
-    @unittest.skipIf(os.name == "nt", "POSIX symlink transaction is also executed on Linux")
     def test_success_preserves_previous_and_recovery_point(self):
         s = self.subject
         s.execute()
@@ -170,7 +180,6 @@ class ReleaseTransactionTests(unittest.TestCase):
         stages = [stage["stage"] for stage in s.state["stages"]]
         self.assertLess(stages.index("recovery_point_created"), stages.index("switching"))
 
-    @unittest.skipIf(os.name == "nt", "POSIX symlink transaction is also executed on Linux")
     def test_confirmed_retry_checks_health_without_install_or_restart(self):
         s = self.subject
         s.execute()
@@ -178,7 +187,6 @@ class ReleaseTransactionTests(unittest.TestCase):
         s.execute()
         self.assertEqual(s.commands, [("chown", "root:agentbridge", str(s.directory)), ("ready", False)])
 
-    @unittest.skipIf(os.name == "nt", "POSIX symlink transaction is also executed on Linux")
     def test_ancillary_failure_does_not_rollback_confirmed_release(self):
         s = self.subject
         s.fail_after_confirmation = True
@@ -220,7 +228,6 @@ class ReleaseTransactionTests(unittest.TestCase):
             s.stage("checking")
         self.assertEqual(json.loads((s.directory / "deployment.json").read_text())["status"], "checking")
 
-    @unittest.skipIf(os.name == "nt", "POSIX symlink transaction is also executed on Linux")
     def test_second_release_failure_restores_previous_version_pointer(self):
         first = self.subject
         first.execute()

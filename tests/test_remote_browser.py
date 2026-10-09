@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from bscli.adapters.base import AdapterLoginRequired
-from bscli.broker.remote_browser import (
+from agentbridge.adapters.base import AdapterLoginRequired
+from agentbridge.broker.remote_browser import (
     RemoteBrowserConfig,
     RemoteInteractiveBrowserBroker,
     _NoVncGateway,
@@ -16,8 +16,8 @@ from bscli.broker.remote_browser import (
     _RemoteInteractiveRun,
     _remote_url,
 )
-from bscli.core.auth_challenges import AuthChallengeStore
-from bscli.core.sessions import SessionRegistry
+from agentbridge.core.auth_challenges import AuthChallengeStore
+from agentbridge.core.sessions import SessionRegistry
 
 
 class RemoteBrowserConfigTests(unittest.TestCase):
@@ -175,19 +175,19 @@ class RemoteBrowserRunTests(unittest.TestCase):
 
             with (
                 patch(
-                    "bscli.broker.remote_browser._create_xauthority",
+                    "agentbridge.broker.remote_browser._create_xauthority",
                     lambda path, _display: path.write_text("xauth", encoding="ascii"),
                 ),
                 patch(
-                    "bscli.broker.remote_browser._start_process",
+                    "agentbridge.broker.remote_browser._start_process",
                     side_effect=fake_start,
                 ),
                 patch(
-                    "bscli.broker.remote_browser._wait_until",
+                    "agentbridge.broker.remote_browser._wait_until",
                     lambda *_args, **_kwargs: None,
                 ),
                 patch(
-                    "bscli.broker.remote_browser._discover_chrome",
+                    "agentbridge.broker.remote_browser._discover_chrome",
                     return_value=Path("/opt/chromium/chrome"),
                 ),
             ):
@@ -231,15 +231,15 @@ class RemoteBrowserRunTests(unittest.TestCase):
             commands = []
 
             with (
-                patch("bscli.broker.remote_browser._require_command"),
+                patch("agentbridge.broker.remote_browser._require_command"),
                 patch(
-                    "bscli.broker.remote_browser._start_process",
+                    "agentbridge.broker.remote_browser._start_process",
                     side_effect=lambda command, _environment: (
                         commands.append(command) or FakeProcess()
                     ),
                 ),
                 patch(
-                    "bscli.broker.remote_browser._wait_until",
+                    "agentbridge.broker.remote_browser._wait_until",
                     lambda *_args, **_kwargs: None,
                 ),
             ):
@@ -264,13 +264,13 @@ class RemoteBrowserRunTests(unittest.TestCase):
             process = FakeProcess()
 
             with (
-                patch("bscli.broker.remote_browser._require_command"),
+                patch("agentbridge.broker.remote_browser._require_command"),
                 patch(
-                    "bscli.broker.remote_browser._start_process",
+                    "agentbridge.broker.remote_browser._start_process",
                     return_value=process,
                 ),
                 patch(
-                    "bscli.broker.remote_browser._wait_until",
+                    "agentbridge.broker.remote_browser._wait_until",
                     side_effect=RuntimeError("listener failed"),
                 ),
             ):

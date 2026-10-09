@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 import unittest
 
-from bscli.core import task_state_rules as rules
-from bscli.core import task_projections as projections
-from bscli.core import tasks
+from agentbridge.core import task_state_rules as rules
+from agentbridge.core import task_projections as projections
+from agentbridge.core import tasks
 
 
 CONTRACT = json.loads((Path(__file__).parent / 'fixtures/task_state_contract.json').read_text())

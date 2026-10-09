@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core import tasks
+from agentbridge.core import tasks
 
 
 def run_sequence(module, root, steps):
@@ -87,12 +87,12 @@ def run_sequence(module, root, steps):
                     with closing(sqlite3.connect(path)) as db, db:
                         db.execute("UPDATE agent_tasks SET status='active', finished_at=NULL WHERE task_id=?", (task_id,))
                 elif kind == 'source_tables':
-                    from bscli.core.operations import OperationStore
-                    from bscli.core.interactions import InteractionStore
+                    from agentbridge.core.operations import OperationStore
+                    from agentbridge.core.interactions import InteractionStore
                     OperationStore(path)
                     InteractionStore(path)
                 elif kind == 'source_operation':
-                    from bscli.core import operations
+                    from agentbridge.core import operations
                     with patch.object(operations, 'uuid4', return_value=step['id']), \
                             patch.object(operations, '_utc_now', return_value='2030-01-01T00:00:00+00:00'):
                         ledger = operations.OperationStore(path)
@@ -100,7 +100,7 @@ def run_sequence(module, root, steps):
                             capability_version='1', input_summary={}, request_id='fixture-request')
                         ledger.mark_succeeded(record['operation_id'], {'verified': True})
                 elif kind == 'source_credential':
-                    from bscli.core import interactions
+                    from agentbridge.core import interactions
                     with patch.object(interactions.secrets, 'token_urlsafe', return_value=step['id']):
                         interactions.InteractionStore(path).register(
                             interaction_type='credential', user_subject='alice', system_id='oa',

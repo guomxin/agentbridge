@@ -13,9 +13,9 @@ sys.path.insert(0, str(ROOT))
 
 
 def code_facts():
-    from bscli.core.central_service import CentralCapabilityService
-    from bscli.core.mcp_identities import McpIdentityTokenStore
-    from bscli.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
+    from agentbridge.core.central_service import CentralCapabilityService
+    from agentbridge.core.mcp_identities import McpIdentityTokenStore
+    from agentbridge.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
 
     with TemporaryDirectory() as tmp:
         service = CentralCapabilityService(home=Path(tmp), base_url="https://oa.example.test")

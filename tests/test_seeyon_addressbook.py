@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from bscli.adapters.seeyon_addressbook import (
+from agentbridge.adapters.seeyon_addressbook import (
     ADDRESSBOOK_DEPARTMENT_MEMBERS_CAPABILITY,
     ADDRESSBOOK_EXPORT_CAPABILITY,
     ADDRESSBOOK_GROUP_LIST_CAPABILITY,
@@ -22,9 +22,9 @@ from bscli.adapters.seeyon_addressbook import (
     person_search,
     private_contact_search,
 )
-from bscli.adapters.seeyon_central import build_central_capability_registry
-from bscli.adapters.base import AdapterLoginRequired
-from bscli.adapters.seeyon_addressbook import _organization_nodes
+from agentbridge.adapters.seeyon_central import build_central_capability_registry
+from agentbridge.adapters.base import AdapterLoginRequired
+from agentbridge.adapters.seeyon_addressbook import _organization_nodes
 import json
 from unittest.mock import Mock
 
@@ -78,7 +78,7 @@ class SeeyonAddressbookTests(unittest.TestCase):
                 page.wait_for_timeout.assert_not_called()
 
     def test_home_and_frame_failures_preserve_stage_without_browser_text(self):
-        module='bscli.adapters.seeyon_addressbook.'
+        module='agentbridge.adapters.seeyon_addressbook.'
         with patch(module+'_open_home',side_effect=RuntimeError('secret-browser-url')):
             with self.assertRaises(SeeyonAddressbookContractMismatch) as caught:
                 organization_tree(object(),base_url=BASE_URL,arguments={})
@@ -113,10 +113,10 @@ class SeeyonAddressbookTests(unittest.TestCase):
             )
         )
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home",
+            "agentbridge.adapters.seeyon_addressbook._open_home",
             return_value=(page, "100"),
         ), patch(
-            "bscli.adapters.seeyon_addressbook._wait_for_frame",
+            "agentbridge.adapters.seeyon_addressbook._wait_for_frame",
             return_value=page.frames[0],
         ):
             result = organization_tree(
@@ -138,10 +138,10 @@ class SeeyonAddressbookTests(unittest.TestCase):
             _node("202", "100", "研发中心", [], False),
         ]))
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home",
+            "agentbridge.adapters.seeyon_addressbook._open_home",
             return_value=(page, "100"),
         ), patch(
-            "bscli.adapters.seeyon_addressbook._wait_for_frame",
+            "agentbridge.adapters.seeyon_addressbook._wait_for_frame",
             return_value=page.frames[0],
         ):
             for keyword, expected in [
@@ -186,10 +186,10 @@ class SeeyonAddressbookTests(unittest.TestCase):
             return raw
 
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home",
+            "agentbridge.adapters.seeyon_addressbook._open_home",
             return_value=(object(), "100"),
         ), patch(
-            "bscli.adapters.seeyon_addressbook._read_list",
+            "agentbridge.adapters.seeyon_addressbook._read_list",
             side_effect=read_list,
         ):
             result = person_search(
@@ -216,7 +216,7 @@ class SeeyonAddressbookTests(unittest.TestCase):
             kind="organization",
         )
         with patch(
-            "bscli.adapters.seeyon_addressbook.person_search",
+            "agentbridge.adapters.seeyon_addressbook.person_search",
             return_value={"items": [item]},
         ):
             result = person_get(
@@ -228,7 +228,7 @@ class SeeyonAddressbookTests(unittest.TestCase):
         self.assertEqual(result["detail_visibility"], "directory_row")
 
         with patch(
-            "bscli.adapters.seeyon_addressbook.person_search",
+            "agentbridge.adapters.seeyon_addressbook.person_search",
             return_value={"items": []},
         ):
             with self.assertRaises(SeeyonAddressbookContractMismatch):
@@ -246,10 +246,10 @@ class SeeyonAddressbookTests(unittest.TestCase):
             return {"rows": [], "total": 0, "total_pages": 0}
 
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home",
+            "agentbridge.adapters.seeyon_addressbook._open_home",
             return_value=(object(), "100"),
         ), patch(
-            "bscli.adapters.seeyon_addressbook._read_list",
+            "agentbridge.adapters.seeyon_addressbook._read_list",
             side_effect=read_list,
         ):
             result = department_members(
@@ -279,9 +279,9 @@ class SeeyonAddressbookTests(unittest.TestCase):
             return pages[addressbook_type], "100"
 
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home", side_effect=open_home
+            "agentbridge.adapters.seeyon_addressbook._open_home", side_effect=open_home
         ), patch(
-            "bscli.adapters.seeyon_addressbook._wait_for_frame",
+            "agentbridge.adapters.seeyon_addressbook._wait_for_frame",
             side_effect=lambda page, _fragment: page.frames[0],
         ):
             result = group_list(object(), base_url=BASE_URL, arguments={})
@@ -316,10 +316,10 @@ class SeeyonAddressbookTests(unittest.TestCase):
             }
 
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home",
+            "agentbridge.adapters.seeyon_addressbook._open_home",
             return_value=(object(), "100"),
         ), patch(
-            "bscli.adapters.seeyon_addressbook._read_list",
+            "agentbridge.adapters.seeyon_addressbook._read_list",
             side_effect=read_list,
         ):
             result = group_members(
@@ -334,10 +334,10 @@ class SeeyonAddressbookTests(unittest.TestCase):
 
     def test_private_contact_search_uses_private_shape(self):
         with patch(
-            "bscli.adapters.seeyon_addressbook._open_home",
+            "agentbridge.adapters.seeyon_addressbook._open_home",
             return_value=(object(), "100"),
         ), patch(
-            "bscli.adapters.seeyon_addressbook._read_list",
+            "agentbridge.adapters.seeyon_addressbook._read_list",
             return_value={
                 "rows": [
                     {
@@ -387,7 +387,7 @@ class SeeyonAddressbookTests(unittest.TestCase):
             ],
         }
         with patch(
-            "bscli.adapters.seeyon_addressbook.person_search", return_value=result
+            "agentbridge.adapters.seeyon_addressbook.person_search", return_value=result
         ):
             report = export_addressbook(
                 object(),

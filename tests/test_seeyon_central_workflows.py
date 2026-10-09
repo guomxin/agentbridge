@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from bscli.adapters.seeyon_central import (
+from agentbridge.adapters.seeyon_central import (
     SeeyonCentralAdapter,
     SeeyonReadContractMismatch,
     build_central_capability_registry,
@@ -217,7 +217,7 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(result["schema_version"], "bscli.oa_workflow_list.v2")
+        self.assertEqual(result["schema_version"], "agentbridge.oa_workflow_list.v2")
         self.assertEqual(result["source_count"], 2)
         self.assertEqual(result["date_filtered_count"], 2)
         self.assertEqual(result["matched_count"], 2)
@@ -418,7 +418,7 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
             "title": "Expanded sent subject",
         }
         with patch(
-            "bscli.adapters.seeyon_central._load_collection_rows",
+            "agentbridge.adapters.seeyon_central._load_collection_rows",
             return_value=([row], self.worker.page),
         ):
             rows, page = self.adapter.load_sent_workflow_rows(self.worker)

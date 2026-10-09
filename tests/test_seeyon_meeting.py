@@ -2,7 +2,7 @@ import json
 from urllib.parse import parse_qs
 import unittest
 
-from bscli.adapters.seeyon_meeting import (
+from agentbridge.adapters.seeyon_meeting import (
     MEETING_CONTRACT_VERSION,
     MeetingContractMismatch,
     MeetingOutcomeUnknown,
@@ -148,8 +148,8 @@ class SeeyonMeetingTests(unittest.TestCase):
         self.assertTrue(prepared["plan"]["preconditions"]["oa_room_validation_passed"])
 
     def test_http_200_login_html_is_reported_as_login_required(self):
-        from bscli.adapters.seeyon_central import SeeyonLoginRequired
-        from bscli.adapters.seeyon_meeting import _response_json
+        from agentbridge.adapters.seeyon_central import SeeyonLoginRequired
+        from agentbridge.adapters.seeyon_meeting import _response_json
 
         with self.assertRaises(SeeyonLoginRequired):
             _response_json(

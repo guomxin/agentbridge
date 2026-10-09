@@ -13,9 +13,9 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from pydantic import AnyHttpUrl
 
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.mcp.central import StoredIdentityTokenVerifier
-from bscli.mcp.resource_budget import BoundedMcpProtocol, McpIdentityBudget, bounded_mcp_app
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.mcp.central import StoredIdentityTokenVerifier
+from agentbridge.mcp.resource_budget import BoundedMcpProtocol, McpIdentityBudget, bounded_mcp_app
 
 
 @asynccontextmanager
@@ -60,7 +60,7 @@ class McpResourceTests(unittest.IsolatedAsyncioTestCase):
                 return {'type': 'http.request', 'body': chunk, 'more_body': bool(chunks)}
             async def send(message):
                 messages.append(message)
-            with patch('bscli.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='alice')):
+            with patch('agentbridge.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='alice')):
                 await budget({'type': 'http', 'path': '/mcp', 'method': 'POST', 'headers': headers}, receive, send)
             self.assertEqual((budget.active, budget.subjects), (0, {}))
             return messages
@@ -98,10 +98,10 @@ class McpResourceTests(unittest.IsolatedAsyncioTestCase):
         async def receive():
             return {'type': 'http.disconnect'}
         scope = {'type': 'http', 'path': '/mcp'}
-        with patch('bscli.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='alice')):
+        with patch('agentbridge.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='alice')):
             pending = asyncio.create_task(budget(scope, receive, send))
             await entered.wait()
-        with patch('bscli.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='bob')):
+        with patch('agentbridge.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='bob')):
             await budget(scope, receive, send)
         self.assertEqual(messages[0]['status'], 429)
         self.assertEqual(calls, 1)
@@ -112,7 +112,7 @@ class McpResourceTests(unittest.IsolatedAsyncioTestCase):
         async def fail(scope, receive, send):
             raise RuntimeError('handler failure')
         budget.app = fail
-        with patch('bscli.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='bob')):
+        with patch('agentbridge.mcp.resource_budget.get_access_token', return_value=SimpleNamespace(client_id='bob')):
             with self.assertRaisesRegex(RuntimeError, 'handler failure'):
                 await budget(scope, receive, send)
         self.assertEqual((budget.active, budget.subjects), (0, {}))

@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLifecycle } from "../bscli/workspace/static/workspace_lifecycle.mjs";
-import { createWorkspaceRequests } from "../bscli/workspace/static/workspace_request.mjs";
-import { createComposer } from "../bscli/workspace/static/workspace_forms.mjs";
-import { createSkillForms } from "../bscli/workspace/static/workspace_skills.mjs";
+import { createLifecycle } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
+import { createWorkspaceRequests } from "../agentbridge/workspace/static/workspace_request.mjs";
+import { createComposer } from "../agentbridge/workspace/static/workspace_forms.mjs";
+import { createSkillForms } from "../agentbridge/workspace/static/workspace_skills.mjs";
 
 class Element {
   children = [];

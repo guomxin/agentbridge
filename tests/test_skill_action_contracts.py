@@ -8,10 +8,10 @@ import unittest
 
 from pydantic import ValidationError
 
-from bscli.core.skill_actions import SKILL_ACTION_DEFINITIONS, SKILL_ACTIONS, parse_skill_action
-from bscli.core.skill_authoring import SkillAuthoring
-from bscli.core import skill_contracts, skill_quality
-from bscli.core.skill_workbench import SkillWorkbench
+from agentbridge.core.skill_actions import SKILL_ACTION_DEFINITIONS, SKILL_ACTIONS, parse_skill_action
+from agentbridge.core.skill_authoring import SkillAuthoring
+from agentbridge.core import skill_contracts, skill_quality
+from agentbridge.core.skill_workbench import SkillWorkbench
 
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures/skill_action_contract.json').read_text())
@@ -55,7 +55,7 @@ class SkillActionContractTests(unittest.TestCase):
         for name in ('StrictModel', 'SkillSelection', 'SkillDatabaseDependencies', 'SkillDependencies',
                      'SkillMethod', 'SkillProposal', 'SkillAuthoringData'):
             self.assertIs(getattr(skill_quality, name), getattr(skill_contracts, name))
-        from bscli.mcp.central import SkillAuthoringData
+        from agentbridge.mcp.central import SkillAuthoringData
         self.assertIs(SkillAuthoringData, skill_contracts.SkillAuthoringData)
 
     def test_declarations_match_original_routes_and_handler_signatures(self):

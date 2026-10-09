@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from bscli.adapters.seeyon_business_trip import (
+from agentbridge.adapters.seeyon_business_trip import (
     BUSINESS_TRIP_FORM_APP_ID,
     BUSINESS_TRIP_TEMPLATE_ID,
     BUSINESS_TRIP_TEMPLATE_TITLE,
@@ -9,7 +9,7 @@ from bscli.adapters.seeyon_business_trip import (
     BusinessTripOutcomeUnknown,
     normalize_business_trip_inputs,
 )
-from bscli.adapters.seeyon_business_trip_submit import (
+from agentbridge.adapters.seeyon_business_trip_submit import (
     BUSINESS_TRIP_SUBMIT_CONTRACT_VERSION,
     BusinessTripBusinessValidationRequired,
     _wait_for_sent_readback,
@@ -28,13 +28,13 @@ class SeeyonBusinessTripSubmitTests(unittest.TestCase):
         adapter = FakeAdapter(sent_items=[{"affair_id": "sent-old", "title": "Old"}])
         with (
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
-            patch("bscli.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._read_business_trip_form",
                 return_value=readback,
             ),
         ):
@@ -57,17 +57,17 @@ class SeeyonBusinessTripSubmitTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
-            patch("bscli.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._read_business_trip_form",
                 return_value=readback,
             ),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._wait_for_sent_readback",
+                "agentbridge.adapters.seeyon_business_trip_submit._wait_for_sent_readback",
                 return_value={
                     "affair_id": "sent-new",
                     "title": subject,
@@ -101,17 +101,17 @@ class SeeyonBusinessTripSubmitTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
-            patch("bscli.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._read_business_trip_form",
                 return_value=readback,
             ),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._wait_for_sent_readback",
+                "agentbridge.adapters.seeyon_business_trip_submit._wait_for_sent_readback",
                 side_effect=BusinessTripOutcomeUnknown("not confirmed"),
             ),
         ):
@@ -136,13 +136,13 @@ class SeeyonBusinessTripSubmitTests(unittest.TestCase):
         first_page = DialogPage(first_dialog)
         patches = (
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._open_and_validate_form",
                 return_value=(first_page, FakeFrame()),
             ),
-            patch("bscli.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
-            patch("bscli.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._read_business_trip_form",
                 return_value=readback,
             ),
         )
@@ -171,17 +171,17 @@ class SeeyonBusinessTripSubmitTests(unittest.TestCase):
         second_page = DialogPage(second_dialog)
         with (
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._open_and_validate_form",
                 return_value=(second_page, FakeFrame()),
             ),
-            patch("bscli.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
-            patch("bscli.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._validate_optional_inputs"),
+            patch("agentbridge.adapters.seeyon_business_trip_submit._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip_submit._read_business_trip_form",
                 return_value=readback,
             ),
             patch(
-                "bscli.adapters.seeyon_business_trip_submit._wait_for_sent_readback",
+                "agentbridge.adapters.seeyon_business_trip_submit._wait_for_sent_readback",
                 return_value={
                     "affair_id": "sent-new",
                     "title": subject,

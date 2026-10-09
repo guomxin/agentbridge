@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLifecycle, isCancellation } from "../bscli/workspace/static/workspace_lifecycle.mjs";
-import { createWorkspaceRequests } from "../bscli/workspace/static/workspace_request.mjs";
-import { createChatStream } from "../bscli/workspace/static/workspace_stream.mjs";
+import { createLifecycle, isCancellation } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
+import { createWorkspaceRequests } from "../agentbridge/workspace/static/workspace_request.mjs";
+import { createChatStream } from "../agentbridge/workspace/static/workspace_stream.mjs";
 
 const deferred = () => {
   let resolve;

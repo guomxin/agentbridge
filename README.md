@@ -57,7 +57,7 @@ Telegram / 微信 / Agent Workspace / 其他 MCP 宿主
 ```bash
 python -m pip install -e .
 python -m playwright install chromium
-python -m bscli.cli.main --home .bscli system init-seeyon-oa
+python -m agentbridge.cli.main --home .agentbridge system init-seeyon-oa
 ```
 
 ## 三、业务能力
@@ -65,9 +65,9 @@ python -m bscli.cli.main --home .bscli system init-seeyon-oa
 查看中央能力目录：
 
 ```bash
-python -m bscli.cli.main --home .bscli capability list
-python -m bscli.cli.main --home .bscli capability describe oa.template.list
-python -m bscli.cli.main --home .bscli capability describe oa.business_trip.prepare
+python -m agentbridge.cli.main --home .agentbridge capability list
+python -m agentbridge.cli.main --home .agentbridge capability describe oa.template.list
+python -m agentbridge.cli.main --home .agentbridge capability describe oa.business_trip.prepare
 ```
 
 截至 2026-09-04，中央注册表包含 101 个业务能力：
@@ -284,6 +284,10 @@ scripts/agentbridge-native validate --full
 - 不存在静默降级到旧桥或更弱治理路径；
 - 结果未知时不自动重试；
 - 当前逻辑隔离不冒充生产级 OS/容器隔离。
+
+## 命名与平台
+
+核心分发包、Python 模块与命令统一为 `agentbridge`（0.2.0）。旧 `bscli` 仅转发启动，计划在 0.3.0 删除。新安装使用 `~/.agentbridge`；检测到旧数据时须显式 `--home`，不会静默建立空环境。维护目标为 macOS 和 Linux。迁移、宿主重新登记及证书操作见[命名迁移与证书维护](docs/部署运维/命名迁移与证书维护.md)与[原生维护](docs/部署运维/苹果系统原生维护.md)。
 
 ## 十一、文档
 

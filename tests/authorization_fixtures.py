@@ -1,6 +1,6 @@
 """Explicit user grants for business-behavior tests, separate from identity issuance."""
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.user_grants import PERMISSIONS
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.user_grants import PERMISSIONS
 
 
 def grant_permissions(grants, subject, permissions):

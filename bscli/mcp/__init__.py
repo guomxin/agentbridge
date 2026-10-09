@@ -1,1 +1,0 @@
-"""MCP integration for BSCLI."""

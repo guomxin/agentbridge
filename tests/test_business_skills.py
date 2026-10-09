@@ -6,9 +6,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from bscli.core.business_skills import SkillRegistry, SkillRejected, SkillStore, skill_catalog, dependency_state, validate_binding, skill_bundle
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.user_grants import UserGrantConflict
+from agentbridge.core.business_skills import SkillRegistry, SkillRejected, SkillStore, skill_catalog, dependency_state, validate_binding, skill_bundle
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.user_grants import UserGrantConflict
 
 
 class BusinessSkillsTests(unittest.TestCase):
@@ -88,7 +88,7 @@ class BusinessSkillsTests(unittest.TestCase):
 
     def test_packaged_resources_reject_path_escape(self):
         root = Path(self.temp.name) / "packages"
-        shutil.copytree(Path("bscli/business_skills"), root)
+        shutil.copytree(Path("agentbridge/business_skills"), root)
         path = root / "log-review/manifest.json"
         manifest = json.loads(path.read_text(encoding="utf-8"))
         manifest["resources"] = ["../../outside.md"]
@@ -100,7 +100,7 @@ class BusinessSkillsTests(unittest.TestCase):
         manifest = self.store.registry.get("log-review")["manifest"]
         catalog = {"sources": [{"source_id": "a", "capabilities": [{"name": "database.directory"}]},
                                {"source_id": "b", "capabilities": [{"name": "database.logs.query"}]}]}
-        with patch("bscli.database.independent.IndependentDatabase.catalog", return_value=catalog):
+        with patch("agentbridge.database.independent.IndependentDatabase.catalog", return_value=catalog):
             self.assertFalse(dependency_state(self.service, "alice", manifest, "review", "a")["available"])
             catalog["sources"][0]["capabilities"].append({"name": "database.logs.query"})
             self.assertTrue(dependency_state(self.service, "alice", manifest, "review", "a")["available"])
@@ -166,7 +166,7 @@ class BusinessSkillsTests(unittest.TestCase):
 
     def test_invalid_required_resources_and_selection_fail_at_registry_load(self):
         root = Path(self.temp.name) / "packages"
-        shutil.copytree(Path("bscli/business_skills"), root)
+        shutil.copytree(Path("agentbridge/business_skills"), root)
         path = root / "log-review/manifest.json"
         original = json.loads(path.read_text(encoding="utf-8"))
         for required in ({}, {"review": ["missing.md"]}, {"review": ["SKILL.md"]},
@@ -196,8 +196,8 @@ class BusinessSkillsTests(unittest.TestCase):
 
     def test_real_mcp_host_load_revoke_and_cross_user_binding(self):
         from starlette.testclient import TestClient
-        from bscli.core.mcp_identities import McpIdentityTokenStore
-        from bscli.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
+        from agentbridge.core.mcp_identities import McpIdentityTokenStore
+        from agentbridge.mcp.central import create_central_mcp_server, validate_central_mcp_server_config
         store = McpIdentityTokenStore(self.service.db_path)
         tokens = {u: store.issue(user_subject=u, expected_principal_ref=u, ttl_seconds=3600) for u in ("alice", "bob")}
         profile = json.loads(Path("schemas/agent-host/v1/test-vectors.json").read_text(encoding="utf-8"))["profiles"][0]["value"]
@@ -223,7 +223,7 @@ class BusinessSkillsTests(unittest.TestCase):
             self.assertEqual(self.store.load_history("alice")[0]["status"], "rejected")
             # Real host load includes references without allowing the host to select a file.
             self.assign({"oa-work-log": {"profiles": ["preview", "fill"]}, "log-review": {"profiles": ["review"]}}, 1)
-            with patch("bscli.database.independent.IndependentDatabase.catalog", return_value={"sources": [
+            with patch("agentbridge.database.independent.IndependentDatabase.catalog", return_value={"sources": [
                 {"source_id":"a", "capabilities":[{"name":"database.directory"}, {"name":"database.logs.query"}]}]}):
                 loaded = call("agentbridge_skill_get", {"skill_id":"log-review", "profile":"review", "source_id":"a"})["structuredContent"]
                 self.assertEqual(loaded["loaded_resources"], ["SKILL.md", "references/evidence.md"])

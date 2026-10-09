@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const outputUrl = new URL(
-  "../../../bscli/mcp/static/trusted-interaction.html",
+  "../../../agentbridge/mcp/static/trusted-interaction.html",
   import.meta.url,
 );
 const html = await readFile(outputUrl, "utf8");

@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from bscli.mcp.central import AGENT_FACING_TOOL_SCOPE_REQUIREMENTS
+from agentbridge.mcp.central import AGENT_FACING_TOOL_SCOPE_REQUIREMENTS
 from tools.export_openclaw_agentbridge_catalog import build_catalog
 
 

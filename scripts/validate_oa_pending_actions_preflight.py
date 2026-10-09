@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 
-from bscli.adapters.seeyon_central import SeeyonCentralAdapter
-from bscli.adapters.seeyon_missed_punch import prepare_missed_punch_approval
-from bscli.adapters.seeyon_pending_actions import (
+from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
+from agentbridge.adapters.seeyon_missed_punch import prepare_missed_punch_approval
+from agentbridge.adapters.seeyon_pending_actions import (
     prepare_attendance_confirmation,
     prepare_business_trip_approval,
     prepare_efficiency_data_approval,
@@ -22,10 +22,10 @@ from bscli.adapters.seeyon_pending_actions import (
     prepare_travel_expense_approval,
     prepare_weekly_report_acknowledgement,
 )
-from bscli.browser.central import CentralBrowserWorker
-from bscli.core.config import ConfigStore
-from bscli.core.session_secrets import SessionStateStore
-from bscli.core.sessions import SessionRegistry
+from agentbridge.browser.central import CentralBrowserWorker
+from agentbridge.core.config import ConfigStore
+from agentbridge.core.session_secrets import SessionStateStore
+from agentbridge.core.sessions import SessionRegistry
 
 
 _PREPARE_FUNCTIONS = {

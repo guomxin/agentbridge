@@ -1,6 +1,6 @@
 import unittest
 
-from bscli.adapters.seeyon_pending_actions import (
+from agentbridge.adapters.seeyon_pending_actions import (
     PendingActionContractMismatch,
     acknowledge_weekly_report,
     approve_business_trip_request,

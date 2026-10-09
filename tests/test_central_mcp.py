@@ -18,10 +18,10 @@ warnings.filterwarnings(
 
 from starlette.testclient import TestClient
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.mcp_identities import McpIdentityTokenStore
-from bscli.auth.server import AuthServerConfig
-from bscli.mcp.central import (
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
+from agentbridge.auth.server import AuthServerConfig
+from agentbridge.mcp.central import (
     CentralSessionKeepalive,
     _run_host_control,
     agent_facing_tools_for_scopes,
@@ -29,7 +29,7 @@ from bscli.mcp.central import (
     serve_central_mcp,
     validate_central_mcp_server_config,
 )
-from bscli.mcp.presentation import (
+from agentbridge.mcp.presentation import (
     MCP_APP_MIME_TYPE,
     MCP_APP_RESOURCE_URI,
     MCP_PROFILE_RESOURCE_URI,
@@ -39,8 +39,8 @@ from bscli.mcp.presentation import (
 
 class CentralMcpTests(unittest.TestCase):
     def test_workflow_detail_optional_revision_matches_capability_contract(self):
-        from bscli.adapters.seeyon_central import build_central_capability_registry
-        from bscli.core.capability_runtime import _validate_json_object
+        from agentbridge.adapters.seeyon_central import build_central_capability_registry
+        from agentbridge.core.capability_runtime import _validate_json_object
         schema = build_central_capability_registry().get("oa.workflow.detail.get").input_schema
         with self._server() as (service, _store, token, client):
             def checked_invoke(**kwargs):
@@ -80,7 +80,7 @@ class CentralMcpTests(unittest.TestCase):
             service.invoke.assert_not_called()
 
     def test_slow_host_control_logs_non_sensitive_latency_context(self):
-        with patch("bscli.mcp.central._LOGGER") as logger:
+        with patch("agentbridge.mcp.central._LOGGER") as logger:
             result = asyncio.run(
                 _run_host_control(
                     "agentbridge_host_timeline_append",
@@ -1013,7 +1013,7 @@ class CentralMcpTests(unittest.TestCase):
 
 
     def test_configured_user_grant_overrides_old_token_scope_for_business_tools(self):
-        from bscli.core.user_grants import UserGrants
+        from agentbridge.core.user_grants import UserGrants
 
         with self._server() as (service, store, read_token, client):
             UserGrants(store.db_path).save(
@@ -2558,10 +2558,10 @@ class CentralMcpTests(unittest.TestCase):
         mcp.streamable_http_app.return_value = app
 
         with (
-            patch("bscli.mcp.central.create_auth_http_server", return_value=auth_server),
-            patch("bscli.mcp.central.create_central_mcp_server", return_value=mcp),
-            patch("bscli.mcp.central.CentralSessionKeepalive") as keepalive_class,
-            patch("bscli.mcp.central.uvicorn.run") as run,
+            patch("agentbridge.mcp.central.create_auth_http_server", return_value=auth_server),
+            patch("agentbridge.mcp.central.create_central_mcp_server", return_value=mcp),
+            patch("agentbridge.mcp.central.CentralSessionKeepalive") as keepalive_class,
+            patch("agentbridge.mcp.central.uvicorn.run") as run,
         ):
             serve_central_mcp(
                 service=service,
@@ -2600,9 +2600,9 @@ class CentralMcpTests(unittest.TestCase):
         auth_server = MagicMock()
 
         with (
-            patch("bscli.mcp.central.create_auth_http_server", return_value=auth_server),
+            patch("agentbridge.mcp.central.create_auth_http_server", return_value=auth_server),
             patch(
-                "bscli.mcp.central.create_central_mcp_server",
+                "agentbridge.mcp.central.create_central_mcp_server",
                 side_effect=RuntimeError("MCP setup failed"),
             ),
             self.assertRaisesRegex(RuntimeError, "MCP setup failed"),

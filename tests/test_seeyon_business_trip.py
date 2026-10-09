@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from bscli.adapters.seeyon_business_trip import (
+from agentbridge.adapters.seeyon_business_trip import (
     BUSINESS_TRIP_CONTRACT_VERSION,
     BUSINESS_TRIP_FIELD_CARD_SCHEMA,
     BUSINESS_TRIP_FORM_APP_ID,
@@ -78,7 +78,7 @@ class SeeyonBusinessTripTests(unittest.TestCase):
         page.title_value = "新建页面"
         frame = FakeFrame()
         with patch(
-            "bscli.adapters.seeyon_business_trip._open_and_validate_form",
+            "agentbridge.adapters.seeyon_business_trip._open_and_validate_form",
             return_value=(page, frame),
         ):
             prepared = prepare_business_trip_draft(FakeAdapter(), object(), _inputs())
@@ -100,7 +100,7 @@ class SeeyonBusinessTripTests(unittest.TestCase):
         page.content_coll_visible = False
         frame = FakeFrame()
         with patch(
-            "bscli.adapters.seeyon_business_trip._open_and_validate_form",
+            "agentbridge.adapters.seeyon_business_trip._open_and_validate_form",
             return_value=(page, frame),
         ):
             with self.assertRaisesRegex(BusinessTripContractMismatch, "note field"):
@@ -120,19 +120,19 @@ class SeeyonBusinessTripTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_business_trip._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_business_trip._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip._read_business_trip_form",
                 side_effect=[readback, readback],
             ),
             patch(
-                "bscli.adapters.seeyon_business_trip._wait_for_cap4_frame",
+                "agentbridge.adapters.seeyon_business_trip._wait_for_cap4_frame",
                 return_value=frame,
             ),
-            patch("bscli.adapters.seeyon_business_trip._validate_form_controls"),
+            patch("agentbridge.adapters.seeyon_business_trip._validate_form_controls"),
         ):
             result = save_business_trip_draft(
                 FakeAdapter(),
@@ -160,19 +160,19 @@ class SeeyonBusinessTripTests(unittest.TestCase):
         boundary = []
         with (
             patch(
-                "bscli.adapters.seeyon_business_trip._open_and_validate_form",
+                "agentbridge.adapters.seeyon_business_trip._open_and_validate_form",
                 return_value=(page, frame),
             ),
-            patch("bscli.adapters.seeyon_business_trip._fill_business_trip_form"),
+            patch("agentbridge.adapters.seeyon_business_trip._fill_business_trip_form"),
             patch(
-                "bscli.adapters.seeyon_business_trip._read_business_trip_form",
+                "agentbridge.adapters.seeyon_business_trip._read_business_trip_form",
                 side_effect=[precommit, mismatched],
             ),
             patch(
-                "bscli.adapters.seeyon_business_trip._wait_for_cap4_frame",
+                "agentbridge.adapters.seeyon_business_trip._wait_for_cap4_frame",
                 return_value=frame,
             ),
-            patch("bscli.adapters.seeyon_business_trip._validate_form_controls"),
+            patch("agentbridge.adapters.seeyon_business_trip._validate_form_controls"),
         ):
             with self.assertRaises(BusinessTripOutcomeUnknown):
                 save_business_trip_draft(

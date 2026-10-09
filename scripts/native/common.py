@@ -57,8 +57,11 @@ def external(path, root=ROOT):
 
 
 def private_file(path):
-    path = external(path)
-    if not path.is_file() or path.stat().st_mode & 0o077:
+    original = Path(path).expanduser().absolute()
+    if original.is_symlink():
+        raise ValueError('Private file must not be a symbolic link')
+    path = external(original)
+    if not path.is_file() or path.stat().st_mode & 0o077 or path.stat().st_uid != os.getuid():
         raise ValueError('Private file missing or accessible by group/others')
     return path
 

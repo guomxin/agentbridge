@@ -1,2 +1,1 @@
-"""Command-line interface package."""
-
+"""Compatibility for the former command entry point only."""

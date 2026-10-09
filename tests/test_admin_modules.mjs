@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createViewScope, createTimerSlot } from '../bscli/admin/static/admin_lifecycle.mjs';
-import { createAdminApi, csrfToken, restoreAdminSession } from '../bscli/admin/static/admin_request.mjs';
-import { createModalController } from '../bscli/admin/static/admin_forms.mjs';
-import { badge, sessionStateBadge, table, filteredTable, skillReviewQualityHtml, escapeHtml, fmtBytes, fmtDuration } from '../bscli/admin/static/admin_presentation.mjs';
+import { createViewScope, createTimerSlot } from '../agentbridge/admin/static/admin_lifecycle.mjs';
+import { createAdminApi, csrfToken, restoreAdminSession } from '../agentbridge/admin/static/admin_request.mjs';
+import { createModalController } from '../agentbridge/admin/static/admin_forms.mjs';
+import { badge, sessionStateBadge, table, filteredTable, skillReviewQualityHtml, escapeHtml, fmtBytes, fmtDuration } from '../agentbridge/admin/static/admin_presentation.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b)=>{resolve=a;reject=b;}); return {promise,resolve,reject}; };
 const response = (value, status=200) => ({ok: status < 400, status, json: async()=>value});

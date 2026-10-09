@@ -8,10 +8,10 @@ from threading import Thread
 import unittest
 from urllib.parse import urlencode
 
-from bscli.auth.card import TrustedAuthApplication
-from bscli.auth.interactive_browser import TrustedInteractiveBrowserApplication
-from bscli.auth.server import create_auth_http_server, validate_auth_server_config
-from bscli.core.auth_challenges import AuthChallengeStore
+from agentbridge.auth.card import TrustedAuthApplication
+from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
+from agentbridge.auth.server import create_auth_http_server, validate_auth_server_config
+from agentbridge.core.auth_challenges import AuthChallengeStore
 
 
 class InteractiveBrowserServerTests(unittest.TestCase):

@@ -4,8 +4,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
 
-from bscli.auth.action_card import TrustedActionApplication
-from bscli.core.write_authorizations import WriteAuthorizationStore
+from agentbridge.auth.action_card import TrustedActionApplication
+from agentbridge.core.write_authorizations import WriteAuthorizationStore
 
 
 class TrustedActionCardTests(unittest.TestCase):

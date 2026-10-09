@@ -5,7 +5,7 @@ import {
   canRecoverStartup,
   recoveryIdempotencyKey,
   sessionRunState,
-} from "../bscli/workspace/gateway_run_guard.mjs";
+} from "../agentbridge/workspace/gateway_run_guard.mjs";
 
 
 const sessionKey =

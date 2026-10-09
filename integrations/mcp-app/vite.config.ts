@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [viteSingleFile()],
   build: {
     target: "es2022",
-    outDir: "../../bscli/mcp/static",
+    outDir: "../../agentbridge/mcp/static",
     emptyOutDir: false,
     rollupOptions: {
       input: "trusted-interaction.html",

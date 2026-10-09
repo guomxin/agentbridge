@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from bscli.browser.http import CentralHttpWorker, _RejectRedirectHandler
+from agentbridge.browser.http import CentralHttpWorker, _RejectRedirectHandler
 
 
 class CentralHttpWorkerTests(unittest.TestCase):

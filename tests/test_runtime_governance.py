@@ -8,13 +8,13 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
-from bscli.core.central_service import CentralCapabilityService
-from bscli.core.operations import OperationStore
-from bscli.core.runtime_governance import (
+from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.operations import OperationStore
+from agentbridge.core.runtime_governance import (
     RuntimeGovernanceStore,
     classify_runtime_error,
 )
-from bscli.mcp.central import CentralRuntimeGovernanceWorker
+from agentbridge.mcp.central import CentralRuntimeGovernanceWorker
 
 
 class MutableClock:

@@ -5,15 +5,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 
-from bscli.core.capability import CapabilityRegistry, CapabilitySpec
-from bscli.core.capability_runtime import (
+from agentbridge.core.capability import CapabilityRegistry, CapabilitySpec
+from agentbridge.core.capability_runtime import (
     CapabilityEngine,
     CapabilityRejected,
     RequiresUserAction,
 )
-from bscli.core.operations import OperationConflictError, OperationStore
-from bscli.core.session_secrets import SessionStateStore
-from bscli.core.sessions import SessionPrincipalMismatch, SessionRegistry
+from agentbridge.core.operations import OperationConflictError, OperationStore
+from agentbridge.core.session_secrets import SessionStateStore
+from agentbridge.core.sessions import SessionPrincipalMismatch, SessionRegistry
 
 
 class AgentBridgeCoreTests(unittest.TestCase):
@@ -524,25 +524,6 @@ class AgentBridgeCoreTests(unittest.TestCase):
             self.assertNotIn(b"top-secret-cookie", ciphertext)
             self.assertEqual(store.load("session-a"), state)
 
-    @unittest.skipUnless(os.name == "nt", "Windows DPAPI validation")
-    def test_default_session_state_store_round_trips_with_windows_dpapi(self):
-        with TemporaryDirectory() as tmp:
-            store = SessionStateStore(Path(tmp))
-            state = {
-                "cookies": [
-                    {
-                        "name": "JSESSIONID",
-                        "value": "dpapi-secret-cookie",
-                        "domain": "oa.example.test",
-                        "path": "/",
-                    }
-                ]
-            }
-
-            store.save("session-dpapi", state)
-
-            self.assertNotIn(b"dpapi-secret-cookie", store.path_for("session-dpapi").read_bytes())
-            self.assertEqual(store.load("session-dpapi"), state)
 
 
 def _template_capability() -> CapabilitySpec:

@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tests.database_fixtures import configured_source
-from bscli.database.content import compile_query
-from bscli.database.independent import IndependentDatabase, DatabaseRejected, rejection_result, validate_sql
+from agentbridge.database.content import compile_query
+from agentbridge.database.independent import IndependentDatabase, DatabaseRejected, rejection_result, validate_sql
 
 WINDOW = {'start_date': '2026-09-01', 'end_date_exclusive': '2026-09-02'}
 
@@ -58,7 +58,7 @@ class ScopeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             runtime, conn, cursor = self.fixture(root)
             args = {**WINDOW, 'department_id': '3', 'include_descendants': True, 'page_size': 1}
-            with patch('bscli.database.sources.connect') as connect, patch('bscli.database.sources.check_role'):
+            with patch('agentbridge.database.sources.connect') as connect, patch('agentbridge.database.sources.check_role'):
                 connect.return_value.__enter__.return_value = conn
                 first = runtime.execute('reader', 'database.logs.content_analyze', args)
                 self.assertEqual(first['resolved_department_scope']['status_filter'], 'none')
@@ -84,7 +84,7 @@ class ScopeTests(unittest.TestCase):
                     if missing == 'hierarchy' and 'AS available' in sql: r.fetchone.return_value = {'available': False}
                     return r
                 conn.execute.side_effect = execute
-                with patch('bscli.database.sources.connect') as connect, patch('bscli.database.sources.check_role'):
+                with patch('agentbridge.database.sources.connect') as connect, patch('agentbridge.database.sources.check_role'):
                     connect.return_value.__enter__.return_value = conn
                     code = 'DATABASE_DEPARTMENT_NOT_FOUND' if missing == 'root' else 'DATABASE_HIERARCHY_UNAVAILABLE'
                     with self.assertRaisesRegex(DatabaseRejected, code):
@@ -96,7 +96,7 @@ class ScopeTests(unittest.TestCase):
             runtime, conn, cursor = self.fixture(root)
             cursor.description = [SimpleNamespace(name=k) for k in ('id', 'name', 'parent_id', 'status')]
             cursor.fetchmany.side_effect = [[{'id': 9007199254740993, 'name': 'Child', 'parent_id': 3, 'status': False}], []]
-            with patch('bscli.database.sources.connect') as connect, patch('bscli.database.sources.check_role'):
+            with patch('agentbridge.database.sources.connect') as connect, patch('agentbridge.database.sources.check_role'):
                 connect.return_value.__enter__.return_value = conn
                 r = runtime.execute('reader', 'database.directory', {'entity': 'departments', 'keyword': 'Child', 'parent_id': '3', 'after_id': '8'})
             self.assertEqual(r['rows'][0]['id'], '9007199254740993')

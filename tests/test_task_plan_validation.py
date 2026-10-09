@@ -1,12 +1,12 @@
 import unittest
 
-from bscli.adapters.seeyon_central import build_central_capability_registry
-from bscli.adapters.taihua import (
+from agentbridge.adapters.seeyon_central import build_central_capability_registry
+from agentbridge.adapters.taihua import (
     TAIHUA_WORK_LOG_CREATE_CAPABILITY,
     TAIHUA_WORK_LOG_CREATE_PREPARE_CAPABILITY,
     build_taihua_capability_registry,
 )
-from bscli.core.task_plan_validation import (
+from agentbridge.core.task_plan_validation import (
     PlanValidationError,
     TaskPlanCapabilityStepInput,
     TaskPlanTransformStepInput,
@@ -14,9 +14,9 @@ from bscli.core.task_plan_validation import (
     task_plan_step_json_schema,
     validate_and_compile_task_plan,
 )
-from bscli.core.planning_catalog import build_planning_catalog
-from bscli.core.planning_policy import compile_temporal_constraints, COMPOSED_TASK_PLANNING_POLICY
-from bscli.core.transforms import build_transform_registry
+from agentbridge.core.planning_catalog import build_planning_catalog
+from agentbridge.core.planning_policy import compile_temporal_constraints, COMPOSED_TASK_PLANNING_POLICY
+from agentbridge.core.transforms import build_transform_registry
 
 
 class TaskPlanValidationTests(unittest.TestCase):

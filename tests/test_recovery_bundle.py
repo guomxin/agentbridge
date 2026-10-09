@@ -7,12 +7,12 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from bscli.core import recovery_bundle as bundle
-from bscli.core.config import ConfigStore, SystemProfile
-from bscli.core.data_source_secrets import DataSourceSecretStore
-from bscli.core.session_secrets import AesGcmSessionStateProtector
-from bscli.database.independent import DatabaseGrants
-from bscli.database.sources import Sources
+from agentbridge.core import recovery_bundle as bundle
+from agentbridge.core.config import ConfigStore, SystemProfile
+from agentbridge.core.data_source_secrets import DataSourceSecretStore
+from agentbridge.core.session_secrets import AesGcmSessionStateProtector
+from agentbridge.database.independent import DatabaseGrants
+from agentbridge.database.sources import Sources
 
 
 class RecoveryBundleTests(unittest.TestCase):
@@ -43,7 +43,7 @@ class RecoveryBundleTests(unittest.TestCase):
                 INSERT INTO timeline_attachments VALUES ('a1','ready');
                 INSERT INTO task_artifacts VALUES ('a1','ready');
             """)
-        with patch("bscli.core.data_source_secrets._default_protector", return_value=self.protector):
+        with patch("agentbridge.core.data_source_secrets._default_protector", return_value=self.protector):
             sources = Sources(self.home)
         config = dict(source_id="demo", name="Demo", description="Fixture", engine="postgresql",
                       host="database.invalid", port=5432, dbname="demo", username="reader",
@@ -176,7 +176,7 @@ class RecoveryBundleTests(unittest.TestCase):
         self.assertFalse((self.root / "drills/escape").exists())
 
     def test_legacy_dispatch_validates_v2(self):
-        from bscli.core.runtime_backup import validate_backup_manifest, run_runtime_restore_drill
+        from agentbridge.core.runtime_backup import validate_backup_manifest, run_runtime_restore_drill
         backup = self.create()
         with patch.object(bundle, "_default_protector", return_value=self.protector):
             self.assertTrue(validate_backup_manifest(backup["manifestPath"])["passed"])

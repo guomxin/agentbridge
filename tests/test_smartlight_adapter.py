@@ -7,7 +7,7 @@ import json
 from urllib.parse import parse_qs, urlparse
 import unittest
 
-from bscli.adapters.smartlight import (
+from agentbridge.adapters.smartlight import (
     SMARTLIGHT_ALARM_ANALYSIS_CAPABILITY,
     SMARTLIGHT_ALARM_LIST_CAPABILITY,
     SMARTLIGHT_ALARM_REMARK_GET_CAPABILITY,
@@ -61,7 +61,7 @@ from bscli.adapters.smartlight import (
     prepare_smartlight_alarm_remark_update,
     prepare_smartlight_rtu_alarm_dispose,
 )
-from bscli.core.central_service import capability_required_scopes
+from agentbridge.core.central_service import capability_required_scopes
 
 
 class SmartlightAdapterTests(unittest.TestCase):

@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 
-from bscli.adapters.seeyon_central import SeeyonCentralAdapter
-from bscli.browser.central import CentralBrowserWorker
-from bscli.core.config import ConfigStore
-from bscli.core.session_secrets import SessionStateStore
-from bscli.core.sessions import SessionRegistry
+from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
+from agentbridge.browser.central import CentralBrowserWorker
+from agentbridge.core.config import ConfigStore
+from agentbridge.core.session_secrets import SessionStateStore
+from agentbridge.core.sessions import SessionRegistry
 
 
 _PAGE_CONTRACT_SCRIPT = r"""
