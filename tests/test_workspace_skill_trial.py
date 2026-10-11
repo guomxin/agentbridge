@@ -1,5 +1,6 @@
 """Trusted short trials use the durable dispatch and real authoring receipts."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -200,20 +201,47 @@ class WorkspaceSkillTrialTests(unittest.TestCase):
         public = list(self.app._stream_host_dispatch(user_subject='user-a', dispatch_id=dispatch['dispatch_id']))
         self.assertTrue(all('skillTrial' not in event for event in public if event.get('type') != 'chat'))
 
-    def test_reported_receipt_recovers_a_lost_host_final_without_replaying(self):
+    def test_reported_receipt_recovers_a_lost_host_final_at_deadline_without_replaying(self):
         dispatch = self.accept()
         self.sample(self.binding()['skillTrial'])
         claimed = self.service.workspace.claim_next_host_dispatch(account_id=self.account['account_id'], claim_owner='test')
         accepted = self.service.workspace.mark_host_dispatch_accepted(dispatch['dispatch_id'],
             claim_token=claimed['claim_token'], run_id='recovered-native-run', status='recovered')
-        with patch.object(self.app.gateway, 'send_stream') as send, patch.object(self.app.gateway, 'run_history_evidence', create=True) as history:
+        with patch.object(self.app.gateway, 'send_stream') as send, \
+                patch.object(self.app.gateway, 'run_history_evidence', return_value={}, create=True) as history, \
+                patch.object(self.service.workspace, 'host_dispatch_result_deadline_passed', return_value=True):
             self.app._observe_accepted_dispatch(accepted)
         send.assert_not_called()
-        history.assert_not_called()
+        history.assert_called_once()
         event = self.service.workspace.list_host_dispatch_events(dispatch['dispatch_id'])[-1]['payload']
         self.assertEqual(event['skillTrial']['status'], 'reported')
         self.assertTrue(event['recovered'])
         self.assertEqual(event['text'], '计划：修复登录问题，尚未完成。')
+
+    def test_saved_sample_waits_for_actual_host_final_and_preserves_its_text(self):
+        dispatch = self.accept()
+        self.sample(self.binding()['skillTrial'])
+        claimed = self.service.workspace.claim_next_host_dispatch(account_id=self.account['account_id'], claim_owner='test')
+        accepted = self.service.workspace.mark_host_dispatch_accepted(dispatch['dispatch_id'],
+            claim_token=claimed['claim_token'], run_id='native-run', status='started')
+        with patch.object(self.app.gateway, 'send_stream') as send, \
+                patch.object(self.app.gateway, 'run_history_evidence', return_value={'had_tool_activity': True}, create=True):
+            self.app._observe_accepted_dispatch(accepted)
+        send.assert_not_called()
+        self.assertNotEqual(self.service.workspace.get_host_dispatch(dispatch['dispatch_id'])['state'], 'completed')
+        self.assertFalse(any(e['payload'].get('state') == 'final'
+                             for e in self.service.workspace.list_host_dispatch_events(dispatch['dispatch_id'])))
+        with patch.object(self.service.workspace, '_now', return_value=self.service.workspace._now() + timedelta(seconds=11)):
+            accepted = self.service.workspace.claim_next_host_dispatch(account_id=self.account['account_id'], claim_owner='test')
+        # The presentation may add a heading or confirmation after test_result.
+        final = '样例已保存。\n\n**计划**：修复登录问题，尚未完成。'
+        with patch.object(self.app.gateway, 'run_history_evidence', return_value={'final_text': final}, create=True):
+            self.app._observe_accepted_dispatch(accepted)
+        event = self.service.workspace.list_host_dispatch_events(dispatch['dispatch_id'])[-1]['payload']
+        self.assertEqual(event['text'], final)
+        self.assertEqual(event['skillTrial']['status'], 'reported')
+        entry = self.service.tasks.get_timeline_message(user_subject='user-a', message_key='workspace:assistant:native-run')
+        self.assertEqual(entry['text'], final)
 
     def test_canceled_trial_stream_and_timeline_do_not_claim_saved(self):
         dispatch = self.accept()

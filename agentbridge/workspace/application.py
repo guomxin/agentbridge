@@ -1015,13 +1015,6 @@ class WorkspaceApplication:
         evidence = None
         if self._dispatch_stop.is_set():
             return
-        trial = self.store.skill_trial_for_dispatch(dispatch['dispatch_id'], user_subject=account['user_subject'],
-                                                   account_id=account['account_id'])
-        sample = self.service.skill_authoring.workspace_trial_receipt(account['user_subject'], trial) if trial else None
-        if sample and sample['status'] == 'reported' and sample['output']:
-            self._finish_accepted_dispatch(dispatch, account, {
-                'type': 'chat', 'runId': run_id, 'state': 'final', 'text': sample['output'], 'recovered': True})
-            return
         try:
             evidence = self._gateway().run_history_evidence(
                 session_key=dispatch["conversation_ref"], run_ref=run_id, timeout_seconds=8,
@@ -1040,6 +1033,16 @@ class WorkspaceApplication:
                 dispatch["dispatch_id"], claim_token=dispatch["claim_token"],
                 had_tool_activity=bool(evidence and evidence.get("had_tool_activity")),
             )
+            return
+        # Saving a sample happens before the host finishes presenting it. Wait
+        # for the real final text so history and the Workspace receipt agree.
+        # Only use the saved sample after the normal recovery deadline expires.
+        trial = self.store.skill_trial_for_dispatch(dispatch['dispatch_id'], user_subject=account['user_subject'],
+                                                   account_id=account['account_id'])
+        sample = self.service.skill_authoring.workspace_trial_receipt(account['user_subject'], trial) if trial else None
+        if sample and sample['status'] == 'reported' and sample['output']:
+            self._finish_accepted_dispatch(dispatch, account, {
+                'type': 'chat', 'runId': run_id, 'state': 'final', 'text': sample['output'], 'recovered': True})
             return
         text = (
             "请求已接收，但在结果恢复时限内未能确认最终结果。"

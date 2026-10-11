@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "cc7149a6da42"
+    "0ddb4f845584"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "reason": "Skill batch two adds only skill_feedback_context and its primary-key index. Candidate startup on a schema-only reconstruction of live predecessor cc7149a6da42 preserves every existing table, index, trigger and userVersion, including the original seven-column feedback writer. Other database schemas are unchanged. Structured trials require the dedicated endpoint and host acknowledgement and never downgrade on rollback. Exact before/after SQLite schema fingerprints are enforced.",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "38a3cc962bfe5ccd74b84aef8786a5e18c6f6586f13f20f513b4d497ff772651",
-      "afterSha256": "aeec856f0fd1aa3ab0d2a3cff1c7302ef46848002d9b5eed7c66b7f707a523ca"
-    }
-  }
+  "dataCompatibility": "no-migration",
+  "reason": "Skill trial recovery now waits for the host final reply before falling back to a saved sample at the existing recovery deadline. Only recovery ordering changes; no schema or host plugin change. Live predecessor 0ddb4f845584 has the reviewed feedback context table; all four database schemas match its reviewed post-deployment fingerprints. No business request replay or data restore is introduced."
 }
