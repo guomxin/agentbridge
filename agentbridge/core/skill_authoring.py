@@ -221,6 +221,9 @@ class SkillAuthoring:
             draft = self._owned(db, owner, draft_id)
             row, bundle = self._bundle(db, draft_id, draft['revision'])
             return {**dict(draft), 'revisions':[dict(r) for r in db.execute('SELECT revision,content_hash,created_at FROM skill_draft_revisions WHERE draft_id=? ORDER BY revision DESC LIMIT 100',(draft_id,))], 'bundle': bundle, 'provenance': json.loads(row['provenance_json']),
+                    # The display history is bounded; publication coverage must
+                    # include every reported sample of this exact revision.
+                    'tested_profiles': [r[0] for r in db.execute("SELECT DISTINCT profile FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported' ORDER BY profile", (draft_id, draft['revision']))],
                     'tests': [dict(r) for r in db.execute('SELECT * FROM skill_draft_tests WHERE draft_id=? ORDER BY created_at DESC LIMIT 30', (draft_id,))],
                     'requests': [self._review_public(r) for r in db.execute('SELECT * FROM skill_review_requests WHERE draft_id=? ORDER BY created_at DESC LIMIT 30', (draft_id,))]}
 

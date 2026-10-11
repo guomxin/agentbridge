@@ -1,6 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { skillBindingMeta, rememberSkillBinding, businessSkillContext } from "../lib/business-skills.js";
+import { rankSkillCandidates } from "../lib/skill-ranking.js";
+
+const rankingCases = JSON.parse(await readFile(new URL("../../../tests/fixtures/skill_ranking.json", import.meta.url), "utf8")).cases;
+
+for (const fixture of rankingCases) {
+  test(`shared candidate ranking: ${fixture.name}`, async () => {
+    const items = structuredClone(fixture.items);
+    const ranked = rankSkillCandidates(items, fixture.query);
+    assert.deepEqual(ranked.slice(0, fixture.limit ?? 100).map(item => item.id), fixture.expected);
+    assert.deepEqual(items, fixture.items);
+    assert.ok(ranked.every(item => items.includes(item)));
+    const context = await businessSkillContext({client:{callTool:async()=>({items})}}, fixture.query);
+    const candidateLine = context.split("\n").find(line => line.startsWith("[{"));
+    const candidates = JSON.parse(candidateLine);
+    assert.deepEqual(candidates.map(item => item.id), fixture.expected.slice(0, 20));
+    for (const candidate of candidates) {
+      const original = items.find(item => item.id === candidate.id);
+      assert.deepEqual(candidate.selection, original.selection);
+      assert.deepEqual(candidate.profiles, original.profiles);
+      assert.equal(candidate.status, original.status);
+    }
+    assert.match(context, /先检查适用性和可用性/);
+    if (items.length > 20) assert.match(context, /discover/);
+  });
+}
 
 test("business Skill binding is isolated by router, identity, session and run", () => {
   const router = {}, context = {runId:"r1",sessionKey:"s1"}, identity={binding:{key:"alice"}};

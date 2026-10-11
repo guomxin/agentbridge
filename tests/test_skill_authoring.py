@@ -56,6 +56,28 @@ class SkillAuthoringTests(unittest.TestCase):
         with self.assertRaises(UserGrantConflict):self.a.save('alice',draft_id=d['draft_id'],expected_revision=7,proposal=self.proposal,request_key='two')
         with self.assertRaises(ValueError):self.a.test_start('alice',draft_id=d['draft_id'],expected_revision=None,profile='use',prompt='x',request_key='t')
 
+    def test_publication_coverage_survives_bounded_history_and_resets_per_revision(self):
+        proposal = {**self.proposal, 'profiles': {'preview': {}, 'fill': {}}}
+        draft = self.a.save('alice', proposal=proposal, request_key='coverage')
+        for index, profile in enumerate(['preview'] + ['fill'] * 30):
+            sample = self.a.test_start('alice', draft_id=draft['draft_id'], expected_revision=1,
+                                       profile=profile, prompt='合成样例', request_key=f'coverage-{index}')
+            self.a.test_result('alice', test_id=sample['test_id'], output='区分完成和计划。')
+        detail = self.a.get('alice', draft['draft_id'])
+        self.assertEqual(len(detail['tests']), 30)
+        self.assertEqual({test['profile'] for test in detail['tests']}, {'fill'})
+        self.assertEqual(detail['tested_profiles'], ['fill', 'preview'])
+        request = self.a.submit('alice', draft_id=draft['draft_id'], expected_revision=1,
+                                request_key='preview-only', reason='仅申请预览', profiles=['preview'])
+        self.assertEqual(self.a.review_detail(request['request_id'])['profiles'], ['preview'])
+        self.a.withdraw('alice', request['request_id'])
+        self.a.save('alice', draft_id=draft['draft_id'], expected_revision=1,
+                    proposal={**proposal, 'instructions': '新修订需重新试用。'}, request_key='coverage-revision')
+        self.a.test_start('alice', draft_id=draft['draft_id'], expected_revision=2,
+                          profile='preview', prompt='未返回的样例', request_key='coverage-running')
+        self.assertEqual(self.a.get('alice', draft['draft_id'])['tested_profiles'], [])
+        with self.assertRaises(KeyError): self.a.get('bob', draft['draft_id'])
+
     def test_snapshot_and_evidence_are_frozen(self):
         d=self.draft();r=self.submit(d)
         self.sample(d)

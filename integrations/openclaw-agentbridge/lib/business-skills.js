@@ -1,3 +1,5 @@
+import { rankSkillCandidates } from "./skill-ranking.js";
+
 // Bind only within the authenticated host run; never retain another user's settings.
 const bindings = new WeakMap();
 export function skillRunKey(context, identity) {
@@ -23,13 +25,7 @@ export async function businessSkillContext(identity, prompt = "") {
   const catalog = await identity.client.callTool("agentbridge_skill_catalog", {});
   const authoring = catalog?.authoring ? "业务助手创作：所有已认证用户均可用 agentbridge_skill_authoring，无需业务权限。用户要求做助手时，优先 generate(material,request_key) 后台提炼并用 jobs 查看；也可 save 按工具结构化 schema 保存。先 list/get 检查已有草稿，inspect 查看诊断与差异。过程材料只含用户选定范围，删除业务原文、姓名、凭据；未知历史不编造。试用分为 test/test_result 人工样例和 evaluate 独立无工具评测，均不代表真实业务通过。发布用 submit，默认仅自己，必须管理员审批。自动沉淀只在总开关与范围授权同时开启时由后台处理，不能自行开启或自动提交。当前总开关：" + (catalog.authoring.value?.auto_draft ? "已开启。" : "关闭。") + "工具说明含完整参数。\n" : "";
   if (!Array.isArray(catalog?.items) || !catalog.items.length) return authoring || null;
-  let items = catalog.items;
-  if (items.length > 20) {
-    const grams = text => new Set(Array.from(String(text).toLowerCase()).slice(0,-1).map((c,i)=>c+String(text).toLowerCase()[i+1]));
-    const query = grams(prompt);
-    const score = item => { const words = grams(item.name+item.description+JSON.stringify(item.selection)); return [...query].filter(w=>words.has(w)).length; };
-    items = [...items].sort((a,b)=>score(b)-score(a)).slice(0,20);
-  }
+  const items = rankSkillCandidates(catalog.items, prompt).slice(0, 20);
   return authoring + (catalog.items.length>20 ? `目录共 ${catalog.items.length} 项，当前仅列候选；未匹配或用户指定未列出的助手时，调用 agentbridge_skill_authoring discover 检索，不能声称不存在。\n` : "") + "AgentBridge 当前用户业务助手（中央发布）：\n" +
     JSON.stringify(items.map(item => ({ id: item.id, name: item.name,
       description: item.description, selection: item.selection, version: item.version, status: item.status, profiles: item.profiles }))) +

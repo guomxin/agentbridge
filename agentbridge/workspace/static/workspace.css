@@ -1600,6 +1600,12 @@ td {
 .draft-editor fieldset legend { padding: 0 6px; color: #43576b; }
 #skill-recipients label { display: flex; align-items: center; gap: 8px; }
 #skill-recipients input { width: auto; }
+#skill-publication-profiles label { display: flex; align-items: flex-start; gap: 8px; }
+#skill-publication-profiles input { width: auto; height: auto; flex: 0 0 auto; margin-top: 3px; }
+#skill-candidate-preview { max-width: 850px; }
+#skill-candidate-preview:not(:empty) { margin: 20px 0; padding: 16px; border: 1px solid #dce3ec; border-radius: 10px; }
+#skill-candidate-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#skill-candidate-preview details { margin: 12px 0; }
 .skill-job { border-bottom: 1px solid #dce3ec; padding: 12px 0; }
 #skill-workbench-home pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #skill-workbench-home, #skill-quality-panel { max-width: 850px; }

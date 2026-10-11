@@ -14,6 +14,7 @@ from agentbridge.core.skill_quality import (bundle_diff, diagnostics, export_sta
     import_standard, proposal_from_bundle, similarity, validate_cases)
 from agentbridge.core.skill_job_executor import SkillJobDependencies, SkillJobExecutor
 from agentbridge.core.skill_job_queue import SkillJobQueue
+from agentbridge.core.skill_ranking import rank_skill_candidates
 from agentbridge.core.user_grants import UserGrantConflict
 
 
@@ -212,11 +213,10 @@ class SkillWorkbench:
         if not isinstance(query, str) or len(query) > 2000 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('助手检索参数无效')
         catalog = skill_catalog(self.authoring.service, owner)
-        items = catalog['items']
-        if query:
-            items = sorted(items, key=lambda x: -similarity(query, x['name'] + x['description'] + _json(x['selection'])))
+        items = rank_skill_candidates(catalog['items'], query)
         return {**catalog, 'items': items[:limit], 'has_more': len(items) > limit, 'total': len(items),
-                'ranking': 'text_similarity', 'message': '候选排序可能遗漏匹配，必要时查看完整目录'}
+                'ranking': 'explicit_identity_then_positive_text',
+                'message': '名称或 ID 命中优先，仍须检查适用范围与权限；必要时查看完整目录'}
 
     def composition(self, owner, *, steps):
         if not isinstance(steps, list) or not 1 <= len(steps) <= 8: raise ValueError('组合需要 1 至 8 个步骤')

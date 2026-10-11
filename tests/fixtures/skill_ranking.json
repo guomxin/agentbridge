@@ -1,0 +1,110 @@
+{
+  "cases": [
+    {
+      "name": "explicit short ID survives a catalog larger than twenty",
+      "query": "请用 s29 整理本周工作记录",
+      "limit": 20,
+      "items": [
+        {"id":"s1","name":"方法一","description":"整理本周工作记录"},
+        {"id":"s2","name":"方法二","description":"整理本周工作记录"},
+        {"id":"s3","name":"方法三","description":"整理本周工作记录"},
+        {"id":"s4","name":"方法四","description":"整理本周工作记录"},
+        {"id":"s5","name":"方法五","description":"整理本周工作记录"},
+        {"id":"s6","name":"方法六","description":"整理本周工作记录"},
+        {"id":"s7","name":"方法七","description":"整理本周工作记录"},
+        {"id":"s8","name":"方法八","description":"整理本周工作记录"},
+        {"id":"s9","name":"方法九","description":"整理本周工作记录"},
+        {"id":"s10","name":"方法十","description":"整理本周工作记录"},
+        {"id":"s11","name":"方法十一","description":"整理本周工作记录"},
+        {"id":"s12","name":"方法十二","description":"整理本周工作记录"},
+        {"id":"s13","name":"方法十三","description":"整理本周工作记录"},
+        {"id":"s14","name":"方法十四","description":"整理本周工作记录"},
+        {"id":"s15","name":"方法十五","description":"整理本周工作记录"},
+        {"id":"s16","name":"方法十六","description":"整理本周工作记录"},
+        {"id":"s17","name":"方法十七","description":"整理本周工作记录"},
+        {"id":"s18","name":"方法十八","description":"整理本周工作记录"},
+        {"id":"s19","name":"方法十九","description":"整理本周工作记录"},
+        {"id":"s20","name":"方法二十","description":"整理本周工作记录"},
+        {"id":"s21","name":"方法二十一","description":"整理本周工作记录"},
+        {"id":"s29","name":"指定助手","description":"内部约定","status":"disabled","selection":{"not_for":"整理本周工作记录"},"profiles":{"use":{"available":false}}}
+      ],
+      "expected": ["s29","s1","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","s12","s13","s14","s15","s16","s17","s18","s19"]
+    },
+    {
+      "name": "full Chinese name takes priority without hiding exclusions",
+      "query": "请用星河助手整理本周工作记录",
+      "items": [
+        {"id":"generic","name":"汇总方法","description":"整理本周工作记录"},
+        {"id":"named","name":"星河助手","description":"条目","selection":{"not_for":"整理本周工作记录"}}
+      ],
+      "expected": ["named","generic"]
+    },
+    {
+      "name": "short ID does not match inside a longer identifier",
+      "query": "请用 S10，不是 x-s1 或 s1_extra",
+      "items": [
+        {"id":"s1","name":"甲","description":""},
+        {"id":"s10","name":"乙","description":""}
+      ],
+      "expected": ["s10","s1"]
+    },
+    {
+      "name": "ID is not a substring of ordinary English words",
+      "query": "broad roadmap",
+      "items": [
+        {"id":"topic","name":"Roadmap","description":""},
+        {"id":"oa","name":"甲","description":""}
+      ],
+      "expected": ["topic","oa"]
+    },
+    {
+      "name": "not_for alone adds no relevance and zero scores retain order",
+      "query": "整理工作日志",
+      "items": [
+        {"id":"neutral","name":"甲","description":""},
+        {"id":"excluded","name":"乙","description":"","selection":{"not_for":"整理工作日志"}},
+        {"id":"positive","name":"丙","description":"","selection":{"use_when":"整理工作日志"}}
+      ],
+      "expected": ["positive","neutral","excluded"]
+    },
+    {
+      "name": "negative wording does not hard-filter an explicit candidate",
+      "query": "不要使用 s1",
+      "items": [
+        {"id":"s2","name":"甲","description":""},
+        {"id":"s1","name":"乙","description":"","selection":{"not_for":"使用"}}
+      ],
+      "expected": ["s1","s2"]
+    },
+    {
+      "name": "positive output metadata is searchable",
+      "query": "来源时间线",
+      "items": [
+        {"id":"neutral","name":"甲","description":""},
+        {"id":"timeline","name":"乙","description":"","selection":{"output":"来源时间线与证据缺口"}}
+      ],
+      "expected": ["timeline","neutral"]
+    },
+    {
+      "name": "normalization supports whitespace and non-BMP characters",
+      "query": "ALPHA   REVIEW 🔎日志",
+      "items": [
+        {"id":"emoji","name":"甲","description":"🔎日志"},
+        {"id":"named","name":"Alpha Review","description":""}
+      ],
+      "expected": ["named","emoji"]
+    },
+    {
+      "name": "whitespace query keeps catalog order",
+      "query": "  \n\t ",
+      "items": [{"id":"z","name":"乙"},{"id":"a","name":"甲"}],
+      "expected": ["z","a"]
+    },
+    {
+      "name": "empty query keeps catalog order",
+      "query": "",
+      "items": [{"id":"z","name":"乙"},{"id":"a","name":"甲"}],
+      "expected": ["z","a"]
+    }
+  ]
+}
