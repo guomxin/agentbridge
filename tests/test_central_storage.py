@@ -35,8 +35,12 @@ class CentralStorageTests(unittest.TestCase):
                         self.assertEqual(obj.db_path, Path(home) / 'agentbridge.db')
                 with sqlite3.connect(instance.db_path) as db:
                     schema = db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetchall()
-                self.assertEqual([[r[0], r[1]] for r in schema], baseline['schemaObjects'])
-                self.assertEqual(hashlib.sha256(json.dumps(schema, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest(), baseline['schemaSha256'])
+                # Skill feedback attribution is an additive companion table;
+                # preserve the frozen pre-refactor schema of every old object.
+                self.assertEqual([[r[0], r[1]] for r in schema],
+                                 sorted(baseline['schemaObjects'] + [['table', 'skill_feedback_context']]))
+                original_schema = [r for r in schema if r[1] != 'skill_feedback_context']
+                self.assertEqual(hashlib.sha256(json.dumps(original_schema, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest(), baseline['schemaSha256'])
 
     def test_injected_secret_store_release_identity_and_home_isolation(self):
         with TemporaryDirectory() as temp:
