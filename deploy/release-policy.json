@@ -1,25 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "35dcf996a6e8",
-    "565cbe4ecead",
-    "eb5b8d5794d1",
-    "ea5ff6773ddf",
-    "9c7e6fe5e85e",
-    "dd986b88a0ca",
-    "54f68a01474d",
-    "e6cf0f1c9b7d",
-    "1d298fcceae4",
-    "8687c1a712db",
-    "1422644d87ca",
-    "52407ea1db3d",
-    "cd9426193642",
-    "fb177641d8d7",
-    "05755c72ab4f",
-    "1fe0ae1a34c9",
-    "9e5888ef660d",
-    "52b662d68b5d"
+    "cc7149a6da42"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Skill revision safety, per-revision publication profile coverage and deterministic candidate ranking preserve existing draft/version storage and authorization. OpenClaw plugin 0.4.113 uses the matching candidate ranking. No database schema or production configuration migration is required."
+  "dataCompatibility": "reviewed-schema-transition",
+  "reason": "Skill batch two adds only skill_feedback_context and its primary-key index. Candidate startup on a schema-only reconstruction of live predecessor cc7149a6da42 preserves every existing table, index, trigger and userVersion, including the original seven-column feedback writer. Other database schemas are unchanged. Structured trials require the dedicated endpoint and host acknowledgement and never downgrade on rollback. Exact before/after SQLite schema fingerprints are enforced.",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "38a3cc962bfe5ccd74b84aef8786a5e18c6f6586f13f20f513b4d497ff772651",
+      "afterSha256": "aeec856f0fd1aa3ab0d2a3cff1c7302ef46848002d9b5eed7c66b7f707a523ca"
+    }
+  }
 }
