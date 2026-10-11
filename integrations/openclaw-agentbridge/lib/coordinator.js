@@ -159,6 +159,10 @@ export class InteractionCoordinator {
     if (!text) {
       return;
     }
+    // Workspace inbound envelopes may be decorated or replayed by the host.
+    // Only the next authenticated bind may replace this accepted dispatch.
+    const workspaceTurn = this.recentUserMessages.get(sessionKey);
+    if (workspaceTurn?.taskRunRef?.startsWith("workspace:")) return;
     // A continuation applies to one inbound turn. The prompt hook may bind a
     // fresh server-backed selection before this turn reaches any business tool.
     this.taskContinuations.delete(sessionKey);
@@ -173,7 +177,7 @@ export class InteractionCoordinator {
     });
   }
 
-  bindWorkspaceTurn(sessionKey, turnRef, message = null) {
+  bindWorkspaceTurn(sessionKey, turnRef, message = null, skillTrial = null) {
     if (!isPrivateSessionKey(sessionKey)) {
       return false;
     }
@@ -191,8 +195,21 @@ export class InteractionCoordinator {
       intentText: safeMessageText(message, 20_000) || null,
       capturedAt: this.now(),
       taskRunRef: `workspace:${normalizedTurnRef}`,
+      ...(skillTrial ? { skillTrial: { ...skillTrial } } : {}),
     });
     return true;
+  }
+
+  skillTrialForSession(sessionKey) {
+    this.prune();
+    return this.recentUserMessages.get(sessionKey)?.skillTrial || null;
+  }
+
+  rememberSkillTrialResult(sessionKey, trial, params, payload) {
+    const current = this.skillTrialForSession(sessionKey);
+    if (current?.dispatch_id !== trial?.dispatch_id || params?.action !== "test" ||
+        payload?.status !== "running" || typeof payload.test_id !== "string") return;
+    current.test_id = payload.test_id;
   }
 
   currentUserMessageForSession(sessionKey) {
@@ -2444,7 +2461,9 @@ export class InteractionCoordinator {
       }
     }
     for (const [sessionKey, message] of this.recentUserMessages) {
-      if (message.capturedAt <= continuationCutoff) {
+      // Expiring ordinary context must never silently lift a trial's tool guard.
+      // The next authenticated turn or clearSession releases the trial.
+      if (!message.skillTrial && message.capturedAt <= continuationCutoff) {
         this.recentUserMessages.delete(sessionKey);
       }
     }

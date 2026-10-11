@@ -82,14 +82,19 @@ export function rowMenuButton(label, items) {
   return `<button type="button" class="row-menu-trigger" data-row-actions="${escapeHtml(JSON.stringify(items))}" aria-label="${escapeHtml(label)}操作" aria-haspopup="dialog" aria-expanded="false">操作 <span aria-hidden="true">⌄</span></button>`;
 }
 
-export function skillReviewQualityHtml(q){
+export function skillReviewQualityHtml(q, selectedProfiles = []){
   if(!q)return '<p>历史申请未记录独立评测及版本差异。</p>';
   const report=q.evaluation;const labels={candidate:'候选版本',published:'线上版本',without_skill:'不使用助手'};
+  const scoped = q.publication_evidence?.schema === 'agentbridge.skill-publication-evidence.v1' && selectedProfiles.length > 0;
+  const rows = scoped ? selectedProfiles.map(profile => q.publication_evidence.profiles.find(row => row.profile === profile)) : [];
+  const eligible = scoped && !q.publication_evidence.shared.blocked && rows.every(row => row?.eligible && !row.blocked);
+  const manual = !report || (scoped && rows.some(row => row?.source !== 'evaluation'));
   return `<h3>固定修订质量依据</h3><p>${escapeHtml(q.diagnostics.message)}</p>${q.diagnostics.checks.filter(c=>c.level==='warning').map(c=>`<p>待复核：${escapeHtml(c.message)}</p>`).join('')}
     <details><summary>版本差异（${q.diff.length} 项）</summary>${q.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre class="skill-review-text">${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
     <p>新增使用用户：${escapeHtml(q.audience_diff.added.join('、')||'无')}；移除：${escapeHtml(q.audience_diff.removed.join('、')||'无')}</p>
-    ${report?`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p><p>${escapeHtml(report.limitations)}</p>
+    ${scoped?`<p><strong>${eligible?'本次申请的模式具备发布依据，仍需人工复核':'本次申请的模式存在阻断，不能批准'}</strong></p><p>${escapeHtml(q.publication_evidence.shared.reason)}</p>${rows.map((row,index)=>`<p>${escapeHtml(selectedProfiles[index])}：${escapeHtml(row?.evidence||'缺少发布依据')}</p>`).join('')}`:''}
+    ${report?`${scoped?'':`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p>`}<p>${escapeHtml(report.limitations)}</p>
     ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
-    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p></details>`).join('')}`:
-    `<p>尚无独立评测，仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`}`;
+    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p></details>`).join('')}`:''}
+    ${manual?`<p>申请中有模式仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`:''}`;
 }

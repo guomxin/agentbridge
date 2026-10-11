@@ -1,5 +1,5 @@
 import { resolvePluginConfig } from "./config.js";
-import { businessSkillContext, releaseSkillRun } from "./business-skills.js";
+import { businessSkillContext, releaseSkillRun, workspaceSkillTrialContext, workspaceSkillTrialGuard } from "./business-skills.js";
 import { registerSkillCompletion } from "./skill-completion.js";
 import {
   createInteractionSharedState,
@@ -24,7 +24,7 @@ import {
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
 
-export const PLUGIN_VERSION = "0.4.113";
+export const PLUGIN_VERSION = "0.4.114";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;
@@ -153,6 +153,9 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
             coordinator.terminalPlanFailureForCall(request),
           argumentNormalizer: (request) =>
             coordinator.normalizeBusinessToolArguments(request),
+          skillTrialResolver: (sessionKey) => coordinator.skillTrialForSession(sessionKey),
+          skillTrialResultHandler: (sessionKey, trial, params, payload) =>
+            coordinator.rememberSkillTrialResult(sessionKey, trial, params, payload),
           trustedResultHandler: (event, toolContext) =>
             captureNativeAgentBridgeResult(coordinator, event, toolContext),
           logger: api.logger,
@@ -195,6 +198,13 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   // OpenClaw 2026.7.1 omits session context from result middleware.
   api.on("before_tool_call", (event, context) => {
     coordinator.bindToolCall(event, context);
+    const trial = coordinator.skillTrialForSession(event.sessionKey || context.sessionKey);
+    // The Codex native relay qualifies this tool with its `openclaw` namespace.
+    // Accept only this known alias; arbitrary suffix matches could admit other tools.
+    const trialTool = event.toolName === "openclawagentbridge_skill_authoring"
+      ? "agentbridge_skill_authoring" : event.toolName;
+    const trialBlock = workspaceSkillTrialGuard(trial, trialTool, event.params);
+    if (trialBlock) return { block: true, blockReason: trialBlock.error.message };
     if (
       identityRouter.enabled &&
       String(event.toolName || "").startsWith(`${config.mcpServerName}__`)
@@ -542,6 +552,8 @@ async function taskContinuityPromptContext({
   syncTimeline = true,
 }) {
   const sessionKey = safeText(context.sessionKey, 1_024);
+  const skillTrial = coordinator.skillTrialForSession(sessionKey);
+  if (skillTrial) return { prependContext: workspaceSkillTrialContext(skillTrial) };
   // The host may pass quoted history together with the current request. Only
   // the separately captured inbound text can select a task in that envelope.
   if (typeof prompt === "string" && prompt.startsWith("OpenClaw assembled context for this turn:")) {
@@ -1134,11 +1146,12 @@ async function bindWorkspaceGatewaySession({
         })
       ) {
         if (turnRef) {
-          coordinator.bindWorkspaceTurn(sessionKey, turnRef, message);
+          coordinator.bindWorkspaceTurn(sessionKey, turnRef, message, result.binding?.skillTrial || null);
         }
         respond(true, {
           status: "bound",
           sessionKey,
+          ...(result.binding?.skillTrial ? { trialBound: true } : {}),
         });
         return;
       }

@@ -3112,6 +3112,12 @@ class CentralCapabilityService:
         }
         if redeemed["turn_ref"] is not None:
             binding["turnRef"] = redeemed["turn_ref"]
+            trial = self.workspace.skill_trial_for_turn(
+                account_id=redeemed['account_id'], user_subject=user_subject,
+                turn_ref=redeemed['turn_ref'])
+            if trial:
+                sample = self.skill_authoring.workspace_trial_receipt(user_subject, trial)
+                binding['skillTrial'] = {**trial, **({'test_id': sample['test_id']} if sample else {})}
         return {
             "protocolVersion": "0.1",
             "status": "succeeded",

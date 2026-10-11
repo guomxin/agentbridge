@@ -1,4 +1,5 @@
 import { cancellationError, abortableDelay } from "./workspace_lifecycle.mjs";
+import { skillTrialBinding } from "./workspace_skill_trial.mjs";
 
 export function createWorkspaceRequests({ fetch = globalThis.fetch, document, getScope, addLiveProgress }) {
   async function api(path, options = {}) {
@@ -62,6 +63,7 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
     message,
     idempotencyKey,
     attachments,
+    skillTrial,
     activeStream,
   }) {
     const request = {
@@ -76,6 +78,7 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
       body: JSON.stringify({
         message,
         idempotencyKey,
+        ...(skillTrial ? {skillTrial: skillTrialBinding(skillTrial)} : {}),
         attachments: attachments.map((item) => ({
           type: "image",
           mimeType: item.mimeType,
@@ -87,7 +90,8 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         if (request.signal.aborted) throw cancellationError();
-        const response = await fetch("/api/chat/send-stream", request);
+        // Older servers must return 404, never silently treat a trial as chat.
+        const response = await fetch(skillTrial ? "/api/skill-trials/send-stream" : "/api/chat/send-stream", request);
         if (request.signal.aborted) throw cancellationError();
         return response;
       } catch (error) {

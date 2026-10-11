@@ -87,13 +87,42 @@ def workspace_authoring():
 
 
 class SkillMcpTransportTests(unittest.TestCase):
+    def test_user_without_business_grants_can_discover_and_create_private_draft(self):
+        from contextlib import closing
+        import sqlite3
+
+        with mcp_authoring() as (service, token, client):
+            with closing(sqlite3.connect(service.db_path)) as db, db:
+                db.execute("DELETE FROM user_business_grants WHERE user_subject = ?", ('user-a',))
+            response = mcp_support.CentralMcpTests._request(
+                client, 'tools/call', request_id=1, token=token,
+                params={'name': 'agentbridge_server_profile', 'arguments': {}},
+            )
+            allowed = response.json()['result']['structuredContent']['agentToolAccess']['allowedToolNames']
+            self.assertIn('agentbridge_skill_authoring', allowed)
+            self.assertNotIn('oa_workflow_pending_list', allowed)
+            saved = mcp_call(client, token, 'save', {
+                'proposal': PROPOSAL, 'request_key': 'no-business-grants',
+            }).json()['result']
+            self.assertFalse(saved['isError'], saved)
+            self.assertEqual(service.skill_authoring.get('user-a', saved['structuredContent']['draft_id'])['owner_subject'], 'user-a')
+            self.assertIsNone(service.user_grants.get('user-a'))
+            self.assertEqual(service.skill_authoring.list('user-b')['items'], [])
+
     def test_complete_authoring_tool_matches_pre_refactor_http_catalog(self):
         fixture = json.loads((Path(__file__).parent / 'fixtures' / 'skill_authoring_mcp_tool.json').read_text())
         with mcp_support.CentralMcpFixture() as (_service, _store, token, client):
             response = mcp_support.CentralMcpTests._request(client, 'tools/list', request_id=1, token=token)
         self.assertEqual(response.status_code, 200)
         tool = next(item for item in response.json()['result']['tools'] if item['name'] == 'agentbridge_skill_authoring')
-        self.assertEqual(tool, fixture['tool'])
+        # Keep the pre-refactor wire schema frozen; this batch only documents
+        # the two new feedback source options and reusable report inputs.
+        expected = {**fixture['tool'], 'description': fixture['tool']['description'].replace(
+            'inspect(draft_id)返回诊断和版本差异。',
+            'inspect(draft_id)返回诊断、版本差异、previous_report复用样例输入（标注来源修订，不继承通过结论）和最近反馈。').replace(
+            'feedback(skill_id,profile,version,rating:useful|incorrect|not_applicable,comment)反馈；',
+            'feedback(skill_id,profile,rating:useful|incorrect|not_applicable,comment,可选version)反馈；可选test_id或binding_id二选一绑定自己已保存的试用或历史任务，原修订/模式/版本由服务端冻结；无来源时针对当前目录模式和版本。试用反馈版本为draft:修订号；用户纠错文字只能作为待复核的样例建议，不能当作已通过断言；')}
+        self.assertEqual(tool, expected)
 
     def test_mcp_rejects_extra_private_and_non_strict_field_values_before_dispatch(self):
         cases = [

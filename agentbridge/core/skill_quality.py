@@ -102,6 +102,89 @@ def grade_output(case, output):
     return {'passed': bool(checks) and all(c['passed'] for c in checks), 'checks': checks}
 
 
+EVALUATION_SCHEMA = 'agentbridge.skill-evaluation.v2'
+
+
+def _candidate_case_results(report, cases):
+    """Require the complete candidate matrix, independently of score summaries."""
+    repeats, rows = report.get('repeats'), report.get('rows')
+    if type(repeats) is not int or not 1 <= repeats <= 3 or not isinstance(rows, list):
+        raise ValueError('评测行或重复次数不完整')
+    expected = {(index, repeat) for index in range(len(cases)) for repeat in range(repeats)}
+    found = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('评测行无效')
+        if row.get('variant') != 'candidate':
+            continue
+        index, repeat = row.get('case'), row.get('repeat')
+        if type(index) is not int or type(repeat) is not int:
+            raise ValueError('评测行缺少样例或重复序号')
+        key = (index, repeat)
+        if key not in expected or key in found or row.get('skipped'):
+            raise ValueError('评测行重复、越界或未完成')
+        output = row.get('output')
+        if not isinstance(output, str) or not output.strip() or type(row.get('passed')) is not bool:
+            raise ValueError('评测行缺少有效输出')
+        passed = grade_output(cases[index], output)['passed']
+        if passed != row['passed']:
+            raise ValueError('评测行与输出断言不一致')
+        found[key] = passed
+    if set(found) != expected:
+        raise ValueError('评测行未覆盖全部样例与重复次数')
+    return [all(found[index, repeat] for repeat in range(repeats)) for index in range(len(cases))]
+
+
+def publication_evidence(bundle, revision, tested_profiles, report):
+    """One publication rule for inspection, submission, and frozen review evidence.
+
+    Only the latest complete report is considered; reports are never combined.
+    New output cases belong to their profile. Trigger selection is a shared gate.
+    Legacy reports retain their original all-or-nothing evaluation semantics.
+    """
+    names = list(bundle['manifest']['profiles'])
+    samples = set(tested_profiles)
+    cases, results = [], []
+    reason = None
+    legacy = report is not None and report.get('schema') != EVALUATION_SCHEMA
+    if report is not None:
+        if report.get('revision') != revision or report.get('content_hash') != bundle['content_hash']:
+            reason = '独立评测的修订或内容不匹配，请重新评测。'
+        else:
+            try:
+                cases = validate_cases(report.get('cases'))
+                if any(c['profile'] not in names for c in cases):
+                    raise ValueError('评测模式不存在')
+                if legacy:
+                    if report.get('passed') is not True:
+                        reason = '旧版独立评测未整体通过，请重新评测。'
+                    results = [report.get('passed') is True] * len(cases)
+                else:
+                    results = _candidate_case_results(report, cases)
+            except (ValueError, TypeError):
+                reason = '独立评测证据不完整或不一致，请重新评测。'
+    shared_indexes = [i for i, case in enumerate(cases) if case['kind'] == 'trigger']
+    if not reason and any(not results[i] for i in shared_indexes):
+        reason = '共享的助手选择评测未通过，所有模式均需重新核对。'
+    profiles = []
+    for profile in names:
+        indexes = [i for i, case in enumerate(cases) if case['kind'] == 'output' and case['profile'] == profile]
+        blocked = bool(reason) or any(not results[i] for i in indexes)
+        passed = bool(indexes) and not blocked
+        source = 'evaluation' if passed else 'sample' if profile in samples else 'none'
+        evidence = (reason or '本模式输出断言未通过，请修订或重新评测。') if blocked else (
+            '本修订本模式输出断言通过，语义待人工复核。' if passed else
+            '本修订已有样例，待人工复核。' if source == 'sample' else '本修订尚无本模式输出样例。')
+        profiles.append({'profile': profile, 'passed': passed, 'blocked': blocked,
+                         'eligible': not blocked and source != 'none', 'source': source,
+                         'evidence': evidence, 'case_indexes': indexes})
+    return {'schema': 'agentbridge.skill-publication-evidence.v1', 'revision': revision,
+            'content_hash': bundle['content_hash'], 'report_job_id': report.get('job_id') if report else None,
+            'basis': 'latest_complete_report_only',
+            'shared': {'passed': not bool(reason), 'blocked': bool(reason), 'reason': reason,
+                       'case_indexes': shared_indexes}, 'profiles': profiles}
+
+
 def export_standard(bundle):
     m = bundle['manifest']
     header = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in [('name', m['id']), ('description', m['description'])])

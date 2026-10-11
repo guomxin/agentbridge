@@ -99,7 +99,7 @@ class FakeWebSocket {
       return;
     }
     if (request.method === "agentbridge.workspace.bind") {
-      this.respond(request, { ok: true });
+      this.respond(request, { ok: true, ...(scenario === "trial_bound" ? {trialBound:true} : {}) });
       return;
     }
     if (request.method === "chat.send") {
@@ -108,7 +108,7 @@ class FakeWebSocket {
       lastRunId = runId;
       this.respond(request, { status: "started", runId }, () => {
         if (
-          scenario === "normal" ||
+          scenario === "normal" || scenario === "trial_bound" ||
           scenario === "preflight_wait" ||
           ([
             "startup_recovery",

@@ -7830,3 +7830,39 @@ test("Skills use authenticated Workspace turns without per-tool hook context", a
   bindToolCall(harness,{toolCallId:"foreign",sessionKey:"other-session",runId:"other-run"});
   assert.equal(resolve("foreign",sessionKey,"agentbridge_skill_get"),null);
 });
+
+test('Workspace trial survives runtime recreation and blocks tools before test starts', async () => {
+  const sharedState = createInteractionSharedState();
+  const config = {autoPoll:false};
+  const one = fakeApi(config), two = fakeApi(config);
+  const first = registerAgentBridgeInteractions(one.api,{sharedState,mcpClient:null});
+  const second = registerAgentBridgeInteractions(two.api,{sharedState,mcpClient:null});
+  const sessionKey='agent:main:agentbridge-workspace:direct:trial-user';
+  const trial={draft_id:'draft-a',expected_revision:2,profile:'preview',name:'周报',prompt:'完成联调，计划下周上线。',request_key:'workspace-sample:dispatch-a',dispatch_id:'dispatch-a'};
+  first.bindWorkspaceTurn(sessionKey,'turn-a',trial.prompt,trial);
+  second.recordUserMessage({sessionKey,content:'宿主封装：'+trial.prompt},{});
+  sharedState.recentUserMessages.get(sessionKey).capturedAt = 0;
+  assert.deepEqual(second.skillTrialForSession(sessionKey),trial);
+  assert.equal(two.hooks.before_tool_call({toolName:'exec',params:{}},{sessionKey}).block,true);
+  const calls=[];
+  const client={async callToolResult(name,args,options){calls.push({name,args,options});return {structuredContent:args.action==='test'?{status:'running',test_id:'test-a'}:{status:'reported'}};}};
+  const identityRouter={resolveToolContext:()=>({bound:true,binding:{key:'owner'},client})};
+  const makeTools=()=>createAgentBridgeProxyTools({context:{sessionKey,runId:'native'},serverName:'agentbridge',identityRouter,
+    skillTrialResolver:key=>second.skillTrialForSession(key),skillTrialResultHandler:(...args)=>second.rememberSkillTrialResult(...args)});
+  const author=()=>makeTools().find(t=>t.name==='agentbridge_skill_authoring');
+  const data=(({draft_id,expected_revision,profile,prompt,request_key})=>({draft_id,expected_revision,profile,prompt,request_key}))(trial);
+  assert.equal(two.hooks.before_tool_call({toolName:'openclawagentbridge_skill_authoring',params:{action:'test',data}},{sessionKey}),undefined);
+  assert.equal(two.hooks.before_tool_call({toolName:'foreignagentbridge_skill_authoring',params:{action:'test',data}},{sessionKey}).block,true);
+  for(const params of [{action:'save',data:{}},{action:'test',data:{...data,expected_revision:3}},{action:'test',data:{...data,prompt:'另一条'}},{action:'test_result',data:{test_id:'foreign',output:'伪造'}}]) {
+    const result=await author().execute('bad',params); assert.match(JSON.stringify(result),/SKILL_TRIAL_BOUND/);
+  }
+  assert.equal(calls.length,0);
+  await author().execute('start',{action:'test',data});
+  assert.deepEqual(calls[0].options.meta['agentbridge/skill-trial'],{dispatchId:'dispatch-a'});
+  assert.equal(first.skillTrialForSession(sessionKey).test_id,'test-a');
+  await author().execute('finish',{action:'test_result',data:{test_id:'test-a',output:'完成：联调。计划：下周上线。'}});
+  assert.equal(calls.length,2);
+  first.bindWorkspaceTurn(sessionKey,'normal','你好');
+  assert.equal(second.skillTrialForSession(sessionKey),null);
+  assert.equal(two.hooks.before_tool_call({toolName:'exec',params:{}},{sessionKey}),undefined);
+});

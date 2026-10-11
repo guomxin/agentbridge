@@ -3,7 +3,7 @@ import {
   AGENTBRIDGE_USER_TURN_SOURCE_TOOLS,
 } from "./tool-catalog.js";
 import { extractToolPayload } from "./mcp-client.js";
-import { skillBindingMeta, rememberSkillBinding, skillRunKey, draftSampleGuard } from "./business-skills.js";
+import { skillBindingMeta, rememberSkillBinding, skillRunKey, draftSampleGuard, workspaceSkillTrialGuard } from "./business-skills.js";
 import {
   HOST_CONTEXT_META_KEY,
   TASK_CONTEXT_META_KEY,
@@ -119,6 +119,8 @@ export function createAgentBridgeProxyTools({
   interactionGetGuard = null,
   terminalPlanGuard = null,
   argumentNormalizer = null,
+  skillTrialResolver = null,
+  skillTrialResultHandler = null,
   trustedResultHandler = null,
   logger = null,
 }) {
@@ -165,6 +167,8 @@ export function createAgentBridgeProxyTools({
         interactionGetGuard,
         terminalPlanGuard,
         argumentNormalizer,
+        skillTrialResolver,
+        skillTrialResultHandler,
         trustedResultHandler,
         logger,
       }),
@@ -219,6 +223,8 @@ function createProxyTool({
   interactionGetGuard,
   terminalPlanGuard,
   argumentNormalizer,
+  skillTrialResolver,
+  skillTrialResultHandler,
   trustedResultHandler,
   logger,
 }) {
@@ -242,6 +248,9 @@ function createProxyTool({
         });
       }
       const normalizedParams = normalizeParams(rawParams);
+      const trial = skillTrialResolver?.(context.sessionKey);
+      const trialBlocked = workspaceSkillTrialGuard(trial, descriptor.name, normalizedParams);
+      if (trialBlocked) return jsonToolResult(trialBlocked);
       const skillRun = taskRunRefResolver?.(toolCallId, context.sessionKey, "agentbridge_skill_get");
       const skillContext = { ...context, runId: (skillRun && skillRun !== toolCallId ? skillRun : null) || context.runId };
       const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
@@ -362,6 +371,7 @@ function createProxyTool({
             meta: {
               ...hostContextMeta(),
               ...skillBindingMeta(identityRouter, skillContext, identity),
+              ...(trial ? { "agentbridge/skill-trial": { dispatchId: trial.dispatch_id } } : {}),
               ...(taskId
                 ? {
                   [TASK_CONTEXT_META_KEY]: {
@@ -401,6 +411,7 @@ function createProxyTool({
       if (descriptor.name === "agentbridge_skill_get") {
         rememberSkillBinding(identityRouter, skillContext, identity, extractToolPayload(result));
       }
+      if (trial) skillTrialResultHandler?.(context.sessionKey, trial, normalizedParams, extractToolPayload(result));
       if (["agentbridge_task_cancel", "agentbridge_task_plan_cancel"].includes(descriptor.name)) {
         const payload = extractToolPayload(result);
         if (!result.isError && !payload?.error && !["failed", "rejected", "not_found"].includes(payload?.status)) {

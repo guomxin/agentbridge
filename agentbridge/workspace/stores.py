@@ -846,6 +846,8 @@ class WorkspaceStore:
         tasks: TaskHubStore,
         attachment_store: TimelineAttachmentStore,
         media_base_url: str,
+        skill_trial: dict | None = None,
+        validate_skill_trial: Callable[[sqlite3.Connection, dict], dict] | None = None,
     ) -> tuple[dict, bool]:
         """Atomically accept the message, media references, outbox and dispatch.
 
@@ -889,7 +891,7 @@ class WorkspaceStore:
                     origin_endpoint_id=account["endpoint_id"],
                     conversation_ref=account["openclaw_session_key"],
                     message_key=message_key,
-                    payload_hash=_host_dispatch_payload_hash(message, stored_attachments),
+                    payload_hash=_host_dispatch_payload_hash(message, stored_attachments, skill_trial),
                     idempotency_key=idempotency_key,
                     attachment_refs=[item["attachment_id"] for item in stored_attachments],
                     deadline_seconds=60,
@@ -898,6 +900,11 @@ class WorkspaceStore:
                 # expiration or while a different request fills the queue.
                 if reused:
                     return dispatch, True
+                trial_snapshot = None
+                if skill_trial is not None:
+                    if validate_skill_trial is None:
+                        raise ValueError('短试用需要验证草稿')
+                    trial_snapshot = validate_skill_trial(connection, skill_trial)
                 timeline_attachments = [public_attachment(item) for item in stored_attachments]
                 entry, _ = tasks._append_timeline_message_in_connection(
                     connection,
@@ -906,7 +913,8 @@ class WorkspaceStore:
                     message_key=message_key,
                     role="user",
                     text=message,
-                    payload={"attachments": timeline_attachments},
+                    payload={"attachments": timeline_attachments,
+                             **({'skillTrial': trial_snapshot} if trial_snapshot else {})},
                 )
                 # Older releases could leave a timeline message without a
                 # dispatch. Never attach a new payload hash to different text.
@@ -914,6 +922,7 @@ class WorkspaceStore:
                     entry["role"] != "user"
                     or entry["text"] != message.replace("\0", "").strip()
                     or (entry["payload"].get("attachments") or []) != timeline_attachments
+                    or entry["payload"].get("skillTrial") != trial_snapshot
                 ):
                     raise WorkspaceConflictError("IDEMPOTENCY_PAYLOAD_MISMATCH")
             return dispatch, False
@@ -1138,6 +1147,37 @@ class WorkspaceStore:
         if row is None:
             raise KeyError(f"host dispatch not found: {dispatch_id}")
         return _host_dispatch_from_row(row)
+
+    def skill_trial_for_turn(self, *, account_id: str, user_subject: str, turn_ref: str) -> dict | None:
+        """Resolve only this grant's account and explicit turn, never the latest turn."""
+        with self._connect() as connection:
+            row = connection.execute('''SELECT dispatch_id FROM agent_host_dispatches
+                WHERE account_id=? AND user_subject=? AND agent_host='openclaw' AND idempotency_key=?''',
+                (account_id, user_subject, turn_ref)).fetchone()
+        if row is None:
+            return None
+        return self.skill_trial_for_dispatch(row['dispatch_id'], user_subject=user_subject, account_id=account_id)
+
+    def skill_trial_for_dispatch(self, dispatch_id: str, *, user_subject: str, account_id: str | None = None) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute('''SELECT d.*, t.text AS prompt, t.payload_json AS trial_payload
+                FROM agent_host_dispatches d JOIN user_timeline t
+                  ON t.user_subject=d.user_subject AND t.dedupe_key='message:' || d.message_key
+                WHERE d.dispatch_id=? AND d.user_subject=?''', (dispatch_id, user_subject)).fetchone()
+        if row is None or (account_id is not None and row['account_id'] != account_id):
+            return None
+        payload = json.loads(row['trial_payload'])
+        if 'skillTrial' not in payload:
+            return None
+        snapshot = payload['skillTrial']
+        trial = normalize_skill_trial({key: snapshot.get(key) for key in ('draft_id', 'expected_revision', 'profile')})
+        if (not trial or json.loads(row['attachment_refs_json']) or not row['prompt']
+                or len(row['prompt']) > 3000
+                or not hmac.compare_digest(row['payload_hash'], _host_dispatch_payload_hash(row['prompt'], [], trial))):
+            raise ValueError('短试用派发内容不匹配')
+        return {**trial, 'name': str(snapshot.get('name') or trial['draft_id']),
+                'prompt': row['prompt'], 'dispatch_id': row['dispatch_id'],
+                'request_key': 'workspace-sample:' + row['dispatch_id']}
 
     def list_host_dispatches(
         self,
@@ -1737,7 +1777,12 @@ class WorkspaceStore:
             )
             # Transactional outbox: a crash after completion cannot lose opted-in
             # method capture. Standalone stores without the workbench stay compatible.
-            if state == 'completed' and event.get('text') and connection.execute("SELECT 1 FROM sqlite_master WHERE name='skill_auto_capture'").fetchone():
+            source = None
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='user_timeline'").fetchone():
+                source = connection.execute('SELECT payload_json FROM user_timeline WHERE user_subject=? AND dedupe_key=?',
+                                            (row['user_subject'], 'message:' + row['message_key'])).fetchone()
+            is_skill_trial = source is not None and 'skillTrial' in json.loads(source['payload_json'])
+            if state == 'completed' and event.get('text') and not is_skill_trial and connection.execute("SELECT 1 FROM sqlite_master WHERE name='skill_auto_capture'").fetchone():
                 from agentbridge.core.skill_workbench import SkillWorkbench
                 if SkillWorkbench._auto_allowed(connection, row['user_subject'], 'workspace:' + row['account_id']):
                     connection.execute('INSERT OR IGNORE INTO skill_auto_capture VALUES (?,?,?,?,?)',
@@ -2056,6 +2101,7 @@ def _parse_time(value: str) -> datetime:
 def _host_dispatch_payload_hash(
     message: str,
     attachments: list[dict],
+    skill_trial: dict | None = None,
 ) -> str:
     canonical = {
         "message": message,
@@ -2069,6 +2115,8 @@ def _host_dispatch_payload_hash(
             for item in attachments
         ],
     }
+    if skill_trial is not None:
+        canonical['skillTrial'] = skill_trial
     encoded = json.dumps(
         canonical,
         ensure_ascii=False,
@@ -2076,3 +2124,17 @@ def _host_dispatch_payload_hash(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_skill_trial(value: object) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {'draft_id', 'expected_revision', 'profile'}:
+        raise ValueError('短试用参数无效')
+    if type(value['expected_revision']) is not int or value['expected_revision'] < 1:
+        raise ValueError('短试用需要有效修订号')
+    if any(not isinstance(value[key], str) or not value[key].strip() or len(value[key]) > 128
+           for key in ('draft_id', 'profile')):
+        raise ValueError('短试用草稿或模式无效')
+    return {'draft_id': value['draft_id'].strip(), 'expected_revision': value['expected_revision'],
+            'profile': value['profile'].strip()}

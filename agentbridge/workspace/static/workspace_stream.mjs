@@ -1,16 +1,19 @@
 import { cancellationError } from "./workspace_lifecycle.mjs";
 
 export function createChatStream({ state, getScope, fetchChatStreamResponse, adoptLiveMessage, addLiveProgress, ensureLiveMessage, handleChatProgress, handleChatDelta, attachDispatchCancel, agentFailureMessage, renderRunFailure }) {
-  async function consumeChatStream({ message, idempotencyKey, attachments = [] }) {
+  async function consumeChatStream({ message, idempotencyKey, attachments = [], skillTrial, onAccepted, onCanceled }) {
     const scope = getScope().child();
     const { controller } = scope.controller();
     const activeStream = {
       controller,
       requestMessage: message,
       requestAttachments: attachments,
+      requestSkillTrial: skillTrial ? {...skillTrial} : undefined,
       runIds: new Set(),
       terminal: false,
       timelineCompleted: false,
+      onAccepted,
+      onCanceled,
     };
     registerActiveStream(activeStream, idempotencyKey);
     let runId = idempotencyKey;
@@ -29,6 +32,7 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
         message,
         idempotencyKey,
         attachments,
+        skillTrial: activeStream.requestSkillTrial,
         activeStream,
       });
       scope.assertCurrent();
@@ -64,8 +68,10 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
             runId = event.data.runId;
             registerActiveStream(activeStream, runId);
             adoptLiveMessage(previousRunId, runId, message);
+            ensureLiveMessage(runId).requestSkillTrial = activeStream.requestSkillTrial;
             addLiveProgress(runId, "请求已交给智能体", "active");
             ensureLiveMessage(runId).actions.replaceChildren();
+            onAccepted?.();
           } else if (event.name === "progress") {
             if (event.data.kind === "tool") hadToolActivity = true;
             handleChatProgress(event.data);
@@ -84,8 +90,10 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
               stopReading = true;
             }
             if (["error", "aborted"].includes(event.data.state)) {
+              if (event.data.state === "aborted") onCanceled?.();
               terminalFailure = event.data;
             } else {
+              if (event.data.state === "final") onAccepted?.();
               handleChatDelta(event.data);
             }
           } else if (event.name === "stream-error") {
@@ -120,7 +128,7 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
           safeToRetry,
           terminalFailure.state,
         );
-        renderRunFailure(runId, text, safeToRetry, message, attachments);
+        renderRunFailure(runId, text, safeToRetry, message, attachments, activeStream.requestSkillTrial, terminalFailure.skillTrial, onAccepted, onCanceled);
         const error = new Error(text);
         error.code =
           terminalFailure.state === "aborted"

@@ -1873,7 +1873,8 @@ class WorkspaceApplicationTests(unittest.TestCase):
                 patch.object(
                     app.store,
                     "get_host_dispatch",
-                    return_value={"state": "completed"},
+                    return_value={"state": "completed", "dispatch_id": "dispatch-race",
+                                  "user_subject": "user-a", "account_id": "account-race"},
                 ),
             ):
                 events = list(
@@ -3229,7 +3230,8 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("const enrollmentForm = event.currentTarget;", script)
         self.assertIn("页面已刷新，请重新生成配对码。", script)
         self.assertNotIn("setBusy(event.currentTarget", script)
-        self.assertIn('fetch("/api/chat/send-stream"', script)
+        self.assertIn('"/api/chat/send-stream"', script)
+        self.assertIn('"/api/skill-trials/send-stream"', script)
         self.assertIn("fetchChatStreamResponse", script)
         self.assertIn("attempt < 2", script)
         self.assertIn("error instanceof TypeError", script)

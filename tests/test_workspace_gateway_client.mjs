@@ -276,3 +276,15 @@ test("starts the execution budget at the first real progress event", () => {
   assert.equal(events.at(-1).type, "chat");
   assert.equal(events.at(-1).state, "final");
 });
+
+test('structured trial refuses an older host before sending chat', () => {
+  const {events,trace}=runScenario('normal',{requireTrialBinding:true});
+  assert.equal(events.at(-1).error.code,'SKILL_TRIAL_HOST_UNSUPPORTED');
+  assert.equal(trace.some(item=>item.method==='chat.send'),false);
+});
+
+test('structured trial sends only after trusted host acknowledgement', () => {
+  const {events,trace}=runScenario('trial_bound',{requireTrialBinding:true});
+  assert.equal(trace.some(item=>item.method==='chat.send'),true);
+  assert.equal(events.at(-1).type,'chat');
+});

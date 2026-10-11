@@ -288,6 +288,10 @@ socket.addEventListener("message", (event) => {
       );
       return;
     }
+    if (input.requireTrialBinding === true && frame.payload?.trialBound !== true) {
+      finishError("SKILL_TRIAL_HOST_UNSUPPORTED", "当前宿主尚未确认草稿试用绑定，请升级或重载宿主后重试。", stageDetails());
+      return;
+    }
     requestChatSend();
     return;
   }

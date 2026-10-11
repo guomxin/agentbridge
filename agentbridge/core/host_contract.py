@@ -519,6 +519,10 @@ class HostContractStore:
                 "openclaw", "0.4.113", "L3",
                 "shared-contract-h01-h29-skill-candidate-ranking-v1",
             ),
+            (
+                "openclaw", "0.4.114", "L3",
+                "shared-contract-h01-h29-workspace-bound-skill-trial-v1",
+            ),
         )
         for name, version, level, evidence in builtins:
             connection.execute(

@@ -89,6 +89,19 @@ test("dispatch adoption, concurrent runs and final cleanup keep separate ownersh
   assert.equal(f.state.liveMessages.get("other").progressDescription.textContent, "另一条说明");
 });
 
+test("trial result says saved only with the server's reported receipt, independently of model prose", () => {
+  for (const [receipt, saved] of [[{status: "reported", test_id: "test"}, true], [{status: "reported"}, false], [{status: "not_reported", test_id: "test"}, false], [null, false]]) {
+    const f = fixture();
+    const live = f.ensureLiveMessage("run");
+    live.requestSkillTrial = {draft_id: "draft", expected_revision: 7, profile: "preview", name: "周报助手"};
+    f.handleChatDelta({runId: "run", state: "final", text: "模型说已保存",
+      ...(receipt ? {skillTrial: {...live.requestSkillTrial, ...receipt, revision: 7}} : {})});
+    assert.match(live.trialStatus.textContent, /修订 7.*草稿预览/);
+    assert.equal(live.trialStatus.textContent.includes("样例已保存，待人工复核"), saved);
+    assert.equal(live.text.textContent, "模型说已保存");
+  }
+});
+
 
 test("protected CSV cards accept only the exact authenticated same-origin route", () => {
   const { appendArtifactList: render } = createResultView({

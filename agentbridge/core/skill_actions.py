@@ -50,7 +50,7 @@ SKILL_ACTION_DEFINITIONS = (
     SkillActionDefinition('export_standard', 'workbench', 'export', ('draft_id',)),
     SkillActionDefinition('import_standard', 'workbench', 'import_package', ('package', 'request_key')),
     SkillActionDefinition('feedback', 'workbench', 'feedback', ('skill_id', 'profile', 'rating'),
-                          ('comment', 'version')),
+                          ('comment', 'version', 'test_id', 'binding_id')),
     SkillActionDefinition('metrics', 'workbench', 'metrics'),
     SkillActionDefinition('recipients', 'workbench', 'recipients'),
     SkillActionDefinition('discover', 'workbench', 'discover', (), ('query', 'limit')),

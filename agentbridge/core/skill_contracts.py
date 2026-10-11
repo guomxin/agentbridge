@@ -57,6 +57,8 @@ class SkillAuthoringData(StrictModel):
     provenance: dict | None = None
     profile: str | None = None
     prompt: str | None = None
+    # test_id / binding_id can also reference feedback sources. Source identity,
+    # revision and mode are derived by the domain, never supplied as a snapshot.
     test_id: str | None = None
     output: str | None = None
     reason: str | None = None

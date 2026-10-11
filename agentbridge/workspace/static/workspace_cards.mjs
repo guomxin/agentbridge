@@ -176,8 +176,8 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     progress.type = "button";
     progress.className = "secondary";
     progress.textContent = "查看进度";
-    progress.addEventListener("click", () => {
-      switchView("tasks");
+    progress.addEventListener("click", async () => {
+      if (await switchView("tasks") === false) return;
       loadTaskDetail(task.task_id);
     });
     actions.append(progress);

@@ -1,4 +1,4 @@
-
+import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 export function createChatProgress({ document, state, $, scrollChat, scheduleChatRefresh, renderMarkdown, attachDispatchCancel }) {
   function ensureLiveMessage(runId) {
     let live = state.liveMessages.get(runId);
@@ -114,6 +114,7 @@ export function createChatProgress({ document, state, $, scrollChat, scheduleCha
       renderMarkdown(live.text, payload.text);
     }
     if (payload.state === "final") {
+      renderSkillTrialStatus(document, live, payload.skillTrial || live.requestSkillTrial);
       live.progress.replaceChildren();
       live.actions.replaceChildren();
       live.item.classList.remove("live-message");

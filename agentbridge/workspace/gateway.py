@@ -165,6 +165,7 @@ class OpenClawGatewayClient:
         timeout_seconds: float = 300,
         retry_before_accept: bool = True,
         abort_accepted_on_close: bool = True,
+        require_trial_binding: bool = False,
     ) -> Iterator[dict[str, Any]]:
         values = {
             "sessionKey": (session_key, 16, 1_024),
@@ -184,6 +185,7 @@ class OpenClawGatewayClient:
             **normalized,
             "attachments": list(attachments or []),
             "preflightAbort": True,
+            **({"requireTrialBinding": True} if require_trial_binding else {}),
             "acceptTimeoutMs": 35_000,
             "startupProgressTimeoutMs": 15_000,
             "sessionIdleTimeoutMs": 15_000,

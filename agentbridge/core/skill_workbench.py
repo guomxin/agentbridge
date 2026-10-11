@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from agentbridge.core.business_skills import _json, skill_catalog
 from agentbridge.core.skill_quality import (bundle_diff, diagnostics, export_standard,
-    import_standard, proposal_from_bundle, similarity, validate_cases)
+    import_standard, proposal_from_bundle, publication_evidence, similarity, validate_cases)
 from agentbridge.core.skill_job_executor import SkillJobDependencies, SkillJobExecutor
 from agentbridge.core.skill_job_queue import SkillJobQueue
 from agentbridge.core.skill_ranking import rank_skill_candidates
@@ -50,6 +50,9 @@ class SkillWorkbench:
                     feedback_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL,
                     skill_id TEXT NOT NULL, version TEXT NOT NULL, rating TEXT NOT NULL,
                     comment TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS skill_feedback_context (
+                    feedback_id TEXT PRIMARY KEY, profile TEXT NOT NULL,
+                    source_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS skill_auto_capture (
                     dispatch_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL,
                     assistant_text TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -145,9 +148,28 @@ class SkillWorkbench:
         with closing(self.store.connect()) as db:
             pub = db.execute('SELECT version,payload_json FROM skill_versions WHERE skill_id=? ORDER BY rowid DESC LIMIT 1', (draft['skill_id'],)).fetchone()
             report = self.latest_report(db, owner, draft_id, draft['revision'])
+            previous = db.execute("""SELECT job_id,payload_json,created_at FROM skill_jobs
+                WHERE owner_subject=? AND kind='evaluation' AND state='succeeded'
+                AND json_extract(payload_json,'$.draft_id')=? ORDER BY created_at DESC,rowid DESC LIMIT 1""",
+                (owner, draft_id)).fetchone()
+            previous_report = None
+            if previous:
+                payload = json.loads(previous['payload_json'])
+                # Reusable inputs are not evidence for this revision. Leave all
+                # scores and assertions' previous outcomes out of the template.
+                previous_report = {'job_id': previous['job_id'], 'revision': payload['revision'],
+                    'content_hash': payload['bundle']['content_hash'], 'cases': payload['cases'],
+                    'repeats': payload.get('repeats', 1), 'created_at': previous['created_at']}
+            feedback = [self._feedback_public(row) for row in db.execute('''
+                SELECT f.*,c.profile,c.source_json FROM skill_feedback f
+                LEFT JOIN skill_feedback_context c USING(feedback_id)
+                WHERE f.owner_subject=? AND f.skill_id=? ORDER BY f.created_at DESC,f.rowid DESC LIMIT 20''',
+                (owner, draft['skill_id']))]
         before = json.loads(pub['payload_json']) if pub else None
         return {'diagnostics': diagnostics(draft['bundle']), 'diff': bundle_diff(before, draft['bundle']),
                 'published_version': pub['version'] if pub else None, 'evaluation': report,
+                'previous_report': previous_report, 'feedback': {'items': feedback},
+                'publication_evidence': publication_evidence(draft['bundle'], draft['revision'], draft['tested_profiles'], report),
                 'similar': self.similar(owner, draft['bundle']['manifest']['name'] + draft['bundle']['manifest']['description'], exclude=draft_id)}
 
     def similar(self, owner, query, exclude=None):
@@ -175,21 +197,74 @@ class SkillWorkbench:
             draft_id=draft_id, expected_revision=expected_revision,
             provenance={'kind':'revision' if draft_id else 'interaction', 'summary':'用户采用后台方法候选', 'complete':False})
 
-    def feedback(self, owner, *, skill_id, profile, rating, comment='', version=None):
+    @staticmethod
+    def _feedback_public(row):
+        item = dict(row)
+        item['profile'] = item.get('profile') or 'unknown'
+        item['source'] = json.loads(item.pop('source_json') or '{}')
+        item.pop('owner_subject', None)
+        return item
+
+    def feedback(self, owner, *, skill_id, profile, rating, comment='', version=None, test_id=None, binding_id=None):
         from agentbridge.core.skill_authoring import text
-        item = self.store.available_item(owner, skill_id, profile)
         if rating not in {'useful', 'incorrect', 'not_applicable'}: raise ValueError('反馈类型无效')
-        text(comment, '反馈', 1000, empty=True)
-        current = item['manifest']['version']
-        if version is not None and version != current: raise UserGrantConflict('版本已变化，请刷新后反馈')
+        comment = text(comment, '反馈', 1000, empty=True)
+        if test_id is not None and binding_id is not None: raise ValueError('反馈只能关联一种来源')
         with closing(self.store.connect()) as db, db:
-            db.execute('INSERT INTO skill_feedback VALUES (?,?,?,?,?,?,?)', (str(uuid4()), owner, skill_id, current, rating, comment, timestamp()))
-        return {'status': 'recorded', 'version': current}
+            db.execute('BEGIN IMMEDIATE')
+            if test_id is not None:
+                text(test_id, '试用标识', 128)
+                sample = db.execute('''SELECT t.*,d.skill_id FROM skill_draft_tests t JOIN skill_drafts d USING(draft_id)
+                    WHERE t.test_id=? AND t.owner_subject=? AND d.owner_subject=?''', (test_id, owner, owner)).fetchone()
+                if not sample: raise KeyError('试用不存在或不可访问')
+                if sample['status'] != 'reported': raise ValueError('只能反馈已保存的试用')
+                if sample['skill_id'] != skill_id or sample['profile'] != profile:
+                    raise ValueError('反馈助手或模式与试用不一致')
+                snapshot, _ = self.authoring._bundle(db, sample['draft_id'], sample['revision'])
+                current = 'draft:' + str(sample['revision'])
+                source = {'kind': 'sample', 'test_id': test_id, 'draft_id': sample['draft_id'],
+                    'revision': sample['revision'], 'profile': profile, 'version': current,
+                    'content_hash': snapshot['content_hash'], 'prompt': sample['prompt']}
+            elif binding_id is not None:
+                text(binding_id, '任务绑定', 128)
+                # Feedback describes the owner's historical use; it never
+                # executes that binding or restores revoked business access.
+                binding = db.execute('SELECT * FROM skill_bindings WHERE binding_id=? AND user_subject=?',
+                                     (binding_id, owner)).fetchone()
+                if not binding: raise KeyError('任务绑定不存在或不可访问')
+                if binding['skill_id'] != skill_id or binding['profile'] != profile:
+                    raise ValueError('反馈助手或模式与任务绑定不一致')
+                snapshot = db.execute('SELECT content_hash FROM skill_versions WHERE skill_id=? AND version=?',
+                                      (skill_id, binding['version'])).fetchone()
+                if not snapshot: raise ValueError('任务原版本不可用')
+                current = binding['version']
+                source = {'kind': 'binding', 'binding_id': binding_id, 'profile': profile,
+                          'version': current, 'content_hash': snapshot['content_hash']}
+                publication = db.execute('''SELECT d.draft_id,q.draft_revision FROM skill_review_requests q
+                    JOIN skill_drafts d USING(draft_id) WHERE d.skill_id=? AND d.owner_subject=?
+                    AND q.published_version=? AND q.state='published' LIMIT 1''', (skill_id, owner, current)).fetchone()
+                if publication:
+                    source.update(draft_id=publication['draft_id'], revision=publication['draft_revision'])
+            else:
+                item = self.store.available_item(owner, skill_id, profile)
+                current = item['manifest']['version']
+                source = {'kind': 'catalog', 'profile': profile, 'version': current,
+                          'content_hash': item['content_hash']}
+            if version is not None and version != current: raise UserGrantConflict('版本与反馈来源不一致，请刷新后反馈')
+            feedback_id = str(uuid4())
+            # Keep the original seven-column table writable by the previous
+            # release; attribution is an atomic, optional companion record.
+            db.execute('INSERT INTO skill_feedback VALUES (?,?,?,?,?,?,?)',
+                       (feedback_id, owner, skill_id, current, rating, comment, timestamp()))
+            db.execute('INSERT INTO skill_feedback_context VALUES (?,?,?)', (feedback_id, profile, _json(source)))
+        return {'status': 'recorded', 'feedback_id': feedback_id, 'version': current, 'profile': profile, 'source': source}
 
     def metrics(self, owner=None):
         where, args = (' WHERE owner_subject=?', (owner,)) if owner else ('', ())
         with closing(self.store.connect()) as db:
-            feedback = [dict(r) for r in db.execute('SELECT skill_id,version,rating,count(*) AS count FROM skill_feedback' + where + ' GROUP BY skill_id,version,rating', args)]
+            feedback = [dict(r) for r in db.execute("SELECT f.skill_id,f.version,COALESCE(c.profile,'unknown') AS profile,f.rating,count(*) AS count "
+                'FROM skill_feedback f LEFT JOIN skill_feedback_context c USING(feedback_id)' + where +
+                " GROUP BY f.skill_id,f.version,COALESCE(c.profile,'unknown'),f.rating", args)]
             jobs = [dict(r) for r in db.execute('SELECT kind,state,count(*) AS count FROM skill_jobs' + where + ' GROUP BY kind,state', args)]
         return {'feedback': feedback, 'jobs': jobs, 'verification': 'user_feedback_not_independent_success_rate'}
 

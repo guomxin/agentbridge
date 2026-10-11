@@ -141,6 +141,74 @@ test("stream transport retries only a network failure and keeps the same idempot
   scope.dispose();
 });
 
+test("short trial transport retries the exact bound revision and sends no display metadata", async () => {
+  const calls = [], paths = [];
+  const trial = {draft_id: "draft", expected_revision: 7, profile: "preview", name: "周报助手"};
+  const client = createWorkspaceRequests({document, addLiveProgress() {}, fetch: async (_path, options) => {
+    paths.push(_path);
+    calls.push(options.body);
+    if (calls.length === 1) { trial.expected_revision = 8; throw new TypeError("offline"); }
+    return {ok: true};
+  }});
+  await client.fetchChatStreamResponse({message: "计划修复登录问题", idempotencyKey: "bound", attachments: [], skillTrial: trial,
+    activeStream: {controller: new AbortController()}});
+  assert.equal(calls[0], calls[1]);
+  assert.deepEqual(paths, ['/api/skill-trials/send-stream', '/api/skill-trials/send-stream']);
+  assert.deepEqual(JSON.parse(calls[0]), {message: "计划修复登录问题", idempotencyKey: "bound", attachments: [],
+    skillTrial: {draft_id: "draft", expected_revision: 7, profile: "preview"}});
+});
+
+test('old server 404 never downgrades a structured trial into ordinary chat', async () => {
+  const paths=[];
+  const client=createWorkspaceRequests({document,addLiveProgress(){},fetch:async path=>{
+    paths.push(path);return {ok:false,status:404};
+  }});
+  const response=await client.fetchChatStreamResponse({message:'计划修复登录问题',idempotencyKey:'trial',attachments:[],
+    skillTrial:{draft_id:'draft',expected_revision:1,profile:'preview'},activeStream:{controller:new AbortController()}});
+  assert.equal(response.status,404);
+  assert.deepEqual(paths,['/api/skill-trials/send-stream']);
+});
+
+test("failed trial stream preserves its binding and receipt for explicit retry", async () => {
+  const scope = createLifecycle().scope(), trial = {draft_id: "draft", expected_revision: 7, profile: "preview"};
+  const receipt = {draft_id: "draft", revision: 7, profile: "preview", status: "not_reported"};
+  let sent, failure, accepted = 0;
+  const live = {actions: {replaceChildren() {}}};
+  const onAccepted = () => accepted++;
+  const {consumeChatStream} = createChatStream({state: {activeStreams: new Map()}, getScope: () => scope,
+    fetchChatStreamResponse: async request => {sent = request; return new Response(
+      'event: accepted\ndata: {"runId":"run"}\n\n' +
+      `event: chat\ndata: ${JSON.stringify({runId: "run", state: "error", text: "失败", safeToRetry: true, skillTrial: receipt})}\n\n`);},
+    ensureLiveMessage: () => live, adoptLiveMessage() {}, addLiveProgress() {}, agentFailureMessage: text => text,
+    renderRunFailure: (...args) => {failure = args;},
+  });
+  await assert.rejects(consumeChatStream({message: "合成材料", idempotencyKey: "key", skillTrial: trial, onAccepted}));
+  assert.deepEqual(sent.skillTrial, trial);
+  assert.notEqual(sent.skillTrial, trial);
+  assert.equal(accepted, 1);
+  assert.deepEqual(failure.slice(2, 7), [true, "合成材料", [], trial, receipt]);
+  assert.equal(failure[7], onAccepted);
+  scope.dispose();
+});
+
+test("an aborted trial clears only its bound intent while ordinary failure keeps it for retry", async () => {
+  for (const terminal of ['error', 'aborted']) {
+    const scope = createLifecycle().scope(), trial = {draft_id: 'draft', expected_revision: 7, profile: 'preview'};
+    let canceled = 0, accepted = 0, failure;
+    const onCanceled = () => canceled++;
+    const {consumeChatStream} = createChatStream({state: {activeStreams: new Map()}, getScope: () => scope,
+      fetchChatStreamResponse: async () => new Response(`event: chat\ndata: ${JSON.stringify({runId: 'run', state: terminal, text: '已停止', safeToRetry: true})}\n\n`),
+      agentFailureMessage: text => text, renderRunFailure: (...args) => {failure = args;},
+    });
+    await assert.rejects(consumeChatStream({message: '合成材料', idempotencyKey: 'key', skillTrial: trial, onAccepted: () => accepted++, onCanceled}));
+    assert.equal(canceled, terminal === 'aborted' ? 1 : 0);
+    assert.equal(accepted, 0);
+    assert.deepEqual(failure[5], trial);
+    assert.equal(failure[8], onCanceled);
+    scope.dispose();
+  }
+});
+
 test("canceling during the retry delay prevents a second send", async () => {
   let calls = 0;
   const controller = new AbortController();

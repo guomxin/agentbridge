@@ -951,6 +951,7 @@
     "oa_addressbook_group_list": "动态：显式 group_type 按类型授权；省略类型会查询全部，要求组织和私人两项读取权限",
     "oa_addressbook_group_members": "动态：private 用 oa.addressbook.private.read；personal/system/project 用 oa.addressbook.read；列表省略类型时仅查询已授权类型",
     "agentbridge_skill_catalog": "平台：当前用户业务助手分配及依赖；不授予业务权限",
+    "agentbridge_skill_authoring": "平台：当前用户私有业务助手草稿创作与评测；不授予业务权限",
     "agentbridge_skill_get": "平台：当前用户业务助手分配及依赖；不授予业务权限"
   },
   "private_tools": [

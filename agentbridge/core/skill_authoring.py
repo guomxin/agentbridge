@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from agentbridge.core.business_skills import PROTOCOL, _json, validate_skill_bundle
 from agentbridge.core.skill_actions import dispatch_skill_action
+from agentbridge.core.skill_quality import publication_evidence
 from agentbridge.core.user_grants import UserGrantConflict
 
 
@@ -235,6 +236,8 @@ class SkillAuthoring:
             if previous: return previous
             revision(expected_revision)
             draft = self._owned(db, owner, draft_id, expected_revision)
+            if draft['state'] == 'archived':
+                raise ValueError('归档草稿不能试用')
             _, bundle = self._bundle(db, draft_id, draft['revision'])
             if profile not in bundle['manifest']['profiles']:
                 raise ValueError('模式不存在')
@@ -245,6 +248,48 @@ class SkillAuthoring:
             return self._receipt(db, owner, request_key, digest, {'test_id':tid,'status':'running',
                 'mode':'isolated_sample','bundle':bundle,'prompt':prompt,
                 'instruction':'仅使用合成示例评估草稿，不调用业务工具，不写业务。提供示例回答及不足，再用 test_result 保存。报告待用户和管理员复核，不代表真实业务通过。'})
+
+    def validate_workspace_trial(self, db, owner, trial):
+        """Validate only a new acceptance, using its existing transaction."""
+        draft = self._owned(db, owner, trial['draft_id'], trial['expected_revision'])
+        if draft['state'] == 'archived':
+            raise ValueError('归档草稿不能试用')
+        _, bundle = self._bundle(db, draft['draft_id'], draft['revision'])
+        if trial['profile'] not in bundle['manifest']['profiles']:
+            raise ValueError('模式不存在')
+        return {**trial, 'name': bundle['manifest']['name']}
+
+    def workspace_trial_receipt(self, owner, trial):
+        """Return a sample only when both the command receipt and its row agree."""
+        expected = {'op': 'test', 'draft_id': trial['draft_id'],
+                    'revision': trial['expected_revision'], 'profile': trial['profile'],
+                    'prompt': trial['prompt']}
+        with closing(self.store.connect()) as db:
+            command = db.execute('SELECT * FROM skill_authoring_commands WHERE owner_subject=? AND request_key=?',
+                                 (owner, trial['request_key'])).fetchone()
+            if not command or command['input_hash'] != sha256(_json(expected).encode()).hexdigest():
+                return None
+            test_id = json.loads(command['result_json']).get('test_id')
+            row = db.execute('SELECT * FROM skill_draft_tests WHERE test_id=? AND owner_subject=?',
+                             (test_id, owner)).fetchone()
+            if not row or any(row[key] != value for key, value in expected.items() if key != 'op'):
+                return None
+            return dict(row)
+
+    def guard_workspace_trial(self, owner, dispatch_id, action, data):
+        """Constrain trusted host metadata to the persisted workspace request."""
+        trial = self.service.workspace.skill_trial_for_dispatch(dispatch_id, user_subject=owner)
+        if not trial:
+            raise PermissionError('短试用绑定不存在')
+        if action == 'test':
+            expected = {key: trial[key] for key in ('draft_id', 'expected_revision', 'profile', 'prompt', 'request_key')}
+            if data == expected:
+                return
+        elif action == 'test_result':
+            sample = self.workspace_trial_receipt(owner, trial)
+            if sample and set(data) == {'test_id', 'output'} and data['test_id'] == sample['test_id']:
+                return
+        raise PermissionError('短试用只允许按绑定问题创建和保存本次样例')
 
     def test_result(self, owner, *, test_id, output):
         text(output, '测试结果', 16000)
@@ -285,9 +330,10 @@ class SkillAuthoring:
                 raise ValueError('申请模式无效')
             tested = {r[0] for r in db.execute("SELECT profile FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported'", (draft_id,draft['revision']))}
             report = self.workbench.latest_report(db, owner, draft_id, draft['revision'])
-            if report and report['passed'] and report['content_hash'] == bundle['content_hash']:
-                tested.update(c['profile'] for c in report['cases'] if c['kind'] == 'output')
-            if not set(profiles)<=tested: raise ValueError('请先为每个申请模式完成样例试运行，结果由管理员复核')
+            evidence = publication_evidence(bundle, draft['revision'], tested, report)
+            selected = [p for p in evidence['profiles'] if p['profile'] in profiles]
+            if any(p['blocked'] for p in selected): raise ValueError('申请模式的独立评测或共享门槛未通过，请重新核对评测')
+            if not all(p['eligible'] for p in selected): raise ValueError('请先为每个申请模式完成样例试运行，结果由管理员复核')
             pending=db.execute("SELECT * FROM skill_review_requests WHERE draft_id=? AND state='submitted'",(draft_id,)).fetchone()
             if pending: raise UserGrantConflict('已有待审批申请，请先撤回或等待处理')
             current=db.execute('SELECT revision FROM skill_publications WHERE skill_id=?',(draft['skill_id'],)).fetchone()
@@ -297,9 +343,9 @@ class SkillAuthoring:
             db.execute("INSERT INTO skill_review_tests SELECT ?,test_id FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported'",(rid,draft_id,draft['revision']))
             from agentbridge.core.skill_quality import diagnostics, bundle_diff
             prior = self.store.current(draft['skill_id'], db) if current else None
-            report = self.workbench.latest_report(db, owner, draft_id, draft['revision'])
             prior_audience = [x[0][5:] for x in db.execute("SELECT owner FROM skill_config WHERE owner LIKE 'user:%' AND json_type(value_json,?) IS NOT NULL", ('$.' + draft['skill_id'],))]
             quality = {'diagnostics': diagnostics(bundle), 'diff': bundle_diff(prior, bundle), 'evaluation': report,
+                       'publication_evidence': {**evidence, 'selected_profiles': profiles},
                        'audience_diff': {'added': sorted(set(audience)-set(prior_audience)), 'removed': sorted(set(prior_audience)-set(audience))}}
             db.execute('INSERT INTO skill_review_quality VALUES (?,?)', (rid, _json(quality)))
             self._event(db,owner,'release.submitted',rid,{'draft_id':draft_id,'revision':draft['revision']})
@@ -348,19 +394,27 @@ class SkillAuthoring:
                 if reviewed_tests is not True: raise ValueError('请复核草稿、样例结果及使用范围后批准')
                 quality = db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request_id,)).fetchone()
                 report = json.loads(quality[0]).get('evaluation') if quality else None
-                if report and (not report['passed'] or report['content_hash'] != r['content_hash']):
-                    raise ValueError('独立评测未通过或内容不匹配，请退回修改并重新申请')
-                if quality and not report:
-                    text(manual_quality_reason, '无独立评测时的人工验证说明', 1000)
-                    snapshot = json.loads(quality[0]); snapshot['manual_quality_reason'] = manual_quality_reason
-                    db.execute('UPDATE skill_review_quality SET snapshot_json=? WHERE request_id=?', (_json(snapshot), request_id))
                 _,bundle=self._bundle(db,r['draft_id'],r['draft_revision'])
                 if bundle['content_hash']!=r['content_hash']: raise ValueError('申请内容不一致')
+                profiles=json.loads(r['profiles_json']); audience=json.loads(r['audience_json'])
+                tested = {t[0] for t in db.execute(
+                    "SELECT t.profile FROM skill_draft_tests t JOIN skill_review_tests e USING(test_id) "
+                    "WHERE e.request_id=? AND t.draft_id=? AND t.revision=? AND t.status='reported'",
+                    (request_id, r['draft_id'], r['draft_revision']))}
+                evidence = publication_evidence(bundle, r['draft_revision'], tested, report)
+                selected = [p for p in evidence['profiles'] if p['profile'] in profiles]
+                if any(not p['eligible'] for p in selected):
+                    raise ValueError('独立评测未通过或内容不匹配，请退回修改并重新申请')
+                if any(p['source'] != 'evaluation' for p in selected):
+                    text(manual_quality_reason, '申请模式缺少独立输出评测时的人工验证说明', 1000)
+                    snapshot = json.loads(quality[0]) if quality else {}
+                    snapshot['manual_quality_reason'] = manual_quality_reason
+                    db.execute('INSERT INTO skill_review_quality VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET snapshot_json=excluded.snapshot_json',
+                               (request_id, _json(snapshot)))
                 sid=bundle['manifest']['id']
                 current=db.execute('SELECT * FROM skill_publications WHERE skill_id=?',(sid,)).fetchone()
                 pubrev=current['revision'] if current else 0
                 if pubrev!=r['expected_publication_revision']: raise UserGrantConflict('发布版本已变化，请重新申请')
-                profiles=json.loads(r['profiles_json']); audience=json.loads(r['audience_json'])
                 # Check every recipient at review time; never create identities or grants.
                 # The author is already authenticated; publishing a method needs no business grants.
                 tables={t[0] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}

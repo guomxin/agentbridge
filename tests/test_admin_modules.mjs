@@ -116,6 +116,25 @@ test('skill review projection keeps manual and independent evidence separate',()
   assert.match(text,/语义仍需人工复核/);assert.match(text,/synthetic only/);
 });
 
+test('skill review uses the selected modes rather than a mixed report total',()=>{
+  const q={diagnostics:{message:'检查',checks:[]},diff:[],audience_diff:{added:[],removed:[]},
+    evaluation:{passed:false,limitations:'仅验证所列断言',scores:{candidate:{passed:1,total:2}},rows:[]},
+    publication_evidence:{schema:'agentbridge.skill-publication-evidence.v1',shared:{blocked:false,reason:'共用要求通过'},profiles:[
+      {profile:'preview',eligible:true,blocked:false,source:'evaluation',evidence:'预览检查通过'},
+      {profile:'fill',eligible:false,blocked:true,source:'none',evidence:'填单检查失败'},
+    ]}};
+  const html=skillReviewQualityHtml(q,['preview']);
+  assert.match(html,/本次申请的模式具备发布依据/);
+  assert.match(html,/预览检查通过/);
+  assert.doesNotMatch(html,/不能批准|manual_quality_reason/);
+  assert.match(skillReviewQualityHtml(q,['fill']),/不能批准/);
+  q.publication_evidence.shared.blocked=true;
+  assert.match(skillReviewQualityHtml(q,['preview']),/不能批准/);
+  q.publication_evidence.shared.blocked=false;
+  q.publication_evidence.profiles[0].source='sample';
+  assert.match(skillReviewQualityHtml(q,['preview']),/manual_quality_reason/);
+});
+
 for (const status of [200, 401]) test(`late initial session ${status} cannot clear a newer login`, async () => {
   const pending = deferred();
   const {api, accountScope} = client(() => pending.promise);

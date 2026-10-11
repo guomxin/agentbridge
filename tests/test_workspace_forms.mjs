@@ -1,20 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createLifecycle } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
 import { createWorkspaceRequests } from "../agentbridge/workspace/static/workspace_request.mjs";
 import { createComposer } from "../agentbridge/workspace/static/workspace_forms.mjs";
-import { createSkillForms, skillPublicationCoverage, skillCandidateDiff } from "../agentbridge/workspace/static/workspace_skills.mjs";
+import { createSkillForms, skillPublicationCoverage, skillCandidateDiff, skillCandidateRemovals } from "../agentbridge/workspace/static/workspace_skills.mjs";
+import { createSkillLeaveGuard } from "../agentbridge/workspace/static/workspace_skill_leave.mjs";
 
 class Element {
   dataset = {};
   children = [];
   textContent = "";
   innerHTML = "";
+  events = {};
   classList = { add() {}, remove() {} };
   append(...items) { this.children.push(...items); }
   replaceChildren(...items) { this.children = items; }
   setAttribute() {}
-  addEventListener() {}
+  addEventListener(name, callback) { this.events[name] = callback; }
+  focus() {}
   querySelector() { return new Element(); }
   querySelectorAll() { return []; }
 }
@@ -32,6 +36,15 @@ const deferred = () => {
   return { promise, resolve };
 };
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const workspaceSource = readFileSync(new URL('../agentbridge/workspace/static/workspace.js', import.meta.url), 'utf8');
+function workspaceHandler(name, nextName, bindings) {
+  const marker = workspaceSource.includes(`async function ${name}(`) ? `async function ${name}(` : `function ${name}(`;
+  const start = workspaceSource.indexOf(marker);
+  const next = workspaceSource.indexOf(`function ${nextName}(`, start);
+  const end = workspaceSource.lastIndexOf('\n}', next) + 2;
+  assert.ok(start >= 0 && end > start, 'load the actual workspace handler');
+  return new Function(...Object.keys(bindings), `${workspaceSource.slice(start, end)}\nreturn ${name};`)(...Object.values(bindings));
+}
 
 function composerFixture() {
   const scope = createLifecycle().scope();
@@ -47,11 +60,12 @@ function composerFixture() {
     abort() { this.events.abort?.(); }
     load(content = "iVBORw0KGgo=") { this.result = `data:image/png;base64,${content}`; this.events.load(); }
   }
-  const forms = createComposer({ ...dom(), state, getScope: () => scope,
+  const elements = dom();
+  const forms = createComposer({ ...elements, state, getScope: () => scope,
     FileReader: Reader, crypto: { randomUUID: () => String(readers.length) },
     toast: (...args) => warnings.push(args), executeChatMessage: (...args) => messages.push(args),
   });
-  return { forms, scope, state, readers, messages, warnings };
+  return { forms, scope, state, readers, messages, warnings, ...elements };
 }
 
 test("account disposal cancels pending image reads and ignores a reader that reports load late", async () => {
@@ -106,6 +120,130 @@ test("an unsupported or malformed image is rejected before sending without losin
     assert.deepEqual(f.state.composerAttachments, [existing]);
     assert.match(f.warnings[0][0], /图片内容不是/);
     assert.equal(f.messages.length, 0);
+    f.scope.dispose();
+  }
+});
+
+const trial = {draft_id: "draft-private-id", expected_revision: 7, profile: "preview", name: "周报助手"};
+const trialForm = f => ({elements: {message: f.$("#chat-form textarea[name='message']")}});
+
+test("short trial card binds the saved revision without putting technical context into material", () => {
+  const f = composerFixture();
+  f.forms.beginComposerTrial(trial);
+  const card = f.$("#composer-skill-trial"), input = trialForm(f).elements.message;
+  assert.equal(card.hidden, false);
+  assert.match(card.children[0].textContent, /周报助手.*修订 7.*草稿预览/);
+  assert.equal(input.value, "");
+  assert.equal(input.maxLength, 3000);
+  assert.equal(f.$("#attach-image").disabled, true);
+  input.value = "计划修复登录问题。";
+  card.children.at(-1).events.click();
+  assert.equal(f.state.composerSkillTrial, null);
+  assert.equal(input.value, "计划修复登录问题。");
+  assert.equal(input.maxLength, 20000);
+  assert.equal(f.$("#attach-image").disabled, false);
+  assert.equal(card.hidden, true);
+  f.scope.dispose();
+});
+
+test("short trial keeps material and binding until acceptance, and an old acceptance cannot clear a new trial", async () => {
+  const f = composerFixture();
+  f.forms.beginComposerTrial(trial);
+  const form = trialForm(f);
+  form.elements.message.value = "计划修复登录问题。";
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(f.messages[0][0], "计划修复登录问题。");
+  assert.deepEqual(f.messages[0][2], []);
+  assert.deepEqual(f.messages[0][3], trial);
+  assert.notEqual(f.messages[0][3], f.state.composerSkillTrial);
+  assert.equal(form.elements.message.value, "计划修复登录问题。");
+  assert.deepEqual(f.state.composerSkillTrial, trial);
+  f.messages[0][4]();
+  assert.equal(f.state.composerSkillTrial, null);
+  assert.equal(form.elements.message.value, "");
+  f.forms.beginComposerTrial({...trial, expected_revision: 8});
+  form.elements.message.value = "下一次的材料";
+  f.messages[0][4]();
+  assert.equal(f.state.composerSkillTrial.expected_revision, 8);
+  assert.equal(form.elements.message.value, "下一次的材料");
+  f.scope.dispose();
+  assert.equal(f.state.composerSkillTrial, null);
+  assert.equal(f.$("#composer-skill-trial").hidden, true);
+});
+
+test("short trial rejects long material, pasted images and images finishing after the trial starts", async () => {
+  const f = composerFixture();
+  const reading = f.forms.addComposerFiles([{type: "image/png", name: "pending.png", size: 1}]);
+  f.forms.beginComposerTrial(trial);
+  f.readers[0].load(); await reading;
+  assert.deepEqual(f.state.composerAttachments, []);
+  await f.forms.addComposerFiles([{type: "image/png", name: "trial.png", size: 1}]);
+  assert.equal(f.readers.length, 1);
+  assert.match(f.warnings.at(-1)[0], /仅支持合成文字/);
+  const form = trialForm(f);
+  form.elements.message.value = "字".repeat(3001);
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(f.messages.length, 0);
+  assert.match(f.warnings.at(-1)[0], /3000/);
+  form.elements.message.value = "合成材料";
+  f.state.composerAttachments = [{id: "forged"}];
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(f.messages.length, 0);
+  assert.deepEqual(f.state.composerSkillTrial, trial);
+  f.scope.dispose();
+});
+
+test("explicit logout waits for the editor decision before destroying account state", async () => {
+  for (const discard of [false, true]) {
+    const scope = createLifecycle().scope(), decision = deferred(), changes = [], state = {account: {username: 'alice'}};
+    const logout = workspaceHandler('logout', 'switchView', {
+      sessionScope: scope, viewScope: scope.child(), state, canLeaveSkillEditor: () => decision.promise,
+      stopWorkspaceObservers: () => changes.push('observers'), lifecycle: createLifecycle(),
+      resetWorkspaceState: () => changes.push('reset'), showAuth: () => changes.push('auth'),
+      setBusy() {}, $: () => ({}), api: async () => changes.push('logout'), location: {reload: () => changes.push('reload')},
+    });
+    const pending = logout();
+    assert.deepEqual(changes, []);
+    assert.equal(scope.current(), true);
+    decision.resolve(discard); await pending;
+    assert.deepEqual(changes, discard ? ['observers', 'reset', 'auth', 'logout', 'reload'] : []);
+    assert.equal(scope.current(), !discard);
+    assert.equal(state.account === null, discard);
+    scope.dispose();
+  }
+});
+
+test("canceling a dispatch clears only its original trial intent after success and keeps retry material", async () => {
+  for (const scenario of ['original', 'new trial', 'failed cancel']) {
+    const f = composerFixture(), gate = deferred(), live = {actions: new Element()};
+    f.forms.beginComposerTrial(trial);
+    const form = trialForm(f); form.elements.message.value = '计划修复登录问题';
+    await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+    const request = f.messages[0], cancelTrial = request[5];
+    const attachCancel = workspaceHandler('attachDispatchCancel', 'dismissTerminalLiveMessages', {
+      state: {activeStreams: new Map([['run', {onCanceled: cancelTrial}]])}, ensureLiveMessage: () => live,
+      document: f.document, api: async () => {await gate.promise;if(scenario === 'failed cancel')throw Error('cancel failed');},
+      addLiveProgress() {}, isCancellation: () => false, toast() {}, friendlyError: error => error.message,
+    });
+    attachCancel('run', 'dispatch');
+    const canceling = live.actions.children[0].events.click();
+    assert.deepEqual(f.state.composerSkillTrial, trial);
+    if (scenario === 'new trial') {
+      f.forms.beginComposerTrial({...trial, expected_revision: 8});
+      form.elements.message.value = '新卡的材料';
+    }
+    gate.resolve(); await canceling;
+    assert.deepEqual(request[3], trial);
+    if (scenario === 'original') {
+      assert.equal(f.state.composerSkillTrial, null);
+      assert.equal(form.elements.message.value, '计划修复登录问题');
+      f.forms.beginComposerTrial({...trial, expected_revision: 9});
+      cancelTrial(); // A later aborted event for the canceled run is harmless.
+      assert.equal(f.state.composerSkillTrial.expected_revision, 9);
+    } else {
+      assert.equal(f.state.composerSkillTrial.expected_revision, scenario === 'new trial' ? 8 : 7);
+      assert.equal(form.elements.message.value, scenario === 'new trial' ? '新卡的材料' : '计划修复登录问题');
+    }
     f.scope.dispose();
   }
 });
@@ -201,18 +339,24 @@ class SkillFormData {
   get(name) { return this.getAll(name)[0] ?? null; }
 }
 const editableDraft = (id = "draft") => ({...draft(id), revision: 3,
+  skill_id: "user.skill",
   bundle: {content_hash: "hash-3", manifest: {name: "日志助手", description: "归纳日志", selection: {use_when: "归纳", not_for: "无来源", output: "摘要"},
     profiles: {preview: {}, fill: {all: ["taihua.work_log.create"]}}, executionMode: "durable_plan", required_resources: {preview: ["references/evidence.md"], fill: []}},
     resources: {"SKILL.md": "保留计划与完成的区别。", "references/evidence.md": "核对来源。"}},
   tests: [{revision: 3, profile: "preview", status: "reported", prompt: "归纳计划", output: "计划"}],
 });
 
-function skillFixture({initial = editableDraft(), jobs = [], report = null, onAction, timers} = {}) {
+function skillFixture({initial = editableDraft(), jobs = [], report = null, onAction, timers, confirm = () => false, refuseNavigation = false} = {}) {
   const nodes = new Map();
   const $ = selector => { if (!nodes.has(selector)) nodes.set(selector, new SkillElement()); return nodes.get(selector); };
   const view = createLifecycle({timers}).scope();
   const drafts = new Map([[initial.draft_id, structuredClone(initial)]]);
-  const calls = [], navigations = [];
+  const calls = [], navigations = [], trials = [];
+  const windowEvents = new Map();
+  const eventTarget = {
+    addEventListener: (type, callback) => windowEvents.set(type, callback),
+    removeEventListener: (type, callback) => { if (windowEvents.get(type) === callback) windowEvents.delete(type); },
+  };
   const editor = $("#draft-editor");
   editor.fieldset = $("#draft-editor-fields");
   for (const [name, value] of Object.entries({name: initial.bundle.manifest.name, description: initial.bundle.manifest.description,
@@ -249,11 +393,144 @@ function skillFixture({initial = editableDraft(), jobs = [], report = null, onAc
     options.scope?.assertCurrent();
     return result;
   };
-  const forms = createSkillForms({document: {createElement: () => new SkillElement()}, $, state: {activeView: "skills"}, api,
-    FormData: SkillFormData, getScope: () => view, switchView: value => navigations.push(value)});
-  return {forms, $, view, editor, drafts, calls, navigations};
+  const switchView = async (value, permit) => {
+      if (refuseNavigation || !await forms.canLeaveSkillEditor(permit)) return false;
+      navigations.push(value); return true;
+  };
+  const forms = createSkillForms({document: {createElement: () => new SkillElement()}, $, state: {activeView: "skills"}, api, eventTarget, confirm,
+    FormData: SkillFormData, getScope: () => view, switchView, startTrial: async (trial, permit) => {
+      if (await switchView("chat", permit) === false) return false;
+      trials.push(trial); $("#chat-form textarea[name='message']").value = ""; return true;
+    }});
+  return {forms, $, view, editor, drafts, calls, navigations, windowEvents, trials};
 }
 const submitEvent = target => ({target, preventDefault() {}});
+
+test("leave dialog has explicit actions, Escape stays, and account disposal closes a pending decision", async () => {
+  const scope = createLifecycle().scope(), body = new Element();
+  let refocused = 0, value = "dirty";
+  const document = {body, activeElement: {focus() {refocused++;}}, createElement: () => {
+    const element = new Element();
+    element.showModal = () => { element.open = true; };
+    element.close = () => { element.open = false; };
+    element.remove = () => { body.children = body.children.filter(child => child !== element); };
+    return element;
+  }};
+  const guard = createSkillLeaveGuard({document, eventTarget: {addEventListener() {}, removeEventListener() {}}});
+  guard.register(scope, {isDirty: () => true, isBusy: () => false, snapshot: () => value, notify() {}, refresh() {}});
+  let decision = guard.request();
+  let dialog = body.children[0];
+  assert.equal(dialog.open, true);
+  assert.deepEqual(dialog.children[2].children.map(button => button.textContent), ["继续编辑", "放弃修改并离开"]);
+  assert.equal(await guard.request(), false);
+  dialog.children[2].children[0].events.click();
+  assert.equal(await decision, false);
+  assert.equal(body.children.length, 0);
+  assert.equal(refocused, 1);
+  decision = guard.request(); dialog = body.children[0];
+  let prevented = false;
+  dialog.events.cancel({preventDefault() {prevented = true;}});
+  assert.equal(await decision, false);
+  assert.equal(prevented, true);
+  decision = guard.request(); dialog = body.children[0];
+  dialog.children[2].children[1].events.click();
+  assert.equal(await decision, true);
+  decision = guard.request(); dialog = body.children[0];
+  value = "late edit";
+  dialog.children[2].children[1].events.click();
+  assert.equal(await decision, false);
+  decision = guard.request(); dialog = body.children[0];
+  scope.dispose();
+  assert.equal(await decision, false);
+  assert.equal(body.children.length, 0);
+  assert.equal(await guard.request(), true);
+  dialog.children[2].children[1].events.click();
+  assert.equal(body.children.length, 0);
+});
+
+test("dirty navigation can continue editing or discard once without saving, and owns beforeunload only while dirty", async () => {
+  let discard = false;
+  const prompts = [];
+  const f = skillFixture({confirm: message => {prompts.push(message); return discard;}});
+  f.drafts.set("other", editableDraft("other"));
+  await f.forms.showSkillDraft("draft");
+  assert.equal(f.windowEvents.size, 0);
+  const field = f.editor.controls.get("instructions"), original = field.value;
+  field.value = "未保存的重要修改"; f.editor.oninput();
+  assert.equal(f.windowEvents.size, 1);
+  let prevented = false;
+  const unloading = {preventDefault() {prevented = true;}};
+  f.windowEvents.get("beforeunload")(unloading);
+  assert.equal(prevented, true);
+  assert.equal(unloading.returnValue, "");
+  const count = f.calls.length;
+  assert.equal(await f.forms.showSkillDraft("other"), false);
+  assert.equal(await f.forms.loadSkillDrafts(), false);
+  assert.equal(await f.forms.canLeaveSkillEditor(), false);
+  assert.equal(f.calls.length, count);
+  assert.equal(field.value, "未保存的重要修改");
+  assert.match(prompts[0], /放弃修改并离开.*继续编辑/);
+  field.value = original; f.editor.oninput();
+  assert.equal(f.windowEvents.size, 0);
+  field.value = "再修改"; f.editor.oninput();
+  discard = true;
+  const priorPrompts = prompts.length;
+  await f.forms.showSkillDraft("other");
+  assert.equal(prompts.length, priorPrompts + 1);
+  assert.equal(f.windowEvents.size, 0);
+  assert.equal(f.calls.some(c => c.action === "save"), false);
+  f.view.dispose();
+});
+
+test("saving blocks user switches but a completed save can explicitly redraw the editor", async () => {
+  const gate = deferred();
+  let prompts = 0;
+  const f = skillFixture({confirm: () => {prompts++; return true;}, onAction: action => action === "save" ? gate.promise : undefined});
+  await f.forms.showSkillDraft("draft");
+  f.editor.controls.get("instructions").value = "保存中的修改"; f.editor.oninput();
+  const saving = f.editor.onsubmit(submitEvent(f.editor));
+  const count = f.calls.length;
+  assert.equal(await f.forms.canLeaveSkillEditor(), false);
+  assert.equal(await f.forms.loadSkillDrafts(), false);
+  assert.equal(await f.forms.showSkillDraft("draft"), false);
+  assert.equal(f.calls.length, count);
+  assert.equal(prompts, 0);
+  assert.match(f.$("#draft-detail-error").textContent, /正在处理/);
+  gate.resolve({draft_id: "draft", revision: 7, content_hash: "hash-7"});
+  await saving;
+  assert.equal(f.calls.filter(c => c.path === "/api/skill-drafts?id=draft").length, 2);
+  assert.equal(await f.forms.canLeaveSkillEditor(), true);
+  assert.equal(f.windowEvents.size, 0);
+  f.view.dispose();
+});
+
+test("late input during normal save stays protected instead of authorizing an internal redraw", async () => {
+  const gate = deferred();
+  const f = skillFixture({onAction: action => action === "save" ? gate.promise : undefined});
+  await f.forms.showSkillDraft("draft");
+  f.editor.controls.get("instructions").value = "发送的修改";
+  const saving = f.editor.onsubmit(submitEvent(f.editor));
+  f.editor.controls.get("instructions").value = "等待保存时追加的修改"; f.editor.oninput();
+  gate.resolve({draft_id: "draft", revision: 7, content_hash: "hash-7"});
+  await saving;
+  assert.equal(f.calls.filter(c => c.path === "/api/skill-drafts?id=draft").length, 1);
+  assert.equal(f.editor.controls.get("instructions").value, "等待保存时追加的修改");
+  assert.equal(await f.forms.canLeaveSkillEditor(), false);
+  assert.equal(f.windowEvents.size, 1);
+  f.view.dispose();
+  assert.equal(f.windowEvents.size, 0);
+  assert.equal(await f.forms.canLeaveSkillEditor(), true);
+});
+
+test("a refused trial navigation does not overwrite the existing composer", async () => {
+  const f = skillFixture({refuseNavigation: true});
+  await f.forms.showSkillDraft("draft");
+  f.$("#chat-form textarea[name='message']").value = "原有问题";
+  await f.$("#draft-test").onclick();
+  assert.equal(f.$("#chat-form textarea[name='message']").value, "原有问题");
+  assert.deepEqual(f.navigations, []);
+  f.view.dispose();
+});
 
 test("unsaved method edits block publication and evaluation without sending the old revision", async () => {
   const f = skillFixture();
@@ -289,9 +566,8 @@ test("save then trial preserves disabled form values and uses the returned revis
   gate.resolve({draft_id: "draft", revision: 7, content_hash: "hash-7"});
   await pending;
   assert.deepEqual(f.navigations, ["chat"]);
-  assert.match(f.$("#chat-form textarea[name='message']").value, /修订 7.*准备填单（fill）/);
-  assert.match(f.$("#chat-form textarea[name='message']").value, /草稿（draft）/);
-  assert.doesNotMatch(f.$("#chat-form textarea[name='message']").value, /expected_revision|profile=/);
+  assert.deepEqual(f.trials, [{draft_id: "draft", expected_revision: 7, profile: "fill", name: "日志助手"}]);
+  assert.equal(f.$("#chat-form textarea[name='message']").value, "");
   f.view.dispose();
 });
 
@@ -350,6 +626,40 @@ test("publication uses complete current-revision coverage instead of the truncat
   assert.deepEqual(skillPublicationCoverage(d, null).map(c => c.eligible), [false, false]);
 });
 
+test("server publication evidence separates modes and cannot be overridden by reported samples", () => {
+  const d = {...editableDraft(), tested_profiles: ["preview", "fill"]};
+  const evidence = {schema: "agentbridge.skill-publication-evidence.v1", revision: 3, content_hash: "hash-3",
+    shared: {blocked: false}, profiles: [
+      {profile: "preview", eligible: true, blocked: false, evidence: "预览输出检查通过"},
+      {profile: "fill", eligible: false, blocked: true, evidence: "填单输出检查失败"},
+    ]};
+  assert.deepEqual(skillPublicationCoverage(d, {passed: false}, evidence).map(c => c.eligible), [true, false]);
+  assert.match(skillPublicationCoverage(d, null, evidence)[1].evidence, /失败/);
+  for (const patch of [{revision: 2}, {content_hash: "old"}, {shared: {blocked: true}}]) {
+    assert.deepEqual(skillPublicationCoverage(d, {passed: true}, {...evidence, ...patch}).map(c => c.eligible), [false, false]);
+  }
+});
+
+test("mixed-mode evaluation presents and submits only the server-approved mode", async () => {
+  const evidence = {schema: "agentbridge.skill-publication-evidence.v1", revision: 3, content_hash: "hash-3",
+    shared: {blocked: false, reason: "共用要求通过"}, profiles: [
+      {profile: "preview", eligible: true, blocked: false, evidence: "本模式输出断言通过"},
+      {profile: "fill", eligible: false, blocked: true, evidence: "本模式输出断言未通过"},
+    ]};
+  const f = skillFixture({onAction: action => action === "inspect" ? {...quality("方法检查"), publication_evidence: evidence} : undefined});
+  await f.forms.showSkillDraft("draft");
+  assert.match(f.$("#skill-publication-profiles").innerHTML, /共用要求通过/);
+  assert.match(f.$("#skill-publication-profiles").innerHTML, /value="preview" checked/);
+  assert.match(f.$("#skill-publication-profiles").innerHTML, /value="fill" disabled/);
+  f.$("#draft-submit").formValues.profiles = ["fill"];
+  await f.$("#draft-submit").onsubmit(submitEvent(f.$("#draft-submit")));
+  assert.equal(f.calls.some(c => c.action === "submit"), false);
+  f.$("#draft-submit").formValues.profiles = ["preview"];
+  await f.$("#draft-submit").onsubmit(submitEvent(f.$("#draft-submit")));
+  assert.deepEqual(f.calls.find(c => c.action === "submit").data.profiles, ["preview"]);
+  f.view.dispose();
+});
+
 test("publication sends the selected eligible subset and rejects untested modes in a forged form", async () => {
   const f = skillFixture();
   await f.forms.showSkillDraft("draft");
@@ -377,6 +687,130 @@ test("archived drafts keep export enabled while editing and trial remain disable
   f.view.dispose();
 });
 
+test("previous evaluation imports editable inputs and assertions without inheriting a pass or starting a run", async () => {
+  const previous = {revision: 2, repeats: 3, cases: [
+    {prompt: "整理计划", profile: "preview", kind: "output", contains: ["计划"], excludes: ["完成"]},
+    {prompt: "查天气", profile: "preview", kind: "trigger", expected_trigger: false, contains: [], excludes: []},
+  ]};
+  const f = skillFixture({onAction: action => action === "inspect" ? {...quality("检查"), previous_report: previous} : undefined});
+  await f.forms.showSkillDraft("draft");
+  f.$("#skill-reuse-cases").onclick();
+  const cases = f.$("#skill-eval-cases").children;
+  assert.equal(cases.length, 2);
+  assert.match(cases[0].querySelector('[data-case-source]').textContent, /修订 2.*不继承通过/);
+  assert.equal(cases[0].querySelector('[name=contains]').value, "计划");
+  assert.equal(cases[1].querySelector('[name=kind]').value, "trigger_false");
+  assert.match(f.$("#skill-eval-state").textContent, /尚未运行或保存/);
+  assert.equal(f.calls.some(c => c.action === "evaluate"), false);
+  cases[0].querySelector('[name=prompt]').value = "编辑后的材料";
+  await f.$("#skill-eval-form").onsubmit(submitEvent(f.$("#skill-eval-form")));
+  const sent = f.calls.find(c => c.action === "evaluate").data;
+  assert.equal(sent.expected_revision, 3);
+  assert.equal(sent.repeats, 3);
+  assert.equal(sent.cases[0].prompt, "编辑后的材料");
+  assert.deepEqual(sent.cases[0].contains, ["计划"]);
+  assert.equal(sent.cases[1].expected_trigger, false);
+  assert.equal(Object.hasOwn(sent, "passed"), false);
+  f.view.dispose();
+});
+
+test("sample conversion forces a removed mode to be selected and leaves assertions for a human", async () => {
+  const initial = editableDraft();
+  initial.tests = [{test_id: "sample", revision: 1, profile: "retired", status: "reported", prompt: "计划修复", output: "已完成"}];
+  const f = skillFixture({initial});
+  const button = new SkillElement(); button.dataset.sampleCase = "sample";
+  f.$("#skill-sample-list").queries.set('[data-sample-case]', [button]);
+  await f.forms.showSkillDraft("draft");
+  button.onclick();
+  assert.match(f.$("#draft-detail").innerHTML, /已保存，待复核/);
+  const row = f.$("#skill-eval-cases").children[0];
+  assert.equal(row.querySelector('[name=prompt]').value, "计划修复");
+  assert.equal(row.querySelector('[name=profile]').value, "");
+  assert.equal(row.querySelector('[name=contains]').value, "");
+  assert.equal(row.querySelector('[name=excludes]').value, "");
+  assert.match(row.querySelector('[data-case-source]').textContent, /retired.*请明确选择/);
+  await f.$("#skill-eval-form").onsubmit(submitEvent(f.$("#skill-eval-form")));
+  assert.match(f.$("#draft-detail-error").textContent, /明确选择/);
+  row.querySelector('[name=profile]').value = "preview";
+  await f.$("#skill-eval-form").onsubmit(submitEvent(f.$("#skill-eval-form")));
+  assert.match(f.$("#draft-detail-error").textContent, /填写至少一项/);
+  assert.equal(f.calls.some(c => c.action === "evaluate"), false);
+  row.querySelector('[name=contains]').value = "计划";
+  row.querySelector('[name=excludes]').value = "已完成";
+  await f.$("#skill-eval-form").onsubmit(submitEvent(f.$("#skill-eval-form")));
+  assert.deepEqual(f.calls.find(c => c.action === "evaluate").data.cases[0],
+    {prompt: "计划修复", profile: "preview", kind: "output", contains: ["计划"], excludes: ["已完成"]});
+  f.view.dispose();
+});
+
+test("sample feedback carries original test attribution and can become an editable case without turning correction into assertions", async () => {
+  const initial = editableDraft();
+  initial.tests[0].test_id = "sample";
+  const gate = deferred(), comment = "把计划误写成已完成。";
+  const f = skillFixture({initial, onAction: action => action === "feedback" ? gate.promise : undefined});
+  const form = new SkillElement(); form.dataset.sampleFeedback = "sample";
+  form.querySelector('[name=rating]').value = "incorrect";
+  form.querySelector('[name=comment]').value = comment;
+  f.$("#skill-sample-list").queries.set('[data-sample-feedback]', [form]);
+  await f.forms.showSkillDraft("draft");
+  const saving = form.onsubmit(submitEvent(form));
+  await form.onsubmit(submitEvent(form));
+  const calls = f.calls.filter(c => c.action === "feedback");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].data, {skill_id: "user.skill", profile: "preview", rating: "incorrect", comment, test_id: "sample", version: "draft:3"});
+  gate.resolve({feedback_id: "feedback", version: "draft:3", profile: "preview", source: {kind: "sample", revision: 3, profile: "preview", prompt: "归纳计划"}});
+  await saving;
+  assert.match(form.querySelector('[role=status]').textContent, /反馈已保存/);
+  const feedback = f.$("#skill-feedback-list").children[0];
+  assert.match(feedback.children[0].textContent, /修订 3.*草稿预览/);
+  assert.doesNotMatch(feedback.children[0].textContent, /draft:/);
+  feedback.children.at(-1).onclick();
+  const row = f.$("#skill-eval-cases").children[0];
+  assert.equal(row.querySelector('[name=prompt]').value, "归纳计划");
+  assert.match(row.querySelector('[data-case-source]').textContent, /把计划误写成已完成/);
+  assert.match(row.querySelector('[data-case-source]').textContent, /纠错说明：把计划误写成已完成。 请补上“应包含\/不应包含”的内容；反馈仅作参考，不会自动成为验收条件。/);
+  assert.doesNotMatch(row.querySelector('[data-case-source]').textContent, /。。|断言/);
+  assert.equal(row.querySelector('[name=contains]').value, "");
+  assert.equal(row.querySelector('[name=excludes]').value, "");
+  assert.equal(f.calls.some(c => c.action === "evaluate"), false);
+  f.view.dispose();
+});
+
+test("legacy feedback labels unknown modes and stale feedback responses cannot paint another view", async () => {
+  const gate = deferred(), initial = editableDraft(); initial.tests[0].test_id = "sample";
+  const f = skillFixture({initial, onAction: action => action === "inspect" ? {...quality("检查"), feedback: {items: [{version: "1.0.0", profile: "unknown", rating: "incorrect", comment: "旧反馈", source: {}}]}}
+    : action === "feedback" ? gate.promise : undefined});
+  const form = new SkillElement(); form.dataset.sampleFeedback = "sample";
+  form.querySelector('[name=rating]').value = "useful"; form.querySelector('[name=comment]').value = "已区分计划";
+  f.$("#skill-sample-list").queries.set('[data-sample-feedback]', [form]);
+  await f.forms.showSkillDraft("draft");
+  assert.match(f.$("#skill-feedback-list").children[0].children[0].textContent, /模式未记录/);
+  assert.equal(f.$("#skill-feedback-list").children[0].children.length, 2);
+  const saving = form.onsubmit(submitEvent(form));
+  f.view.dispose();
+  form.querySelector('[role=status]').textContent = "新账号";
+  gate.resolve({feedback_id: "old", profile: "preview", version: "draft:3", source: {kind: "sample"}});
+  await saving;
+  assert.equal(form.querySelector('[role=status]').textContent, "新账号");
+});
+
+test("catalog feedback requires a selected eligible mode instead of silently using the first", async () => {
+  const f = skillFixture({onAction: action => action === "feedback" ? {status: "recorded"} : undefined});
+  const card = new SkillElement();
+  f.forms.addSkillFeedback(card, {id: "published", version: "1.0.0", profiles: {fill: {available: false}, preview: {available: true}}});
+  const details = card.children[0];
+  details.querySelector('[name=rating]').value = "useful";
+  details.querySelector('textarea').value = "保留了计划";
+  await details.querySelector('button').onclick();
+  details.querySelector('[name=profile]').value = "fill";
+  await details.querySelector('button').onclick();
+  assert.equal(f.calls.some(c => c.action === "feedback"), false);
+  details.querySelector('[name=profile]').value = "preview";
+  await details.querySelector('button').onclick();
+  assert.equal(f.calls.find(c => c.action === "feedback").data.profile, "preview");
+  f.view.dispose();
+});
+
 const replacementJob = () => ({job_id: "job", kind: "generation", state: "succeeded", result: {similar: [{draft_id: "draft", name: "日志助手"}],
   candidate: {name: "新方法", description: "新说明", instructions: "<img onerror=bad>新步骤", selection: {use_when: "新目标", not_for: "新排除", output: "新输出"},
     profiles: {use: {}}, executionMode: "read_exploration", references: {}, required_resources: {use: []}}}});
@@ -401,6 +835,51 @@ function mountCandidateJobs(root) {
   }});
   return () => root.querySelectorAll("[data-candidate-job]");
 }
+
+test("candidate adoption confirms dirty edits before mutation and refuses to discard late input", async () => {
+  const gate = deferred();
+  let discard = false;
+  const f = skillFixture({jobs: [replacementJob()], confirm: () => discard, onAction: action => action === "adopt" ? gate.promise : undefined});
+  const candidates = mountCandidateJobs(f.$("#skill-jobs"));
+  await f.forms.refreshSkillJobs();
+  await f.forms.showSkillDraft("draft");
+  f.editor.controls.get("instructions").value = "当前未保存的方法"; f.editor.oninput();
+  await candidates()[0].saveButton.onclick();
+  assert.equal(f.calls.some(c => c.action === "adopt"), false);
+  discard = true;
+  const adopting = candidates()[0].saveButton.onclick();
+  await flush();
+  assert.equal(f.$("#draft-editor-fields").disabled, true);
+  assert.equal(await f.forms.canLeaveSkillEditor(), false);
+  f.editor.controls.get("instructions").value = "采用期间又输入的内容"; f.editor.oninput();
+  gate.resolve({draft_id: "draft"});
+  await adopting;
+  assert.equal(f.calls.filter(c => c.path === "/api/skill-drafts?id=draft").length, 1);
+  assert.equal(f.editor.controls.get("instructions").value, "采用期间又输入的内容");
+  assert.match(f.$("#draft-detail-error").textContent, /内容又有变化/);
+  assert.equal(f.$("#draft-editor-fields").disabled, false);
+  assert.equal(f.windowEvents.size, 1);
+  f.view.dispose();
+});
+
+test("candidate comparison ignores only dependency defaults and order, preserving database presence and actual removals", () => {
+  const bundle = editableDraft().bundle;
+  const candidate = {...structuredClone(bundle.manifest), instructions: bundle.resources["SKILL.md"], references: {"references/evidence.md": "核对来源。"}};
+  candidate.profiles.preview = {all: [], any: []};
+  bundle.manifest.profiles.fill = {all: ["b", "a"], database: {any: ["y", "x"]}};
+  candidate.profiles.fill = {all: ["a", "b"], any: [], database: {all: [], any: ["x", "y"]}};
+  assert.deepEqual(skillCandidateDiff(bundle, candidate), []);
+  candidate.profiles.preview.database = {};
+  assert.deepEqual(skillCandidateDiff(bundle, candidate).map(c => c.label), ["模式与能力依赖 · preview"]);
+  delete candidate.profiles.preview.database;
+  delete candidate.profiles.fill.database;
+  candidate.profiles.fill.all = ["a"];
+  delete candidate.references["references/evidence.md"];
+  candidate.required_resources.preview = [];
+  const changes = skillCandidateDiff(bundle, candidate);
+  assert.deepEqual(skillCandidateRemovals(changes), ["fill 必需能力：b", "fill 数据源要求", "参考资料：references/evidence.md", "preview 必读资料：references/evidence.md"]);
+  assert.deepEqual(changes.find(c => c.label === "模式与能力依赖 · fill").before, bundle.manifest.profiles.fill);
+});
 
 test("background polling preserves candidate expansion by job ID and keeps its preview action usable", async () => {
   const pending = new Map();

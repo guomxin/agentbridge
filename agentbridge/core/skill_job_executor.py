@@ -11,7 +11,7 @@ import time
 from typing import Callable, Protocol
 
 from agentbridge.core.business_skills import _json, skill_bundle
-from agentbridge.core.skill_quality import grade_output
+from agentbridge.core.skill_quality import EVALUATION_SCHEMA, grade_output
 from agentbridge.core.user_grants import UserGrantConflict
 
 
@@ -166,7 +166,8 @@ class SkillJobExecutor:
                     self._dependencies.active(job, rows)
         scores = {name: {'passed': sum(r['passed'] for r in rows if r['variant'] == name),
                          'total': sum(r['variant'] == name for r in rows)} for name in variants}
-        return {'job_id': job['job_id'], 'draft_id': payload['draft_id'], 'revision': payload['revision'],
+        return {'schema': EVALUATION_SCHEMA, 'repeats': payload['repeats'],
+                'job_id': job['job_id'], 'draft_id': payload['draft_id'], 'revision': payload['revision'],
                 'content_hash': payload['bundle']['content_hash'], 'cases': payload['cases'], 'rows': rows,
                 'scores': scores, 'passed': scores['candidate']['passed'] == scores['candidate']['total'],
                 'verification': 'independent_text_rules', 'semantic_review_required': True,

@@ -6,6 +6,7 @@ import { createChatProgress } from "./workspace_progress.mjs";
 import { createChatStream } from "./workspace_stream.mjs";
 import { createComposer } from "./workspace_forms.mjs";
 import { createSkillForms } from "./workspace_skills.mjs";
+import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 
 const state = {
   account: null,
@@ -41,6 +42,7 @@ const state = {
   taskSyncTimers: new Map(),
   toasts: new Map(),
   composerAttachments: [],
+  composerSkillTrial: null,
 };
 
 const GATEWAY_STATUS_ONLINE_POLL_MS = 30000;
@@ -75,11 +77,11 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = creat
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
-  handleComposerDrop, addComposerFiles, clearComposerAttachments, sendChat } = createComposer({
+  handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
   document, state, $, toast, getScope: () => sessionScope, executeChatMessage,
 });
-const { loadSkillDrafts, addSkillFeedback } = createSkillForms({
-  document, state, $, api, switchView, getScope: () => viewScope,
+const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor } = createSkillForms({
+  document, state, $, api, switchView, startTrial, clearTrial: clearComposerTrial, getScope: () => viewScope,
 });
 
 document.addEventListener("DOMContentLoaded", bootstrap);
@@ -87,9 +89,9 @@ window.addEventListener("pagehide", () => {
   stopWorkspaceObservers();
   sessionScope.dispose();
 });
-window.addEventListener("pageshow", (event) => {
+window.addEventListener("pageshow", async (event) => {
   if (!event.persisted) return;
-  if (state.account) enterWorkspace(state.account);
+  if (state.account) await enterWorkspace(state.account);
   else {
     sessionScope = lifecycle.scope();
     viewScope = sessionScope.child();
@@ -110,6 +112,7 @@ function resetWorkspaceState() {
   state.selectedTaskId = null;
   state.taskDetailRequest += 1;
   state.composerAttachments = [];
+  clearComposerTrial();
   state.timelineCursor = 0;
   state.chatTimelineOldestSequence = 0;
   state.chatTimelineHasOlder = false;
@@ -128,7 +131,7 @@ async function bootstrap() {
   try {
     const session = await api("/api/session");
     if (session.authenticated) {
-      enterWorkspace(session.account);
+      await enterWorkspace(session.account);
     } else {
       showAuth();
       await restoreEnrollment();
@@ -214,7 +217,7 @@ async function login(event) {
         password: form.get("password"),
       },
     });
-    enterWorkspace(result.account);
+    await enterWorkspace(result.account);
   } catch (error) {
     if (isCancellation(error)) return;
     showAuthError(friendlyError(error));
@@ -306,7 +309,7 @@ async function completeEnrollment(event) {
         password,
       },
     });
-    enterWorkspace(result.account);
+    await enterWorkspace(result.account);
   } catch (error) {
     if (isCancellation(error)) return;
     showAuthError(friendlyError(error));
@@ -315,7 +318,7 @@ async function completeEnrollment(event) {
   }
 }
 
-function enterWorkspace(account) {
+async function enterWorkspace(account) {
   stopWorkspaceObservers();
   sessionScope.dispose();
   sessionScope = lifecycle.scope();
@@ -326,7 +329,7 @@ function enterWorkspace(account) {
   $("#auth-view").hidden = true;
   $("#app-view").hidden = false;
   $("#account-name").textContent = account.username;
-  switchView("chat");
+  if (await switchView("chat") === false || !accountScope.current()) return;
   loadTasks();
   loadChat().finally(() => {
     if (!accountScope.current()) return;
@@ -337,6 +340,8 @@ function enterWorkspace(account) {
 }
 
 async function logout() {
+  const scope = sessionScope;
+  if (!await canLeaveSkillEditor() || !scope.current()) return;
   stopWorkspaceObservers();
   sessionScope.dispose();
   sessionScope = lifecycle.scope();
@@ -352,7 +357,10 @@ async function logout() {
   location.reload();
 }
 
-function switchView(view) {
+async function switchView(view, permit) {
+  if (view === state.activeView && view === "skills") return true;
+  const previousScope = viewScope;
+  if (!await canLeaveSkillEditor(permit) || !previousScope.current()) return false;
   if (view !== state.activeView) {
     viewScope.dispose();
     viewScope = sessionScope.child();
@@ -370,12 +378,21 @@ function switchView(view) {
   }
   if (view === "endpoints") loadEndpoints();
   if (view === "skills") loadSkills();
+  return true;
+}
+
+async function startTrial(trial, permit) {
+  const scope = sessionScope;
+  if (await switchView("chat", permit) === false || !scope.current()) return false;
+  beginComposerTrial(trial);
+  return true;
 }
 
 async function loadSkills() {
+  const parent = viewScope;
+  if (await loadSkillDrafts() === false || !parent.current()) return;
   const scope = viewScope.replace("skills-list");
   const api = scopedApi(scope);
-  await loadSkillDrafts();
   if (!scope.current()) return;
   const container = $("#skill-list");
   container.replaceChildren();
@@ -393,8 +410,9 @@ async function loadSkills() {
       note.textContent = item.status === "disabled" ? "已停用" : !eligible ? Object.values(item.profiles).flatMap(p => p.missing).join("；") : item.status === "trial" ? "试用 · 结果请结合来源核对" : "可用";
       const button = document.createElement("button"); button.type = "button"; button.className = "secondary"; button.textContent = "使用此助手";
       button.disabled = item.status === "disabled" || !eligible;
-      button.addEventListener("click", () => {
-        switchView("chat");
+      button.addEventListener("click", async () => {
+        if (await switchView("chat") === false) return;
+        clearComposerTrial();
         const input = $("#chat-form textarea[name='message']");
         input.value = `请使用“${item.name}”（${item.id}）助手，`;
         input.focus();
@@ -730,6 +748,9 @@ async function executeChatMessage(
   message,
   form = $("#chat-form"),
   attachments = [],
+  skillTrial,
+  onAccepted,
+  onCanceled,
 ) {
   const scope = sessionScope;
   const api = scopedApi(scope);
@@ -751,9 +772,11 @@ async function executeChatMessage(
   setBusy(form, true);
   const live = ensureLiveMessage(idempotencyKey);
   live.requestMessage = message;
+  live.requestSkillTrial = skillTrial ? {...skillTrial} : undefined;
+  renderSkillTrialStatus(document, live, skillTrial, true);
   addLiveProgress(idempotencyKey, "正在连接智能体", "active");
   try {
-    await consumeChatStream({ message, idempotencyKey, attachments });
+    await consumeChatStream({ message, idempotencyKey, attachments, skillTrial, onAccepted, onCanceled });
     scope.assertCurrent();
     scheduleChatRefresh(500, 1);
   } catch (error) {
@@ -766,12 +789,17 @@ async function executeChatMessage(
         error.safeToRetry === true,
         message,
         attachments,
+        skillTrial,
+        undefined,
+        onAccepted,
+        onCanceled,
       );
       toast(text, true, error.code || "chat-failed");
     }
   } finally {
     if (!scope.current()) return;
     setBusy(form, false);
+    renderComposerTrial();
     form.elements.message?.focus();
   }
 }
@@ -835,9 +863,14 @@ function reconcileOriginChatMessage(entry, render = true) {
           false,
           activeStream.requestMessage,
           activeStream.requestAttachments,
+          activeStream.requestSkillTrial,
+          entry.payload?.skillTrial,
+          activeStream.onAccepted,
+          activeStream.onCanceled,
         );
       } else {
-        handleChatDelta({ runId, state: "final", text: entry.text });
+        activeStream.onAccepted?.();
+        handleChatDelta({ runId, state: "final", text: entry.text, skillTrial: entry.payload?.skillTrial });
       }
       activeStream.controller.abort();
     }
@@ -858,6 +891,7 @@ function reconcileOriginChatMessage(entry, render = true) {
       timestamp: entry.created_at,
     });
     state.syncedMessages.set(entry.entry_id, item);
+    renderSkillTrialStatus(document, {item}, entry.payload?.skillTrial);
   }
   setTimelineNode(item, {
     key: `timeline:${entry.entry_id}`,
@@ -921,12 +955,17 @@ function renderRunFailure(
   canRetry,
   requestMessage,
   requestAttachments = [],
+  requestSkillTrial,
+  trialReceipt,
+  onAccepted,
+  onCanceled,
 ) {
   const live = ensureLiveMessage(runId);
   live.item.classList.add("failed");
   live.text.textContent = text;
   live.actions.replaceChildren();
   addLiveProgress(runId, "处理未完成", "failed");
+  renderSkillTrialStatus(document, live, trialReceipt || requestSkillTrial);
   if (canRetry && requestMessage) {
     const retry = document.createElement("button");
     retry.type = "button";
@@ -938,6 +977,9 @@ function renderRunFailure(
         requestMessage,
         $("#chat-form"),
         requestAttachments,
+        requestSkillTrial,
+        onAccepted,
+        onCanceled,
       );
     });
     live.actions.append(retry);
@@ -952,6 +994,7 @@ function attachDispatchCancel(runId, dispatchId) {
     return;
   }
   live.cancelDispatchId = dispatchId;
+  const cancelTrial = state.activeStreams.get(runId)?.onCanceled;
   live.actions.replaceChildren();
   const cancel = document.createElement("button");
   cancel.type = "button";
@@ -964,6 +1007,7 @@ function attachDispatchCancel(runId, dispatchId) {
         `/api/chat/dispatches/${encodeURIComponent(dispatchId)}/cancel`,
         { method: "POST", body: {}, csrf: true },
       );
+      cancelTrial?.();
       addLiveProgress(runId, "已取消等待", "failed");
     } catch (error) {
     if (isCancellation(error)) return;
@@ -1187,7 +1231,7 @@ async function continueTask(task, button) {
       { method: "POST", body: {}, csrf: true },
     );
     scope.assertCurrent();
-    switchView("chat");
+    if (await switchView("chat") === false) return;
     await executeChatMessage(result.message);
   } catch (error) {
     if (isCancellation(error)) return;

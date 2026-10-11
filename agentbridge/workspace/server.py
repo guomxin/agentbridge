@@ -570,6 +570,8 @@ def create_workspace_http_server(
                     )
                     return
                 if route.path == "/api/chat/send":
+                    if body.get('skillTrial') is not None:
+                        raise ValueError('短试用请使用专用入口 /api/skill-trials/send-stream')
                     result = application.send_chat(
                         account,
                         message=_required_string(body, "message"),
@@ -587,7 +589,14 @@ def create_workspace_http_server(
                         },
                     )
                     return
+                if route.path == "/api/skill-trials/send-stream":
+                    if body.get('skillTrial') is None:
+                        raise ValueError('短试用需要草稿、修订和模式')
+                    self._chat_send_stream(account, body)
+                    return
                 if route.path == "/api/chat/send-stream":
+                    if body.get('skillTrial') is not None:
+                        raise ValueError('短试用请使用专用入口 /api/skill-trials/send-stream')
                     self._chat_send_stream(account, body)
                     return
                 self._json(404, {"error": {"code": "NOT_FOUND"}})
@@ -802,6 +811,7 @@ def create_workspace_http_server(
                 message=message,
                 idempotency_key=idempotency_key,
                 attachments=body.get("attachments"),
+                skill_trial=body.get("skillTrial"),
             )
             try:
                 self.close_connection = True

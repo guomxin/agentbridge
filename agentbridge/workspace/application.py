@@ -23,6 +23,7 @@ from agentbridge.core.timeline_attachments import (
     public_attachment,
 )
 from agentbridge.workspace.gateway import GatewayRequestError, OpenClawGatewayClient
+from agentbridge.workspace.stores import normalize_skill_trial
 
 
 _LOG = logging.getLogger(__name__)
@@ -96,6 +97,8 @@ class WorkspaceApplication:
     def _capture_skill_method(self, capture):
         try:
             dispatch = self.store.get_host_dispatch(capture['dispatch_id'], user_subject=capture['owner_subject'])
+            if self.store.skill_trial_for_dispatch(dispatch['dispatch_id'], user_subject=capture['owner_subject']):
+                return
             account = self.store.get_account(dispatch['account_id'])
             material, attachments = self._host_dispatch_payload(dispatch)
             if not attachments and not re.search(r'(创建|做个|发布|审批|评测|试用|沉淀).{0,10}(助手|skill|草稿)|草稿', material, re.I):
@@ -537,10 +540,14 @@ class WorkspaceApplication:
         message: str,
         idempotency_key: str | None = None,
         attachments: list[dict] | None = None,
+        skill_trial: dict | None = None,
     ) -> Iterator[dict[str, Any]]:
         self._gateway()
         message = str(message or "").strip()
         normalized_attachments = _validated_chat_attachments(attachments)
+        skill_trial = normalize_skill_trial(skill_trial)
+        if skill_trial is not None and (not message or len(message) > 3000 or '\0' in message or normalized_attachments):
+            raise ValueError('短试用仅支持1至3000字的文本，不支持附件')
         if not message and normalized_attachments:
             message = "请处理附加图片中的内容。"
         if not message or len(message) > 20_000:
@@ -555,6 +562,9 @@ class WorkspaceApplication:
             tasks=self.service.tasks,
             attachment_store=self.service.timeline_attachments,
             media_base_url=self.service.trusted_card_base_url,
+            skill_trial=skill_trial,
+            validate_skill_trial=lambda db, trial: self.service.skill_authoring.validate_workspace_trial(
+                db, account['user_subject'], trial),
         )
         self._ensure_dispatch_worker(account["account_id"])
         return self._stream_host_dispatch(
@@ -701,6 +711,7 @@ class WorkspaceApplication:
 
         try:
             message, attachments = self._host_dispatch_payload(dispatch)
+            trial = self.store.skill_trial_for_dispatch(dispatch['dispatch_id'], user_subject=dispatch['user_subject'])
         except Exception as exc:
             self._fail_dispatch_before_accept(
                 dispatch,
@@ -738,6 +749,7 @@ class WorkspaceApplication:
                 timeout_seconds=300,
                 retry_before_accept=False,
                 abort_accepted_on_close=False,
+                **({'require_trial_binding': True} if trial else {}),
             )
             for item in source:
                 item_type = item.get("type")
@@ -1003,6 +1015,13 @@ class WorkspaceApplication:
         evidence = None
         if self._dispatch_stop.is_set():
             return
+        trial = self.store.skill_trial_for_dispatch(dispatch['dispatch_id'], user_subject=account['user_subject'],
+                                                   account_id=account['account_id'])
+        sample = self.service.skill_authoring.workspace_trial_receipt(account['user_subject'], trial) if trial else None
+        if sample and sample['status'] == 'reported' and sample['output']:
+            self._finish_accepted_dispatch(dispatch, account, {
+                'type': 'chat', 'runId': run_id, 'state': 'final', 'text': sample['output'], 'recovered': True})
+            return
         try:
             evidence = self._gateway().run_history_evidence(
                 session_key=dispatch["conversation_ref"], run_ref=run_id, timeout_seconds=8,
@@ -1026,11 +1045,15 @@ class WorkspaceApplication:
             "请求已接收，但在结果恢复时限内未能确认最终结果。"
             "这不代表后台任务失败；请核对任务状态，系统不会自动重发。"
         )
+        verified = self._verified_trial_event(dispatch, {'state': 'error', 'text': text})
+        text = verified['text']
+        trial_payload = {'skillTrial': verified['skillTrial']} if verified.get('skillTrial') else {}
         self._append_workspace_message(
             account,
             role="assistant",
             text=text,
             message_key=f"workspace:assistant:error:{run_id}",
+            payload=trial_payload,
         )
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
@@ -1043,11 +1066,35 @@ class WorkspaceApplication:
                 "state": "error",
                 "text": text,
                 "safeToRetry": False,
+                **trial_payload,
                 "hadToolActivity": bool(
                     dispatch.get("had_tool_activity") or (evidence and evidence.get("had_tool_activity"))
                 ),
             },
         )
+
+    def _verified_trial_event(self, dispatch: dict, item: dict) -> dict:
+        # Even a host-supplied status object must never become a saved receipt.
+        item = {key: value for key, value in item.items() if key != 'skillTrial'}
+        trial = self.store.skill_trial_for_dispatch(dispatch['dispatch_id'], user_subject=dispatch['user_subject'],
+                                                   account_id=dispatch['account_id'])
+        if trial:
+            sample = self.service.skill_authoring.workspace_trial_receipt(dispatch['user_subject'], trial)
+            reported = bool(sample and sample['status'] == 'reported' and sample['output'])
+            item['skillTrial'] = {
+                'draft_id': trial['draft_id'], 'name': trial['name'],
+                'revision': trial['expected_revision'], 'profile': trial['profile'],
+                'dispatch_id': trial['dispatch_id'], 'test_id': sample['test_id'] if sample else None,
+                'status': 'reported' if reported else 'not_reported',
+            }
+            # Preserve diagnostic/model text; only this separately verified
+            # status can tell the client that the sample was saved.
+            item['text'] = (_safe_text(item.get('text'), 200_000) or
+                            (sample['output'] if reported else _terminal_chat_failure_text(item)))
+            # The host history and Workspace timeline deduplicate by text.
+            # Keep the existing text normalization; the verified
+            # skillTrial card, not a suffix, communicates whether saving worked.
+        return item
 
     def _finish_accepted_dispatch(
         self,
@@ -1055,6 +1102,8 @@ class WorkspaceApplication:
         account: dict,
         item: dict,
     ) -> None:
+        item = self._verified_trial_event(dispatch, item)
+        trial_payload = {'skillTrial': item['skillTrial']} if item.get('skillTrial') else {}
         state = item.get("state")
         run_id = (
             _safe_text(item.get("runId"), 256)
@@ -1069,15 +1118,17 @@ class WorkspaceApplication:
                     role="assistant",
                     text=text,
                     message_key=f"workspace:assistant:{run_id}",
+                    payload=trial_payload,
                 )
             terminal_state = "completed"
         else:
-            text = _terminal_chat_failure_text(item)
+            text = item['text'] if trial_payload else _terminal_chat_failure_text(item)
             self._append_workspace_message(
                 account,
                 role="assistant",
                 text=text,
                 message_key=f"workspace:assistant:error:{run_id}",
+                payload=trial_payload,
             )
             terminal_state = "failed"
         self.store.finish_host_dispatch(
@@ -1183,6 +1234,14 @@ class WorkspaceApplication:
         dispatch_id: str,
     ) -> Iterator[dict[str, Any]]:
         sequence = 0
+        dispatch = self.store.get_host_dispatch(dispatch_id, user_subject=user_subject)
+
+        def public_event(event):
+            payload = {key: value for key, value in event['payload'].items() if key != 'skillTrial'}
+            if payload.get('type') == 'chat' and payload.get('state') in {'final', 'error', 'aborted'}:
+                payload = self._verified_trial_event(dispatch, payload)
+            return {**payload, 'dispatchId': dispatch_id}
+
         while True:
             events = self.store.list_host_dispatch_events(
                 dispatch_id,
@@ -1191,7 +1250,7 @@ class WorkspaceApplication:
             )
             for event in events:
                 sequence = event["sequence"]
-                yield {**event["payload"], "dispatchId": dispatch_id}
+                yield public_event(event)
             dispatch = self.store.get_host_dispatch(
                 dispatch_id,
                 user_subject=user_subject,
@@ -1207,7 +1266,7 @@ class WorkspaceApplication:
                         break
                     for event in terminal_events:
                         sequence = event["sequence"]
-                        yield {**event["payload"], "dispatchId": dispatch_id}
+                        yield public_event(event)
                 return
             time.sleep(0.1)
 
@@ -1255,6 +1314,7 @@ class WorkspaceApplication:
         message: str,
         idempotency_key: str | None = None,
         attachments: list[dict] | None = None,
+        skill_trial: dict | None = None,
     ) -> WorkspaceChatResult:
         run_id = ""
         status = "completed"
@@ -1263,6 +1323,7 @@ class WorkspaceApplication:
             message=message,
             idempotency_key=idempotency_key,
             attachments=attachments,
+            skill_trial=skill_trial,
         ):
             if item.get("type") != "accepted":
                 continue
@@ -1312,11 +1373,20 @@ class WorkspaceApplication:
         effective_key: str,
         text: str,
     ) -> None:
+        trial = self.store.skill_trial_for_turn(account_id=account['account_id'],
+                                                user_subject=account['user_subject'], turn_ref=effective_key)
+        payload = {}
+        if trial:
+            dispatch = self.store.get_host_dispatch(trial['dispatch_id'], user_subject=account['user_subject'])
+            event = self._verified_trial_event(dispatch, {'state': 'error', 'text': text})
+            text = event['text']
+            payload = {'skillTrial': event['skillTrial']}
         self._append_workspace_message(
             account,
             role="assistant",
             text=text,
             message_key=f"workspace:assistant:error:{effective_key}",
+            payload=payload,
         )
 
     def _gateway(self) -> OpenClawGatewayClient:

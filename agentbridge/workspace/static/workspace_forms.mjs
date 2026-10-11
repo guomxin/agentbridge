@@ -1,4 +1,5 @@
 import { isCancellation, cancellationError } from "./workspace_lifecycle.mjs";
+import { skillTrialTitle, skillTrialBinding } from "./workspace_skill_trial.mjs";
 
 const MAX_COMPOSER_IMAGES = 4;
 const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
@@ -11,6 +12,48 @@ const SUPPORTED_COMPOSER_IMAGE_TYPES = new Set([
 
 
 export function createComposer({ document, state, $, toast, getScope, executeChatMessage, FileReader = globalThis.FileReader, crypto = globalThis.crypto }) {
+  let attachmentGeneration = 0;
+  let trialScope = null;
+  function renderComposerTrial() {
+    const trial = state.composerSkillTrial;
+    const card = $("#composer-skill-trial");
+    card.replaceChildren();
+    card.hidden = !trial;
+    const input = $("#chat-form textarea[name='message']");
+    input.maxLength = trial ? 3000 : 20000;
+    input.placeholder = trial ? "输入简短的合成材料，例如：计划修复登录问题。" : "输入你的任务或问题";
+    $("#attach-image").disabled = Boolean(trial || input.disabled);
+    $("#image-input").disabled = Boolean(trial || input.disabled);
+    if (!trial) return;
+    const title = document.createElement("strong");
+    title.textContent = `正在试用：${skillTrialTitle(trial)}`;
+    const note = document.createElement("p");
+    note.textContent = "仅输入合成文字，最多 3000 字；不支持图片。样例保存后仍需人工复核。";
+    const cancel = document.createElement("button");
+    cancel.type = "button"; cancel.className = "secondary"; cancel.textContent = "取消试用";
+    cancel.disabled = Boolean(input.disabled);
+    cancel.addEventListener("click", () => clearComposerTrial(trial));
+    card.append(title, note, cancel);
+  }
+  function clearComposerTrial(expected) {
+    if (expected && state.composerSkillTrial !== expected) return;
+    state.composerSkillTrial = null;
+    renderComposerTrial();
+  }
+  function beginComposerTrial(trial) {
+    const scope = getScope();
+    scope.assertCurrent();
+    if (trialScope !== scope) {
+      trialScope = scope;
+      scope.defer(() => { if (trialScope === scope) { trialScope = null; clearComposerTrial(); } });
+    }
+    state.composerSkillTrial = {...skillTrialBinding(trial), name: trial.name};
+    clearComposerAttachments();
+    renderComposerTrial();
+    const input = $("#chat-form textarea[name='message']");
+    input.value = "";
+    input.focus();
+  }
   async function handleComposerPaste(event) {
     const files = [...(event.clipboardData?.items || [])]
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
@@ -48,7 +91,12 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
   }
 
   async function addComposerFiles(fileList) {
+    if (state.composerSkillTrial) {
+      toast("短试用仅支持合成文字，请取消试用后再添加图片。", true, "trial-text-only");
+      return;
+    }
     const scope = getScope();
+    const generation = attachmentGeneration;
     const available = MAX_COMPOSER_IMAGES - state.composerAttachments.length;
     if (available <= 0) {
       toast("一次最多添加 4 张图片。", true, "image-limit");
@@ -79,6 +127,7 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
       try {
         const attachment = await readComposerImage(file, mimeType, scope);
         scope.assertCurrent();
+        if (generation !== attachmentGeneration || state.composerSkillTrial) return;
         // Parallel paste/drop events share the same attachment budget.
         const bytes = state.composerAttachments.reduce((total, item) => total + item.size, 0);
         if (state.composerAttachments.length >= MAX_COMPOSER_IMAGES ||
@@ -179,6 +228,7 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
   }
 
   function clearComposerAttachments() {
+    attachmentGeneration++;
     state.composerAttachments = [];
     renderComposerAttachments();
   }
@@ -187,15 +237,29 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
     event.preventDefault();
     const form = event.currentTarget;
     const textarea = form.elements.message;
+    if (textarea.disabled) return;
+    const trial = state.composerSkillTrial;
     const attachments = state.composerAttachments.map((item) => ({ ...item }));
     const message =
       textarea.value.trim() ||
       (attachments.length > 0 ? "请处理附加图片中的内容。" : "");
     if (!message) return;
+    if (trial && (attachments.length || message.length > 3000)) {
+      toast(attachments.length ? "短试用不支持图片，请移除图片。" : "短试用材料不能超过 3000 字。", true, "trial-material");
+      return;
+    }
+    if (trial) {
+      await executeChatMessage(message, form, [], {...trial}, () => {
+        if (state.composerSkillTrial !== trial) return;
+        clearComposerTrial(trial);
+        if (textarea.value.trim() === message) textarea.value = "";
+      }, () => clearComposerTrial(trial));
+      return;
+    }
     textarea.value = "";
     clearComposerAttachments();
     await executeChatMessage(message, form, attachments);
   }
 
-  return { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave, handleComposerDrop, addComposerFiles, normalizedImageType, readComposerImage, renderComposerAttachments, clearComposerAttachments, sendChat };
+  return { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave, handleComposerDrop, addComposerFiles, normalizedImageType, readComposerImage, renderComposerAttachments, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat };
 }

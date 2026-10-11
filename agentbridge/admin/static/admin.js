@@ -847,7 +847,7 @@ async function openSkillReview(id) {
   openModal({title:`${m.name} · 修订 ${r.draft_revision}`,submit:canReview?"提交审批决定":"关闭",body:`
     <p>${escapeHtml(m.description)}</p><p>申请人：${escapeHtml(r.owner_subject)} · 使用范围：${escapeHtml(r.audience.join("、"))}</p><p>发布说明：${escapeHtml(r.reason)}</p>
     <p>适用：${escapeHtml(m.selection.use_when)}<br>不适用：${escapeHtml(m.selection.not_for)}<br>输出：${escapeHtml(m.selection.output)}</p>
-    ${skillReviewQualityHtml(r.quality)}
+    <p>本次发布模式：${escapeHtml(r.profiles.join('、'))}</p>${skillReviewQualityHtml(r.quality,r.profiles)}
     <details open><summary>方法与依赖</summary><pre class="skill-review-text">${escapeHtml(JSON.stringify(m.profiles,null,2))}\n${escapeHtml(r.bundle.resources["SKILL.md"])}</pre></details>
     ${Object.entries(r.bundle.resources).filter(([k])=>k!=="SKILL.md").map(([k,v])=>`<details><summary>${escapeHtml(k)}</summary><pre class="skill-review-text">${escapeHtml(v)}</pre></details>`).join("")}
     <h3>样例结果（模型生成，待人工复核）</h3>${r.tests.map(t=>`<details open><summary>${escapeHtml(t.profile)} · ${escapeHtml(t.prompt)}</summary><pre class="skill-review-text">${escapeHtml(t.output)}</pre></details>`).join("")}
