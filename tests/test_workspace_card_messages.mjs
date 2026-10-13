@@ -24,11 +24,31 @@ test("database CSV artifacts expose only valid authenticated download paths", ()
     if (allowed) assert.equal(links[0].href, path);
   }
 });
-test("canceled task takes precedence over its retired interaction", () => {
-  for (const state of ["superseded", "pending", "completed", "expired"]) {
-    assert.equal(cardStatus(state, "canceled"), "canceled");
+test("terminal business results take precedence over interaction state", () => {
+  for (const status of ["succeeded", "failed", "partially_succeeded", "outcome_unknown", "canceled"]) {
+    for (const state of ["superseded", "pending", "completed", "expired"]) {
+      assert.equal(cardStatus(state, status), status);
+    }
   }
   assert.equal(cardStatus("superseded", "waiting_user"), "superseded");
+  assert.equal(cardStatus("completed", "running"), "running");
+  assert.equal(cardStatus("completed", "waiting_user"), "waiting_user");
+  assert.notEqual(cardStatus("completed", undefined), "succeeded");
+});
+
+test("stopped batch separates an unknown result from confirmed failures and unprocessed items", () => {
+  const batch = {
+    totalCount: 3, succeededCount: 2, failedCount: 1, skippedCount: 0,
+    state: "outcome_unknown", currentOrdinal: 3,
+    currentItem: { ordinal: 3, state: "outcome_unknown", display: { title: "【HR】补签申请单-测试员工" } },
+  };
+  const message = batchMessage("outcome_unknown", { batch });
+  assert.match(message, /共 3 条.*成功 2 条.*失败 0 条.*结果未知 1 条.*未处理 0 条/);
+  assert.match(message, /第 3 条.*测试员工.*结果待核对/);
+  assert.match(message, /不要重复提交/);
+  assert.doesNotMatch(message, /剩余 0|全部完成/);
+  assert.match(batchMessage("outcome_unknown", { batch: { ...batch, totalCount: 5 } }), /未处理 2 条/);
+  assert.match(batchMessage("partially_succeeded", { batch: { ...batch, state: "partially_succeeded", totalCount: 5 } }), /失败 1 条.*结果未知 0 条.*未处理 2 条/);
 });
 test("batch progress distinguishes a single completed item from the whole batch", () => {
   const batch = { totalCount: 23, succeededCount: 4, currentOrdinal: 5, state: "waiting_user" };
@@ -46,11 +66,49 @@ test("completed input and credential cards describe the step, not business succe
   assert.match(login.message, /原任务结果/);
 });
 
-test("pending, failed, canceled and business authorization retain their actual state", () => {
+test("completed authorization describes consent without claiming business success", () => {
+  const approval = presentation({ state: "completed", type: "execution_authorization" });
+  assert.equal(approval.label, "已授权");
+  assert.match(approval.message, /业务结果以任务核验为准/);
+});
+
+test("an authorized batch card and its task detail expose the unconfirmed item", () => {
+  const node = (tag = "div") => ({
+    tag, dataset: {}, children: [], classList: { add() {} },
+    get childElementCount() { return this.children.length; },
+    append(...items) { this.children.push(...items); },
+    replaceChildren(...items) { this.children = items; },
+    setAttribute() {}, addEventListener() {},
+  });
+  const detail = node();
+  const state = { taskCards: new Map(), taskCardMeta: new Map() };
+  const cards = createTaskCards({
+    document: { createElement: node }, state,
+    $: selector => selector === "#task-detail" ? detail : node(),
+    setTimelineNode() {}, appendArtifactList() {},
+  });
+  const result = {
+    task: { task_id: "batch", status: "outcome_unknown", summary: { batch: {
+      totalCount: 3, succeededCount: 2, failedCount: 1, state: "outcome_unknown", currentOrdinal: 3,
+      currentItem: { ordinal: 3, display: { title: "【HR】补签申请单-测试员工" } },
+    } } },
+    interaction: { interactionId: "approval", state: "completed", type: "execution_authorization" },
+    events: [],
+  };
+  cards.upsertTaskCard(result, { render: false });
+  const card = [...state.taskCards.values()][0];
+  assert.match(card.className, /outcome_unknown/);
+  assert.equal(card.children[0].children[1].textContent, "已授权");
+  assert.match(card.children[1].textContent, /成功 2 条.*结果未知 1 条.*测试员工/);
+  cards.renderTaskDetail(result);
+  const text = n => [n.textContent || "", ...n.children.map(text)].join(" ");
+  assert.match(text(detail), /批量结果.*结果未知 1 条.*测试员工/);
+});
+
+test("pending, failed and canceled input cards retain their actual state", () => {
   for (const state of ["pending", "processing", "failed", "declined", "expired"]) {
     assert.equal(presentation({ state, type: "business_input" }), null);
   }
-  assert.equal(presentation({ state: "completed", type: "execution_authorization" }), null);
   assert.equal(presentation(null), null);
 });
 

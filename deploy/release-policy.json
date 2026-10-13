@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "0ddb4f845584"
+    "2a2420a29d8e"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Skill trial recovery now waits for the host final reply before falling back to a saved sample at the existing recovery deadline. Only recovery ordering changes; no schema or host plugin change. Live predecessor 0ddb4f845584 has the reviewed feedback context table; all four database schemas match its reviewed post-deployment fingerprints. No business request replay or data restore is introduced."
+  "reason": "Workspace approval cards distinguish completed consent from verified business success and preserve terminal task results. Stopped batch summaries separate unknown outcomes from failures and identify the item requiring verification. Only static presentation and tests change relative to live predecessor 2a2420a29d8e; no database schema, adapter, host plugin or workflow execution change. No business request replay or data restore is introduced."
 }

@@ -118,7 +118,10 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     const interactionActive =
       interaction &&
       ["pending", "processing"].includes(interaction.state);
-    description.textContent = planFailure?.message || completedInteraction?.message || (
+    const authorizationResult = completedInteraction && interaction.type === "execution_authorization"
+      ? `${completedInteraction.message}${taskCardStatusMessage(cardStatus, task.summary)}`
+      : null;
+    description.textContent = planFailure?.message || authorizationResult || completedInteraction?.message || (
       interactionActive
         ? interaction.message || taskCardStatusMessage(cardStatus, task.summary)
         : taskCardStatusMessage(cardStatus, task.summary)
@@ -257,6 +260,9 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
       ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}`
       : "未关联 Skill");
     addDetail(metadata, "任务编号", task.task_id);
+    if (task.summary?.batch) {
+      addDetail(metadata, "批量结果", taskCardStatusMessage(task.status, task.summary));
+    }
     detail.append(metadata);
 
     if (result.plan) {

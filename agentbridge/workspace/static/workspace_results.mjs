@@ -13,16 +13,24 @@ export function completedInteractionPresentation(interaction) {
       message: "认证步骤已完成，原任务结果请查看后续消息和任务进度。",
     };
   }
+  if (interaction.type === "execution_authorization") {
+    return {
+      label: "已授权",
+      message: "授权已完成，业务结果以任务核验为准。",
+    };
+  }
   return null;
 }
 
 export function taskCardStatusForInteraction(state, fallback) {
-  if (fallback === "canceled") return "canceled";
+  if (["succeeded", "failed", "partially_succeeded", "outcome_unknown", "canceled"].includes(fallback)) {
+    return fallback;
+  }
   return (
     {
       pending: "waiting_user",
       processing: "running",
-      completed: "succeeded",
+      completed: fallback || "active",
       declined: "canceled",
       expired: "expired",
       failed: "failed",
@@ -35,12 +43,25 @@ export function taskCardStatusMessage(status, summary = null) {
   const batch = summary?.batch;
   if (batch && Number.isInteger(batch.totalCount) && batch.totalCount > 0) {
     const done = Number(batch.succeededCount) || 0;
-    const failed = Number(batch.failedCount) || 0;
-    const remaining = Math.max(0, batch.totalCount - done - failed - (Number(batch.skippedCount) || 0));
-    const progress = `已完成 ${done}/${batch.totalCount} 条，剩余 ${remaining} 条。`;
+    // The durable batch stops at its first unsuccessful item. failedCount also
+    // includes that item when its outcome is unknown; do not call it a failure.
+    const unsuccessful = Number(batch.failedCount) || 0;
+    const unknown = batch.state === "outcome_unknown" ? 1 : 0;
+    const failed = Math.max(0, unsuccessful - unknown);
+    const skipped = Number(batch.skippedCount) || 0;
+    const remaining = Math.max(0, batch.totalCount - done - failed - unknown - skipped);
     if (batch.state === "succeeded") return `批量事项全部完成，共 ${batch.totalCount} 条。`;
-    if (["running", "waiting_user"].includes(batch.state)) return `${progress}正在处理第 ${batch.currentOrdinal} 条。`;
-    return `${progress}批次已停止，请核对当前事项的结果或失败原因。`;
+    if (["running", "waiting_user"].includes(batch.state)) {
+      return `已确认成功 ${done}/${batch.totalCount} 条，待处理 ${remaining} 条。正在处理第 ${batch.currentOrdinal} 条。`;
+    }
+    const progress = `共 ${batch.totalCount} 条：已确认成功 ${done} 条，失败 ${failed} 条，结果未知 ${unknown} 条，未处理 ${remaining} 条${skipped ? `，已跳过 ${skipped} 条` : ""}。`;
+    const current = batch.currentItem;
+    const title = current?.display?.title;
+    const target = title ? `第 ${current.ordinal || batch.currentOrdinal} 条「${title}」` : "当前事项";
+    if (unknown) {
+      return `${progress}批次已停止，${target}结果待核对；请先到业务系统核对，核对前不要重复提交。`;
+    }
+    return `${progress}批次已停止，请查看${target}的处理记录。`;
   }
   const deliveryMessage = taskCardArtifactDeliveryMessage(summary);
   if (deliveryMessage) return deliveryMessage;
