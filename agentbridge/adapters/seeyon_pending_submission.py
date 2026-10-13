@@ -51,6 +51,10 @@ class PendingSubmissionTracker:
             return
         if self._page is not None:
             raise RuntimeError("The pending submission tracker is already attached.")
+        if not callable(getattr(page, "remove_listener", None)) and not callable(
+            getattr(page, "off", None)
+        ):
+            raise RuntimeError("The submission page does not support observer cleanup.")
         self._page = page
         try:
             for event, handler in (

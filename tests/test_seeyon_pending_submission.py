@@ -34,6 +34,14 @@ class PendingSubmissionTrackerTests(unittest.TestCase):
         tracker.attach(FakePage())
         tracker.detach()
 
+    def test_page_without_observer_cleanup_is_rejected_before_attach(self):
+        page = FakePage()
+        page.remove_listener = None
+        tracker = PendingSubmissionTracker()
+        with self.assertRaisesRegex(RuntimeError, "observer cleanup"):
+            tracker.attach(page)
+        self.assertEqual(page.listeners, {})
+
     def test_approval_responses_are_diagnostic_not_success_or_rejection(self):
         tracker = PendingSubmissionTracker()
         tracker.observe_response(FakeResponse(
