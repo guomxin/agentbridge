@@ -6,9 +6,9 @@
   "dataCompatibility": "reviewed-schema-transition",
   "schemaTransitions": {
     "agentbridge.db": {
-      "beforeSha256": "1a8d8dab2c112525a7f92ac327183fef6e60351de902012080af5c97d095be86",
-      "afterSha256": "3ffa1596b8b356c8c1e2617016dd58713104e0b865fd793144cc6cbae6cf008e"
+      "beforeSha256": "aeec856f0fd1aa3ab0d2a3cff1c7302ef46848002d9b5eed7c66b7f707a523ca",
+      "afterSha256": "974b1c40cbac3ae37eb9df2edf824cf80b0316df924bb9b0c3ef38d19e1e1603"
     }
   },
-  "reason": "Add four companion ledgers for versioned trusted drafts, immutable read-only previews, revision-bound room choices, and atomic approval receipts. Existing tables and immutable interaction contracts remain unchanged. New decisions are resumed only by a draft-aware coordinator; do not roll back to an older reader while decisions are pending. The reviewed schema transition is fingerprint-gated; automatic program rollback remains forbidden after any schema change, and business data must never be rewound. No historical operation replay."
+  "reason": "Add four companion ledgers for versioned trusted drafts, immutable read-only previews, revision-bound room choices, and atomic approval receipts. Existing tables and immutable interaction contracts remain unchanged. New decisions are resumed only by a draft-aware coordinator; do not roll back to an older reader while decisions are pending. The reviewed schema transition is fingerprint-gated; automatic program rollback remains forbidden after any schema change, and business data must never be rewound. No historical operation replay. Fingerprints were reviewed against the actual production schema and an offline schema-only reconstruction: preserve all 261 existing objects, including historical migrations and independently initialized runtime stores; add only 16 companion objects. The other three database schemas and all user_version values remain unchanged."
 }
