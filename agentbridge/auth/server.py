@@ -13,6 +13,7 @@ from agentbridge.auth.action_card import TrustedActionApplication
 from agentbridge.auth.card import MAX_AUTH_BODY_BYTES, AuthCardResponse, TrustedAuthApplication
 from agentbridge.auth.field_card import TrustedFieldApplication
 from agentbridge.auth.flow import TrustedFlowApplication, flow_target
+from agentbridge.auth.business_draft_card import business_draft_target
 from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
 from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
 from agentbridge.auth.timeline_attachment import TrustedTimelineAttachmentApplication
@@ -123,6 +124,20 @@ def create_auth_http_server(
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 return
+            draft = business_draft_target(self.path)
+            if draft is not None and flow_application is not None:
+                source_id, presentation_id, action = draft
+                draft_application = flow_application.draft_application
+                if action != "state":
+                    self._send(draft_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
+                elif (not self._origin_allowed()
+                      or (self.headers.get("Sec-Fetch-Site") or "").lower() not in {"", "same-origin"}):
+                    self._send(draft_application.json(403, {"error": {"code": "INVALID_ORIGIN", "message": "请求来源无效。"}}))
+                else:
+                    self._send(draft_application.state(source_id, presentation_id=presentation_id,
+                        token=self.headers.get("X-AgentBridge-Draft-Token") or "",
+                        csrf_cookie=_csrf_cookie(self.headers.get("Cookie") or "")))
+                return
             continued = flow_target(self.path)
             if continued is not None and flow_application is not None:
                 kind, resource_id, presentation_id, is_status = continued
@@ -214,6 +229,23 @@ def create_auth_http_server(
                 return
             body = self.rfile.read(content_length)
             csrf_cookie = _csrf_cookie(self.headers.get("Cookie") or "")
+            draft = business_draft_target(self.path)
+            if draft is not None and flow_application is not None:
+                source_id, presentation_id, action = draft
+                draft_application = flow_application.draft_application
+                if action == "state":
+                    self._send(draft_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
+                    return
+                if (self.headers.get("Sec-Fetch-Site") or "").lower() not in {"", "same-origin"}:
+                    self._send(draft_application.json(403, {"error": {"code": "INVALID_ORIGIN", "message": "请求来源无效。"}}))
+                    return
+                try:
+                    self._send(draft_application.mutate(source_id, presentation_id=presentation_id,
+                        action=action, token=self.headers.get("X-AgentBridge-Draft-Token") or "",
+                        csrf_cookie=csrf_cookie, content_type=self.headers.get("Content-Type") or "", body=body))
+                finally:
+                    body = b""
+                return
             continued = flow_target(self.path)
             if continued is not None and flow_application is not None:
                 kind, resource_id, presentation_id, is_status = continued

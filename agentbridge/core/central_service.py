@@ -216,6 +216,7 @@ class CentralCapabilityService:
         self.interactions = runtime_stores.interactions
         self.tasks = runtime_stores.tasks
         self.task_plans = runtime_stores.task_plans
+        self.business_drafts = runtime_stores.business_drafts
         self.transforms = runtime_stores.transforms
         self.host_contract = runtime_stores.host_contract
         self.workspace = runtime_stores.workspace
@@ -552,6 +553,8 @@ class CentralCapabilityService:
         ).fetchall()
         for row in rows:
             self.validate_skill_task(user_subject, row[0], connection=connection)
+        from agentbridge.core.business_drafts import BusinessDraftService
+        BusinessDraftService(self).guard_consumption(connection, authorization_id, user_subject)
 
     def get_task_plan(self, *, user_subject: str, plan_id: str) -> dict:
         plan = self.task_plans.get(plan_id, user_subject=user_subject)
@@ -681,6 +684,11 @@ class CentralCapabilityService:
 
         self.validate_skill_task(user_subject, task_id, capability=capability_name)
         self.user_grants.require_capability(user_subject, capability_name, arguments)
+        if capability_name == "taihua.work_log.create.prepare" and arguments.get("input_submission_id"):
+            from agentbridge.core.business_drafts import BusinessDraftService
+            continued = BusinessDraftService(self).prepare_successor(str(arguments["input_submission_id"]), user_subject, task_id)
+            if continued is not None:
+                return continued
         grant_before = self.user_grants.get(user_subject)
 
         engine = CapabilityEngine(registry=self.registry, operation_store=self.operations)
@@ -3212,6 +3220,11 @@ class CentralCapabilityService:
             user_subject=user_subject,
             interaction_id=interaction_id,
         )
+        if record["interaction_type"] == "business_input" and record["resume_spec"].get("businessDraft") == "v1":
+            from agentbridge.core.business_drafts import BusinessDraftService
+            continued = BusinessDraftService(self).resume_successor(resource["submission_id"], user_subject=user_subject)
+            if continued is not None:
+                return continued
         if not resource.get("commit_operation_id") and not resource.get("consume_operation_id"):
             self.validate_skill_task(user_subject, self.tasks.task_id_for_interaction(interaction_id, user_subject=user_subject))
         plan_binding = self.task_plans.step_for_interaction(
@@ -3509,6 +3522,7 @@ class CentralCapabilityService:
     def _controlled_writes(self) -> ControlledWriteExecutor:
         # Bind at each entry so callers replacing a registry/store/callback before
         # invocation use the current collaborators, without rebuilding any stores.
+        from agentbridge.core.business_drafts import BusinessDraftService
         return ControlledWriteExecutor(ControlledWriteDependencies(
             registry=self.registry,
             tasks=self.tasks,
@@ -3523,6 +3537,8 @@ class CentralCapabilityService:
             pending_batch_definition=self._pending_batch_definition,
             guard_skill_authorization=self.guard_skill_authorization,
             validate_task_plan_execution=self.validate_task_plan_execution,
+            business_draft_source_context=BusinessDraftService(self).source_context,
+            business_draft_successor=BusinessDraftService(self).prepare_successor,
         ))
 
     def _business_input_interaction(self, submission: dict) -> dict:
@@ -3547,6 +3563,7 @@ class CentralCapabilityService:
             resume_spec={
                 "kind": "capability",
                 "capability": submission["capability_name"],
+                **({"businessDraft": "v1"} if schema.get("_agentbridge_business_draft") == "v1" else {}),
                 "arguments": {
                     **dict(schema.get("_agentbridge_resume_arguments") or {}),
                     "input_submission_id": submission["submission_id"],
@@ -3557,7 +3574,7 @@ class CentralCapabilityService:
         )
         return build_interaction_envelope(record, submission)
 
-    def _execution_authorization_interaction(self, authorization: dict) -> dict:
+    def _execution_authorization_interaction(self, authorization: dict, *, connection=None) -> dict:
         summary = authorization["summary"]
         record = self.interactions.register(
             interaction_type="execution_authorization",
@@ -3582,6 +3599,7 @@ class CentralCapabilityService:
             },
             created_at=authorization["created_at"],
             expires_at=authorization["expires_at"],
+            connection=connection,
         )
         return build_interaction_envelope(record, authorization)
 

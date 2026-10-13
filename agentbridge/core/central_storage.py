@@ -7,6 +7,7 @@ from pathlib import Path
 from agentbridge.admin.stores import GovernancePolicyStore
 from agentbridge.core.auth_challenges import AuthChallengeStore
 from agentbridge.core.business_skills import SkillStore
+from agentbridge.core.business_drafts import BusinessDraftStore
 from agentbridge.core.document_downloads import DocumentDownloadStore
 from agentbridge.core.field_submissions import FieldSubmissionStore
 from agentbridge.core.host_contract import HostContractStore
@@ -49,6 +50,7 @@ class CentralRuntimeStores:
     interactions: InteractionStore
     tasks: TaskHubStore
     task_plans: TaskPlanStore
+    business_drafts: BusinessDraftStore
     transforms: TransformRegistry
     host_contract: HostContractStore
     workspace: WorkspaceStore
@@ -75,6 +77,7 @@ class CentralRuntimeStores:
         tasks = TaskHubStore(db_path, maintain_on_startup=False)
         tasks.run_startup_maintenance()
         task_plans = TaskPlanStore(db_path)
+        business_drafts = BusinessDraftStore(db_path)
         transforms = build_transform_registry()
         host_contract = HostContractStore(db_path)
         workspace = WorkspaceStore(db_path)
@@ -85,7 +88,8 @@ class CentralRuntimeStores:
             challenges=challenges, field_submissions=field_submissions,
             document_downloads=document_downloads, timeline_attachments=timeline_attachments,
             write_authorizations=write_authorizations, interactions=interactions,
-            tasks=tasks, task_plans=task_plans, transforms=transforms,
+            tasks=tasks, task_plans=task_plans, business_drafts=business_drafts,
+            transforms=transforms,
             host_contract=host_contract, workspace=workspace,
             governance_policies=governance_policies, runtime_governance=runtime_governance,
         )

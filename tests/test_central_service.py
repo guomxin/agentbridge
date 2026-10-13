@@ -2015,12 +2015,53 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             replacement_id = replacement["nextAction"]["inputSubmissionId"]
             self.assertEqual(
                 service.field_submissions.get(first_id)["state"],
-                "superseded",
+                "pending",
+            )
+            # A fresh operation is a separate intent, even for the same target;
+            # editable versions of one intent are handled by its draft revision.
+            self.assertNotEqual(
+                service.field_submissions.get(first_id)["supersession_key"],
+                service.field_submissions.get(replacement_id)["supersession_key"],
             )
             self.assertEqual(service.field_submissions.get(second_id)["state"], "pending")
             self.assertEqual(
                 service.field_submissions.get(replacement_id)["state"],
                 "pending",
+            )
+
+    def test_parallel_empty_context_writes_in_one_task_keep_inputs_and_approvals(self):
+        with TemporaryDirectory() as tmp:
+            service = self._service(tmp, FakeWorker())
+            self._activate(service)
+            task_id = self._ensure_host_task(service)
+            inputs = [service.invoke(
+                user_subject="user-a", capability_name="oa.business_trip.prepare",
+                arguments={}, idempotency_key=f"separate-intent-{index}", task_id=task_id,
+            ) for index in range(2)]
+            source_ids = [item["nextAction"]["inputSubmissionId"] for item in inputs]
+            self.assertEqual([service.field_submissions.get(i)["state"] for i in source_ids],
+                             ["pending", "pending"])
+            authorization_ids = []
+            with patch("agentbridge.core.write_catalog.prepare_business_trip_draft", return_value={
+                "plan": {"business_intent": "save_business_trip_request_draft", "exact_input": {"reason": "synthetic"}},
+                "summary": {"title": "Synthetic isolated draft", "effect": "test only"},
+            }):
+                for source, started in zip(source_ids, inputs):
+                    token = service.field_submissions.issue_csrf(source)
+                    service.field_submissions.submit(source, csrf_token=token, csrf_cookie=token,
+                                                     values={"reason": "synthetic"})
+                    prepared = service.resume_interaction(user_subject="user-a",
+                        interaction_id=started["interaction"]["interactionId"])
+                    authorization_id = prepared["nextAction"]["authorizationId"]
+                    authorization_ids.append(authorization_id)
+                    token = service.write_authorizations.issue_csrf(authorization_id)
+                    service.write_authorizations.decide(authorization_id, decision="approve",
+                                                       csrf_token=token, csrf_cookie=token)
+            self.assertEqual([service.write_authorizations.get(i)["state"] for i in authorization_ids],
+                             ["approved", "approved"])
+            self.assertEqual(
+                [service.field_submissions.get(i)["supersession_key"] for i in source_ids],
+                [service.write_authorizations.get(i)["supersession_key"] for i in authorization_ids],
             )
 
     def test_business_trip_prepare_requires_trusted_card_then_consumes_it_once(self):

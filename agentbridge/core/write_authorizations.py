@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.store_transactions import store_transaction
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -175,6 +176,7 @@ class WriteAuthorizationStore:
         summary: dict[str, Any],
         card_base_url: str,
         ttl_seconds: int = 600,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         required = {
             "user_subject": user_subject,
@@ -203,8 +205,7 @@ class WriteAuthorizationStore:
         authorization_id = secrets.token_urlsafe(32)
         card_url = f"{base_url}/authorize/{authorization_id}"
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             connection.execute(
                 """
                 UPDATE write_authorizations
@@ -291,6 +292,7 @@ class WriteAuthorizationStore:
         *,
         user_subject: str,
         endpoint_id: str,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         user_subject = str(user_subject or "").strip()
         endpoint_id = str(endpoint_id or "").strip()
@@ -299,8 +301,7 @@ class WriteAuthorizationStore:
                 "write authorization presentation identity is required"
             )
         now = _as_utc(self.clock())
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             authorization = self._expire_if_needed(
                 connection,
                 self._select(connection, authorization_id),

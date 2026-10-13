@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.store_transactions import store_transaction
 import re
 
 from contextlib import contextmanager, nullcontext
@@ -1655,6 +1656,7 @@ class TaskHubStore:
         task_id: str,
         user_subject: str,
         operation: dict[str, Any],
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         operation_id = _required_text(
             operation.get("operation_id"),
@@ -1666,8 +1668,7 @@ class TaskHubStore:
         status = str(operation.get("status") or "")
         now = _utc_now()
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             task = self._select_owned_task(connection, task_id, user_subject)
             batch = connection.execute(
                 "SELECT * FROM task_batches WHERE parent_task_id = ?",
@@ -1928,6 +1929,7 @@ class TaskHubStore:
         user_subject: str,
         interaction_record: dict[str, Any],
         interaction: dict[str, Any],
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         interaction_id = _required_text(
             interaction_record.get("interaction_id"),
@@ -1942,8 +1944,7 @@ class TaskHubStore:
         state = str(interaction.get("state") or "")
         now = _utc_now()
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             task = self._select_owned_task(connection, task_id, user_subject)
             linked = connection.execute(
                 "SELECT * FROM task_interactions WHERE interaction_id = ?",

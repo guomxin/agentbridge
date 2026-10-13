@@ -7,6 +7,7 @@ import re
 import secrets
 
 from agentbridge.auth.card import AuthCardResponse
+from agentbridge.auth.business_draft_card import BusinessDraftApplication
 from agentbridge.auth.field_card import _document, _security_headers
 from agentbridge.core.field_submissions import FieldSubmissionIntegrityError
 from agentbridge.core.interactions import InteractionIntegrityError
@@ -30,14 +31,21 @@ def flow_target(path: str) -> tuple[str, str, str | None, bool] | None:
 
 
 class TrustedFlowApplication:
-    def __init__(self, *, service, field_application, action_application) -> None:
+    def __init__(self, *, service, field_application, action_application, draft_application=None) -> None:
         self.reader = TrustedFlowReader(service)
         self.applications = {"input": field_application, "authorize": action_application}
+        self.draft_application = draft_application or BusinessDraftApplication(service=service)
 
     def get_card(self, kind: str, resource_id: str, *, presentation_id: str | None,
                  secure_cookie: bool, csrf_cookie: str) -> AuthCardResponse:
         try:
             context = self.reader.context(kind, resource_id, presentation_id)
+            if self.draft_application.supports(context) and (
+                context.resource["state"] == "pending"
+                or self.draft_application.has_decision(resource_id)
+            ):
+                return self.draft_application.get_card(resource_id, presentation_id=presentation_id,
+                    secure_cookie=secure_cookie, csrf_cookie=csrf_cookie)
             if context.resource["state"] == "pending":
                 if not context.actionable:
                     raise TrustedFlowDenied("batch item is no longer actionable")

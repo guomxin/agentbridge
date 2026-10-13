@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.store_transactions import store_transaction
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -437,14 +438,14 @@ class FieldSubmissionStore:
         csrf_cookie: str,
         values: dict[str, Any],
         presentation_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         if not isinstance(values, dict):
             raise TypeError("submitted field values must be an object")
         values_json = _canonical_json(values)
         values_hash = _json_hash(values_json)
         now = _as_utc(self.clock())
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             row = self._expire_if_needed(connection, self._select(connection, submission_id))
             self._verify_integrity(row, include_values=False)
             if row["state"] != "pending":
@@ -564,10 +565,10 @@ class FieldSubmissionStore:
         capability_name: str,
         capability_version: str,
         consume_operation_id: str,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         now = _as_utc(self.clock())
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             row = self._expire_if_needed(connection, self._select(connection, submission_id))
             if row["state"] != "submitted":
                 raise FieldSubmissionStateError(

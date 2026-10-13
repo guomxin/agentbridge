@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.store_transactions import store_transaction
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -385,6 +386,7 @@ class TaskPlanStore:
         operation_id: str,
         interaction_id: str,
         input_hash: str | None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         return self._update_step(
             plan_id,
@@ -396,6 +398,7 @@ class TaskPlanStore:
             interaction_id=interaction_id,
             input_hash=input_hash,
             terminal=False,
+            connection=connection,
         )
 
     def mark_step_succeeded(
@@ -792,10 +795,10 @@ class TaskPlanStore:
         output_hash: str | None = None,
         terminal: bool,
         clear_current: bool = False,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         now = _utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             plan = self._select_owned_plan(connection, plan_id, user_subject)
             if plan["state"] in TERMINAL_PLAN_STATES:
                 return self._snapshot(connection, plan)

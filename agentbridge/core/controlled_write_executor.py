@@ -78,6 +78,8 @@ class ControlledWriteDependencies:
     pending_batch_definition: PendingBatchDefinition
     guard_skill_authorization: Callable[[Connection, str, str], None]
     validate_task_plan_execution: Callable[[dict], None]
+    business_draft_source_context: Callable[[str, str], dict] | None = None
+    business_draft_successor: Callable[[str, str, str | None], dict | None] | None = None
 
 
 class ControlledWriteExecutor:
@@ -86,7 +88,7 @@ class ControlledWriteExecutor:
     def __init__(self, dependencies: ControlledWriteDependencies) -> None:
         self._dependencies = dependencies
 
-    def prepare(
+    def prepare_preview(
         self,
         *,
         context: CapabilityContext,
@@ -174,6 +176,18 @@ class ControlledWriteExecutor:
                 parent_task_id=context.task_id, user_subject=session["user_subject"],
             )
             summary["title"] = f"{summary['title']}（第 {batch['current_ordinal']}/{batch['total_count']} 条）"
+        return {"plan": plan, "summary": summary}
+
+    def prepare(
+        self, *, context: CapabilityContext, session: dict, adapter: object,
+        worker: object, arguments: dict, field_submission: dict | None,
+        definition: dict,
+    ) -> dict:
+        prepared = self.prepare_preview(context=context, session=session, adapter=adapter,
+                                        worker=worker, arguments=arguments,
+                                        field_submission=field_submission, definition=definition)
+        plan, summary = prepared["plan"], prepared["summary"]
+        resume_arguments = plan["resume_arguments"]
         commit_spec = self._dependencies.registry.get(str(definition["commit_capability"]))
         authorization = self._dependencies.write_authorizations.create(
             user_subject=session["user_subject"],
@@ -182,7 +196,11 @@ class ControlledWriteExecutor:
             capability_name=commit_spec.name,
             capability_version=commit_spec.version,
             prepare_operation_id=context.operation_id,
-            supersession_key=_trusted_write_supersession_key(resume_arguments),
+            supersession_key=(field_submission.get("supersession_key") if field_submission else None)
+            or _trusted_write_supersession_key(
+                resume_arguments, task_id=context.task_id,
+                source_operation_id=context.operation_id,
+            ),
             plan=plan,
             summary=summary,
             card_base_url=self._dependencies.trusted_card_base_url,
@@ -254,6 +272,12 @@ class ControlledWriteExecutor:
                 **_prefill_trusted_field_schema(selected_schema, arguments),
                 "_agentbridge_resume_arguments": context_arguments,
             }
+            if (context.task_id and context.spec.name == "taihua.work_log.create.prepare"
+                    and self._dependencies.business_draft_source_context is not None):
+                submission_schema["_agentbridge_business_draft"] = "v1"
+                submission_schema["notice"] = "请填写并核对工作日志；明确确认执行前不会向日志系统写入内容。"
+                submission_schema["_agentbridge_business_draft_context"] = self._dependencies.business_draft_source_context(
+                    session["user_subject"], context.task_id)
             submission = self._dependencies.field_submissions.create(
                 user_subject=session["user_subject"],
                 system_id=session["system_id"],
@@ -261,7 +285,10 @@ class ControlledWriteExecutor:
                 capability_name=context.spec.name,
                 capability_version=context.spec.version,
                 create_operation_id=context.operation_id,
-                supersession_key=_trusted_write_supersession_key(context_arguments),
+                supersession_key=_trusted_write_supersession_key(
+                    context_arguments, task_id=context.task_id,
+                    source_operation_id=context.operation_id,
+                ),
                 form_schema=submission_schema,
                 card_base_url=self._dependencies.trusted_card_base_url,
                 ttl_seconds=TRUSTED_WRITE_INTERACTION_TTL_SECONDS,
@@ -292,6 +319,15 @@ class ControlledWriteExecutor:
                 context.spec.name,
                 context_arguments,
             )
+        draft_context = submission.get("form_schema", {}).get("_agentbridge_business_draft_context")
+        if isinstance(draft_context, dict) and draft_context.get("taskId") != context.task_id:
+            raise self._field_input_unavailable("task_binding_mismatch", context.spec.name, context_arguments)
+        if self._dependencies.business_draft_successor is not None:
+            continued = self._dependencies.business_draft_successor(submission_id, session["user_subject"], context.task_id)
+            if continued is not None:
+                raise RequiresUserAction("WRITE_AUTHORIZATION_RECORDED", "请继续原提交决定，不要重复准备或提交。",
+                    next_action={"type": "resume_interaction", "interaction": continued["interaction"],
+                                 "interactionId": continued["interaction"]["interactionId"]})
         if submission["state"] == "pending":
             raise self._field_input_required(submission, definition)
         if submission["state"] != "submitted" or not isinstance(submission.get("values"), dict):
@@ -499,9 +535,7 @@ class ControlledWriteExecutor:
                 capability_name=context.spec.name,
                 capability_version=context.spec.version,
                 prepare_operation_id=context.operation_id,
-                supersession_key=_trusted_write_supersession_key(
-                    dict(continued_plan.get("resume_arguments") or {})
-                ),
+                supersession_key=authorization.get("supersession_key"),
                 plan=continued_plan,
                 summary=continued_summary,
                 card_base_url=self._dependencies.trusted_card_base_url,
@@ -602,11 +636,17 @@ def _prefill_trusted_field_schema(schema: dict, arguments: dict) -> dict:
             field["value"] = arguments[name]
     return selected
 
-def _trusted_write_supersession_key(arguments: dict) -> str:
+def _trusted_write_supersession_key(
+    arguments: dict, *, task_id: str | None, source_operation_id: str,
+) -> str:
+    # New writers isolate each original intent, including multiple writes in a
+    # single task. A resumed prepare retains its source field's frozen key.
+    # Legacy rows keep their original keys; never re-key historical approvals.
     canonical = json.dumps(
-        arguments,
+        {"version": 2, "taskId": task_id, "sourceOperationId": source_operation_id,
+         "arguments": arguments},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+    return f"v2:sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"

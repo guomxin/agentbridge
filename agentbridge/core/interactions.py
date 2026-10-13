@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.store_transactions import store_transaction
 
 from contextlib import contextmanager
 import json
@@ -99,6 +100,7 @@ class InteractionStore:
         created_at: str,
         expires_at: str,
         operation_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         if interaction_type not in INTERACTION_TYPES:
             raise ValueError(f"unsupported interaction type: {interaction_type}")
@@ -122,8 +124,7 @@ class InteractionStore:
         display_json = _canonical_json(display)
         resume_json = _canonical_json(resume_spec)
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             existing = connection.execute(
                 """
                 SELECT * FROM interactions

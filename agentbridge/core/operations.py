@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.store_transactions import store_transaction
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -81,6 +82,7 @@ class OperationStore:
         input_identity: dict | None = None,
         idempotency_key: str | None = None,
         request_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> tuple[dict, bool]:
         if not user_subject:
             raise ValueError("user_subject is required")
@@ -92,7 +94,7 @@ class OperationStore:
         stripped_key = idempotency_key.strip() if idempotency_key else ""
         normalized_key = stripped_key or None
 
-        with self._connect() as connection:
+        with store_transaction(self, connection) as connection:
             existing = self._find_idempotent(
                 connection,
                 user_subject=user_subject,
@@ -209,6 +211,7 @@ class OperationStore:
         code: str,
         message: str,
         next_action: dict,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         return self._update(
             operation_id,
@@ -217,6 +220,7 @@ class OperationStore:
             error_message=message,
             next_action_json=_canonical_json(next_action),
             finished=True,
+            connection=connection,
         )
 
     def _update(
@@ -229,9 +233,10 @@ class OperationStore:
         error_message: str | None = None,
         next_action_json: str | None = None,
         finished: bool = False,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         now = _utc_now()
-        with self._connect() as connection:
+        with store_transaction(self, connection) as connection:
             cursor = connection.execute(
                 """
                 UPDATE operations
