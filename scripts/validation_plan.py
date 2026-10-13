@@ -25,6 +25,7 @@ WORKSPACE_NODE = (
     "tests/test_workspace_gateway_run_guard.mjs",
     "tests/test_workspace_gateway_client.mjs",
     "tests/test_workspace_card_messages.mjs",
+    "tests/test_workspace_business_cards.mjs",
     "tests/test_workspace_progress.mjs",
     "tests/test_workspace_query_groups.mjs",
     "tests/test_workspace_request.mjs",
@@ -113,6 +114,9 @@ def plan(root, *, mcp_app=False):
         raise ValueError("OpenClaw npm test changed; update the shared validation plan")
     add("openclaw-pack", [npm, "run", "pack:check"], cwd="integrations/openclaw-agentbridge")
     if mcp_app:
+        add("mcp-app-test", [npm, "test"], cwd="integrations/mcp-app",
+            files=sorted(p.relative_to(root).as_posix() for p in
+                         (root / "integrations/mcp-app/tests").glob("*.test.*")))
         add("mcp-app-check", [npm, "run", "check"], cwd="integrations/mcp-app")
         add("mcp-app-build", [npm, "run", "build"], cwd="integrations/mcp-app")
     add("installed-wheel", [python, "scripts/agentbridge_artifact.py", "build", "--root", str(root),

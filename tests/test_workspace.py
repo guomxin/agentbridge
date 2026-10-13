@@ -919,6 +919,35 @@ class WorkspaceApplicationTests(unittest.TestCase):
             )
 
 
+    def test_task_detail_projects_owned_batch_rows_without_execution_material(self) -> None:
+        with TemporaryDirectory() as tmp:
+            service = _service(tmp)
+            account = _create_account(service, user_subject="user-a", username="alice", endpoint_key="telegram:*:alice")
+            other = _create_account(service, user_subject="user-b", username="bob", endpoint_key="telegram:*:bob")
+            task = service.ensure_host_task(user_subject="user-a", token_id="token-a", agent_host="openclaw",
+                host_task_key="batch-view", endpoint_key=account["endpoint_key"], client_type="web",
+                external_subject=account["account_id"], conversation_ref=account["openclaw_session_key"], title="办理事项")
+            task_id = task["task"]["taskId"]
+            batch, _ = service.tasks.create_batch(parent_task_id=task_id, user_subject="user-a", system_id="oa",
+                capability_name="oa.workflow.pending.batch.prepare", selection_summary={"secret": "selection-private"},
+                failure_policy="stop_on_failure", items=[{"resource_ref": "private-affair-" + str(i),
+                    "display_summary": {"title": "事项" + str(i), "sender": "测试用户", "date": "2026-10-13",
+                        "prepare_capability": "private-prepare", "commit_version": "private-contract",
+                        "nested": {"password": "never-expose"}}, "source_fingerprint": "private-fingerprint"}
+                    for i in range(1, 4)])
+            app = WorkspaceApplication(service=service)
+            detail = app.task_detail(account, task_id)
+            projected = detail["batch"]
+            self.assertEqual(projected["batchId"], batch["batch_id"])
+            self.assertEqual(projected["items"][0]["itemId"], batch["items"][0]["item_id"])
+            self.assertEqual([item["state"] for item in projected["items"]], ["queued", "queued", "queued"])
+            self.assertEqual(projected["items"][0]["display"], {"title": "事项1", "sender": "测试用户", "date": "2026-10-13"})
+            serialized = json.dumps(projected)
+            for forbidden in ("private-affair", "private-fingerprint", "selection-private", "private-prepare", "private-contract", "never-expose", "result_summary", "operation_id"):
+                self.assertNotIn(forbidden, serialized)
+            with self.assertRaises(TaskNotFound):
+                app.task_detail(other, task_id)
+
     def test_task_detail_exposes_owned_task_plan_without_private_arguments(self) -> None:
         with TemporaryDirectory() as tmp:
             service = _service(tmp)
@@ -3300,7 +3329,8 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("state.taskCards.get(cardKey)", script)
         self.assertIn("upsertTaskCardVariant", script)
         self.assertIn("result.interactions", script)
-        self.assertIn(":interaction:${interaction.interactionId}", script)
+        self.assertIn(":batch:${batchId}", script)
+        self.assertIn("reconcileChildren(container", script)
         self.assertIn("taskCardStatusForInteraction", script)
         self.assertIn("displayTaskTitle", script)
         self.assertIn("OA 出差申请提交", script)
@@ -3324,7 +3354,7 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertNotIn('"任务状态已更新",', script)
         self.assertIn("childElementCount > 2", script)
         self.assertIn("application-card", stylesheet)
-        self.assertIn('continueButton.textContent = "继续任务"', script)
+        self.assertIn('text(resume, "继续任务")', script)
         self.assertIn("/continue`,", script)
         self.assertIn("detail-heading-actions", stylesheet)
 

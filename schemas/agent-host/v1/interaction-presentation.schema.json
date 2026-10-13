@@ -16,7 +16,8 @@
       "properties": {
         "url": {"type": "string", "format": "uri"},
         "uiResourceUri": {"type": "string"},
-        "hostHandled": {"type": "boolean"}
+        "hostHandled": {"type": "boolean"},
+        "flowVersion": {"const": "agentbridge.trusted-flow.v1"}
       }
     },
     "resume": {

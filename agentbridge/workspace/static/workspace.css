@@ -751,6 +751,91 @@ code {
   min-height: 36px;
 }
 
+.business-interactions {
+  display: grid;
+  gap: 10px;
+  margin: 14px 16px 0;
+}
+
+.business-interaction {
+  padding: 13px;
+  border: 1px solid #c6d9d1;
+  border-radius: 6px;
+  background: #f7faf8;
+  font-size: 13px;
+}
+
+.business-interaction > strong,
+.interaction-record > strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.interaction-step-status {
+  display: inline-block;
+  margin: 5px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.business-interaction p,
+.interaction-record p {
+  margin: 0 0 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.business-interaction .primary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+}
+
+.business-disclosure {
+  margin: 14px 16px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.business-disclosure > summary {
+  padding: 12px 0;
+  cursor: pointer;
+  color: var(--teal-dark);
+  font-weight: 650;
+}
+
+.business-disclosure > summary:focus-visible {
+  outline: 3px solid #8fbdb3;
+  outline-offset: 2px;
+}
+
+.batch-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.batch-item.current { background: var(--soft); }
+.batch-item-ordinal { color: var(--muted); }
+.batch-item-copy { min-width: 0; }
+.batch-item-copy strong { display: block; overflow-wrap: anywhere; }
+.batch-item-copy small { display: block; margin-top: 4px; color: var(--muted); }
+.batch-item-result { font-size: 12px; white-space: nowrap; }
+.batch-item.succeeded .batch-item-result { color: var(--green); }
+.batch-item.failed .batch-item-result,
+.batch-item.outcome_unknown .batch-item-result { color: var(--red); }
+.interaction-record { padding: 10px 0; border-top: 1px solid var(--line); }
+.interaction-record p { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 540px) {
+  .batch-item { grid-template-columns: 22px minmax(0, 1fr); }
+  .batch-item-result { grid-column: 2; }
+}
+
 .task-artifacts {
   display: grid;
   gap: 8px;

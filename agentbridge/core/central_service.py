@@ -19,6 +19,11 @@ from typing import (
 )
 from uuid import uuid4
 
+from agentbridge.core.trusted_flow_presentation import (
+    FLOW_ENDPOINT_CAPABILITY,
+    continuous_flow_presentation,
+)
+
 from agentbridge.adapters.seeyon_pending_batch import (
     PENDING_BATCH_PREPARE_CAPABILITY,
     PendingBatchSelectionError,
@@ -1525,6 +1530,7 @@ class CentralCapabilityService:
         agent_host: str,
         endpoint_key: str,
         interaction_id: str,
+        continuous_flow: bool = False,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1551,6 +1557,7 @@ class CentralCapabilityService:
                     resource=resource,
                     interaction=interaction,
                     endpoint=endpoint,
+                    continuous_flow=continuous_flow,
                 ),
                 "taskId": task_id,
             },
@@ -3416,14 +3423,21 @@ class CentralCapabilityService:
         resource: dict,
         interaction: dict,
         endpoint: dict,
+        continuous_flow: bool = False,
     ) -> dict:
+        task_id = self.tasks.task_id_for_interaction(
+            record["interaction_id"], user_subject=record["user_subject"]
+        )
+        flow_enabled = continuous_flow or (
+            FLOW_ENDPOINT_CAPABILITY in (endpoint.get("capabilities") or [])
+        )
         if record["interaction_type"] == "business_input":
             presentation = self.field_submissions.create_presentation(
                 resource["submission_id"],
                 user_subject=record["user_subject"],
                 endpoint_id=endpoint["endpoint_id"],
             )
-            return {
+            return continuous_flow_presentation({
                 **interaction,
                 "presentation": {
                     **interaction["presentation"],
@@ -3432,7 +3446,7 @@ class CentralCapabilityService:
                     "presentationId": presentation["presentation_id"],
                     "individualized": True,
                 },
-            }
+            }, task_id=task_id, enabled=flow_enabled)
         if record["interaction_type"] != "execution_authorization":
             return {
                 **interaction,
@@ -3447,7 +3461,7 @@ class CentralCapabilityService:
             user_subject=record["user_subject"],
             endpoint_id=endpoint["endpoint_id"],
         )
-        return {
+        return continuous_flow_presentation({
             **interaction,
             "presentation": {
                 **interaction["presentation"],
@@ -3456,7 +3470,7 @@ class CentralCapabilityService:
                 "presentationId": presentation["presentation_id"],
                 "individualized": True,
             },
-        }
+        }, task_id=task_id, enabled=flow_enabled)
 
     @staticmethod
     def _credential_challenge_id(record: dict) -> str:

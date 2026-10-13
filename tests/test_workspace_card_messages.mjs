@@ -4,6 +4,7 @@ import { createResultView, completedInteractionPresentation as presentation,
   taskCardStatusMessage as batchMessage, taskCardStatusForInteraction as cardStatus,
   taskPlanFailurePresentation as failurePresentation } from "../agentbridge/workspace/static/workspace_results.mjs";
 import { createTaskCards } from "../agentbridge/workspace/static/workspace_cards.mjs";
+import { createDocument } from "./workspace_dom_fixture.mjs";
 
 test("database CSV artifacts expose only valid authenticated download paths", () => {
   const node = (tag = "div") => ({tag, children: [], append(...items) { this.children.push(...items); }});
@@ -73,13 +74,8 @@ test("completed authorization describes consent without claiming business succes
 });
 
 test("an authorized batch card and its task detail expose the unconfirmed item", () => {
-  const node = (tag = "div") => ({
-    tag, dataset: {}, children: [], classList: { add() {} },
-    get childElementCount() { return this.children.length; },
-    append(...items) { this.children.push(...items); },
-    replaceChildren(...items) { this.children = items; },
-    setAttribute() {}, addEventListener() {},
-  });
+  const document = createDocument();
+  const node = (tag = "div") => document.createElement(tag);
   const detail = node();
   const state = { taskCards: new Map(), taskCardMeta: new Map() };
   const cards = createTaskCards({
@@ -98,7 +94,8 @@ test("an authorized batch card and its task detail expose the unconfirmed item",
   cards.upsertTaskCard(result, { render: false });
   const card = [...state.taskCards.values()][0];
   assert.match(card.className, /outcome_unknown/);
-  assert.equal(card.children[0].children[1].textContent, "已授权");
+  assert.equal(card.children[0].children[1].textContent, "结果待核对");
+  assert.match(card.textContent, /已授权/);
   assert.match(card.children[1].textContent, /成功 2 条.*结果未知 1 条.*测试员工/);
   cards.renderTaskDetail(result);
   const text = n => [n.textContent || "", ...n.children.map(text)].join(" ");

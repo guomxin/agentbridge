@@ -165,6 +165,7 @@ from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplic
 from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
 from agentbridge.auth.timeline_attachment import TrustedTimelineAttachmentApplication
 from agentbridge.auth.server import AuthServerConfig, create_auth_http_server
+from agentbridge.auth.flow import TrustedFlowApplication
 from agentbridge.broker.credential import CredentialBroker
 from agentbridge.broker.remote_browser import (
     RemoteBrowserConfig,
@@ -6274,6 +6275,11 @@ def serve_central_mcp(
         application=auth_application,
         action_application=action_application,
         field_application=field_application,
+        flow_application=TrustedFlowApplication(
+            service=service,
+            field_application=field_application,
+            action_application=action_application,
+        ),
         download_application=download_application,
         timeline_attachment_application=timeline_attachment_application,
         interactive_application=interactive_application,

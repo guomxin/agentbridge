@@ -34,6 +34,47 @@ def batch_task_summary(
     }
     return summary
 
+
+def workspace_batch_projection(batch: Mapping[str, Any] | None) -> dict | None:
+    """Business queue view of an owned snapshot; never copy execution inputs.
+
+    Mirrors batch_response's public counters/items, with opaque row identity for
+    stable rendering. Only the current item may link to its trusted interaction.
+    Display fields are explicitly selected because the ledger's display_summary
+    also carries internal capability contracts used by the executor.
+    """
+    if batch is None:
+        return None
+    current = int(batch["current_ordinal"])
+    return {
+        "batchId": batch["batch_id"],
+        "parentTaskId": batch["parent_task_id"],
+        "state": batch["state"],
+        "version": int(batch["version"]),
+        "currentOrdinal": current,
+        "totalCount": int(batch["total_count"]),
+        "succeededCount": int(batch["succeeded_count"]),
+        "failedCount": int(batch["failed_count"]),
+        "skippedCount": int(batch["skipped_count"]),
+        "failurePolicy": batch["failure_policy"],
+        "items": [
+            {
+                "itemId": item["item_id"],
+                "ordinal": int(item["ordinal"]),
+                "state": item["state"],
+                "display": {
+                    key: value for key in ("title", "sender", "date", "category")
+                    if isinstance(value := (item.get("display_summary") or {}).get(key), str)
+                },
+                "errorCode": item.get("error_code"),
+                "interactionId": item.get("interaction_id")
+                if int(item["ordinal"]) == current and batch["state"] in {"running", "waiting_user"}
+                else None,
+            }
+            for item in batch.get("items") or []
+        ],
+    }
+
 def _endpoint_from_row(row: Mapping[str, Any]) -> dict:
     value = dict(row)
     value["capabilities"] = json.loads(value.pop("capabilities_json"))

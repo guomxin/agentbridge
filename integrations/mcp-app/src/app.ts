@@ -1,4 +1,5 @@
 import { App } from "@modelcontextprotocol/ext-apps";
+import { interactionStateLabel, operationStatus, terminalPresentation } from "./result-state";
 import "./styles.css";
 
 type JsonRecord = Record<string, unknown>;
@@ -34,15 +35,6 @@ const ACTION_LABELS: Record<Interaction["type"], string> = {
   credential: "安全登录",
   business_input: "填写信息",
   execution_authorization: "确认执行",
-};
-const STATE_LABELS: Record<string, string> = {
-  pending: "等待操作",
-  processing: "正在处理",
-  completed: "已完成",
-  declined: "已取消",
-  expired: "已失效",
-  failed: "处理失败",
-  superseded: "已被新交互替代",
 };
 
 const titleElement = requiredElement<HTMLHeadingElement>("title");
@@ -88,8 +80,7 @@ async function handleToolResult(result: unknown): Promise<void> {
     return;
   }
 
-  const structured = asRecord(asRecord(result)?.structuredContent);
-  renderTerminalResult(structured);
+  renderTerminalResult(result);
 }
 
 async function openTrustedSurface(): Promise<void> {
@@ -165,7 +156,7 @@ async function resumeInteraction(interaction: Interaction): Promise<void> {
       }
       return;
     }
-    renderTerminalResult(asRecord(asRecord(result)?.structuredContent));
+    renderTerminalResult(result);
     await reportCompletion(interaction, result);
   } catch {
     setStatus("续跑失败，可稍后重试", "error");
@@ -180,11 +171,9 @@ function renderInteraction(interaction: Interaction): void {
   messageElement.textContent =
     interaction.message || "请在 AgentBridge 安全页面完成本次操作。";
   renderFacts(interaction);
-  const stateLabel = STATE_LABELS[interaction.state] || interaction.state;
-  const tone = isTerminal(interaction)
-    ? interaction.state === "declined"
-      ? "neutral"
-      : "error"
+  const stateLabel = interactionStateLabel(interaction.type, interaction.state);
+  const tone = TERMINAL_STATES.has(interaction.state)
+    ? interaction.state === "declined" ? "neutral" : "error"
     : interaction.resume?.ready
       ? "working"
       : "neutral";
@@ -222,16 +211,13 @@ function renderFacts(interaction: Interaction): void {
   factsElement.hidden = false;
 }
 
-function renderTerminalResult(structured: JsonRecord | null): void {
-  const status = typeof structured?.status === "string" ? structured.status : "succeeded";
-  titleElement.textContent = status === "succeeded" ? "操作已完成" : "操作状态已更新";
-  messageElement.textContent =
-    status === "succeeded"
-      ? "AgentBridge 已完成安全交互并继续原操作。"
-      : "请返回对话查看 AgentBridge 的最新结果。";
+function renderTerminalResult(result: unknown): void {
+  const presentation = terminalPresentation(result);
+  titleElement.textContent = presentation.title;
+  messageElement.textContent = presentation.message;
   factsElement.hidden = true;
   actionButton.hidden = true;
-  setStatus(status === "succeeded" ? "已完成" : status, status === "succeeded" ? "success" : "neutral");
+  setStatus(presentation.label, presentation.tone);
   stopPolling();
 }
 
@@ -239,8 +225,7 @@ async function reportCompletion(interaction: Interaction, result: unknown): Prom
   if (reportedInteractionId === interaction.interactionId) return;
   reportedInteractionId = interaction.interactionId;
 
-  const structured = asRecord(asRecord(result)?.structuredContent);
-  const status = typeof structured?.status === "string" ? structured.status : interaction.state;
+  const status = operationStatus(result);
   const context = {
     interactionId: interaction.interactionId,
     interactionType: interaction.type,
@@ -252,7 +237,7 @@ async function reportCompletion(interaction: Interaction, result: unknown): Prom
       content: [
         {
           type: "text",
-          text: `AgentBridge trusted interaction completed. Continue the original OA request. Status: ${status}.`,
+          text: `AgentBridge interaction state: ${interaction.state}. Business operation status: ${status ?? "not confirmed"}. Observe the original task; interaction completion is not business success. Do not replay a submitted operation.`,
         },
       ],
       structuredContent: { agentbridgeInteraction: context },
@@ -263,13 +248,13 @@ async function reportCompletion(interaction: Interaction, result: unknown): Prom
         content: [
           {
             type: "text",
-            text: "AgentBridge 安全交互已完成，请继续刚才的 OA 操作并反馈结果。",
+            text: "AgentBridge 可信交互状态已更新，请查看原任务的核验结果；交互完成不代表业务成功，不要重复提交。",
           },
         ],
       });
     }
   } catch {
-    setStatus(STATE_LABELS[interaction.state] || interaction.state, "neutral");
+    setStatus(interactionStateLabel(interaction.type, interaction.state), "neutral");
   }
 }
 

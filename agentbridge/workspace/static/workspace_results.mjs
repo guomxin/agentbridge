@@ -1,4 +1,59 @@
 // Pure projections shared by timeline cards and task details.
+export const TERMINAL_TASK_STATES = new Set([
+  "succeeded", "failed", "partially_succeeded", "outcome_unknown", "canceled", "expired",
+]);
+
+export function taskInteractions(result) {
+  return Array.isArray(result.interactions) && result.interactions.length
+    ? result.interactions : result.interaction ? [result.interaction] : [];
+}
+
+export function actionableTaskInteractions(result) {
+  if (TERMINAL_TASK_STATES.has(result.task?.status)) return [];
+  const pending = taskInteractions(result).filter(item =>
+    ["pending", "processing"].includes(item.state));
+  if (result.batch) {
+    if (!["running", "waiting_user"].includes(result.batch.state)) return [];
+    const current = result.batch.items?.find(item => item.ordinal === result.batch.currentOrdinal);
+    return pending.filter(item => current?.interactionId === item.interactionId);
+  }
+  // Old servers can provide the aggregate without item identities. Only their
+  // explicitly current interaction is actionable; never guess from recency.
+  if (result.task?.summary?.batch) {
+    return pending.filter(item => item.interactionId === result.task.current_interaction_id);
+  }
+  return pending;
+}
+
+export function batchItemStatusLabel(state) {
+  return ({queued: "未处理", preparing: "准备中", waiting_user: "等待填写或授权",
+    running: "提交与核验中", succeeded: "已核验成功", failed: "失败",
+    outcome_unknown: "结果待核对", skipped: "已跳过", canceled: "已取消",
+    expired: "已过期", superseded: "已被替换"})[state] || "状态待更新";
+}
+
+export function interactionStateLabel(interaction) {
+  return completedInteractionPresentation(interaction)?.label || ({
+    pending: "等待操作", processing: "处理中", declined: "已取消",
+    expired: "已过期", failed: "处理失败", superseded: "已被替换",
+  })[interaction.state] || "状态待更新";
+}
+
+export function trustedInteractionUrl(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password || parsed.hash) return null;
+    // Trusted card servers allow plain HTTP only for local fixture/development
+    // origins. A remote HTTP URL must never become a credential/action link.
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+    return parsed.protocol === "https:" || (parsed.protocol === "http:" && loopback)
+      ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export function completedInteractionPresentation(interaction) {
   if (interaction?.state !== "completed") return null;
   if (interaction.type === "business_input") {

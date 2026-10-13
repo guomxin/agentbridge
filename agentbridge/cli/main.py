@@ -23,6 +23,7 @@ from agentbridge.auth.card import TrustedAuthApplication
 from agentbridge.auth.field_card import TrustedFieldApplication
 from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
 from agentbridge.auth.server import serve_auth_cards, validate_auth_server_config
+from agentbridge.auth.flow import TrustedFlowApplication
 from agentbridge.broker.credential import CredentialBroker
 from agentbridge.broker.remote_browser import (
     RemoteBrowserConfig,
@@ -812,6 +813,11 @@ def handle_auth(args: argparse.Namespace, home: Path) -> int:
             application=application,
             action_application=action_application,
             field_application=field_application,
+            flow_application=TrustedFlowApplication(
+                service=service,
+                field_application=field_application,
+                action_application=action_application,
+            ),
             interactive_application=interactive_application,
         )
     except KeyboardInterrupt:

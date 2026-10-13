@@ -1,190 +1,250 @@
 import { completedInteractionPresentation, taskCardStatusForInteraction,
   taskCardStatusMessage, displayTaskTitle, skillProfileLabel, taskPlanProgress,
   taskPlanFailurePresentation, interactionLabel, interactionActionLabel,
-  escapeClass, formatTime, statusLabel, eventLabel } from "./workspace_results.mjs";
+  escapeClass, formatTime, statusLabel, eventLabel, taskInteractions,
+  actionableTaskInteractions, batchItemStatusLabel, interactionStateLabel, trustedInteractionUrl } from "./workspace_results.mjs";
+
+import { reconcileChildren } from "./workspace_dom.mjs";
 
 export function createTaskCards({ document, state, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan }) {
+  const views = new WeakMap();
+  const detailViews = new WeakMap();
+  const element = (tag, className = "") => {
+    const node = document.createElement(tag);
+    node.className = className;
+    return node;
+  };
+  const text = (node, value) => {
+    const next = String(value ?? "");
+    if (node.textContent !== next) node.textContent = next;
+  };
+  const disclosure = (label, className) => {
+    const root = element("details", className);
+    const summary = element("summary");
+    text(summary, label);
+    const body = element("div");
+    root.append(summary, body);
+    return { root, summary, body, rows: new Map() };
+  };
+
+  function updateFacts(view, entries) {
+    const nodes = [];
+    for (const [label, value] of entries.filter(([, value]) => value)) {
+      let row = view.rows.get(label);
+      if (!row) {
+        row = [element("dt"), element("dd")];
+        text(row[0], label);
+        view.rows.set(label, row);
+      }
+      text(row[1], value);
+      nodes.push(...row);
+    }
+    reconcileChildren(view.root, nodes);
+    view.root.hidden = !nodes.length;
+  }
+
+  function createBusinessView(card, taskId) {
+    const header = element("div", "application-card-header");
+    const heading = element("div");
+    const eyebrow = element("span", "application-card-eyebrow");
+    text(eyebrow, "AGENTBRIDGE 应用卡");
+    const title = element("strong", "application-card-title");
+    heading.append(eyebrow, title);
+    const status = element("span", "application-card-status");
+    header.append(heading, status);
+    const description = element("p", "application-card-copy");
+    const facts = { root: element("dl", "application-card-facts"), rows: new Map() };
+    const active = { root: element("div", "business-interactions"), rows: new Map() };
+    const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
+    const history = disclosure("办理记录", "business-disclosure interaction-history");
+    const artifacts = element("div");
+    const actions = element("div", "application-card-actions");
+    const progress = element("button", "secondary");
+    progress.type = "button";
+    text(progress, "查看进度");
+    progress.addEventListener("click", async () => {
+      if (await switchView("tasks") === false) return;
+      loadTaskDetail(taskId);
+    });
+    actions.append(progress);
+    card.append(header, description, facts.root, active.root, batch.root,
+      history.root, artifacts, actions);
+    return { title, status, description, facts, active, batch, history, artifacts, progress };
+  }
+
+  function renderBatch(view, batch) {
+    view.root.hidden = !batch;
+    if (!batch) return;
+    text(view.summary, `查看逐项结果（${batch.totalCount} 项）`);
+    const nodes = [];
+    for (const item of batch.items || []) {
+      let row = view.rows.get(item.itemId);
+      if (!row) {
+        const root = element("div", "batch-item");
+        const ordinal = element("span", "batch-item-ordinal");
+        const copy = element("div", "batch-item-copy");
+        const title = element("strong");
+        const metadata = element("small");
+        const result = element("span", "batch-item-result");
+        copy.append(title, metadata);
+        root.append(ordinal, copy, result);
+        row = { root, ordinal, title, metadata, result };
+        view.rows.set(item.itemId, row);
+      }
+      const current = item.ordinal === batch.currentOrdinal;
+      row.root.className = `batch-item ${escapeClass(item.state)}${current ? " current" : ""}`;
+      row.root.dataset.itemId = item.itemId;
+      row.root.dataset.state = item.state;
+      row.root.setAttribute("aria-label", `第 ${item.ordinal} 项${current ? "，当前事项" : ""}`);
+      text(row.ordinal, item.ordinal);
+      text(row.title, item.display?.title || `第 ${item.ordinal} 项`);
+      text(row.metadata, [current ? "当前事项" : "", item.display?.sender, item.display?.date].filter(Boolean).join(" · "));
+      // Per-item facts never inherit the parent task's unknown/failed state.
+      text(row.result, batchItemStatusLabel(item.state));
+      nodes.push(row.root);
+    }
+    reconcileChildren(view.body, nodes);
+  }
+
+  function renderInteractions(view, result) {
+    const nodes = [];
+    const active = actionableTaskInteractions(result);
+    for (const interaction of active) {
+      let row = view.rows.get(interaction.interactionId);
+      if (!row) {
+        const root = element("section", "business-interaction");
+        const title = element("strong");
+        const status = element("span", "interaction-step-status");
+        const copy = element("p");
+        const action = element("a", "primary");
+        action.target = "_blank";
+        action.rel = "noopener noreferrer";
+        root.append(title, status, copy, action);
+        row = { root, title, status, copy, action };
+        view.rows.set(interaction.interactionId, row);
+      }
+      row.root.dataset.interactionId = interaction.interactionId;
+      text(row.title, interaction.title || interactionLabel(interaction.type));
+      text(row.status, interactionStateLabel(interaction));
+      text(row.copy, interaction.message || "请在可信页面完成当前操作。");
+      const url = trustedInteractionUrl(interaction.presentation?.url);
+      row.action.hidden = !url;
+      if (url) row.action.href = url;
+      else row.action.removeAttribute("href");
+      text(row.action, interactionActionLabel(interaction.type));
+      nodes.push(row.root);
+    }
+    reconcileChildren(view.root, nodes);
+    view.root.hidden = !nodes.length;
+    return active;
+  }
+
+  function renderHistory(view, result, active) {
+    const activeIds = new Set(active.map(item => item.interactionId));
+    const items = taskInteractions(result).filter(item => !activeIds.has(item.interactionId));
+    text(view.summary, `办理记录（${items.length}）`);
+    view.root.hidden = !items.length;
+    const nodes = [];
+    for (const interaction of items) {
+      let row = view.rows.get(interaction.interactionId);
+      if (!row) {
+        const root = element("div", "interaction-record");
+        const title = element("strong");
+        const status = element("span", "interaction-step-status");
+        const copy = element("p");
+        root.append(title, status, copy);
+        row = { root, title, status, copy };
+        view.rows.set(interaction.interactionId, row);
+      }
+      text(row.title, interaction.title || interactionLabel(interaction.type));
+      text(row.status, interactionStateLabel(interaction));
+      const completed = completedInteractionPresentation(interaction);
+      text(row.copy, completed?.message || "此记录仅供查看；请按当前事项及任务结果继续办理。");
+      nodes.push(row.root);
+    }
+    reconcileChildren(view.body, nodes);
+  }
+
+  function updateArtifacts(view, result, compact) {
+    const signature = JSON.stringify(result.artifacts || []);
+    if (signature === view.artifactSignature) return;
+    view.artifactSignature = signature;
+    view.artifacts.replaceChildren();
+    appendArtifactList(view.artifacts, result.artifacts, {compact, taskId:result.task.task_id});
+  }
+
   function upsertTaskCard(result, { render = true } = {}) {
     const task = result?.task;
     if (!task?.task_id) return;
-    const interactions = Array.isArray(result.interactions) &&
-      result.interactions.length
-      ? result.interactions
-      : result.interaction
-        ? [result.interaction]
-        : [];
-    const variants = interactions.length
-      ? interactions.map((interaction) => ({
-          cardKey: `${task.task_id}:interaction:${interaction.interactionId}`,
-          interaction,
-        }))
-      : [{ cardKey: `${task.task_id}:summary`, interaction: null }];
-    const desiredKeys = new Set(variants.map((variant) => variant.cardKey));
-    let nearBottom = false;
-    variants.forEach((variant, index) => {
-      nearBottom = upsertTaskCardVariant(
-        result,
-        variant.cardKey,
-        variant.interaction,
-        { showArtifacts: index === variants.length - 1 },
-      ) || nearBottom;
-    });
-    state.taskCards.forEach((card, cardKey) => {
-      if (
-        card.dataset.taskId === task.task_id &&
-        !desiredKeys.has(cardKey)
-      ) {
-        card.remove();
-        state.taskCards.delete(cardKey);
-        state.taskCardMeta.delete(cardKey);
-      }
-    });
+    const batchId = result.batch?.batchId || task.summary?.batch?.batchId;
+    const cardKey = batchId ? `${task.task_id}:batch:${batchId}` : `${task.task_id}:summary`;
+    const nearBottom = upsertTaskCardVariant(result, cardKey);
     if (render) renderChatTimeline();
     if (nearBottom) scrollChat();
   }
 
-  function upsertTaskCardVariant(
-    result,
-    cardKey,
-    interaction,
-    { showArtifacts = true } = {},
-  ) {
+  function upsertTaskCardVariant(result, cardKey) {
     const task = result?.task;
-    if (!task?.task_id) return;
+    if (!task?.task_id) return false;
     const container = $("#chat-messages");
-    const nearBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
     let card = state.taskCards.get(cardKey);
     if (!card) {
-      card = document.createElement("article");
-      card.className = "message assistant application-card";
-      card.dataset.taskId = task.task_id;
-      card.dataset.interactionId = interaction?.interactionId || "";
+      // A just-created task can acquire a batch identity without replacing its DOM.
+      const previous = [...state.taskCards].find(([, node]) => node.dataset.taskId === task.task_id);
+      if (previous) {
+        const [oldKey, node] = previous;
+        const oldView = views.get(node);
+        if (oldView && Number(task.version) < oldView.version) return false;
+        card = node;
+        state.taskCards.delete(oldKey);
+        const meta = state.taskCardMeta.get(oldKey);
+        if (meta) state.taskCardMeta.set(cardKey, meta);
+        state.taskCardMeta.delete(oldKey);
+      } else {
+        card = element("article", "message assistant application-card");
+        card.dataset.taskId = task.task_id;
+      }
       state.taskCards.set(cardKey, card);
     }
-    const timelineMeta = state.taskCardMeta.get(cardKey) || {
-      createdAt: interaction?.linkedAt || task.created_at,
-      sequence: 0,
+    let view = views.get(card);
+    if (!view) {
+      view = createBusinessView(card, task.task_id);
+      views.set(card, view);
+    }
+    if (Number.isFinite(view.version) && Number(task.version) < view.version) return false;
+    const focused = document.activeElement;
+    const focusWasInside = focused && card.contains(focused);
+    view.version = Number(task.version);
+    const timelineMeta = state.taskCardMeta.get(cardKey) || state.taskCardMeta.get(`${task.task_id}:summary`) || {
+      createdAt: task.created_at, sequence: 0,
     };
     state.taskCardMeta.set(cardKey, timelineMeta);
-    setTimelineNode(card, {
-      key: `task:${cardKey}`,
-      createdAt:
-        timelineMeta.createdAt || interaction?.linkedAt || task.created_at,
-      order: timelineMeta.sequence || 0,
-    });
-    const cardStatus = taskCardStatusForInteraction(
-      interaction?.state,
-      task.status,
-    );
-    // Keep independent backend tasks; only group read-only database presentation.
-    // Older records have no turn metadata, so the visible user-message boundary
-    // is a conservative fallback. Never fold approvals, artifacts or business plans.
+    setTimelineNode(card, {key:`task:${cardKey}`, createdAt:timelineMeta.createdAt || task.created_at, order:timelineMeta.sequence || 0});
+    const active = actionableTaskInteractions(result);
+    const cardStatus = task.status || taskCardStatusForInteraction(active[0]?.state, "active");
     const queryGroup = task.summary?.workspaceQueryGroup;
     const queryTool = ["database_capabilities", "database_execute"].includes(queryGroup?.toolName);
     const legacyQuery = !queryGroup && ["独立数据库能力目录", "执行独立数据库查询与分析"].includes(task.title);
-    const canGroup = (queryTool || legacyQuery) && !interaction &&
+    const canGroup = (queryTool || legacyQuery) && !taskInteractions(result).length &&
       !result.artifacts?.length && !result.plan && !task.summary?.batch;
-    card.dataset.queryScope = canGroup
-      ? `${task.agent_host || ""}|${task.origin_endpoint_id || ""}|${task.active_conversation_ref || ""}`
-      : "";
+    card.dataset.queryScope = canGroup ? `${task.agent_host || ""}|${task.origin_endpoint_id || ""}|${task.active_conversation_ref || ""}` : "";
     card.dataset.queryTurn = canGroup ? queryGroup?.turnRef || "" : "";
     card.dataset.queryStatus = cardStatus;
-    card.className =
-      `message assistant application-card ${escapeClass(cardStatus)}`;
-    card.replaceChildren();
-
-    const header = document.createElement("div");
-    header.className = "application-card-header";
-    const heading = document.createElement("div");
-    const eyebrow = document.createElement("span");
-    eyebrow.className = "application-card-eyebrow";
-    eyebrow.textContent = "AGENTBRIDGE 应用卡";
-    const title = document.createElement("strong");
-    title.className = "application-card-title";
-    title.textContent = interaction?.title || displayTaskTitle(task.title);
-    heading.append(eyebrow, title);
-    const status = document.createElement("span");
-    status.className =
-      `application-card-status ${escapeClass(cardStatus)}`;
-    const completedInteraction = completedInteractionPresentation(interaction);
-    const planFailure = taskPlanFailurePresentation(result.plan);
-    status.textContent = planFailure?.label || completedInteraction?.label || statusLabel(cardStatus);
-    header.append(heading, status);
-    card.append(header);
-
-    const description = document.createElement("p");
-    description.className = "application-card-copy";
-    const interactionActive =
-      interaction &&
-      ["pending", "processing"].includes(interaction.state);
-    const authorizationResult = completedInteraction && interaction.type === "execution_authorization"
-      ? `${completedInteraction.message}${taskCardStatusMessage(cardStatus, task.summary)}`
-      : null;
-    description.textContent = planFailure?.message || authorizationResult || completedInteraction?.message || (
-      interactionActive
-        ? interaction.message || taskCardStatusMessage(cardStatus, task.summary)
-        : taskCardStatusMessage(cardStatus, task.summary)
-    );
-    card.append(description);
-
-    const facts = document.createElement("dl");
-    facts.className = "application-card-facts";
-    const systemName = interaction?.display?.systemName;
-    const effect = interaction?.display?.effect;
-    if (systemName) addDetail(facts, "系统", systemName);
-    if (effect) addDetail(facts, "影响", effect);
-    const latestEvent = result.events?.at(-1);
-    if (latestEvent) {
-      addDetail(
-        facts,
-        "最新进展",
-        `${eventLabel(latestEvent.event_type)} · ${formatTime(latestEvent.created_at)}`,
-      );
-    }
-    addDetail(facts, "业务助手", result.skill
-      ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}`
-      : "未关联 Skill");
-    if (result.plan) {
-      addDetail(facts, "计划进度", taskPlanProgress(result.plan));
-    }
-    if (task.summary?.batch) {
-      addDetail(facts, "批量进度", taskCardStatusMessage(cardStatus, task.summary));
-    }
-    if (facts.childElementCount) card.append(facts);
-    if (showArtifacts) {
-      appendArtifactList(card, result.artifacts, {
-        compact: true,
-        taskId: task.task_id,
-      });
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "application-card-actions";
-    const url = interaction?.presentation?.url;
-    if (
-      interactionActive &&
-      typeof url === "string" &&
-      /^https:\/\//.test(url)
-    ) {
-      const action = document.createElement("a");
-      action.className = "primary";
-      action.href = url;
-      action.target = "_blank";
-      action.rel = "noopener";
-      action.textContent = interactionActionLabel(interaction.type);
-      actions.append(action);
-    }
-    const progress = document.createElement("button");
-    progress.type = "button";
-    progress.className = "secondary";
-    progress.textContent = "查看进度";
-    progress.addEventListener("click", async () => {
-      if (await switchView("tasks") === false) return;
-      loadTaskDetail(task.task_id);
-    });
-    actions.append(progress);
-    card.append(actions);
+    card.className = `message assistant application-card ${escapeClass(cardStatus)}`;
+    text(view.title, displayTaskTitle(task.title) || "业务办理");
+    view.status.className = `application-card-status ${escapeClass(cardStatus)}`;
+    const failure = taskPlanFailurePresentation(result.plan);
+    text(view.status, failure?.label || statusLabel(cardStatus));
+    text(view.description, failure?.message || taskCardStatusMessage(cardStatus, task.summary));
+    const current = active[0] || result.interaction;
+    updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
+      ["计划进度", result.plan ? taskPlanProgress(result.plan) : null]]);
+    renderInteractions(view.active, result);
+    renderBatch(view.batch, result.batch);
+    renderHistory(view.history, result, active);
+    updateArtifacts(view, result, true);
+    if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
     return nearBottom;
   }
 
@@ -218,107 +278,80 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
   function renderTaskDetail(result) {
     const task = result.task;
     const detail = $("#task-detail");
-    detail.replaceChildren();
-
-    const heading = document.createElement("div");
-    heading.className = "detail-heading";
-    const back = document.createElement("button");
-    back.type = "button";
-    back.className = "icon-command mobile-detail-back";
-    back.setAttribute("aria-label", "返回任务列表");
-    back.title = "返回任务列表";
-    back.textContent = "←";
-    back.addEventListener("click", () => {
-      detail.classList.add("mobile-empty");
-    });
-    const headingCopy = document.createElement("div");
-    const eyebrow = document.createElement("p");
-    eyebrow.className = "eyebrow";
-    eyebrow.textContent = statusLabel(task.status);
-    const title = document.createElement("h2");
-    title.textContent = displayTaskTitle(task.title);
-    headingCopy.append(eyebrow, title);
-    const actions = document.createElement("div");
-    actions.className = "detail-heading-actions";
-    const continueButton = document.createElement("button");
-    continueButton.type = "button";
-    continueButton.className = "primary";
-    continueButton.textContent = "继续任务";
-    continueButton.addEventListener("click", () =>
-      continueTask(task, continueButton),
-    );
-    actions.append(continueButton);
-    heading.append(back, headingCopy, actions);
-    detail.append(heading);
-
-    const metadata = document.createElement("dl");
-    metadata.className = "detail-grid";
-    addDetail(metadata, "来源", task.agent_host);
-    addDetail(metadata, "创建时间", formatTime(task.created_at));
-    addDetail(metadata, "更新时间", formatTime(task.updated_at));
-    addDetail(metadata, "业务助手", result.skill
-      ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}`
-      : "未关联 Skill");
-    addDetail(metadata, "任务编号", task.task_id);
-    if (task.summary?.batch) {
-      addDetail(metadata, "批量结果", taskCardStatusMessage(task.status, task.summary));
+    let view = detailViews.get(detail);
+    if (!view || view.taskId !== task.task_id || view.heading.parentNode !== detail) {
+      detail.replaceChildren();
+      const heading = element("div", "detail-heading");
+      const back = element("button", "icon-command mobile-detail-back");
+      back.type = "button";
+      back.setAttribute("aria-label", "返回任务列表");
+      back.title = "返回任务列表";
+      text(back, "←");
+      back.addEventListener("click", () => detail.classList.add("mobile-empty"));
+      const copy = element("div");
+      const status = element("p", "eyebrow");
+      const title = element("h2");
+      copy.append(status, title);
+      const actions = element("div", "detail-heading-actions");
+      const resume = element("button", "primary");
+      resume.type = "button";
+      text(resume, "继续任务");
+      resume.addEventListener("click", () => continueTask(view.task, resume));
+      actions.append(resume);
+      heading.append(back, copy, actions);
+      const facts = {root:element("dl", "detail-grid"), rows:new Map()};
+      const plan = element("div");
+      const active = {root:element("div", "business-interactions"), rows:new Map()};
+      const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
+      const history = disclosure("办理记录", "business-disclosure interaction-history");
+      const artifacts = element("div");
+      const timeline = {root:element("div", "timeline"), rows:new Map()};
+      detail.append(heading, facts.root, plan, active.root, batch.root, history.root, artifacts, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, facts, plan, active, batch, history, artifacts, timeline};
+      detailViews.set(detail, view);
     }
-    detail.append(metadata);
-
-    if (result.plan) {
-      detail.append(renderTaskPlan(result.plan));
+    if (Number.isFinite(view.version) && Number(task.version) < view.version) return;
+    const focused = document.activeElement;
+    const focusWasInside = focused && detail.contains(focused);
+    view.version = Number(task.version);
+    view.task = task;
+    text(view.title, displayTaskTitle(task.title));
+    text(view.status, statusLabel(task.status));
+    updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
+      ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
+        ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],
+      ["任务编号", task.task_id], ["批量结果", task.summary?.batch ? taskCardStatusMessage(task.status, task.summary) : null]]);
+    const planSignature = JSON.stringify(result.plan || null);
+    if (planSignature !== view.planSignature) {
+      view.planSignature = planSignature;
+      view.plan.replaceChildren();
+      if (result.plan) view.plan.append(renderTaskPlan(result.plan));
     }
-
-    const interactions = Array.isArray(result.interactions)
-      ? result.interactions
-      : result.interaction
-        ? [result.interaction]
-        : [];
-    interactions
-      .filter((interaction) => {
-        const url = interaction?.presentation?.url;
-        return (
-          ["pending", "processing"].includes(interaction?.state) &&
-          typeof url === "string" &&
-          /^https:\/\//.test(url)
-        );
-      })
-      .forEach((interaction) => {
-        const url = interaction.presentation.url;
-        const band = document.createElement("div");
-        band.className = "interaction-band";
-        const label = document.createElement("span");
-        label.textContent = interaction.title || interactionLabel(interaction.type);
-        const link = document.createElement("a");
-        link.className = "primary";
-        link.href = url;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.textContent = "打开";
-        band.append(label, link);
-        detail.append(band);
-      });
-
-    appendArtifactList(detail, result.artifacts, { taskId: task.task_id });
-
-    const timeline = document.createElement("div");
-    timeline.className = "timeline";
-    [...result.events].reverse().forEach((event) => {
-      const item = document.createElement("div");
-      item.className = "timeline-item";
-      const dot = document.createElement("span");
-      dot.className = "timeline-dot";
-      const copy = document.createElement("div");
-      copy.className = "timeline-copy";
-      const eventTitle = document.createElement("strong");
-      eventTitle.textContent = eventLabel(event.event_type);
-      const time = document.createElement("time");
-      time.textContent = formatTime(event.created_at);
-      copy.append(eventTitle, time);
-      item.append(dot, copy);
-      timeline.append(item);
-    });
-    detail.append(timeline);
+    const active = renderInteractions(view.active, result);
+    renderBatch(view.batch, result.batch);
+    renderHistory(view.history, result, active);
+    updateArtifacts(view, result, false);
+    const nodes = [];
+    for (const event of [...(result.events || [])].reverse()) {
+      const key = event.event_id || `${event.event_type}:${event.created_at}`;
+      let row = view.timeline.rows.get(key);
+      if (!row) {
+        const root = element("div", "timeline-item");
+        const dot = element("span", "timeline-dot");
+        const copy = element("div", "timeline-copy");
+        const title = element("strong");
+        const time = element("time");
+        copy.append(title, time);
+        root.append(dot, copy);
+        row = {root, title, time};
+        view.timeline.rows.set(key, row);
+      }
+      text(row.title, eventLabel(event.event_type));
+      text(row.time, formatTime(event.created_at));
+      nodes.push(row.root);
+    }
+    reconcileChildren(view.timeline.root, nodes);
+    if (focusWasInside && !detail.contains(focused)) view.resume.focus({preventScroll:true});
   }
 
   function renderSkillCard(event) {

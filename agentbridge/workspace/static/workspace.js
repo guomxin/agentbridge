@@ -7,6 +7,7 @@ import { createChatStream } from "./workspace_stream.mjs";
 import { createComposer } from "./workspace_forms.mjs";
 import { createSkillForms } from "./workspace_skills.mjs";
 import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
+import { reconcileChildren } from "./workspace_dom.mjs";
 
 const state = {
   account: null,
@@ -645,10 +646,8 @@ function ingestTimelineEntry(entry, render = true) {
   if (entry?.entry_type === "task_event") {
     const taskId = entry.task_id || entry.payload?.taskId;
     const eventType = entry.payload?.eventType;
-    const interactionId = entry.payload?.payload?.interactionId;
-    const cardKey = interactionId
-      ? `${taskId}:interaction:${interactionId}`
-      : `${taskId}:summary`;
+    // An event updates the business container; interaction IDs remain children.
+    const cardKey = `${taskId}:summary`;
     if (taskId && !state.taskCardMeta.has(cardKey)) {
       state.taskCardMeta.set(cardKey, {
         createdAt: entry.created_at,
@@ -695,7 +694,7 @@ function renderChatTimeline() {
   const olderControl = state.chatTimelineHasOlder
     ? [olderChatControl()]
     : [];
-  container.replaceChildren(...olderControl, ...groupQueryCards(stable), ...live);
+  reconcileChildren(container, [...olderControl, ...groupQueryCards(stable), ...live]);
 }
 
 function olderChatControl() {

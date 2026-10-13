@@ -16,6 +16,7 @@ from uuid import uuid4
 from agentbridge.core.central_service import CentralCapabilityService
 from agentbridge.core.user_grants import UserGrantConflict
 from agentbridge.core.task_plans import task_plan_response
+from agentbridge.core.task_projections import workspace_batch_projection
 from agentbridge.core.timeline_attachments import (
     TimelineAttachmentExpired,
     TimelineAttachmentIntegrityError,
@@ -237,6 +238,7 @@ class WorkspaceApplication:
                         agent_host="openclaw",
                         endpoint_key=account["endpoint_key"],
                         interaction_id=linked["interaction_id"],
+                        continuous_flow=True,
                     )
                     interaction = response["interaction"]
                 interactions.append(
@@ -261,6 +263,10 @@ class WorkspaceApplication:
             parent_task_id=task_id,
             user_subject=account["user_subject"],
         )
+        batch = self.service.tasks.get_batch_for_task(
+            parent_task_id=task_id,
+            user_subject=account["user_subject"],
+        )
         return {
             "task": _public_task(task),
             "skill": self.service.skills.task_presentation(account["user_subject"], task_id),
@@ -269,6 +275,7 @@ class WorkspaceApplication:
             "artifacts": [_public_artifact(item) for item in artifacts],
             "interaction": interaction,
             "interactions": interactions,
+            "batch": workspace_batch_projection(batch),
         }
 
     def artifact_history(self, account: dict, *, limit: int = 20) -> list[dict]:

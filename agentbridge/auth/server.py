@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from agentbridge.auth.action_card import TrustedActionApplication
 from agentbridge.auth.card import MAX_AUTH_BODY_BYTES, AuthCardResponse, TrustedAuthApplication
 from agentbridge.auth.field_card import TrustedFieldApplication
+from agentbridge.auth.flow import TrustedFlowApplication, flow_target
 from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
 from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
 from agentbridge.auth.timeline_attachment import TrustedTimelineAttachmentApplication
@@ -89,6 +90,7 @@ def create_auth_http_server(
     application: TrustedAuthApplication,
     action_application: TrustedActionApplication | None = None,
     field_application: TrustedFieldApplication | None = None,
+    flow_application: TrustedFlowApplication | None = None,
     download_application: TrustedDocumentDownloadApplication | None = None,
     timeline_attachment_application: (
         TrustedTimelineAttachmentApplication | None
@@ -120,6 +122,27 @@ def create_auth_http_server(
                 self.send_response(204)
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
+                return
+            continued = flow_target(self.path)
+            if continued is not None and flow_application is not None:
+                kind, resource_id, presentation_id, is_status = continued
+                csrf_cookie = _csrf_cookie(self.headers.get("Cookie") or "")
+                if is_status:
+                    if (not self._origin_allowed()
+                            or (self.headers.get("Sec-Fetch-Site") or "").lower() not in {"", "same-origin"}):
+                        self._send(flow_application._json(403, {"state": "unavailable", "terminal": True,
+                            "title": "请求来源无效", "message": "请从原任务重新打开可信办理页。"}))
+                        return
+                    response = flow_application.status(
+                        kind, resource_id, presentation_id=presentation_id,
+                        token=self.headers.get("X-AgentBridge-Flow-Token") or "", csrf_cookie=csrf_cookie,
+                    )
+                else:
+                    response = flow_application.get_card(
+                        kind, resource_id, presentation_id=presentation_id,
+                        secure_cookie=config.secure_cookie, csrf_cookie=csrf_cookie,
+                    )
+                self._send(response)
                 return
             interactive_target = _interactive_browser_target(self.path)
             if interactive_target is not None and interactive_application is not None:
@@ -191,6 +214,21 @@ def create_auth_http_server(
                 return
             body = self.rfile.read(content_length)
             csrf_cookie = _csrf_cookie(self.headers.get("Cookie") or "")
+            continued = flow_target(self.path)
+            if continued is not None and flow_application is not None:
+                kind, resource_id, presentation_id, is_status = continued
+                if is_status:
+                    self._send(flow_application._json(405, {"error": "method_not_allowed"}))
+                    return
+                try:
+                    response = flow_application.submit_card(
+                        kind, resource_id, presentation_id=presentation_id, body=body,
+                        content_type=self.headers.get("Content-Type") or "", csrf_cookie=csrf_cookie,
+                    )
+                finally:
+                    body = b""
+                self._send(response)
+                return
             interactive_target = _interactive_browser_target(self.path)
             if interactive_target is not None and interactive_application is not None:
                 challenge_id, action = interactive_target
@@ -314,6 +352,7 @@ def serve_auth_cards(
     application: TrustedAuthApplication,
     action_application: TrustedActionApplication | None = None,
     field_application: TrustedFieldApplication | None = None,
+    flow_application: TrustedFlowApplication | None = None,
     download_application: TrustedDocumentDownloadApplication | None = None,
     timeline_attachment_application: (
         TrustedTimelineAttachmentApplication | None
@@ -325,6 +364,7 @@ def serve_auth_cards(
         application=application,
         action_application=action_application,
         field_application=field_application,
+        flow_application=flow_application,
         download_application=download_application,
         timeline_attachment_application=timeline_attachment_application,
         interactive_application=interactive_application,
