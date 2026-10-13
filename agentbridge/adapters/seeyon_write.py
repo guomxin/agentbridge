@@ -152,7 +152,7 @@ def get_write_action_spec(code: str) -> WriteActionSpec:
             promotion_status="promoted",
             execute_allowed=True,
             dry_run_allowed=True,
-            verification_method="pending_disappearance",
+            verification_method="complete_pending_absence_and_done_identity",
         )
     requirements = (
         f"execution mapping for {normalized or 'this action'}",

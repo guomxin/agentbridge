@@ -1,6 +1,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -56,8 +56,7 @@ def target(monkeypatch):
     data = snapshot()
     worker.page.frames = [HandoverFrame(data)]
     adapter = FakeAdapter(worker)
-    adapter.list_workflows = Mock(return_value={"items": [], "coverage": {"status": "complete"}})
-    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_actions.time.sleep", lambda _: None)
+    adapter.list_workflows = Mock(wraps=adapter.list_workflows)
     return fixture, data, worker, adapter
 
 
@@ -134,8 +133,9 @@ def test_incomplete_readback_is_unknown_not_success(target):
     _, _, worker, adapter = target
     plan = prepare_work_handover_approval(adapter, worker, _inputs())["plan"]
     adapter.list_workflows.return_value = {"items": [], "coverage": {"status": "partial"}}
-    with pytest.raises(PendingActionOutcomeUnknown):
-        approve_work_handover(adapter, worker, plan, enter_commit_boundary=Mock())
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+        with pytest.raises(PendingActionOutcomeUnknown, match="pending_coverage_incomplete"):
+            approve_work_handover(adapter, worker, plan, enter_commit_boundary=Mock())
     adapter.list_workflows.assert_called_once()
 
 

@@ -29,7 +29,7 @@ class SeeyonWriteTests(unittest.TestCase):
 
         self.assertEqual(specs["ContinueSubmit"].action_type, "workflow.submit")
         self.assertEqual(specs["ContinueSubmit"].promotion_status, "promoted")
-        self.assertEqual(specs["ContinueSubmit"].verification_method, "pending_disappearance")
+        self.assertEqual(specs["ContinueSubmit"].verification_method, "complete_pending_absence_and_done_identity")
         self.assertTrue(specs["ContinueSubmit"].execute_allowed)
         self.assertEqual(specs["Archive"].promotion_status, "dry_run_only")
         self.assertEqual(specs["Archive"].verification_method, "not_promoted")

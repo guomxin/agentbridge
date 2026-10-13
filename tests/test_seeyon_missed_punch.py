@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agentbridge.adapters.seeyon_missed_punch import (
@@ -179,7 +180,9 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         self.assertEqual(boundary, ["consumed"])
         self.assertEqual(worker.page.submitted_opinion, "同意")
         self.assertTrue(result["workflow_approved"])
-        self.assertEqual(result["verification"]["method"], "pending_disappearance")
+        self.assertEqual(result["verification"]["method"], "complete_pending_absence_and_done_identity")
+        self.assertTrue(worker.readback_closed)
+        self.assertTrue(worker.page.pumped)
 
     def test_approval_verification_recovers_after_transient_pending_read_error(self):
         adapter = FakeAdapter()
@@ -190,14 +193,17 @@ class SeeyonMissedPunchTests(unittest.TestCase):
             {"affair_id": "affair-1", "opinion": "同意"},
         )
 
-        with (
-            patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None),
-            patch.object(
-                adapter,
-                "list_workflows",
-                side_effect=[RuntimeError("temporary pending read failure"), {"items": []}],
-            ) as pending_read,
-        ):
+        original_read = adapter.list_workflows
+        failed = False
+
+        def read_with_transient_error(*args, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError("temporary pending read failure")
+            return original_read(*args, **kwargs)
+
+        with patch.object(adapter, "list_workflows", side_effect=read_with_transient_error) as pending_read:
             result = approve_missed_punch_request(
                 adapter,
                 worker,
@@ -206,7 +212,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
                 timeout_seconds=5,
             )
 
-        self.assertEqual(pending_read.call_count, 2)
+        self.assertEqual(pending_read.call_count, 3)
         self.assertTrue(result["workflow_approved"])
         self.assertTrue(result["verification"]["confirmed"])
 
@@ -222,7 +228,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         with (
             patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None),
             patch(
-                "agentbridge.adapters.seeyon_missed_punch.time.monotonic",
+                "agentbridge.adapters.seeyon_pending_execution.time.monotonic",
                 side_effect=[0, 0, 6],
             ),
             patch.object(
@@ -233,8 +239,8 @@ class SeeyonMissedPunchTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 MissedPunchOutcomeUnknown,
-                "RuntimeError: pending API unavailable",
-            ):
+                '"last_read_error": "RuntimeError"',
+            ) as captured:
                 approve_missed_punch_request(
                     adapter,
                     worker,
@@ -242,6 +248,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
                     enter_commit_boundary=lambda: None,
                     timeout_seconds=5,
                 )
+        self.assertNotIn("pending API unavailable", str(captured.exception))
 
     def test_stale_approval_contract_blocks_before_consumption(self):
         plan = _approval_plan()
@@ -360,23 +367,39 @@ class FakeAdapter:
             },
         )
 
-    def list_workflows(self, _worker, *, collection, arguments):
-        assert collection == "pending"
-        assert arguments == {"limit": 100}
-        self.pending_reads += 1
-        return {"items": []}
+    def list_workflows(self, worker, *, collection, arguments):
+        assert getattr(worker, "is_readback", False)
+        if collection == "pending":
+            assert arguments == {"limit": 100}
+            self.pending_reads += 1
+            return {"items": [], "coverage": {"status": "complete", "hasMore": False}}
+        assert collection == "done"
+        assert arguments == {"limit": 1000}
+        return {"items": [{"affair_id": "affair-1", "title": "【HR】补签申请单-Alice",
+                           "summary_id": "summary-1", "process_id": "process-1"}]}
 
 
 class FakeApprovalWorker:
     def __init__(self):
         self.page = FakeApprovalPage()
+        self.readback_worker = SimpleNamespace(page=FakeApprovalPage(), is_readback=True)
+        self.readback_closed = False
+        self.readback_opened = False
+
+    def fork_page(self):
+        from tests.test_seeyon_pending_actions import FakeForkedWorkerContext
+        return FakeForkedWorkerContext(self)
 
 
 class FakeApprovalPage:
     def __init__(self):
         self.submitted_opinion = None
+        self.handlers = {}
+        self.pumped = []
 
-    def evaluate(self, script, argument):
+    def evaluate(self, script, argument=None):
+        if argument is None:
+            return []
         if isinstance(argument, str):
             return {
                 "affair_matches": True,
@@ -397,8 +420,15 @@ class FakeApprovalPage:
         self.submitted_opinion = argument["opinion"]
         return {"scheduled": True, "submit_entry": "submitClickFunc"}
 
-    def on(self, _event, _handler):
-        return None
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    def remove_listener(self, event, handler):
+        if self.handlers.get(event) is handler:
+            del self.handlers[event]
+
+    def wait_for_timeout(self, milliseconds):
+        self.pumped.append(milliseconds)
 
 
 class FakePage:

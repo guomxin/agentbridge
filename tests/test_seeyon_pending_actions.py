@@ -1,4 +1,8 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 from agentbridge.adapters.seeyon_pending_actions import (
     PendingActionContractMismatch,
@@ -527,11 +531,15 @@ class FakeAdapter:
         return self.worker.fixture["source"], self.worker.fixture["detail"]
 
     def list_workflows(self, worker, *, collection, arguments):
-        self.assert_worker(worker)
-        if collection != "pending" or arguments != {"limit": 100}:
-            raise AssertionError("unexpected pending readback")
-        self.pending_reads += 1
-        return {"items": []}
+        if worker is not self.worker.readback_worker:
+            raise AssertionError("readback must not navigate the submission worker")
+        if collection == "pending" and arguments == {"limit": 100}:
+            self.pending_reads += 1
+            return {"items": [], "coverage": {"status": "complete", "hasMore": False}}
+        if collection == "done" and arguments == {"limit": 1000}:
+            return {"items": [{**self.worker.fixture["source"],
+                               **self.worker.fixture["signals"]["identity"]}]}
+        raise AssertionError("unexpected pending-action readback")
 
     def assert_worker(self, worker):
         if worker is not self.worker:
@@ -542,6 +550,12 @@ class FakeWorker:
     def __init__(self, fixture):
         self.fixture = fixture
         self.page = FakePage(fixture)
+        self.readback_worker = SimpleNamespace(page=FakePage(fixture))
+        self.readback_closed = False
+        self.readback_opened = False
+
+    def fork_page(self):
+        return FakeForkedWorkerContext(self)
 
 
 class FakeForkingAdapter(FakeAdapter):
@@ -550,22 +564,12 @@ class FakeForkingAdapter(FakeAdapter):
         self.readback_worker = None
 
     def list_workflows(self, worker, *, collection, arguments):
-        if worker is not self.worker.readback_worker:
-            raise AssertionError("pending readback did not use the forked worker")
-        if collection != "pending" or arguments != {"limit": 100}:
-            raise AssertionError("unexpected pending readback")
         self.readback_worker = worker
-        return {"items": []}
+        return super().list_workflows(worker, collection=collection, arguments=arguments)
 
 
 class FakeForkingWorker(FakeWorker):
-    def __init__(self, fixture):
-        super().__init__(fixture)
-        self.readback_worker = object()
-        self.readback_closed = False
-
-    def fork_page(self):
-        return FakeForkedWorkerContext(self)
+    pass
 
 
 class FakeForkedWorkerContext:
@@ -573,6 +577,7 @@ class FakeForkedWorkerContext:
         self.owner = owner
 
     def __enter__(self):
+        self.owner.readback_opened = True
         return self.owner.readback_worker
 
     def __exit__(self, _exc_type, _exc, _traceback):
@@ -583,18 +588,29 @@ class FakePage:
     def __init__(self, fixture):
         self.fixture = fixture
         self.commit_payload = None
+        self.handlers = {}
+        self.pumped = []
         self.frames = (
             [FakeBusinessFrame(fixture)] if fixture.get("business_snapshot") else []
         )
 
-    def evaluate(self, _script, argument):
+    def evaluate(self, _script, argument=None):
+        if argument is None:
+            return []
         if isinstance(argument, str):
             return self.fixture["signals"]
         self.commit_payload = dict(argument)
         return {"scheduled": True, "submit_entry": "submitClickFunc"}
 
-    def on(self, _event, _callback):
-        return None
+    def on(self, event, callback):
+        self.handlers[event] = callback
+
+    def remove_listener(self, event, callback):
+        if self.handlers.get(event) is callback:
+            del self.handlers[event]
+
+    def wait_for_timeout(self, milliseconds):
+        self.pumped.append(milliseconds)
 
 
 class FakeBusinessFrame:
@@ -965,6 +981,109 @@ def _fixture(profile):
             },
         },
     }
+
+
+ALL_PENDING_PROFILES = (
+    "missed_punch", "efficiency_data", "travel_expense", "business_trip",
+    "labor_contract_renewal", "intellectual_property_declaration", "overtime",
+    "leave", "resignation", "work_handover", "flight_application",
+    "attendance_confirmation", "weekly_report", "standard_collaboration",
+)
+
+
+def _pending_case(profile, monkeypatch):
+    from agentbridge.adapters import seeyon_missed_punch, seeyon_pending_actions
+    from agentbridge.adapters.seeyon_write_workflows import _PENDING_ACTION_BINDINGS
+
+    if profile == "missed_punch":
+        from tests.test_seeyon_missed_punch import FakeAdapter as MissedPunchAdapter, FakeApprovalWorker
+        worker = FakeApprovalWorker()
+        return (MissedPunchAdapter(), worker,
+                seeyon_missed_punch.prepare_missed_punch_approval,
+                seeyon_missed_punch.approve_missed_punch_request,
+                seeyon_missed_punch.MissedPunchContractMismatch,
+                seeyon_missed_punch.MissedPunchOutcomeUnknown)
+    if profile == "work_handover":
+        from tests.test_seeyon_work_handover import target
+        _, _, worker, adapter = target.__wrapped__(monkeypatch)
+    elif profile == "flight_application":
+        from tests.test_seeyon_flight_application import target
+        _, _, worker, adapter = target.__wrapped__(monkeypatch)
+    else:
+        worker = FakeWorker(_fixture(profile))
+        adapter = FakeAdapter(worker)
+    binding = _PENDING_ACTION_BINDINGS[profile]
+    return (adapter, worker, binding.prepare_function, binding.commit_function,
+            seeyon_pending_actions.PendingActionContractMismatch,
+            seeyon_pending_actions.PendingActionOutcomeUnknown)
+
+
+@pytest.mark.parametrize("profile", ALL_PENDING_PROFILES)
+def test_all_fourteen_profiles_keep_submit_page_and_verify_done_identity(profile, monkeypatch):
+    adapter, worker, prepare, commit, _, _ = _pending_case(profile, monkeypatch)
+    plan = prepare(adapter, worker, _inputs())["plan"]
+    boundaries = []
+
+    def boundary():
+        assert worker.readback_opened, "reader must be ready before authorization is consumed"
+        boundaries.append("entered")
+
+    result = commit(adapter, worker, plan, enter_commit_boundary=boundary)
+
+    assert boundaries == ["entered"]
+    assert result["verification"]["method"] == "complete_pending_absence_and_done_identity"
+    assert result["verification"]["done_identity_confirmed"] is True
+    assert worker.readback_closed
+    assert worker.page.pumped == [800]
+    assert worker.page.handlers == {}
+
+
+@pytest.mark.parametrize("profile", ALL_PENDING_PROFILES)
+def test_all_fourteen_profiles_never_accept_target_hidden_by_partial_list(profile, monkeypatch):
+    adapter, worker, prepare, commit, _, outcome_error = _pending_case(profile, monkeypatch)
+    plan = prepare(adapter, worker, _inputs())["plan"]
+    rows = [{"affair_id": f"other-{i}"} for i in range(100)]
+    observations = []
+
+    def partial_read(reader, *, collection, arguments):
+        assert reader is worker.readback_worker
+        assert collection == "pending", "partial absence must not proceed to done lookup"
+        observations.append(collection)
+        return {"items": rows, "total": 101,
+                "coverage": {"status": "partial", "hasMore": True}}
+
+    monkeypatch.setattr(adapter, "list_workflows", partial_read)
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+        with pytest.raises(outcome_error, match="pending_coverage_incomplete"):
+            commit(adapter, worker, plan, enter_commit_boundary=lambda: None)
+    assert observations == ["pending"]
+    assert worker.readback_closed
+    assert worker.page.handlers == {}
+
+
+@pytest.mark.parametrize("profile", ALL_PENDING_PROFILES)
+def test_all_fourteen_profiles_require_independent_reader_before_commit(profile, monkeypatch):
+    adapter, worker, prepare, commit, contract_error, _ = _pending_case(profile, monkeypatch)
+    plan = prepare(adapter, worker, _inputs())["plan"]
+    worker.fork_page = None
+    boundaries = []
+    with pytest.raises(contract_error, match="尚未提交"):
+        commit(adapter, worker, plan, enter_commit_boundary=lambda: boundaries.append("entered"))
+    assert boundaries == []
+    assert getattr(worker.page, "commit_payload", None) is None
+    assert getattr(worker.page, "submitted_opinion", None) is None
+
+
+@pytest.mark.parametrize("profile", ALL_PENDING_PROFILES)
+def test_all_fourteen_profiles_reject_stale_contract_before_commit(profile, monkeypatch):
+    adapter, worker, prepare, commit, contract_error, _ = _pending_case(profile, monkeypatch)
+    plan = prepare(adapter, worker, _inputs())["plan"]
+    plan["action_contract"]["fingerprint"] = "sha256:previous-verification-contract"
+    boundaries = []
+    with pytest.raises(contract_error):
+        commit(adapter, worker, plan, enter_commit_boundary=lambda: boundaries.append("entered"))
+    assert boundaries == []
+    assert not worker.readback_opened
 
 
 if __name__ == "__main__":

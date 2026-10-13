@@ -49,7 +49,7 @@ FIRST_BATCH_TARGETS: tuple[MatterTargetSpec, ...] = (
             "default_opinion": "\u540c\u610f",
             "execution_route": "matter_execute",
             "binding": "ContinueSubmit",
-            "verification_method": "pending_disappearance",
+            "verification_method": "complete_pending_absence_and_done_identity",
             "required_prefill": [],
             "validated_samples": [
                 {

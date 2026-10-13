@@ -10,6 +10,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from agentbridge.adapters.seeyon_cap4 import wait_for_cap4_interactive
+from agentbridge.adapters.seeyon_pending_execution import VERIFICATION_METHOD, execute_pending_action
 
 
 MISSED_PUNCH_PREPARE_CAPABILITY = "oa.missed_punch.prepare"
@@ -23,7 +24,7 @@ MISSED_PUNCH_TEMPLATE_TITLE = "【HR】补签申请单"
 MISSED_PUNCH_TEMPLATE_ID = "-8494358180075582561"
 MISSED_PUNCH_FORM_APP_ID = "-3950641196724501449"
 MISSED_PUNCH_DRAFT_CONTRACT_VERSION = "seeyon-missed-punch-draft-v1"
-MISSED_PUNCH_APPROVAL_CONTRACT_VERSION = "seeyon-missed-punch-approval-v2"
+MISSED_PUNCH_APPROVAL_CONTRACT_VERSION = "seeyon-missed-punch-approval-v3"
 MISSED_PUNCH_REASONS = ("忘记打卡", "人脸识别有误", "其他")
 
 MISSED_PUNCH_PREPARE_INPUT_SCHEMA = {
@@ -395,7 +396,7 @@ def prepare_missed_punch_approval(adapter, worker, arguments: dict) -> dict:
                 "fingerprint": missed_punch_approval_contract_fingerprint(),
                 "internal_binding": "ContinueSubmit",
                 "action_kind": "approval",
-                "verification": "pending_disappearance",
+                "verification": VERIFICATION_METHOD,
             },
             "exact_input": {"opinion": inputs["opinion"]},
             "preconditions": {
@@ -408,7 +409,7 @@ def prepare_missed_punch_approval(adapter, worker, arguments: dict) -> dict:
             "expected_effect": {
                 "workflow_approved": True,
                 "submitted_count": 1,
-                "verification": "pending_disappearance",
+                "verification": VERIFICATION_METHOD,
             },
         },
         "summary": missed_punch_approval_summary(source, detail, inputs["opinion"]),
@@ -435,70 +436,24 @@ def approve_missed_punch_request(
     _assert_approval_target(
         dict(plan.get("target") or {}), _approval_target(source, detail, signals)
     )
-    page = worker.page
-    page.on("dialog", lambda dialog: dialog.accept())
-    boundary_crossed = False
-    enter_commit_boundary()
-    boundary_crossed = True
-    try:
-        scheduled = page.evaluate(
-            _APPROVAL_SCRIPT,
-            {"affair_id": affair_id, "opinion": opinion},
-        )
-        if not isinstance(scheduled, dict) or scheduled.get("scheduled") is not True:
-            raise MissedPunchOutcomeUnknown("OA did not schedule the approval submission.")
-        deadline = time.monotonic() + max(timeout_seconds, 5)
-        last_verification_error: Exception | None = None
-        while time.monotonic() < deadline:
-            time.sleep(0.8)
-            try:
-                pending = adapter.list_workflows(
-                    worker,
-                    collection="pending",
-                    arguments={"limit": 100},
-                )
-            except Exception as exc:
-                last_verification_error = exc
-                continue
-            if not any(
-                str(item.get("affair_id") or "") == affair_id
-                for item in pending.get("items") or []
-            ):
-                return {
-                    "schema_version": "agentbridge.oa_missed_punch_approval_result.v1",
-                    "business_intent": "approve_missed_punch_request",
-                    "workflow_approved": True,
-                    "submitted_count": 1,
-                    "target": {
-                        "affair_id": affair_id,
-                        "title": str(source.get("title") or ""),
-                    },
-                    "verification": {
-                        "confirmed": True,
-                        "method": "pending_disappearance",
-                    },
-                    "transport": "central_browser_session",
-                }
-            last_verification_error = None
-        if last_verification_error is not None:
-            error_type = type(last_verification_error).__name__
-            error_message = str(last_verification_error).strip()
-            error_detail = f"{error_type}: {error_message}" if error_message else error_type
-            raise MissedPunchOutcomeUnknown(
-                "The approval was scheduled, but pending-list verification did not "
-                f"recover before timeout. Last verification error: {error_detail}"
-            ) from last_verification_error
-        raise MissedPunchOutcomeUnknown(
-            "The approval was scheduled, but the affair remained in the pending list."
-        )
-    except MissedPunchOutcomeUnknown:
-        raise
-    except BaseException as exc:
-        if boundary_crossed:
-            raise MissedPunchOutcomeUnknown(
-                "The OA approval boundary was crossed, but verification failed."
-            ) from exc
-        raise
+    outcome = execute_pending_action(
+        adapter, worker, target=dict(plan["target"]), opinion=opinion,
+        attitude_code="agree", action_kind="approval",
+        enter_commit_boundary=enter_commit_boundary,
+        contract_error=MissedPunchContractMismatch,
+        outcome_error=MissedPunchOutcomeUnknown,
+        timeout_seconds=timeout_seconds,
+    )
+    return {
+        "schema_version": "agentbridge.oa_missed_punch_approval_result.v1",
+        "business_intent": "approve_missed_punch_request",
+        "workflow_approved": True,
+        "submitted_count": 1,
+        "target": {"affair_id": affair_id, "title": str(source.get("title") or "")},
+        **outcome,
+        "transport": "central_browser_session",
+    }
+
 
 
 def normalize_missed_punch_inputs(arguments: dict) -> dict:
@@ -611,7 +566,7 @@ def missed_punch_approval_contract_fingerprint() -> str:
                 "textarea[name='content']",
             ],
             "submit_entries": ["submitClickFunc", "dealSubmitFunc", "$.content.callback.dealSubmit"],
-            "verification": "pending_disappearance",
+            "verification": VERIFICATION_METHOD,
         }
     )
 
@@ -1007,65 +962,3 @@ def _bounded_text(value: Any, name: str, maximum: int) -> str:
 def _fingerprint(value: dict) -> str:
     canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
-
-
-_APPROVAL_SCRIPT = r"""
-({ affair_id, opinion }) => {
-  const pageAffairId = String(window.affairId || '')
-    || document.querySelector('#affairId')?.value
-    || new URLSearchParams(location.search).get('affairId')
-    || '';
-  if (String(pageAffairId) !== String(affair_id)) {
-    throw new Error('affair_id mismatch before approval');
-  }
-  const comment = document.querySelector('#content_deal_comment')
-    || document.querySelector("textarea[name='content_deal_comment']")
-    || document.querySelector('textarea#content')
-    || document.querySelector("textarea[name='content']");
-  if (!comment) throw new Error('approval opinion control is missing');
-  const setValue = (element, value) => {
-    const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, 'value')?.set;
-    if (setter) setter.call(element, value); else element.value = value;
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-    element.dispatchEvent(new Event('blur', { bubbles: true }));
-  };
-  setValue(comment, String(opinion));
-  const radios = Array.from(document.querySelectorAll("input[type='radio'][name='attitude']"));
-  const agree = radios.find((radio) => {
-    const code = String(radio.getAttribute('code') || '').toLowerCase();
-    const value = String(radio.value || '').toLowerCase();
-    return code === 'agree' || value === 'agree';
-  });
-  if (!agree) throw new Error('approval agree attitude is missing');
-  agree.checked = true;
-  agree.dispatchEvent(new Event('input', { bubbles: true }));
-  agree.dispatchEvent(new Event('change', { bubbles: true }));
-  const attitudeCode = agree.getAttribute('code') || agree.value;
-  for (const selector of ['#hidAttitudeCode', '#hidAttitude', '#nodeattitude']) {
-    const element = document.querySelector(selector);
-    if (element) setValue(element, attitudeCode);
-  }
-  const nodePolicy = String(window.nodePolicy || '').toLowerCase();
-  const nodePolicyName = String(window.nodePolicyName || '');
-  let submit = null;
-  let submitName = '';
-  if ((nodePolicy === 'inform' || nodePolicyName.includes('知会'))
-      && typeof window.dealSubmitFunc === 'function') {
-    submit = window.dealSubmitFunc;
-    submitName = 'dealSubmitFunc';
-  } else if (typeof window.submitClickFunc === 'function') {
-    submit = window.submitClickFunc;
-    submitName = 'submitClickFunc';
-  } else if (typeof window.dealSubmitFunc === 'function') {
-    submit = window.dealSubmitFunc;
-    submitName = 'dealSubmitFunc';
-  } else if (typeof window.$?.content?.callback?.dealSubmit === 'function') {
-    submit = window.$.content.callback.dealSubmit;
-    submitName = '$.content.callback.dealSubmit';
-  }
-  if (!submit) throw new Error('approval submit entry is missing');
-  window.setTimeout(() => submit.call(window), 0);
-  return { scheduled: true, submit_entry: submitName };
-}
-"""

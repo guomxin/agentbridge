@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "2a2420a29d8e"
+    "e42c21f73b3e"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Workspace approval cards distinguish completed consent from verified business success and preserve terminal task results. Stopped batch summaries separate unknown outcomes from failures and identify the item requiring verification. Only static presentation and tests change relative to live predecessor 2a2420a29d8e; no database schema, adapter, host plugin or workflow execution change. No business request replay or data restore is introduced."
+  "reason": "All 14 OA pending actions share one submission and verification executor. Independent readback page is provisioned before authorization consumption; complete pending absence and exact done identity are required. Submission evidence is bounded and sanitized; unknown results stop batches without replay. Approval capability and frozen contract versions advance, so old authorizations require a fresh preparation. No database migration, session replacement, host plugin change or historical operation replay."
 }

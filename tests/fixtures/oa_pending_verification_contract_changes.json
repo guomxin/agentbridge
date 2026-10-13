@@ -1,0 +1,100 @@
+{
+  "oa.missed_punch.approval.prepare": {
+    "version": "0.3.0"
+  },
+  "oa.missed_punch.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, approve the frozen missed-punch target, and verify complete pending absence and the exact done identity."
+  },
+  "oa.efficiency_data.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.efficiency_data.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen efficiency data item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.travel_expense.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.travel_expense.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen travel expense item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.business_trip.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.business_trip.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen business trip item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.labor_contract_renewal.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.labor_contract_renewal.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen labor contract renewal item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.intellectual_property_declaration.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.intellectual_property_declaration.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen intellectual property declaration item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.overtime.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.overtime.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen overtime item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.leave.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.leave.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen leave item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.resignation.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.resignation.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen resignation item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.work_handover.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.work_handover.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen work handover item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.flight_application.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.flight_application.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen flight application item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.attendance_confirmation.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.attendance_confirmation.confirm": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen attendance confirmation item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.weekly_report.acknowledgement.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.weekly_report.acknowledge": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen weekly report item, and verify complete pending absence and the exact done identity."
+  },
+  "oa.standard_collaboration.approval.prepare": {
+    "version": "0.2.0"
+  },
+  "oa.standard_collaboration.approve": {
+    "version": "0.2.0",
+    "description": "Consume one trusted authorization, process the frozen standard collaboration item, and verify complete pending absence and the exact done identity."
+  }
+}

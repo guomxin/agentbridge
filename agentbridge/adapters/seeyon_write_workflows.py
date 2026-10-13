@@ -255,7 +255,7 @@ def _pending_action_workflows() -> dict[str, WriteWorkflowDefinition]:
         workflows[definition["prepare_capability"]] = WriteWorkflowDefinition(
             prepare_spec=CapabilitySpec(
                 name=definition["prepare_capability"],
-                version="0.1.0",
+                version="0.2.0",
                 description=(
                     f"Collect a trusted opinion, validate one exact pending "
                     f"{profile_name} item, and create separate {action_kind} confirmation."
@@ -268,10 +268,10 @@ def _pending_action_workflows() -> dict[str, WriteWorkflowDefinition]:
             ),
             commit_spec=CapabilitySpec(
                 name=definition["commit_capability"],
-                version="0.1.0",
+                version="0.2.0",
                 description=(
                     f"Consume one trusted authorization, process the frozen "
-                    f"{profile_name} item, and verify pending disappearance."
+                    f"{profile_name} item, and verify complete pending absence and the exact done identity."
                 ),
                 input_schema=PENDING_ACTION_COMMIT_INPUT_SCHEMA,
                 output_schema={"type": "object"},
@@ -297,7 +297,7 @@ def _pending_action_workflows() -> dict[str, WriteWorkflowDefinition]:
 _MISSED_PUNCH_APPROVAL_WORKFLOW = WriteWorkflowDefinition(
     prepare_spec=CapabilitySpec(
         name=MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY,
-        version="0.2.0",
+        version="0.3.0",
         description=(
             "Collect an approval opinion in a trusted card, validate one exact "
             "pending missed-punch item, and create a separate approval authorization."
@@ -310,10 +310,10 @@ _MISSED_PUNCH_APPROVAL_WORKFLOW = WriteWorkflowDefinition(
     ),
     commit_spec=CapabilitySpec(
         name=MISSED_PUNCH_APPROVE_CAPABILITY,
-        version="0.1.0",
+        version="0.2.0",
         description=(
             "Consume one trusted authorization, approve the frozen missed-punch "
-            "target, and verify that it left the pending collection."
+            "target, and verify complete pending absence and the exact done identity."
         ),
         input_schema=MISSED_PUNCH_APPROVE_INPUT_SCHEMA,
         output_schema={"type": "object"},

@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
-from contextlib import contextmanager
 from typing import Any, Callable
+
+from agentbridge.adapters.seeyon_pending_execution import VERIFICATION_METHOD, execute_pending_action
 
 from agentbridge.adapters.seeyon_business_trip import (
     BUSINESS_TRIP_FORM_APP_ID,
@@ -200,7 +200,7 @@ _PROFILES = {
     "efficiency_data": {
         "prepare_capability": EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": EFFICIENCY_DATA_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-efficiency-data-approval-v1",
+        "contract_version": "seeyon-efficiency-data-approval-v2",
         "plan_schema": "agentbridge.oa_efficiency_data_approval_plan.v1",
         "result_schema": "agentbridge.oa_efficiency_data_approval_result.v1",
         "business_intent": "approve_efficiency_data",
@@ -221,7 +221,7 @@ _PROFILES = {
     "travel_expense": {
         "prepare_capability": TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": TRAVEL_EXPENSE_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-travel-expense-approval-v1",
+        "contract_version": "seeyon-travel-expense-approval-v2",
         "plan_schema": "agentbridge.oa_travel_expense_approval_plan.v1",
         "result_schema": "agentbridge.oa_travel_expense_approval_result.v1",
         "business_intent": "approve_travel_expense_reimbursement",
@@ -251,7 +251,7 @@ _PROFILES = {
     "business_trip": {
         "prepare_capability": BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": BUSINESS_TRIP_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-business-trip-approval-v1",
+        "contract_version": "seeyon-business-trip-approval-v2",
         "plan_schema": "agentbridge.oa_business_trip_approval_plan.v1",
         "result_schema": "agentbridge.oa_business_trip_approval_result.v1",
         "business_intent": "approve_business_trip_request",
@@ -282,7 +282,7 @@ _PROFILES = {
     "labor_contract_renewal": {
         "prepare_capability": LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": LABOR_CONTRACT_RENEWAL_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-labor-contract-renewal-approval-v1",
+        "contract_version": "seeyon-labor-contract-renewal-approval-v2",
         "plan_schema": "agentbridge.oa_labor_contract_renewal_approval_plan.v1",
         "result_schema": "agentbridge.oa_labor_contract_renewal_approval_result.v1",
         "business_intent": "approve_labor_contract_renewal",
@@ -316,7 +316,7 @@ _PROFILES = {
             INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY
         ),
         "commit_capability": INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-intellectual-property-declaration-approval-v1",
+        "contract_version": "seeyon-intellectual-property-declaration-approval-v2",
         "plan_schema": (
             "agentbridge.oa_intellectual_property_declaration_approval_plan.v1"
         ),
@@ -354,7 +354,7 @@ _PROFILES = {
     "overtime": {
         "prepare_capability": OVERTIME_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": OVERTIME_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-overtime-approval-v1",
+        "contract_version": "seeyon-overtime-approval-v2",
         "plan_schema": "agentbridge.oa_overtime_approval_plan.v1",
         "result_schema": "agentbridge.oa_overtime_approval_result.v1",
         "business_intent": "approve_overtime_request",
@@ -384,7 +384,7 @@ _PROFILES = {
     "leave": {
         "prepare_capability": LEAVE_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": LEAVE_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-leave-approval-v1",
+        "contract_version": "seeyon-leave-approval-v2",
         "plan_schema": "agentbridge.oa_leave_approval_plan.v1",
         "result_schema": "agentbridge.oa_leave_approval_result.v1",
         "business_intent": "approve_leave_request",
@@ -416,7 +416,7 @@ _PROFILES = {
     "resignation": {
         "prepare_capability": RESIGNATION_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": RESIGNATION_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-resignation-approval-v1",
+        "contract_version": "seeyon-resignation-approval-v2",
         "plan_schema": "agentbridge.oa_resignation_approval_plan.v1",
         "result_schema": "agentbridge.oa_resignation_approval_result.v1",
         "business_intent": "approve_resignation_request",
@@ -446,7 +446,7 @@ _PROFILES = {
     "work_handover": {
         "prepare_capability": WORK_HANDOVER_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": WORK_HANDOVER_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-work-handover-approval-v1",
+        "contract_version": "seeyon-work-handover-approval-v2",
         "plan_schema": "agentbridge.oa_work_handover_approval_plan.v1",
         "result_schema": "agentbridge.oa_work_handover_approval_result.v1",
         "business_intent": "approve_work_handover_request",
@@ -471,7 +471,7 @@ _PROFILES = {
     "flight_application": {
         "prepare_capability": FLIGHT_APPLICATION_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": FLIGHT_APPLICATION_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-flight-application-approval-v1",
+        "contract_version": "seeyon-flight-application-approval-v2",
         "plan_schema": "agentbridge.oa_flight_application_approval_plan.v1",
         "result_schema": "agentbridge.oa_flight_application_approval_result.v1",
         "business_intent": "approve_flight_application",
@@ -493,7 +493,7 @@ _PROFILES = {
     "attendance_confirmation": {
         "prepare_capability": ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY,
         "commit_capability": ATTENDANCE_CONFIRM_CAPABILITY,
-        "contract_version": "seeyon-attendance-confirmation-v1",
+        "contract_version": "seeyon-attendance-confirmation-v2",
         "plan_schema": "agentbridge.oa_attendance_confirmation_plan.v1",
         "result_schema": "agentbridge.oa_attendance_confirmation_result.v1",
         "business_intent": "confirm_monthly_attendance",
@@ -522,7 +522,7 @@ _PROFILES = {
     "weekly_report": {
         "prepare_capability": WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
         "commit_capability": WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY,
-        "contract_version": "seeyon-weekly-report-acknowledgement-v1",
+        "contract_version": "seeyon-weekly-report-acknowledgement-v2",
         "plan_schema": "agentbridge.oa_weekly_report_acknowledgement_plan.v1",
         "result_schema": "agentbridge.oa_weekly_report_acknowledgement_result.v1",
         "business_intent": "acknowledge_weekly_report",
@@ -548,7 +548,7 @@ _PROFILES = {
     "standard_collaboration": {
         "prepare_capability": STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": STANDARD_COLLABORATION_APPROVE_CAPABILITY,
-        "contract_version": "seeyon-standard-collaboration-approval-v1",
+        "contract_version": "seeyon-standard-collaboration-approval-v2",
         "plan_schema": "agentbridge.oa_standard_collaboration_approval_plan.v1",
         "result_schema": "agentbridge.oa_standard_collaboration_approval_result.v1",
         "business_intent": "approve_standard_collaboration",
@@ -887,7 +887,7 @@ def pending_action_contract_fingerprint(profile_key: str) -> str:
         "business_snapshot_policy": profile.get("business_snapshot_policy"),
         "selection_policy": "exactly_one_pending_affair_id",
         "internal_binding": "ContinueSubmit",
-        "verification": "pending_disappearance",
+        "verification": VERIFICATION_METHOD,
     }
     return _fingerprint(contract)
 
@@ -913,7 +913,7 @@ def _prepare_pending_action(
                 "fingerprint": pending_action_contract_fingerprint(profile_key),
                 "internal_binding": "ContinueSubmit",
                 "action_kind": profile["action_kind"],
-                "verification": "pending_disappearance",
+                "verification": VERIFICATION_METHOD,
             },
             "exact_input": {"opinion": inputs["opinion"]},
             "preconditions": {
@@ -927,7 +927,7 @@ def _prepare_pending_action(
             "expected_effect": {
                 "pending_action_processed": True,
                 "processed_count": 1,
-                "verification": "pending_disappearance",
+                "verification": VERIFICATION_METHOD,
             },
         },
         "summary": _summary(profile_key, profile, target, detail, inputs["opinion"]),
@@ -1017,89 +1017,34 @@ def _commit_pending_action(
     current_target = _frozen_target(source, detail, signals, profile_key)
     _assert_frozen_target(target, current_target)
 
-    page = worker.page
-    page.on("dialog", lambda dialog: dialog.accept())
-    boundary_crossed = False
-    enter_commit_boundary()
-    boundary_crossed = True
-    try:
-        scheduled = page.evaluate(
-            _PENDING_ACTION_SCRIPT,
-            {
-                "affair_id": affair_id,
-                "opinion": opinion,
-                "action_kind": profile["action_kind"],
-                "attitude_code": profile.get("attitude_code", ""),
-            },
-        )
-        if not isinstance(scheduled, dict) or scheduled.get("scheduled") is not True:
-            raise PendingActionOutcomeUnknown(
-                "OA did not schedule the pending action submission."
-            )
-        deadline = time.monotonic() + max(timeout_seconds, 5)
-        with _pending_readback_worker(worker) as readback_worker:
-            while time.monotonic() < deadline:
-                time.sleep(0.8)
-                pending = adapter.list_workflows(
-                    readback_worker,
-                    collection="pending",
-                    arguments={"limit": 100},
-                )
-                if profile_key in {"work_handover", "flight_application"} and (
-                    pending.get("coverage") or {}
-                ).get("status") != "complete":
-                    raise PendingActionOutcomeUnknown(
-                        "The pending readback is incomplete; disappearance is not proven."
-                    )
-                if not any(
-                    str(item.get("affair_id") or "") == affair_id
-                    for item in pending.get("items") or []
-                ):
-                    result = {
-                        "schema_version": profile["result_schema"],
-                        "business_intent": profile["business_intent"],
-                        "pending_action_processed": True,
-                        "processed_count": 1,
-                        "action_kind": profile["action_kind"],
-                        "workflow_profile": profile_key,
-                        "target": {
-                            "affair_id": affair_id,
-                            "title": str(source.get("title") or ""),
-                        },
-                        "verification": {
-                            "confirmed": True,
-                            "method": "pending_disappearance",
-                        },
-                        "transport": "central_browser_session",
-                    }
-                    if profile["action_kind"] == "acknowledgement":
-                        result["workflow_acknowledged"] = True
-                    elif profile["action_kind"] == "confirmation":
-                        result["workflow_confirmed"] = True
-                    else:
-                        result["workflow_approved"] = True
-                    return result
-        raise PendingActionOutcomeUnknown(
-            "The pending action was scheduled, but the affair remained in the pending list."
-        )
-    except PendingActionOutcomeUnknown:
-        raise
-    except BaseException as exc:
-        if boundary_crossed:
-            raise PendingActionOutcomeUnknown(
-                "The OA pending-action boundary was crossed, but verification failed."
-            ) from exc
-        raise
+    outcome = execute_pending_action(
+        adapter, worker, target=target, opinion=opinion,
+        attitude_code=profile.get("attitude_code", ""),
+        action_kind=profile["action_kind"],
+        enter_commit_boundary=enter_commit_boundary,
+        contract_error=PendingActionContractMismatch,
+        outcome_error=PendingActionOutcomeUnknown,
+        timeout_seconds=timeout_seconds,
+    )
+    result = {
+        "schema_version": profile["result_schema"],
+        "business_intent": profile["business_intent"],
+        "pending_action_processed": True,
+        "processed_count": 1,
+        "action_kind": profile["action_kind"],
+        "workflow_profile": profile_key,
+        "target": {"affair_id": affair_id, "title": str(source.get("title") or "")},
+        **outcome,
+        "transport": "central_browser_session",
+    }
+    if profile["action_kind"] == "acknowledgement":
+        result["workflow_acknowledged"] = True
+    elif profile["action_kind"] == "confirmation":
+        result["workflow_confirmed"] = True
+    else:
+        result["workflow_approved"] = True
+    return result
 
-
-@contextmanager
-def _pending_readback_worker(worker):
-    fork_page = getattr(worker, "fork_page", None)
-    if not callable(fork_page):
-        yield worker
-        return
-    with fork_page() as readback_worker:
-        yield readback_worker
 
 
 def _validate_target(
@@ -2163,78 +2108,5 @@ _PAGE_CONTRACT_SCRIPT = r"""
       body_type: read(['bodyType']),
     },
   };
-}
-"""
-
-
-_PENDING_ACTION_SCRIPT = r"""
-({ affair_id, opinion, attitude_code }) => {
-  const read = (names) => {
-    for (const name of names) {
-      const element = document.querySelector(`#${name}`)
-        || document.querySelector(`[name='${name}']`);
-      const value = String(element?.value || window[name] || '').trim();
-      if (value) return value;
-    }
-    return '';
-  };
-  const pageAffairId = read(['affairId'])
-    || new URLSearchParams(location.search).get('affairId')
-    || '';
-  if (String(pageAffairId) !== String(affair_id)) {
-    throw new Error('affair_id mismatch before pending action');
-  }
-  const comment = document.querySelector('#content_deal_comment')
-    || document.querySelector("textarea[name='content_deal_comment']")
-    || document.querySelector('textarea#content')
-    || document.querySelector("textarea[name='content']");
-  if (!comment) throw new Error('pending-action opinion control is missing');
-  const setValue = (element, value) => {
-    const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, 'value')?.set;
-    if (setter) setter.call(element, value); else element.value = value;
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-    element.dispatchEvent(new Event('blur', { bubbles: true }));
-  };
-  setValue(comment, String(opinion));
-  if (attitude_code) {
-    const radios = Array.from(document.querySelectorAll("input[type='radio'][name='attitude']"));
-    const selected = radios.find((radio) => {
-      const code = String(radio.getAttribute('code') || '').toLowerCase();
-      const value = String(radio.value || '').toLowerCase();
-      return code === attitude_code || value === attitude_code
-        || value.endsWith(`.${attitude_code}`);
-    });
-    if (!selected) throw new Error('registered attitude is missing');
-    selected.checked = true;
-    selected.dispatchEvent(new Event('input', { bubbles: true }));
-    selected.dispatchEvent(new Event('change', { bubbles: true }));
-    const attitudeCode = selected.getAttribute('code') || selected.value || attitude_code;
-    for (const selector of ['#hidAttitudeCode', '#hidAttitude', '#nodeattitude']) {
-      const element = document.querySelector(selector);
-      if (element) setValue(element, attitudeCode);
-    }
-  }
-  const nodePolicy = String(window.nodePolicy || '').toLowerCase();
-  const nodePolicyName = String(window.nodePolicyName || '');
-  let submit = null;
-  let submitName = '';
-  if ((nodePolicy === 'inform' || nodePolicyName.includes('知会'))
-      && typeof window.dealSubmitFunc === 'function') {
-    submit = window.dealSubmitFunc;
-    submitName = 'dealSubmitFunc';
-  } else if (typeof window.submitClickFunc === 'function') {
-    submit = window.submitClickFunc;
-    submitName = 'submitClickFunc';
-  } else if (typeof window.dealSubmitFunc === 'function') {
-    submit = window.dealSubmitFunc;
-    submitName = 'dealSubmitFunc';
-  } else if (typeof window.$?.content?.callback?.dealSubmit === 'function') {
-    submit = window.$.content.callback.dealSubmit;
-    submitName = '$.content.callback.dealSubmit';
-  }
-  if (!submit) throw new Error('pending-action submit entry is missing');
-  window.setTimeout(() => submit.call(window), 0);
-  return { scheduled: true, submit_entry: submitName };
 }
 """

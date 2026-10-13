@@ -1,7 +1,7 @@
 from copy import deepcopy
 from html import escape
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -73,8 +73,7 @@ def target(monkeypatch):
     data = snapshot()
     worker.page.frames = [FlightFrame(data)]
     adapter = FakeAdapter(worker)
-    adapter.list_workflows = Mock(return_value={"items": [], "coverage": {"status": "complete"}})
-    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_actions.time.sleep", lambda _: None)
+    adapter.list_workflows = Mock(wraps=adapter.list_workflows)
     return fixture, data, worker, adapter
 
 
@@ -169,8 +168,9 @@ def test_incomplete_pending_readback_cannot_prove_success(target):
     _, _, worker, adapter = target
     plan = prepare_flight_application_approval(adapter, worker, _inputs())["plan"]
     adapter.list_workflows.return_value = {"items": [], "coverage": {"status": "partial"}}
-    with pytest.raises(PendingActionOutcomeUnknown):
-        approve_flight_application(adapter, worker, plan, enter_commit_boundary=Mock())
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+        with pytest.raises(PendingActionOutcomeUnknown, match="pending_coverage_incomplete"):
+            approve_flight_application(adapter, worker, plan, enter_commit_boundary=Mock())
 
 
 def test_title_routes_to_dedicated_profile():

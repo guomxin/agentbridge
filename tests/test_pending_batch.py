@@ -199,7 +199,7 @@ def test_unknown_second_item_stops_remaining_and_never_retries(run, monkeypatch)
 
 
 @pytest.mark.parametrize("batch_capability", [BATCH, "oa.missed_punch.approval.batch.prepare"])
-def test_shared_missed_punch_commit_unknown_stops_both_batch_entries(run, monkeypatch, batch_capability):
+def test_shared_missed_punch_commit_unknown_stops_both_batch_entries(run, monkeypatch, tmp_path, batch_capability):
     service, tid, rows, prepared, committed = run
     rows[:] = [row(i, "【HR】补签申请单") for i in range(1, 4)]
     first = service.invoke(user_subject="user-a", capability_name=batch_capability, arguments={}, task_id=tid)
@@ -221,6 +221,8 @@ def test_shared_missed_punch_commit_unknown_stops_both_batch_entries(run, monkey
     aid = auth["nextAction"]["authorizationId"]
     assert service.write_authorizations.get(aid)["state"] == "consumed"
     assert service.operations.get(result["operationId"])["status"] == "unknown"
+    service = make_service(tmp_path)
+    monkeypatch.setattr(service.adapter, "list_workflows", lambda *_a, **_kw: pytest.fail("unknown recovery must not rediscover or retry the batch"))
     for key in (None, "another-callback-key"):
         service.resume_interaction(
             user_subject="user-a", interaction_id=auth["interaction"]["interactionId"], idempotency_key=key,

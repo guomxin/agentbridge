@@ -1,4 +1,4 @@
-"""Keep the complete OA write surface equal to the pre-migration contract."""
+"""Keep the OA write surface frozen except for explicitly versioned changes."""
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -23,6 +23,14 @@ from agentbridge.core.write_workflow import WritePrepareAliasDefinition, WriteWo
 CONTRACT_BYTES = (Path(__file__).parent / "fixtures/oa_write_workflows_contract.json").read_bytes()
 # Keep the signed-off bytes/hash frozen; adapt only the retired Python exception namespace.
 CONTRACT = json.loads(CONTRACT_BYTES.replace(b'"bscli.adapters.', b'"agentbridge.adapters.'))
+# The original migration fixture remains immutable. This separately reviewed
+# revision changes only versions/descriptions for the 14 unified pending flows.
+PENDING_REVISION = json.loads(
+    (Path(__file__).parent / "fixtures/oa_pending_verification_contract_changes.json").read_text()
+)
+for _spec in CONTRACT["capabilities"]:
+    _spec.update(PENDING_REVISION.get(_spec["name"], {}))
+
 DEFINITIONS = dict(CONTRACT["definitions"])
 SPECS = {spec["name"]: spec for spec in CONTRACT["capabilities"]}
 SCOPES = {name: frozenset(scopes) for name, scopes in CONTRACT["scopes"]}
@@ -94,7 +102,7 @@ def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
     ] == CONTRACT["commits"]
 
 
-def test_all_oa_write_specs_preserve_versions_schemas_and_registration_order():
+def test_all_oa_write_specs_match_versioned_contract_and_registration_order():
     registry = seeyon_central.build_central_capability_registry()
     assert [
         spec.to_dict() for spec in registry._specs.values() if spec.effect != "read"
@@ -355,3 +363,13 @@ def test_prepare_alias_constructor_preserves_arguments_and_lazy_dynamic_builder(
     spy.assert_not_called()
     with pytest.raises(TypeError):
         WritePrepareAliasDefinition(*arguments, original.field_schema_function)
+
+
+def test_pending_verification_revision_is_limited_to_fourteen_versioned_pairs():
+    assert len(PENDING_REVISION) == 28
+    expected_prepares = set(PREFLIGHT_PREPARES) | {CANONICAL_PREPARE}
+    expected_commits = {DEFINITIONS[name]["commit_capability"] for name in expected_prepares}
+    assert set(PENDING_REVISION) == expected_prepares | expected_commits
+    for name, change in PENDING_REVISION.items():
+        assert change["version"] == ("0.3.0" if name == CANONICAL_PREPARE else "0.2.0")
+        assert set(change) == ({"version"} if name in expected_prepares else {"version", "description"})
