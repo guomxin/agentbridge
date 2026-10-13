@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from html import escape
 import json
 from pathlib import Path
@@ -31,7 +31,8 @@ ROOM_VALUES = {"purpose": "合成会议室单次确认验收", "room": "",
 
 
 def _ms(value):
-    return int(datetime.strptime(value, "%Y-%m-%d %H:%M").timestamp() * 1000)
+    local = datetime.strptime(value, "%Y-%m-%d %H:%M").replace(tzinfo=timezone(timedelta(hours=8)))
+    return int(local.timestamp() * 1000)
 
 
 class SyntheticOaTransport:
