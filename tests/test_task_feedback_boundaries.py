@@ -72,9 +72,9 @@ class TaskFeedbackBoundaryTests(unittest.TestCase):
         for extra in ({'skill_id': self.case['skill_id']}, {'binding_id': self.case['binding_id']}, {'version': '1.0.1'}, {'test_id': 'test'}):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 self.record(body={**self.body, **extra})
-        with self.assertRaises(ValueError):
-            self.workbench.feedback(OWNER, skill_id=self.case['skill_id'], profile='use', task_id=self.case['task_id'],
-                rating='useful', request_key=self.body['requestKey'])
+        with self.assertRaises(TypeError):
+            self.workbench.record_task_feedback(OWNER, self.case['task_id'], skill_id=self.case['skill_id'],
+                rating='useful', comment='', request_key=self.body['requestKey'])
         self.assertEqual(self.rows('SELECT count(*) FROM skill_feedback'), [(0,)])
 
     def test_input_validation_is_bounded_and_does_not_write(self):

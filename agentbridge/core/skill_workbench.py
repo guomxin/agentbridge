@@ -244,8 +244,17 @@ class SkillWorkbench:
             return {'available': bool(version_exists and task['status'] in TERMINAL_TASK_STATUSES and not receipt),
                     'receipt': self._task_receipt(receipt) if receipt else None}
 
-    def feedback(self, owner, *, skill_id=None, profile=None, rating, comment='', version=None, test_id=None,
-                 binding_id=None, task_id=None, request_key=None):
+    def feedback(self, owner, *, skill_id, profile, rating, comment='', version=None, test_id=None, binding_id=None):
+        """Preserve the published skill-action contract for existing callers."""
+        return self._record_feedback(owner, skill_id=skill_id, profile=profile, rating=rating, comment=comment,
+            version=version, test_id=test_id, binding_id=binding_id)
+
+    def record_task_feedback(self, owner, task_id, *, rating, comment, request_key):
+        """Task attribution is server-owned and separate from skill tool inputs."""
+        return self._record_feedback(owner, task_id=task_id, rating=rating, comment=comment, request_key=request_key)
+
+    def _record_feedback(self, owner, *, skill_id=None, profile=None, rating, comment='', version=None,
+                         test_id=None, binding_id=None, task_id=None, request_key=None):
         from agentbridge.core.skill_authoring import text
         if not isinstance(rating, str) or rating not in {'useful', 'incorrect', 'not_applicable'}: raise ValueError('反馈类型无效')
         comment = text(comment, '反馈', 1000, empty=True)

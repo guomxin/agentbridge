@@ -282,7 +282,7 @@ class WorkspaceApplication:
     def task_feedback(self, account: dict, task_id: str, body: dict) -> dict:
         if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
             raise ValueError("原任务反馈只能包含评价、补充说明和请求标识。")
-        receipt = self.service.skill_authoring.workbench.feedback(account["user_subject"], task_id=task_id,
+        receipt = self.service.skill_authoring.workbench.record_task_feedback(account["user_subject"], task_id,
             rating=body["rating"], comment=body["comment"], request_key=body["requestKey"])
         return {"feedback": {"available": False, "receipt": receipt}}
 
