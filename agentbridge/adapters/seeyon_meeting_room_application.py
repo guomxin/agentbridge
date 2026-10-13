@@ -153,6 +153,7 @@ def build_meeting_room_application_field_card_schema(
     adapter,
     worker,
     arguments: dict,
+    *, allow_empty: bool = False,
 ) -> dict:
     seed = _normalize_application_card_seed(arguments)
     start_ms = _datetime_ms(seed["start_time"])
@@ -164,7 +165,7 @@ def build_meeting_room_application_field_card_schema(
         end_ms=end_ms,
     )
     free_rooms = available_rooms(snapshot, start_ms=start_ms, end_ms=end_ms)
-    if not free_rooms:
+    if not free_rooms and not allow_empty:
         raise MeetingRoomApplicationContractMismatch(
             "No OA meeting rooms are available for the requested time range."
         )
@@ -215,6 +216,17 @@ def build_meeting_room_application_field_card_schema(
         if part
     )
     return schema
+
+
+def meeting_room_application_options(adapter, worker, *, start_time: str, end_time: str) -> list[dict]:
+    """Read only the available rooms for one validated time range."""
+    inputs = normalize_meeting_room_application_inputs({
+        "purpose": "查询空闲会议室", "room": "候选查询", "start_time": start_time, "end_time": end_time,
+    })
+    start_ms, end_ms = _datetime_ms(inputs["start_time"]), _datetime_ms(inputs["end_time"])
+    snapshot = _query_room_snapshot(worker, adapter, start_ms=start_ms, end_ms=end_ms)
+    return [{"id": str(item["roomId"]), "name": str(item["roomName"])}
+            for item in available_rooms(snapshot, start_ms=start_ms, end_ms=end_ms)]
 
 
 def prepare_meeting_room_application(adapter, worker, arguments: dict) -> dict:

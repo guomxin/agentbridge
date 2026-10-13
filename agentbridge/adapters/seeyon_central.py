@@ -851,6 +851,12 @@ class SeeyonCentralAdapter:
             "transport": templates["transport"],
         }
 
+    def probe_business_draft_session(self, worker) -> dict:
+        """Observe the account on the authenticated home page before draft reads."""
+        worker.goto(self.base_url)
+        probe = self.probe_session(worker)
+        return {**probe, "observed_principal_ref": _principal_from_title(worker.page_title)}
+
     def invoke_capability(self, capability_name: str, worker, arguments: dict) -> dict:
         if capability_name == "oa.template.list":
             if arguments:

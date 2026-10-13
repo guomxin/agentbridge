@@ -164,6 +164,10 @@ class TaihuaBusinessRuleRejected(AdapterBusinessRuleRejected):
     error_code = "TAIHUA_BUSINESS_RULE_REJECTED"
 
 
+class TaihuaDuplicateWorkLog(TaihuaBusinessRuleRejected):
+    """The exact write is already represented by an existing log."""
+
+
 class TaihuaQueryFilterUnverified(AdapterBusinessRuleRejected):
     error_code = "QUERY_FILTER_UNVERIFIED"
 
@@ -637,7 +641,7 @@ def prepare_taihua_work_log_create(adapter, worker, arguments: dict) -> dict:
         inputs["project_code"] = project.get("code")
     existing = adapter.work_logs_for_date(worker, inputs["log_date"])
     if _matching_work_log(existing, inputs) is not None:
-        raise TaihuaBusinessRuleRejected(
+        raise TaihuaDuplicateWorkLog(
             "已存在日期、工时、项目和内容完全相同的个人日志，已停止重复创建。"
         )
     return {
@@ -685,7 +689,7 @@ def commit_taihua_work_log_create(
         raise TaihuaWorkLogContractMismatch("日志写入计划缺少冻结字段。")
     existing = adapter.work_logs_for_date(worker, inputs["log_date"])
     if _matching_work_log(existing, inputs) is not None:
-        raise TaihuaBusinessRuleRejected(
+        raise TaihuaDuplicateWorkLog(
             "授权后发现相同日志已存在，本次计划已停止以避免重复提交。"
         )
     payload = {

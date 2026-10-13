@@ -27,6 +27,7 @@ from agentbridge.core.capability_runtime import (
 )
 
 from agentbridge.core.write_catalog import resolve_write_function
+from agentbridge.core.business_draft_profiles import BY_PREPARE
 
 from agentbridge.core.field_submissions import (
     FieldSubmissionAccessDenied,
@@ -78,7 +79,7 @@ class ControlledWriteDependencies:
     pending_batch_definition: PendingBatchDefinition
     guard_skill_authorization: Callable[[Connection, str, str], None]
     validate_task_plan_execution: Callable[[dict], None]
-    business_draft_source_context: Callable[[str, str], dict] | None = None
+    business_draft_source_context: Callable[[str, str, str], dict] | None = None
     business_draft_successor: Callable[[str, str, str | None], dict | None] | None = None
 
 
@@ -176,7 +177,7 @@ class ControlledWriteExecutor:
                 parent_task_id=context.task_id, user_subject=session["user_subject"],
             )
             summary["title"] = f"{summary['title']}（第 {batch['current_ordinal']}/{batch['total_count']} 条）"
-        return {"plan": plan, "summary": summary}
+        return {"plan": plan, "summary": summary, "review_changed": review_changed}
 
     def prepare(
         self, *, context: CapabilityContext, session: dict, adapter: object,
@@ -272,12 +273,20 @@ class ControlledWriteExecutor:
                 **_prefill_trusted_field_schema(selected_schema, arguments),
                 "_agentbridge_resume_arguments": context_arguments,
             }
-            if (context.task_id and context.spec.name == "taihua.work_log.create.prepare"
-                    and self._dependencies.business_draft_source_context is not None):
+            profile = BY_PREPARE.get(context.spec.name)
+            if (context.task_id and profile and self._dependencies.business_draft_source_context is not None
+                    and not self._dependencies.tasks.get_batch_for_task(parent_task_id=context.task_id, user_subject=session["user_subject"])):
                 submission_schema["_agentbridge_business_draft"] = "v1"
-                submission_schema["notice"] = "请填写并核对工作日志；明确确认执行前不会向日志系统写入内容。"
+                submission_schema["_agentbridge_business_draft_profile"] = profile.marker
+                submission_schema["notice"] = "请填写并核对办理内容；明确确认执行前不会向业务系统写入内容。"
+                if profile.view_kind == "meeting_room":
+                    # New time ranges may offer rooms absent from the source snapshot.
+                    # The enhanced page binds choices itself; old hosts retain a name field.
+                    submission_schema["fields"] = [
+                        {"name": "room", "label": "会议室", "control": "text", "required": True, "max_length": 100}
+                        if field["name"] == "room" else field for field in submission_schema["fields"]]
                 submission_schema["_agentbridge_business_draft_context"] = self._dependencies.business_draft_source_context(
-                    session["user_subject"], context.task_id)
+                    session["user_subject"], context.task_id, context.spec.name)
             submission = self._dependencies.field_submissions.create(
                 user_subject=session["user_subject"],
                 system_id=session["system_id"],

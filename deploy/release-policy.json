@@ -7,8 +7,8 @@
   "schemaTransitions": {
     "agentbridge.db": {
       "beforeSha256": "1a8d8dab2c112525a7f92ac327183fef6e60351de902012080af5c97d095be86",
-      "afterSha256": "6ae572a499356c167588fc8b90c87ba5aa8b1edb108244ae7d8055ecea35ce37"
+      "afterSha256": "3ffa1596b8b356c8c1e2617016dd58713104e0b865fd793144cc6cbae6cf008e"
     }
   },
-  "reason": "Add three companion ledgers for versioned trusted drafts, immutable read-only previews, and atomic approval receipts. Existing tables and immutable interaction contracts remain unchanged. New decisions are resumed only by a draft-aware coordinator; do not roll back to an older reader while decisions are pending. The reviewed schema transition is fingerprint-gated; automatic program rollback remains forbidden after any schema change, and business data must never be rewound. No historical operation replay."
+  "reason": "Add four companion ledgers for versioned trusted drafts, immutable read-only previews, revision-bound room choices, and atomic approval receipts. Existing tables and immutable interaction contracts remain unchanged. New decisions are resumed only by a draft-aware coordinator; do not roll back to an older reader while decisions are pending. The reviewed schema transition is fingerprint-gated; automatic program rollback remains forbidden after any schema change, and business data must never be rewound. No historical operation replay."
 }

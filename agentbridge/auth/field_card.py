@@ -452,36 +452,71 @@ def _render_form(
     )
 
 
-def _render_review(value: Any) -> str:
-    if not isinstance(value, dict):
-        return ""
-    fields = value.get("fields")
-    if not isinstance(fields, list) or not fields:
-        return ""
-    rows = []
-    for item in fields[:100]:
+def _review_sections(fields: list) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Group known detail-row labels without interpreting or changing business data."""
+    clean = []
+    for item in fields:
         if not isinstance(item, dict):
             continue
         label = str(item.get("label") or "").strip()
-        field_value = str(item.get("value") or "").strip()
-        if not label or not field_value:
-            continue
-        rows.append(
-            f"<div class=\"review-row\"><dt>{escape(label)}</dt>"
-            f"<dd>{escape(field_value)}</dd></div>"
-        )
-    if not rows:
+        field_value = str(item["value"] if item.get("value") is not None else "").strip()
+        if label and field_value:
+            clean.append({"label": label, "value": field_value})
+    key_labels = {"事项", "申请人", "发起人", "姓名", "请假类型", "开始时间", "结束时间",
+                  "请假天数", "请假小时", "本次操作", "应付金额合计", "员工与月份", "移交人", "交接日期",
+                  "事由", "出差事由", "加班事由", "OA 当前确认结论", "日期", "发起日期"}
+    overview, groups = [], {}
+    for item in clean:
+        label, content = item["label"], item["value"]
+        match = re.match(r"^(航段\d+|工作明细\d+|财务明细\d+)\s*·", label)
+        if match:
+            groups.setdefault(match[1], []).append(item)
+        elif label in key_labels:
+            if len(content) > 180 or content.count("\n") >= 3:
+                overview.append({"label": label, "value": content[:160].replace("\n", " ") + "…（全文见下方）"})
+                groups.setdefault(label + " · 全文", []).append(item)
+            else:
+                overview.append(item)
+        elif len(content) > 180 or content.count("\n") >= 3:
+            groups.setdefault(label, []).append(item)
+        else:
+            groups.setdefault("其他申请信息", []).append(item)
+    if not overview and "其他申请信息" in groups:
+        overview = groups["其他申请信息"][:6]
+        groups["其他申请信息"] = groups["其他申请信息"][6:]
+    return overview, {name: items for name, items in groups.items() if items}
+
+
+def _render_review(value: Any, *, element_id: str = "review-title") -> str:
+    if not isinstance(value, dict):
         return ""
+    fields = value.get("fields")
+    overview, groups = _review_sections(fields if isinstance(fields, list) else [])
+    for group in value.get("groups", []) if isinstance(value.get("groups"), list) else []:
+        if not isinstance(group, dict):
+            continue
+        first, rest = _review_sections(group.get("fields") if isinstance(group.get("fields"), list) else [])
+        grouped_fields = first + [item for items in rest.values() for item in items]
+        if grouped_fields:
+            groups.setdefault(str(group.get("title") or "申请明细"), []).extend(grouped_fields)
+    if not overview and not groups:
+        return ""
+    def rows(items):
+        return "".join(f'<div class="review-row"><dt>{escape(item["label"])}</dt>'
+                       f'<dd>{escape(item["value"])}</dd></div>' for item in items)
+    grouped = "".join(f'<details class="review-group"><summary>{escape(name)}'
+                      f'<span> · {len(items)} 项</span></summary><dl>{rows(items)}</dl></details>'
+                      for name, items in groups.items())
     title = escape(str(value.get("title") or "审批详情"))
     effect = str(value.get("effect") or "").strip()
     effect_html = (
         f'<p class="review-effect">{escape(effect)}</p>' if effect else ""
     )
     return (
-        '<section class="review" aria-labelledby="review-title">'
+        f'<section class="review" aria-labelledby="{escape(element_id)}">'
         '<p class="review-kicker">审批依据</p>'
-        f'<h2 id="review-title">{title}</h2>{effect_html}'
-        f'<dl>{"".join(rows)}</dl></section>'
+        f'<h2 id="{escape(element_id)}">{title}</h2>{effect_html}'
+        f'<dl class="review-key-facts">{rows(overview)}</dl>{grouped}</section>'
     )
 
 
@@ -628,6 +663,11 @@ def _document(
     .review dt {{ margin:0 0 4px; color:var(--muted); font-size:11px; font-weight:700; }}
     .review dd {{ margin:0; color:var(--ink); font-size:14px; line-height:1.55;
       overflow-wrap:anywhere; white-space:pre-wrap; }}
+    .review-group {{ margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }}
+    .review-group summary {{ cursor:pointer; font-size:13px; font-weight:700; line-height:1.5; }}
+    .review-group summary span {{ color:var(--muted); font-weight:400; }}
+    .review-group dl {{ grid-template-columns:1fr; margin-top:6px; }}
+    .review-group .review-row {{ border-top:0; }}
     .form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:17px 16px; }}
     .field {{ min-width:0; }} .field.wide {{ grid-column:1 / -1; }}
     label,legend {{ display:block; margin:0 0 7px; color:#35423d; font-size:13px; font-weight:700; }}

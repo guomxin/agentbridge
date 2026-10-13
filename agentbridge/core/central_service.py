@@ -684,9 +684,11 @@ class CentralCapabilityService:
 
         self.validate_skill_task(user_subject, task_id, capability=capability_name)
         self.user_grants.require_capability(user_subject, capability_name, arguments)
-        if capability_name == "taihua.work_log.create.prepare" and arguments.get("input_submission_id"):
+        from agentbridge.core.business_draft_profiles import BY_PREPARE
+        if capability_name in BY_PREPARE and arguments.get("input_submission_id"):
             from agentbridge.core.business_drafts import BusinessDraftService
-            continued = BusinessDraftService(self).prepare_successor(str(arguments["input_submission_id"]), user_subject, task_id)
+            continued = BusinessDraftService(self).prepare_successor(str(arguments["input_submission_id"]), user_subject, task_id,
+                capability_name=capability_name, arguments=arguments)
             if continued is not None:
                 return continued
         grant_before = self.user_grants.get(user_subject)
@@ -3819,6 +3821,8 @@ class CentralCapabilityService:
                                 adapter,
                                 worker,
                                 arguments,
+                                **({"allow_empty": True} if capability_name == "oa.meeting_room.application.prepare"
+                                   and task_id and not self.tasks.get_batch_for_task(parent_task_id=task_id, user_subject=user_subject) else {}),
                             )
                         state = worker.capture_session_state()
                         self.session_states.save(

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {createDraftController, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
+import {createDraftController, mountBusinessDraft, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
+import {createDocument, descendants} from "./workspace_dom_fixture.mjs";
 
 const values = {log_date: "2026-10-13", hours: "8", project: "P001", content: "本页日志"};
 const initial = () => ({draftId: "draft-a", revision: 0, version: 0, state: "editable",
@@ -18,6 +19,7 @@ function harness(request, state = initial()) {
   const calls = [], rendered = [], receipts = [];
   let keys = 0;
   const controller = createDraftController({initial: state,
+    fieldNames: Object.keys(state.values),
     request(action, payload) { calls.push({action, payload}); return request(action, payload); },
     readValues: () => ({...local}), writeValues: next => {local = {...next};},
     render: view => rendered.push(view), makeKey: () => `request-${++keys}`,
@@ -213,4 +215,230 @@ test("continuation accepts only exact same-origin authorization paths", () => {
     "/flow/input/" + "a".repeat(43), "javascript:alert(1)", "https://user:pass@trusted.example" + path]) {
     assert.equal(safeFlowUrl(value, origin), null);
   }
+});
+
+const meeting = () => ({...initial(), values: {purpose: '研讨', room: '', start_time: '2026-10-14T10:00', end_time: '2026-10-14T11:00'},
+  ui: {viewKind: 'meeting_room'}, allowedActions: ['save', 'options', 'preview'], options: null});
+const optionsFor = (state, items = [{id: 'room-1', value: 'token-1', label: '第一会议室', available: true}]) => ({...state,
+  version: state.version + 1, options: {revision: state.revision, version: state.version + 1, field: 'room',
+    dependsOn: {start_time: state.values.start_time, end_time: state.values.end_time}, expiresAt: '2099-01-01T00:00:00Z', items,
+    selected: items.find(item => item.value === state.values.room) || null}});
+
+test('meeting candidates never choose a room automatically and time edits invalidate old selection immediately', async () => {
+  let backend = meeting();
+  const h = harness(async (action, payload) => {
+    if (action === 'values') backend = {...backend, revision: backend.revision + 1, version: backend.version + 1,
+      values: payload.values, options: null, preview: null, allowedActions: ['save', 'options', 'preview']};
+    if (action === 'options') backend = optionsFor(backend, [{id: 'room-2', value: 'token-2', label: '第二会议室', available: true}]);
+    if (action === 'preview') backend = reviewed(backend);
+    return backend;
+  }, backend);
+  await h.controller.loadOptions();
+  assert.equal(h.local().room, '');
+  assert.equal(h.controller.state().canApprove, false);
+  h.change({room: 'token-2'}); await h.controller.save();
+  assert.equal(h.controller.state().canApprove, true);
+  h.change({start_time: '2026-10-14T12:00', end_time: '2026-10-14T13:00'});
+  assert.equal(h.controller.state().optionsFresh, false);
+  assert.equal(h.controller.state().canApprove, false);
+  assert.equal(h.local().room, 'token-2');
+});
+
+test('late candidate response cannot replace a newer time range or its explicit selection', async () => {
+  const late = deferred(); let backend = meeting(); let count = 0;
+  const h = harness(async (action, payload) => {
+    if (action === 'options') {
+      if (++count === 1) return late.promise;
+      return backend = optionsFor(backend, [{id: 'new', value: 'new-token', label: '新时段房间', available: true}]);
+    }
+    if (action === 'values') return backend = {...backend, revision: 1, version: 3, values: payload.values};
+    throw new Error('no preview without selection');
+  }, backend);
+  const pending = h.controller.loadOptions();
+  h.change({start_time: '2026-10-15T10:00', end_time: '2026-10-15T11:00'});
+  await h.controller.save();
+  late.resolve(optionsFor(meeting())); await pending; await flush();
+  assert.equal(count, 2);
+  assert.equal(h.controller.state().current.options.dependsOn.start_time, '2026-10-15T10:00');
+  assert.equal(h.controller.state().current.options.items[0].value, 'new-token');
+  assert.equal(h.local().room, '');
+});
+
+test('non-time edits reuse rebased candidates and submit only registered meeting fields', async () => {
+  let backend = meeting(); backend.values.room = 'token-1'; backend = optionsFor(backend);
+  const h = harness(async (action, payload) => {
+    if (action === 'values') backend = {...backend, revision: 1, version: 2, values: payload.values,
+      options: {...backend.options, revision: 1}};
+    else if (action === 'preview') backend = reviewed(backend);
+    else throw new Error('candidate lookup should be reused');
+    return backend;
+  }, backend);
+  h.change({purpose: '修改用途'}); await h.controller.save();
+  assert.deepEqual(h.calls.map(item => item.action), ['values', 'preview']);
+  assert.deepEqual(Object.keys(h.calls[0].payload.values).sort(), ['end_time', 'purpose', 'room', 'start_time']);
+  assert.equal(h.controller.state().canApprove, true);
+});
+
+test('renamed or unavailable room keeps old token and cannot authorize', async () => {
+  let backend = meeting(); backend.values.room = 'token-1'; backend = optionsFor(backend);
+  const h = harness(async () => optionsFor(backend, [{id: 'room-1', value: 'renamed-token', label: '改名会议室', available: true}]), backend);
+  await h.controller.loadOptions(true);
+  assert.equal(h.local().room, 'token-1');
+  assert.equal(h.controller.state().canApprove, false);
+  await h.controller.approve();
+  assert.deepEqual(h.calls.map(item => item.action), ['options']);
+});
+
+test('changed approval materials show new preview and require a second explicit bound decision', async () => {
+  const state = reviewed({...initial(), values: {opinion: '核对后同意'}, ui: {viewKind: 'approval'}});
+  const updated = {...reviewed(state, 3), reviewChanged: true,
+    preview: {...state.preview, previewId: 'new-material-preview', summary: {fields: [{label: '事由', value: '最新事由'}]}}};
+  let attempts = 0;
+  const h = harness(async (action, payload) => {
+    if (action === 'state') return updated;
+    if (action === 'approve' && ++attempts === 1) throw Object.assign(new Error('材料已更新'),
+      {status: 409, code: 'DRAFT_REVIEW_CHANGED', current: updated});
+    return {...updated, version: 4, state: 'finalized', allowedActions: [], receipt: {requestKey: payload.requestKey}};
+  }, state);
+  await h.controller.approve();
+  assert.equal(attempts, 1);
+  assert.equal(h.controller.state().reviewChanged, true);
+  assert.equal(h.controller.state().current.preview.previewId, 'new-material-preview');
+  assert.equal(h.controller.state().canApprove, true);
+  await h.controller.poll();
+  assert.equal(attempts, 1);
+  await h.controller.approve();
+  const decisions = h.calls.filter(item => item.action === 'approve');
+  assert.equal(decisions[1].payload.previewId, 'new-material-preview');
+  assert.notEqual(decisions[0].payload.requestKey, decisions[1].payload.requestKey);
+  assert.equal(h.local().opinion, '核对后同意');
+});
+
+test('material overview keeps key reason excerpt while expanded groups retain every full value', () => {
+  const reason = '完整事由'.repeat(100);
+  const result = reviewSections({fields: [{label: '事由', value: reason}, {label: '请假小时', value: 0},
+    ...Array.from({length: 110}, (_, i) => ({label: `航段${i} · 行程`, value: `目的地${i}`}))],
+    groups: [{title: '补充材料', fields: [{label: '附件', value: '<script>纯文本</script>'}]}]});
+  assert.match(result.overview.find(item => item.label === '事由').value, /全文见下方/);
+  assert.equal(result.overview.find(item => item.label === '请假小时').value, '0');
+  assert.equal(result.groups.find(([name]) => name === '事由 · 全文')[1][0].value, reason);
+  assert.equal(result.groups.find(([name]) => name === '航段109')[1][0].value, '目的地109');
+  assert.equal(result.groups.find(([name]) => name === '补充材料')[1][0].value, '<script>纯文本</script>');
+});
+
+function mountHarness(state) {
+  const document = createDocument(), create = document.createElement;
+  document.createElement = tag => { const node = create(tag); node.querySelectorAll = selector =>
+    descendants(node).filter(item => selector === 'details[open]' && item.tag === 'details' && item.open); return node; };
+  const nodes = new Map(); document.getElementById = id => nodes.get(id);
+  const root = document.createElement('main');
+  for (const id of ['draft-form', 'draft-status', 'draft-error', 'draft-submit', 'draft-retry', 'draft-conflict',
+    'draft-use-server', 'draft-keep-local', 'draft-review', 'draft-evidence', 'draft-material-change',
+    'review-fields', 'review-effect', 'room-options', 'room-status', 'room-selected', ...Object.keys(state.values),
+    ...Object.keys(state.values).flatMap(name => [`error-${name}`, `conflict-local-${name}`, `conflict-server-${name}`, `conflict-row-${name}`])]) {
+    const node = document.createElement('div'); node.id = id; node.value = state.values[id] || '';
+    node.validity = {valid: true}; node.checkValidity = () => true; nodes.set(id, node); root.append(node);
+  }
+  const responses = [];
+  const window = {fetch: async () => ({ok: true, json: async () => responses.shift() || state}),
+    location: {origin: 'https://trusted.example', hash: '', replace() {}}, setTimeout() {}, clearTimeout() {}, addEventListener() {}};
+  const controller = mountBusinessDraft({state, fieldNames: Object.keys(state.values), csrfToken: 't', apiUrl: '/draft'}, document, window);
+  return {controller, document, nodes, responses};
+}
+
+test('candidate cards keep focused radio DOM across polling and disable stale candidates without replacement', async () => {
+  let state = meeting(); state.values.room = 'token-1'; state = reviewed(optionsFor(state));
+  const h = mountHarness(state); await flush();
+  const radio = descendants(h.nodes.get('room-options')).find(node => node.tag === 'input');
+  radio.focus(); await h.controller.poll();
+  assert.equal(h.document.activeElement, radio);
+  assert.equal(radio.checked, true);
+  h.nodes.get('start_time').value = '2026-10-15T10:00'; h.controller.edit();
+  assert.equal(radio.disabled, true);
+  assert.equal(h.nodes.get('room').value, 'token-1');
+  assert.match(h.nodes.get('room-selected').textContent, /不会自动替换/);
+});
+
+test('approval rendering uses safe text nodes, preserves expanded material, and replaces changed evidence visibly', async () => {
+  const review = {title: '申请', fields: [{label: '申请人', value: '甲'}, {label: '事由', value: '<script>材料</script>'.repeat(20)}]};
+  let state = reviewed({...initial(), values: {opinion: '同意'}, ui: {viewKind: 'approval', review}});
+  state.preview.summary = review;
+  const h = mountHarness(state); await flush();
+  const detail = descendants(h.nodes.get('draft-evidence')).find(node => node.tag === 'details');
+  detail.open = true; detail.focus();
+  await h.controller.poll();
+  assert.equal(h.document.activeElement, detail); assert.equal(detail.open, true);
+  assert.ok(!descendants(h.nodes.get('draft-evidence')).some(node => node.tag === 'script'));
+  h.responses.push({...state, version: 3, reviewChanged: true,
+    preview: {...state.preview, summary: {title: '更新申请', fields: [{label: '事由', value: '最新内容'}]}}});
+  await h.controller.poll();
+  assert.equal(h.nodes.get('draft-material-change').hidden, false);
+  assert.match(h.nodes.get('draft-evidence').textContent, /最新内容/);
+});
+
+test('seeded space-format times match native datetime-local values without repeated candidate requests', async () => {
+  let state = meeting(); state.values.room = 'token-1'; state = optionsFor(state);
+  state.options.dependsOn = {start_time: '2026-10-14 10:00', end_time: '2026-10-14 11:00:00'};
+  const h = harness(async action => { assert.equal(action, 'preview'); return reviewed(state); }, state);
+  assert.equal(h.controller.state().optionsFresh, true);
+  h.controller.start(); await flush();
+  assert.deepEqual(h.calls.map(item => item.action), ['preview']);
+  assert.equal(h.controller.state().canApprove, true);
+});
+
+test('reload preserves changed-material warning from nested preview metadata', () => {
+  const state = reviewed({...initial(), values: {opinion: '同意'}, ui: {viewKind: 'approval'}});
+  state.preview.reviewChanged = true;
+  const h = harness(async () => state, state);
+  assert.equal(h.controller.state().reviewChanged, true);
+});
+
+test('state request started before our save does not mislabel the saved revision as another tab', async () => {
+  const late = deferred(); let backend = initial();
+  const h = harness(async (action, payload) => {
+    if (action === 'state') return late.promise;
+    if (action === 'values') return backend = {...backend, revision: 1, version: 2, values: payload.values};
+    return backend = reviewed(backend, 3);
+  });
+  const pending = h.controller.poll();
+  h.change({content: '本页已保存'}); await h.controller.save();
+  late.resolve(backend); await pending;
+  assert.equal(h.controller.state().conflict, null);
+  assert.equal(h.controller.state().canApprove, true);
+});
+
+test('candidate refresh cannot overlap an in-flight preview at the same revision', async () => {
+  let state = meeting(); state.values.room = 'token-1'; state = optionsFor(state);
+  const waiting = deferred();
+  const h = harness(async action => {
+    assert.equal(action, 'preview'); return waiting.promise;
+  }, state);
+  const pending = h.controller.preview();
+  await h.controller.loadOptions(true);
+  assert.deepEqual(h.calls.map(item => item.action), ['preview']);
+  waiting.resolve(reviewed(state)); await pending;
+});
+
+test('first ordinary meeting and approval previews never display a changed-material warning', async () => {
+  let room = meeting(); room.values.room = 'token-1'; room = reviewed(optionsFor(room));
+  const leave = reviewed({...initial(), values: {opinion: '同意'}, ui: {viewKind: 'approval',
+    review: {title: '正常申请', snapshot: 'preview', reviewChanged: false, fields: [{label: '事由', value: '正常事由'}]}}});
+  for (const state of [room, leave]) {
+    state.preview.reviewChanged = false;
+    state.preview.summary = {reviewChanged: false, authorization_notice: '授权后将立即提交',
+      fields: [{label: '本次操作', value: '提交'}]};
+    const h = mountHarness(state); await flush();
+    assert.equal(h.controller.state().reviewChanged, false);
+    assert.equal(h.nodes.get('draft-material-change').hidden, true);
+    assert.equal(h.nodes.get('draft-status').textContent, '已检查，可以确认提交');
+  }
+});
+
+test('changed-material metadata requires explicit booleans rather than truthy strings or snapshots', () => {
+  const state = reviewed(initial());
+  state.reviewChanged = 'false'; state.preview.reviewChanged = 'false';
+  state.preview.summary.reviewChanged = 'preview';
+  state.ui = {review: {snapshot: 'preview', reviewChanged: 'source'}};
+  const h = harness(async () => state, state);
+  assert.equal(h.controller.state().reviewChanged, false);
 });

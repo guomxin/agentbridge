@@ -42,6 +42,7 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'business_drafts'],
                     ['table', 'business_draft_previews'],
                     ['table', 'business_draft_decisions'],
+                    ['table', 'business_draft_options'],
                     ['trigger', 'immutable_business_draft_preview'],
                     ['trigger', 'immutable_business_draft_decision'],
                     ['index', 'business_drafts_expiry'],

@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import Mock
 
 from agentbridge.adapters.taihua import TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA
-from agentbridge.auth.business_draft_card import BusinessDraftApplication, business_draft_target
+from agentbridge.auth.business_draft_card import BusinessDraftApplication, UI_PROFILES, business_draft_target
+from agentbridge.auth.field_card import _render_review
 from agentbridge.auth.card import AuthCardResponse
 from agentbridge.auth.flow import TrustedFlowApplication
 
@@ -179,6 +180,72 @@ class BusinessDraftCardTests(unittest.TestCase):
         self.assertEqual(response.status, 503)
         self.assertNotIn(b"private", response.body)
         self.assertNotIn(b"cookie", response.body)
+
+    def test_only_registered_versioned_profiles_upgrade_new_oa_sources(self):
+        for profile_id, profile in UI_PROFILES.items():
+            with self.subTest(profile=profile_id):
+                schema = deepcopy(profile["schema"])
+                schema.update(_agentbridge_business_draft="v1",
+                    _agentbridge_business_draft_profile={"id": profile_id, "version": "1"})
+                context = SimpleNamespace(kind="input", task_id="task-id", resource={
+                    "capability_name": profile["prepare"], "form_schema": schema})
+                self.assertTrue(self.app.supports(context))
+                schema["_agentbridge_business_draft_profile"]["version"] = "2"
+                self.assertFalse(self.app.supports(context))
+                del schema["_agentbridge_business_draft_profile"]
+                self.assertEqual(self.app.supports(context), profile_id == "taihua.work_log.create")
+        context.resource["capability_name"] = "oa.overtime.approval.prepare"
+        self.assertFalse(self.app.supports(context))
+
+    def test_meeting_renders_time_before_explicit_room_candidates_and_routes_options(self):
+        profile = UI_PROFILES["oa.meeting_room.application.create"]
+        self.state.update(ui={"profileId": "oa.meeting_room.application.create", "profileVersion": "1",
+            "viewKind": "meeting_room", "fields": profile["schema"]["fields"]},
+            values={"purpose": "研讨", "room": 'token\" onclick=\"bad',
+                    "start_time": "2026-10-14T10:00", "end_time": "2026-10-14T11:00"})
+        response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=False)
+        html = response.body.decode()
+        self.assertEqual(response.status, 200)
+        self.assertIn('id="room-options" class="room-options" role="radiogroup"', html)
+        self.assertIn('type="hidden" id="room"', html)
+        self.assertIn('value="token&quot; onclick=&quot;bad"', html)
+        self.assertLess(html.index('id="start_time"'), html.index('id="room"'))
+        self.assertIn('disabled>确认并申请会议室', html)
+        self.backend.options.return_value = self.state
+        response = self.app.mutate(SOURCE_ID, presentation_id=None, action="options", token="t",
+            csrf_cookie="t", content_type="application/json", body=b'{"expectedRevision":2}')
+        self.assertEqual(response.status, 200)
+        self.backend.options.assert_called_once_with(source_submission_id=SOURCE_ID, presentation_id=None,
+            csrf_token="t", csrf_cookie="t", expected_revision=2)
+        self.assertEqual(business_draft_target(f"/flow/input/{SOURCE_ID}/draft/options"), (SOURCE_ID, None, "options"))
+
+    def test_leave_materials_precede_opinion_and_updated_material_alert_is_present(self):
+        profile = UI_PROFILES["oa.leave.approval"]
+        self.state.update(ui={"profileId": "oa.leave.approval", "profileVersion": "1", "viewKind": "approval",
+            "fields": profile["schema"]["fields"], "review": {"title": "年假申请", "fields": [
+                {"label": "申请人", "value": "测试申请人"}, {"label": "事由", "value": "需要休假"},
+                {"label": "附件说明", "value": "附件材料" * 100}]}}, values={"opinion": "核对后同意"})
+        response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=False)
+        html = response.body.decode()
+        self.assertEqual(response.status, 200)
+        self.assertLess(html.index('id="draft-evidence-title"'), html.index('id="opinion"'))
+        self.assertIn('disabled>确认并审批通过', html)
+        self.assertIn("材料已更新，请重新核对", html)
+        self.assertIn('<details class="review-group">', html)
+        self.assertNotIn('id="affair_id"', html)
+
+    def test_review_retains_full_material_and_key_reason_excerpt_with_escaped_text(self):
+        reason = "事由内容" * 100 + '<script>unsafe()</script>'
+        html = _render_review({"fields": [{"label": "事由", "value": reason},
+            {"label": "请假小时", "value": 0}] + [{"label": f"航段{i} · 行程", "value": f"目的地{i}"} for i in range(110)],
+            "groups": [{"title": "额外材料", "fields": [{"label": "补充", "value": "完整保留"}]}]})
+        self.assertIn("…（全文见下方）", html)
+        self.assertLess(html.index("事由内容"), html.index("<details"))
+        self.assertIn("目的地109", html)
+        self.assertIn("完整保留", html)
+        self.assertIn("&lt;script&gt;unsafe()&lt;/script&gt;", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn('<dd>0</dd>', html)
 
 
 if __name__ == "__main__":
