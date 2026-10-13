@@ -281,6 +281,17 @@ class InteractionStore:
 
 def build_interaction_envelope(record: dict, resource: dict) -> dict:
     interaction_type = record["interaction_type"]
+    display = dict(record["display"])
+    # Never accept reserved business hints from arbitrary display/schema text.
+    # These optional labels describe an entry, not authorization or completion.
+    display.pop("businessView", None)
+    if interaction_type == "business_input":
+        from agentbridge.core.business_draft_profiles import profile_for_source
+        from agentbridge.core.business_drafts import BusinessDraftError
+        try:
+            display["businessView"] = profile_for_source(resource).presentation()
+        except (BusinessDraftError, TypeError, AttributeError):
+            pass  # Old/unknown contracts keep their original generic entry.
     state, ready, resume_completed = _project_state(
         interaction_type,
         str(resource["state"]),
@@ -300,7 +311,7 @@ def build_interaction_envelope(record: dict, resource: dict) -> dict:
             "url": resource["card_url"],
             "modelMustNotCollectValues": True,
         },
-        "display": record["display"],
+        "display": display,
         "expiresAt": record["expires_at"],
         "poll": {
             "tool": "agentbridge_interaction_get",

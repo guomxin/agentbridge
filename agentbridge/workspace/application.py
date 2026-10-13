@@ -270,6 +270,7 @@ class WorkspaceApplication:
         return {
             "task": _public_task(task),
             "skill": self.service.skills.task_presentation(account["user_subject"], task_id),
+            "feedback": self.service.skill_authoring.workbench.task_feedback(account["user_subject"], task_id),
             "plan": task_plan_response(plan) if plan is not None else None,
             "events": [_public_event(event) for event in events],
             "artifacts": [_public_artifact(item) for item in artifacts],
@@ -277,6 +278,13 @@ class WorkspaceApplication:
             "interactions": interactions,
             "batch": workspace_batch_projection(batch),
         }
+
+    def task_feedback(self, account: dict, task_id: str, body: dict) -> dict:
+        if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
+            raise ValueError("原任务反馈只能包含评价、补充说明和请求标识。")
+        receipt = self.service.skill_authoring.workbench.feedback(account["user_subject"], task_id=task_id,
+            rating=body["rating"], comment=body["comment"], request_key=body["requestKey"])
+        return {"feedback": {"available": False, "receipt": receipt}}
 
     def artifact_history(self, account: dict, *, limit: int = 20) -> list[dict]:
         limit = min(max(int(limit), 1), 50)

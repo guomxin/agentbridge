@@ -10,6 +10,25 @@
     "interactionId": {"type": "string", "minLength": 16, "maxLength": 128},
     "type": {"enum": ["credential", "business_input", "execution_authorization"]},
     "state": {"enum": ["pending", "processing", "completed", "declined", "expired", "failed", "superseded"]},
+    "display": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "businessView": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaVersion", "profileId", "profileVersion", "viewKind", "entryLabel", "submitLabel"],
+          "properties": {
+            "schemaVersion": {"const": "agentbridge.business-view.v1"},
+            "profileId": {"enum": ["taihua.work_log.create", "oa.meeting_room.application.create", "oa.leave.approval"]},
+            "profileVersion": {"const": "1"},
+            "viewKind": {"enum": ["work_log", "meeting_room", "approval"]},
+            "entryLabel": {"type": "string", "maxLength": 40},
+            "submitLabel": {"type": "string", "maxLength": 40}
+          }
+        }
+      }
+    },
     "presentation": {
       "type": "object",
       "required": ["url"],

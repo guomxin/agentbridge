@@ -197,7 +197,7 @@ export function displayTaskTitle(value) {
 }
 
 export function skillProfileLabel(profile) {
-  return ({review: "总结与复核", track: "进展追踪", search: "相似案例检索",
+  return ({use: "使用", review: "总结与复核", track: "进展追踪", search: "相似案例检索",
     preview: "草稿预览", fill: "准备填写", single: "单项办理", batch: "批量办理"})[profile] || profile || "";
 }
 
@@ -246,7 +246,18 @@ export function interactionLabel(type) {
   );
 }
 
-export function interactionActionLabel(type) {
+export function interactionActionLabel(type, display) {
+  if (type === "business_input") {
+    const view = display?.businessView;
+    const labels = {
+      "taihua.work_log.create": ["work_log", "填写工作日志"],
+      "oa.meeting_room.application.create": ["meeting_room", "选择会议室"],
+      "oa.leave.approval": ["approval", "核对请假材料"],
+    };
+    const known = Object.hasOwn(labels, view?.profileId) ? labels[view.profileId] : null;
+    if (view?.schemaVersion === "agentbridge.business-view.v1" && view.profileVersion === "1" &&
+        known && view.viewKind === known[0]) return known[1];
+  }
   return (
     {
       credential: "安全登录",

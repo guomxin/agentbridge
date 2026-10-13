@@ -242,3 +242,14 @@ test("destroying a streaming account ignores late chunks and closes the reader w
   assert.equal(canceled, 1);
   assert.equal(state.activeStreams.size, 0);
 });
+
+test('task feedback conflict preserves HTTP status and the authoritative receipt without replay', async () => {
+  const scope = createLifecycle().scope(); let calls = 0;
+  const feedback = {available:false,receipt:{status:'recorded',feedback_id:'feedback-1',rating:'useful',comment:'原评价'}};
+  const {api} = createWorkspaceRequests({document,getScope:() => scope,fetch:async () => {
+    calls++; return {ok:false,status:409,json:async () => ({error:{code:'TASK_FEEDBACK_CONFLICT',message:'此任务已有评价'},feedback})};
+  }});
+  await assert.rejects(api('/api/tasks/task/feedback',{method:'POST',csrf:true,body:{rating:'incorrect',comment:'其他评价',requestKey:'key'}}),
+    error => error.status === 409 && error.code === 'TASK_FEEDBACK_CONFLICT' && error.feedback.receipt.feedback_id === 'feedback-1');
+  assert.equal(calls,1); scope.dispose();
+});

@@ -36,6 +36,8 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
         payload?.error?.message || payload?.error?.code || "请求失败",
       );
       error.code = payload?.error?.code;
+      error.status = response.status;
+      if (payload?.feedback) error.feedback = payload.feedback;
       throw error;
     }
     return payload;

@@ -88,6 +88,36 @@ class InteractionStoreTests(unittest.TestCase):
                 envelope["presentation"]["modelMustNotCollectValues"]
             )
 
+    def test_business_view_hints_are_static_and_fail_closed_for_unknown_contracts(self):
+        from copy import deepcopy
+        from agentbridge.core.business_draft_profiles import PROFILES
+        with TemporaryDirectory() as tmp:
+            record = self._register(InteractionStore(Path(tmp) / "agentbridge.db"))
+            record["display"]["businessView"] = {"entryLabel": "injected"}
+            for profile in PROFILES:
+                with self.subTest(profile=profile.profile_id):
+                    resource = {"state": "pending", "card_url": "https://cards.example.test/input/source",
+                        "capability_name": profile.prepare, "values": {"secret": "private input"},
+                        "form_schema": {"_agentbridge_business_draft": "v1",
+                            "_agentbridge_business_draft_profile": profile.marker,
+                            "schema_version": profile.schema_version,
+                            "fields": [{"name": name, "label": "private label"} for name in profile.fields],
+                            "review": {"secret": "private evidence"}}}
+                    envelope = build_interaction_envelope(record, resource)
+                    self.assertEqual(envelope["display"]["businessView"], profile.presentation())
+                    self.assertNotIn("private", str(envelope))
+                    self.assertEqual(record["display"]["businessView"]["entryLabel"], "injected")
+                    for mutate in (
+                        lambda r: r.update(capability_name="unknown.prepare"),
+                        lambda r: r["form_schema"].update(_agentbridge_business_draft_profile={"id": profile.profile_id, "version": "2"}),
+                        lambda r: r["form_schema"].update(schema_version="unknown.v2"),
+                        lambda r: r["form_schema"].update(fields=[{"name": "unexpected"}]),
+                        lambda r: r["form_schema"].update(fields=None),
+                    ):
+                        unknown = deepcopy(resource)
+                        mutate(unknown)
+                        self.assertNotIn("businessView", build_interaction_envelope(record, unknown)["display"])
+
     @staticmethod
     def _register(store, *, session_id="session-a"):
         return store.register(

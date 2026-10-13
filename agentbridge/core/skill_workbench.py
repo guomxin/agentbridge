@@ -4,10 +4,11 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timezone
 import json
+import re
 import threading
 import sqlite3
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agentbridge.core.business_skills import _json, skill_catalog
 from agentbridge.core.skill_quality import (bundle_diff, diagnostics, export_standard,
@@ -16,10 +17,17 @@ from agentbridge.core.skill_job_executor import SkillJobDependencies, SkillJobEx
 from agentbridge.core.skill_job_queue import SkillJobQueue
 from agentbridge.core.skill_ranking import rank_skill_candidates
 from agentbridge.core.user_grants import UserGrantConflict
+from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
 
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
+
+
+class TaskFeedbackError(RuntimeError):
+    def __init__(self, code, message, *, feedback=None):
+        super().__init__(message)
+        self.code, self.feedback = code, feedback
 
 
 class SkillWorkbench:
@@ -205,13 +213,64 @@ class SkillWorkbench:
         item.pop('owner_subject', None)
         return item
 
-    def feedback(self, owner, *, skill_id, profile, rating, comment='', version=None, test_id=None, binding_id=None):
+    @staticmethod
+    def _task_receipt(row):
+        return {"status": "recorded", **{key: row[key] for key in
+                ("feedback_id", "rating", "comment", "version", "profile")}}
+
+    def _task_feedback_context(self, db, owner, task_id):
+        task = self.authoring.service.tasks._select_owned_task(db, task_id, owner)
+        binding = db.execute('''SELECT b.* FROM skill_task_bindings t JOIN skill_bindings b USING(binding_id)
+            WHERE t.task_id=? AND t.user_subject=? AND b.user_subject=?''', (task_id, owner, owner)).fetchone()
+        receipt = None
+        if binding:
+            # Only this task's original binding is attribution; current catalog
+            # settings and revoked execution permission do not rewrite history.
+            receipt = db.execute('''SELECT f.*,c.profile,c.source_json FROM skill_feedback f
+                JOIN skill_feedback_context c USING(feedback_id)
+                WHERE f.owner_subject=? AND json_extract(c.source_json,'$.task_id')=?
+                  AND json_extract(c.source_json,'$.binding_id')=?
+                  AND f.skill_id=? AND f.version=? AND c.profile=?
+                ORDER BY f.created_at,f.feedback_id LIMIT 1''',
+                (owner, task_id, binding['binding_id'], binding['skill_id'], binding['version'], binding['profile'])).fetchone()
+        return task, binding, receipt
+
+    def task_feedback(self, owner, task_id):
+        """Read attribution only; this does not grant access to task results."""
+        with closing(self.store.connect()) as db:
+            task, binding, receipt = self._task_feedback_context(db, owner, task_id)
+            version_exists = bool(binding and db.execute('SELECT 1 FROM skill_versions WHERE skill_id=? AND version=?',
+                (binding['skill_id'], binding['version'])).fetchone())
+            return {'available': bool(version_exists and task['status'] in TERMINAL_TASK_STATUSES and not receipt),
+                    'receipt': self._task_receipt(receipt) if receipt else None}
+
+    def feedback(self, owner, *, skill_id=None, profile=None, rating, comment='', version=None, test_id=None,
+                 binding_id=None, task_id=None, request_key=None):
         from agentbridge.core.skill_authoring import text
-        if rating not in {'useful', 'incorrect', 'not_applicable'}: raise ValueError('反馈类型无效')
+        if not isinstance(rating, str) or rating not in {'useful', 'incorrect', 'not_applicable'}: raise ValueError('反馈类型无效')
         comment = text(comment, '反馈', 1000, empty=True)
         if test_id is not None and binding_id is not None: raise ValueError('反馈只能关联一种来源')
+        if (task_id is None) != (request_key is None): raise ValueError('原任务反馈需要任务和请求标识')
+        if task_id is not None:
+            if any(value is not None for value in (skill_id, profile, version, test_id, binding_id)):
+                raise ValueError('原任务反馈的业务助手由服务器确定')
+            text(task_id, '任务标识', 128)
+            if not isinstance(request_key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', request_key):
+                raise ValueError('反馈请求标识无效')
         with closing(self.store.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
+            if task_id is not None:
+                task, task_binding, existing = self._task_feedback_context(db, owner, task_id)
+                if existing:
+                    receipt = self._task_receipt(existing)
+                    if existing['rating'] != rating or existing['comment'] != comment:
+                        raise TaskFeedbackError('TASK_FEEDBACK_CONFLICT', '此任务已有反馈，原反馈不能被另一页面覆盖。',
+                            feedback={'available': False, 'receipt': receipt})
+                    return receipt
+                if not task_binding: raise KeyError('原任务没有可反馈的业务助手绑定')
+                if task['status'] not in TERMINAL_TASK_STATUSES:
+                    raise TaskFeedbackError('TASK_FEEDBACK_NOT_AVAILABLE', '任务尚未结束，请在任务结束后反馈。')
+                binding_id, skill_id, profile = (task_binding[key] for key in ('binding_id', 'skill_id', 'profile'))
             if test_id is not None:
                 text(test_id, '试用标识', 128)
                 sample = db.execute('''SELECT t.*,d.skill_id FROM skill_draft_tests t JOIN skill_drafts d USING(draft_id)
@@ -251,12 +310,19 @@ class SkillWorkbench:
                 source = {'kind': 'catalog', 'profile': profile, 'version': current,
                           'content_hash': item['content_hash']}
             if version is not None and version != current: raise UserGrantConflict('版本与反馈来源不一致，请刷新后反馈')
-            feedback_id = str(uuid4())
+            if task_id is not None:
+                source.update(task_id=task_id, task_status=task['status'], request_key=request_key)
+                feedback_id = str(uuid5(NAMESPACE_URL, _json(['agentbridge.task-feedback.v1', owner, task_id, binding_id, request_key])))
+            else:
+                feedback_id = str(uuid4())
             # Keep the original seven-column table writable by the previous
             # release; attribution is an atomic, optional companion record.
             db.execute('INSERT INTO skill_feedback VALUES (?,?,?,?,?,?,?)',
                        (feedback_id, owner, skill_id, current, rating, comment, timestamp()))
             db.execute('INSERT INTO skill_feedback_context VALUES (?,?,?)', (feedback_id, profile, _json(source)))
+        if task_id is not None:
+            return {'status': 'recorded', 'feedback_id': feedback_id, 'version': current, 'profile': profile,
+                    'rating': rating, 'comment': comment}
         return {'status': 'recorded', 'feedback_id': feedback_id, 'version': current, 'profile': profile, 'source': source}
 
     def metrics(self, owner=None):

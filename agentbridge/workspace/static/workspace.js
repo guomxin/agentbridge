@@ -37,6 +37,7 @@ const state = {
   localMessages: new Map(),
   syncedMessages: new Map(),
   taskCards: new Map(),
+  taskFeedback: new Map(),
   skillCards: new Map(),
   taskCardMeta: new Map(),
   queryGroupOpen: new Map(),
@@ -76,6 +77,7 @@ const { consumeChatStream } = createChatStream({
 const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
+  submitTaskFeedback,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -106,7 +108,7 @@ function scopedApi(scope) {
 
 function resetWorkspaceState() {
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
-    "syncedMessages", "taskCards", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
+    "syncedMessages", "taskCards", "taskFeedback", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
     state[name].clear();
   }
   state.tasks = [];
@@ -1208,15 +1210,30 @@ async function loadTaskDetail(taskId) {
   renderTasks();
   const detail = $("#task-detail");
   detail.classList.remove("mobile-empty");
-  detail.replaceChildren(emptyState("正在读取任务"));
+  const preserveDetail = detail.dataset.taskId === taskId && detail.querySelector(".detail-heading");
+  if (!preserveDetail) detail.replaceChildren(emptyState("正在读取任务"));
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
     scope.assertCurrent();
     if (state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) renderTaskDetail(result);
   } catch (error) {
     if (isCancellation(error)) return;
-    if (detailRequest === state.taskDetailRequest) detail.replaceChildren(emptyState(friendlyError(error)));
+    if (detailRequest === state.taskDetailRequest) {
+      if (preserveDetail && (!error.status || error.status >= 500)) toast(friendlyError(error), true, `task:${taskId}:refresh`);
+      else {
+        detail.replaceChildren(emptyState(friendlyError(error)));
+        delete detail.dataset.taskId;
+      }
+    }
   }
+}
+
+async function submitTaskFeedback(taskId, payload) {
+  const scope = sessionScope;
+  const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/feedback`,
+    {method: "POST", body: payload, csrf: true});
+  scope.assertCurrent();
+  return result;
 }
 
 async function continueTask(task, button) {

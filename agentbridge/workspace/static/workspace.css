@@ -810,6 +810,23 @@ code {
   outline-offset: 2px;
 }
 
+.task-feedback-identity { margin: 0 0 12px; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
+.task-feedback-form { display: grid; gap: 12px; padding-bottom: 4px; }
+.task-feedback-choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; border: 0; }
+.task-feedback-choices legend { margin-bottom: 8px; font-size: 13px; }
+.task-feedback-choices label { display: inline-flex; gap: 6px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
+.task-feedback-choices label:has(input:checked) { border-color: var(--teal); background: var(--soft); }
+.task-feedback-choices input { width: auto; margin: 0; accent-color: var(--teal); }
+.task-feedback-form > label { display: grid; gap: 6px; font-size: 13px; }
+.task-feedback-form textarea { box-sizing: border-box; width: 100%; min-height: 76px; resize: vertical; font: inherit; }
+.task-feedback-form > button { justify-self: start; }
+.task-feedback-status { margin: 8px 0 12px; line-height: 1.6; color: var(--muted); }
+.task-feedback-status:empty { display: none; }
+.task-feedback-status.error { color: #9b3c32; }
+.task-feedback-receipt { padding: 12px; border-radius: 5px; background: var(--soft); }
+.task-feedback-receipt p { margin: 6px 0 0; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-feedback input:disabled, .task-feedback textarea:disabled { opacity: .65; cursor: not-allowed; }
+
 .batch-item {
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr) auto;

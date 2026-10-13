@@ -4,12 +4,12 @@ import { createTaskCards } from "../agentbridge/workspace/static/workspace_cards
 import { reconcileChildren } from "../agentbridge/workspace/static/workspace_dom.mjs";
 import { createDocument, descendants } from "./workspace_dom_fixture.mjs";
 
-function fixture() {
+function fixture(options = {}) {
   const document = createDocument(), chat = document.createElement("main"), detail = document.createElement("main");
   const state = {taskCards:new Map(), taskCardMeta:new Map()};
   const cards = createTaskCards({document, state, $: selector => selector === "#task-detail" ? detail : chat,
     setTimelineNode() {}, appendArtifactList() {}, scrollChat() {},
-    renderChatTimeline() { reconcileChildren(chat, [...state.taskCards.values()]); }});
+    renderChatTimeline() { reconcileChildren(chat, [...state.taskCards.values()]); }, ...options});
   return {document, chat, detail, state, ...cards};
 }
 function interaction(id, type="business_input", state="pending") {
@@ -132,5 +132,130 @@ test("trusted entry accepts local HTTP card servers but rejects remote HTTP, cre
       assert.equal(links(root).length, Number(allowed), url);
       if (allowed) assert.equal(links(root)[0].href, url);
     }
+  }
+});
+
+const feedbackResult = (version=1) => ({...result(version, 'succeeded', []),
+  skill: {name: '工作日报助手', version: '1.2.3', profile: 'single'}, feedback: {available: true, receipt: null}});
+const feedbackNodes = root => {
+  const panel = findClass(root, 'task-feedback');
+  return {panel, form: findClass(panel, 'task-feedback-form'),
+    textarea: descendants(panel).find(node => node.tag === 'textarea'),
+    choices: descendants(panel).filter(node => node.tag === 'input'),
+    button: descendants(panel).find(node => node.tag === 'button'),
+    status: findClass(panel, 'task-feedback-status'), receipt: findClass(panel, 'task-feedback-receipt')};
+};
+const choose = (view, value) => { const input = view.choices.find(node => node.value === value); input.checked = true; input.events.change(); };
+const comment = (view, value) => { view.textarea.value = value; view.textarea.events.input(); };
+const submit = view => view.form.events.submit({preventDefault() {}});
+const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => {resolve=a;reject=b;}); return {promise,resolve,reject}; };
+
+test('feedback stays folded and optional, shows original assistant binding, and preserves unsaved input/focus on refresh', () => {
+  const f = fixture({submitTaskFeedback: async () => {throw new Error('must not auto-submit');}}), r = feedbackResult();
+  f.upsertTaskCard(r);
+  const view = feedbackNodes(f.chat), textarea = view.textarea;
+  assert.equal(view.panel.hidden, false); assert.equal(view.panel.open, false);
+  assert.match(view.panel.textContent, /工作日报助手 · 版本 1\.2\.3 · 单项办理/);
+  assert.doesNotMatch(view.panel.textContent, /（single）/);
+  assert.equal(view.textarea.maxLength, 1000); assert.equal(view.button.disabled, true);
+  view.panel.open = true; view.panel.events.toggle(); choose(view, 'incorrect'); comment(view, '本页未保存的说明'); textarea.focus();
+  f.upsertTaskCard(feedbackResult(2));
+  assert.equal(feedbackNodes(f.chat).textarea, textarea);
+  assert.equal(f.document.activeElement, textarea);
+  assert.equal(textarea.value, '本页未保存的说明'); assert.equal(view.panel.open, true);
+  f.renderTaskDetail(feedbackResult(2));
+  const detail = feedbackNodes(f.detail);
+  assert.equal(detail.textarea.value, textarea.value); assert.equal(detail.panel.open, true);
+  assert.equal(detail.choices.find(node => node.value === 'incorrect').checked, true);
+  comment(detail, '详情里的修改'); assert.equal(textarea.value, '详情里的修改');
+  f.renderTaskDetail(feedbackResult(3));
+  assert.equal(feedbackNodes(f.detail).textarea, detail.textarea);
+});
+
+test('only terminal eligible tasks expose feedback and legacy tasks remain unchanged', () => {
+  const f = fixture({submitTaskFeedback() {}}), r = feedbackResult();
+  for (const [status, eligible, skill, expected] of [
+    ['waiting_user',true,r.skill,false], ['running',true,r.skill,false], ['succeeded',false,r.skill,false],
+    ['failed',true,null,false], ['outcome_unknown',true,r.skill,true], ['partially_succeeded',true,r.skill,true],
+  ]) {
+    r.task = {...r.task, status, version: r.task.version + 1}; r.skill = skill; r.feedback = {available: eligible, receipt: null};
+    f.upsertTaskCard(r); assert.equal(!feedbackNodes(f.chat).panel.hidden, expected);
+  }
+});
+
+test('one feedback request disables controls, lost response retries the exact payload and key, then updates card and detail receipt', async () => {
+  const first = deferred(); const calls = []; let keys = 0;
+  const receipt = {status:'recorded', feedback_id:'feedback-1', rating:'useful', comment:'保留评价', version:'1.2.3', profile:'single'};
+  const f = fixture({makeFeedbackRequestKey: () => `key-${++keys}`,
+    submitTaskFeedback: async (taskId, payload) => { calls.push({taskId,payload}); if (calls.length === 1) return first.promise; return {feedback:{available:false,receipt}}; }});
+  f.upsertTaskCard(feedbackResult()); f.renderTaskDetail(feedbackResult());
+  const view = feedbackNodes(f.chat); choose(view,'useful'); comment(view,'保留评价');
+  const waiting = submit(view);
+  assert.equal(view.button.disabled,true); assert.equal(view.textarea.disabled,true);
+  assert.ok(view.choices.every(input => input.disabled)); assert.equal(feedbackNodes(f.detail).textarea.disabled,true);
+  await submit(view); assert.equal(calls.length,1);
+  first.reject(new TypeError('连接中断')); await waiting;
+  assert.equal(view.textarea.value,'保留评价'); assert.equal(view.textarea.disabled,true);
+  assert.equal(view.button.disabled,false); assert.equal(view.button.textContent,'重试保存评价');
+  await submit(view);
+  assert.deepEqual(calls[0],calls[1]); assert.equal(keys,1);
+  assert.deepEqual(Object.keys(calls[1].payload).sort(),['comment','rating','requestKey']);
+  for (const root of [f.chat,f.detail]) {
+    const saved = feedbackNodes(root); assert.equal(saved.form.hidden,true); assert.equal(saved.receipt.hidden,false);
+    assert.match(saved.receipt.textContent,/已保存评价 · 有帮助.*保留评价/);
+  }
+  f.upsertTaskCard(feedbackResult(2));
+  assert.equal(feedbackNodes(f.chat).form.hidden,true,'late null receipt cannot reopen saved feedback');
+  await submit(view); assert.equal(calls.length,2);
+});
+
+test('saved feedback is restored from GET after reload, and a conflict restores the server receipt safely', async () => {
+  const receipt = {status:'recorded',feedback_id:'existing',rating:'not_applicable',comment:'<script>只是文字</script>',version:'1.2.3',profile:'single'};
+  const saved = {...feedbackResult(),feedback:{available:false,receipt}};
+  const reloaded = fixture({submitTaskFeedback() {}}); reloaded.upsertTaskCard(saved);
+  assert.match(feedbackNodes(reloaded.chat).receipt.textContent,/不适用.*<script>只是文字<\/script>/);
+  assert.ok(!descendants(reloaded.chat).some(node => node.tag === 'script'));
+  assert.equal(feedbackNodes(reloaded.chat).panel.open,false);
+  const f = fixture({makeFeedbackRequestKey: () => 'new-key', submitTaskFeedback: async () => {
+    throw Object.assign(new Error('已有评价'),{status:409,code:'TASK_FEEDBACK_CONFLICT',feedback:{available:false,receipt}});
+  }});
+  f.upsertTaskCard(feedbackResult()); const view = feedbackNodes(f.chat); choose(view,'useful'); comment(view,'本页尚未保存'); await submit(view);
+  assert.equal(view.form.hidden,true); assert.match(view.receipt.textContent,/不适用/);
+  assert.equal(view.status.textContent,'此任务已有另一份评价，以下为已保存内容。');
+  assert.doesNotMatch(view.receipt.textContent,/本页尚未保存/);
+});
+
+test('feedback validates comment length locally and permits correction after explicit validation rejection', async () => {
+  let calls = 0, keys = 0;
+  const f = fixture({makeFeedbackRequestKey: () => `key-${++keys}`, submitTaskFeedback: async () => {
+    calls++; throw Object.assign(new Error('说明无效'),{status:422});
+  }});
+  f.upsertTaskCard(feedbackResult()); const view = feedbackNodes(f.chat); choose(view,'incorrect');
+  comment(view,'a'.repeat(1001)); await submit(view); assert.equal(calls,0); assert.equal(view.button.disabled,true);
+  comment(view,'可以更正'); await submit(view); assert.equal(calls,1); assert.equal(view.textarea.disabled,false);
+  comment(view,'已更正'); await submit(view); assert.equal(keys,2);
+});
+
+test('trusted business view metadata yields precise entry labels while mismatches retain generic input wording', () => {
+  const f = fixture(); let version = 0;
+  const profiles = [
+    ['taihua.work_log.create','work_log','填写工作日志'],
+    ['oa.meeting_room.application.create','meeting_room','选择会议室'],
+    ['oa.leave.approval','approval','核对请假材料'],
+  ];
+  for (const [profileId,viewKind,expected] of profiles) {
+    const view = {schemaVersion:'agentbridge.business-view.v1',profileVersion:'1',profileId,viewKind,
+      entryLabel:'不可信文案',submitLabel:'确认并执行'};
+    for (const [metadata,label] of [[view,expected],[{...view,profileVersion:'2'},'填写信息'],
+      [{...view,profileId:'unknown'},'填写信息'],[{...view,profileId:'__proto__',viewKind:undefined},'填写信息'],
+      [{...view,viewKind:'other'},'填写信息'],
+      [{...view,schemaVersion:'other'},'填写信息'],[null,'填写信息']]) {
+      const step = interaction('input'); step.display = {businessView:metadata};
+      const r = result(++version,'waiting_user',[step]); f.upsertTaskCard(r); f.renderTaskDetail(r);
+      assert.equal(links(f.chat)[0].textContent,label); assert.equal(links(f.detail)[0].textContent,label);
+    }
+    const auth = interaction('auth','execution_authorization'); auth.display = {businessView:view};
+    f.upsertTaskCard(result(++version,'waiting_user',[auth]));
+    assert.equal(links(f.chat)[0].textContent,'核对并确认');
   }
 });

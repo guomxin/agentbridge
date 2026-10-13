@@ -528,6 +528,10 @@ def create_workspace_http_server(
                     application.logout(self._cookie(SESSION_COOKIE))
                     self._json(200, {"status": "signed_out"}, clear=True)
                     return
+                feedback_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/feedback", route.path)
+                if feedback_match:
+                    self._json(200, application.task_feedback(account, feedback_match.group(1), body))
+                    return
                 continuation_match = re.fullmatch(
                     r"/api/tasks/([0-9a-f-]{36})/continue",
                     route.path,
@@ -1063,6 +1067,13 @@ def create_workspace_http_server(
 
         def _handle_error(self, exc: Exception) -> None:
             from agentbridge.core.user_grants import UserGrantConflict
+            from agentbridge.core.skill_workbench import TaskFeedbackError
+            if isinstance(exc, TaskFeedbackError):
+                payload = {"error": {"code": exc.code, "message": str(exc)}}
+                if exc.feedback is not None:
+                    payload["feedback"] = exc.feedback
+                self._json(409, payload)
+                return
             if isinstance(exc, UserGrantConflict):
                 self._json(409, {"error": {"code": "REVISION_CONFLICT", "message": str(exc)}})
                 return

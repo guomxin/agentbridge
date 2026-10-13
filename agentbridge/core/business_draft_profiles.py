@@ -27,6 +27,15 @@ class BusinessDraftProfile:
     def recheck(self):
         return self.view_kind in {"meeting_room", "approval"}
 
+    def presentation(self):
+        """Static host hints only; business values remain on the trusted page."""
+        return {"schemaVersion": "agentbridge.business-view.v1",
+                "profileId": self.profile_id, "profileVersion": self.version,
+                "viewKind": self.view_kind,
+                "entryLabel": {"work_log": "填写工作日志", "meeting_room": "选择会议室",
+                               "approval": "核对请假材料"}[self.view_kind],
+                "submitLabel": self.submit_label}
+
     def ui(self, schema):
         fields = [{key: value for key, value in item.items()
                    if key in {"name", "label", "control", "required", "max_length", "rows", "minimum", "maximum", "step", "autocomplete"}}

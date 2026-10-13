@@ -2,13 +2,17 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
   taskCardStatusMessage, displayTaskTitle, skillProfileLabel, taskPlanProgress,
   taskPlanFailurePresentation, interactionLabel, interactionActionLabel,
   escapeClass, formatTime, statusLabel, eventLabel, taskInteractions,
-  actionableTaskInteractions, batchItemStatusLabel, interactionStateLabel, trustedInteractionUrl } from "./workspace_results.mjs";
+  actionableTaskInteractions, batchItemStatusLabel, interactionStateLabel, trustedInteractionUrl,
+  TERMINAL_TASK_STATES } from "./workspace_results.mjs";
 
 import { reconcileChildren } from "./workspace_dom.mjs";
 
-export function createTaskCards({ document, state, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan }) {
+export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
+  submitTaskFeedback, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
+  state.taskFeedback ||= new Map();
+  let feedbackViewId = 0;
   const element = (tag, className = "") => {
     const node = document.createElement(tag);
     node.className = className;
@@ -26,6 +30,99 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     root.append(summary, body);
     return { root, summary, body, rows: new Map() };
   };
+
+  const feedbackLabels = { useful: "有帮助", incorrect: "有错误", not_applicable: "不适用" };
+  function feedbackModel(taskId) {
+    if (!state.taskFeedback.has(taskId)) state.taskFeedback.set(taskId, {
+      taskId, available: false, skill: null, rating: "", comment: "", open: false,
+      pending: false, request: null, receipt: null, receiptNotice: "", error: "", views: new Set(),
+    });
+    return state.taskFeedback.get(taskId);
+  }
+  function createFeedbackView(taskId) {
+    const model = feedbackModel(taskId);
+    const view = disclosure("反馈业务助手", "business-disclosure task-feedback");
+    const identity = element("p", "task-feedback-identity");
+    const form = element("form", "task-feedback-form");
+    const choices = element("fieldset", "task-feedback-choices"), legend = element("legend");
+    text(legend, "这次业务助手是否有帮助？"); choices.append(legend);
+    const inputs = new Map(), id = ++feedbackViewId;
+    for (const [value, label] of Object.entries(feedbackLabels)) {
+      const wrapper = element("label"), input = element("input"), copy = element("span");
+      input.type = "radio"; input.name = `task-feedback-${id}`; input.value = value; input.required = true;
+      text(copy, label); wrapper.append(input, copy); choices.append(wrapper); inputs.set(value, input);
+      input.addEventListener("change", () => {
+        if (input.checked && !input.disabled) { model.rating = value; model.error = ""; renderFeedbackModel(model); }
+      });
+    }
+    const commentLabel = element("label"), commentCopy = element("span"), comment = element("textarea");
+    text(commentCopy, "补充说明（可选）"); comment.rows = 3; comment.maxLength = 1000;
+    comment.placeholder = "例如：哪一步有帮助，或哪里需要改进。";
+    commentLabel.append(commentCopy, comment);
+    comment.addEventListener("input", () => { model.comment = comment.value; model.error = ""; renderFeedbackModel(model); });
+    const save = element("button", "secondary"); save.type = "submit"; text(save, "保存评价");
+    const status = element("p", "task-feedback-status"); status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+    const receipt = element("div", "task-feedback-receipt"), receiptTitle = element("strong"), receiptComment = element("p");
+    receipt.append(receiptTitle, receiptComment);
+    form.append(choices, commentLabel, save); view.body.append(identity, form, status, receipt);
+    Object.assign(view, {identity, form, choices, inputs, comment, save, status, receipt, receiptTitle, receiptComment});
+    view.root.addEventListener("toggle", () => {
+      if (view.root.open === model.open) return;
+      model.open = view.root.open; renderFeedbackModel(model);
+    });
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (model.pending || model.receipt || !model.available || !feedbackLabels[model.rating] ||
+          model.comment.length > 1000 || typeof submitTaskFeedback !== "function") return;
+      model.request ||= {rating: model.rating, comment: model.comment, requestKey: makeFeedbackRequestKey()};
+      model.pending = true; model.error = ""; renderFeedbackModel(model);
+      try {
+        const response = await submitTaskFeedback(model.taskId, {...model.request});
+        if (!response?.feedback?.receipt) throw new Error("评价回执暂未返回，请重试恢复本次评价。");
+        model.receipt = response.feedback.receipt; model.available = false; model.request = null;
+      } catch (error) {
+        if (error.feedback?.receipt) {
+          model.receipt = error.feedback.receipt; model.available = false; model.request = null;
+          model.receiptNotice = "此任务已有另一份评价，以下为已保存内容。";
+        } else {
+          model.error = error.message || "保存应答尚未确认，输入已保留，请重试恢复本次评价。";
+          if ([400, 422].includes(error.status)) model.request = null;
+        }
+      } finally { model.pending = false; renderFeedbackModel(model); }
+    });
+    model.views.add(view);
+    return view;
+  }
+  function renderFeedbackModel(model) {
+    for (const view of model.views) {
+      view.root.hidden = !model.available && !model.receipt;
+      if (view.root.open !== model.open) view.root.open = model.open;
+      const skill = model.skill;
+      text(view.identity, skill ? `${skill.name} · 版本 ${skill.version} · ${skillProfileLabel(skill.profile)}` : "原任务绑定的业务助手");
+      view.form.hidden = Boolean(model.receipt); view.receipt.hidden = !model.receipt;
+      const locked = model.pending || Boolean(model.request) || Boolean(model.receipt) || !model.available;
+      for (const [rating, input] of view.inputs) { input.checked = model.rating === rating; input.disabled = locked; }
+      if (view.comment.value !== model.comment) view.comment.value = model.comment;
+      view.comment.disabled = locked;
+      view.save.disabled = model.pending || !model.available || !feedbackLabels[model.rating] || model.comment.length > 1000;
+      text(view.save, model.pending ? "正在保存…" : model.request ? "重试保存评价" : "保存评价");
+      text(view.status, model.receipt ? model.receiptNotice || "此评价已保存。" : model.error);
+      view.status.className = `task-feedback-status${model.error && !model.receipt ? " error" : ""}`;
+      if (model.receipt) {
+        text(view.receiptTitle, `已保存评价 · ${feedbackLabels[model.receipt.rating] || "已记录"}`);
+        text(view.receiptComment, model.receipt.comment || "未填写补充说明。");
+      }
+    }
+  }
+  function updateFeedback(view, result) {
+    const model = feedbackModel(result.task.task_id);
+    if (result.skill) model.skill = result.skill;
+    model.available = Boolean(TERMINAL_TASK_STATES.has(result.task.status) && result.feedback?.available && result.skill && submitTaskFeedback);
+    if (result.feedback?.receipt) {
+      model.receipt = result.feedback.receipt; model.request = null; model.available = false;
+    }
+    renderFeedbackModel(model);
+  }
 
   function updateFacts(view, entries) {
     const nodes = [];
@@ -57,6 +154,7 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     const active = { root: element("div", "business-interactions"), rows: new Map() };
     const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
     const history = disclosure("办理记录", "business-disclosure interaction-history");
+    const feedback = createFeedbackView(taskId);
     const artifacts = element("div");
     const actions = element("div", "application-card-actions");
     const progress = element("button", "secondary");
@@ -68,8 +166,8 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     });
     actions.append(progress);
     card.append(header, description, facts.root, active.root, batch.root,
-      history.root, artifacts, actions);
-    return { title, status, description, facts, active, batch, history, artifacts, progress };
+      history.root, artifacts, feedback.root, actions);
+    return { title, status, description, facts, active, batch, history, artifacts, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -131,7 +229,7 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
       row.action.hidden = !url;
       if (url) row.action.href = url;
       else row.action.removeAttribute("href");
-      text(row.action, interactionActionLabel(interaction.type));
+      text(row.action, interactionActionLabel(interaction.type, interaction.display));
       nodes.push(row.root);
     }
     reconcileChildren(view.root, nodes);
@@ -244,6 +342,7 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     renderBatch(view.batch, result.batch);
     renderHistory(view.history, result, active);
     updateArtifacts(view, result, true);
+    updateFeedback(view.feedback, result);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
     return nearBottom;
   }
@@ -280,6 +379,7 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     const detail = $("#task-detail");
     let view = detailViews.get(detail);
     if (!view || view.taskId !== task.task_id || view.heading.parentNode !== detail) {
+      if (view?.feedback) state.taskFeedback.get(view.taskId)?.views.delete(view.feedback);
       detail.replaceChildren();
       const heading = element("div", "detail-heading");
       const back = element("button", "icon-command mobile-detail-back");
@@ -305,10 +405,12 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
       const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
       const history = disclosure("办理记录", "business-disclosure interaction-history");
       const artifacts = element("div");
+      const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, plan, active.root, batch.root, history.root, artifacts, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, facts, plan, active, batch, history, artifacts, timeline};
+      detail.append(heading, facts.root, plan, active.root, batch.root, history.root, artifacts, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, facts, plan, active, batch, history, artifacts, feedback, timeline};
       detailViews.set(detail, view);
+      detail.dataset.taskId = task.task_id;
     }
     if (Number.isFinite(view.version) && Number(task.version) < view.version) return;
     const focused = document.activeElement;
@@ -331,6 +433,7 @@ export function createTaskCards({ document, state, $, renderChatTimeline, scroll
     renderBatch(view.batch, result.batch);
     renderHistory(view.history, result, active);
     updateArtifacts(view, result, false);
+    updateFeedback(view.feedback, result);
     const nodes = [];
     for (const event of [...(result.events || [])].reverse()) {
       const key = event.event_id || `${event.event_type}:${event.created_at}`;
