@@ -31,7 +31,14 @@ PENDING_REVISION = json.loads(
 for _spec in CONTRACT["capabilities"]:
     _spec.update(PENDING_REVISION.get(_spec["name"], {}))
 
-DEFINITIONS = dict(CONTRACT["definitions"])
+DEFINITIONS = deepcopy(dict(CONTRACT["definitions"]))
+# The immutable migration fixture predates initial missed-punch material review.
+# The only declaration delta is a read-only preflight inherited by both aliases.
+for _prepare in ("oa.missed_punch.approval.prepare", "oa.missed_punch.approval.batch.prepare",
+                 "oa.workflow.pending.batch.prepare"):
+    DEFINITIONS[_prepare].update(preflight_function="preflight_missed_punch_approval",
+                                 preflight_profile="missed_punch")
+FUNCTION_NAMES = sorted([*CONTRACT["function_names"], "preflight_missed_punch_approval"])
 SPECS = {spec["name"]: spec for spec in CONTRACT["capabilities"]}
 SCOPES = {name: frozenset(scopes) for name, scopes in CONTRACT["scopes"]}
 MEETING_PREPARES = {
@@ -40,7 +47,6 @@ MEETING_PREPARES = {
     "oa.meeting_room.application.cancel.prepare",
 }
 NEW_PREPARES = [name for name in DEFINITIONS if name not in MEETING_PREPARES]
-PREFLIGHT_PREPARES = [name for name in NEW_PREPARES if "preflight_function" in DEFINITIONS[name]]
 ALIAS_PREPARES = (
     "oa.missed_punch.approval.batch.prepare",
     "oa.workflow.pending.batch.prepare",
@@ -48,6 +54,7 @@ ALIAS_PREPARES = (
 CANONICAL_PREPARE = "oa.missed_punch.approval.prepare"
 SHARED_COMMIT = "oa.missed_punch.approve"
 PAIR_PREPARES = [name for name in NEW_PREPARES if name not in ALIAS_PREPARES]
+PREFLIGHT_PREPARES = [name for name in PAIR_PREPARES if "preflight_function" in DEFINITIONS[name]]
 POSITIONAL_FIELDS = (
     "prepare_spec", "commit_spec", "required_scopes", "field_schema",
     "context_fields", "prepare_function", "commit_function", "contract_error",
@@ -86,7 +93,8 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
     assert len(SPECS) == 48
     assert len(DEFINITIONS) == 25
     assert len(CONTRACT["commits"]) == 23
-    assert len(PREFLIGHT_PREPARES) == 13
+    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 13
+    assert len(PREFLIGHT_PREPARES) == 14
 
 
 def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
@@ -135,10 +143,10 @@ def test_all_oa_scopes_permissions_and_planning_remain_unchanged():
         assert PERMISSIONS[permission] == expected
 
 
-def test_original_leaf_aliases_and_all_sixty_function_bridges_remain_late_bound():
-    assert sorted(write_catalog.WRITE_FUNCTION_NAMES) == CONTRACT["function_names"]
+def test_original_leaf_aliases_and_extended_function_bridges_remain_late_bound():
+    assert sorted(write_catalog.WRITE_FUNCTION_NAMES) == FUNCTION_NAMES
     modules = [import_module(f"agentbridge.adapters.{name}") for name in LEAF_MODULES]
-    for name in CONTRACT["function_names"]:
+    for name in FUNCTION_NAMES:
         originals = [
             getattr(module, name) for module in modules
             if name in vars(module) and getattr(getattr(module, name), "__module__", None) == module.__name__

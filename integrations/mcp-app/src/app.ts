@@ -1,5 +1,5 @@
 import { App } from "@modelcontextprotocol/ext-apps";
-import { interactionStateLabel, operationStatus, terminalPresentation } from "./result-state";
+import { interactionActionLabel, interactionStateLabel, operationStatus, terminalPresentation } from "./result-state";
 import "./styles.css";
 
 type JsonRecord = Record<string, unknown>;
@@ -31,11 +31,6 @@ const TERMINAL_STATES = new Set([
   "failed",
   "superseded",
 ]);
-const ACTION_LABELS: Record<Interaction["type"], string> = {
-  credential: "安全登录",
-  business_input: "填写信息",
-  execution_authorization: "确认执行",
-};
 
 const titleElement = requiredElement<HTMLHeadingElement>("title");
 const messageElement = requiredElement<HTMLParagraphElement>("message");
@@ -182,7 +177,7 @@ function renderInteraction(interaction: Interaction): void {
   const canOpen = ["pending", "processing"].includes(interaction.state);
   actionButton.hidden = !canOpen;
   actionButton.disabled = interaction.state === "processing";
-  actionButton.textContent = ACTION_LABELS[interaction.type];
+  actionButton.textContent = interactionActionLabel(interaction.type, interaction.display);
 
   if (interaction.state === "processing") {
     schedulePoll(interaction);

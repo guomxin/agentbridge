@@ -200,6 +200,11 @@ def create_auth_http_server(
                     tone="error",
                 ))
                 return
+            if card_application is field_application and flow_application is not None:
+                redirected = flow_application.redirect_registered_input(card_id, presentation_id=presentation_id)
+                if redirected is not None:
+                    self._send(redirected)
+                    return
             card_arguments = {"secure_cookie": config.secure_cookie}
             if card_application in {action_application, field_application}:
                 card_arguments["presentation_id"] = presentation_id

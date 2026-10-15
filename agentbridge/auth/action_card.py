@@ -266,6 +266,16 @@ def _render_confirmation(
         or f"授权后，AgentBridge 将执行：{effect}。请确认操作内容和执行效果无误。"
     )
     authorize_label = str(summary.get("authorize_label") or "授权执行")
+    alarm_actions = {
+        "smartlight.alarm.work_area.submit": ("确认并提交工区", "提交范围", False),
+        "smartlight.alarm.work_area.revoke": ("确认并撤回工区提交", "撤回范围", False),
+        "smartlight.alarm.dispose": ("确认并标记已处置", "此操作不能由 AgentBridge 恢复", True),
+    }
+    alarm_action = alarm_actions.get(authorization.get("capability_name"))
+    if alarm_action:
+        authorize_label = alarm_action[0]
+    notice_heading = alarm_action[1] if alarm_action else "确认执行后果"
+    notice_class = " irreversible" if alarm_action and alarm_action[2] else ""
     rows = []
     for item in fields:
         if not isinstance(item, dict):
@@ -291,9 +301,11 @@ def _render_confirmation(
               <div><dt>目标系统</dt><dd>{escape(str(summary.get('system') or '未标明'))}</dd></div>
               <div><dt>执行效果</dt><dd>{escape(effect)}</dd></div>
               {''.join(rows)}
-              <div><dt>计划指纹</dt><dd class="hash">{escape(str(authorization.get('plan_hash') or ''))}</dd></div>
             </dl>
-            <p class="notice">{escape(notice)}</p>
+            <p class="notice{notice_class}"><strong>{escape(notice_heading)}</strong><br>{escape(notice)}</p>
+            <details class="plan-details"><summary>查看计划校验信息</summary><dl class="detail-list">
+              <div><dt>计划指纹</dt><dd class="hash">{escape(str(authorization.get('plan_hash') or ''))}</dd></div>
+            </dl></details>
             <form method="post" action="{escape(_card_path(authorization['authorization_id'], presentation_id))}" id="action-form">
               <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
               <div class="actions">
@@ -333,6 +345,8 @@ def _document(
   <meta name="color-scheme" content="light">
   <title>{escape(title)} · AgentBridge</title>
   <style nonce="{nonce}">
+    .notice.irreversible {{border-color:#cb795e;background:#fff2ec;color:#713820}}
+    .plan-details {{font-size:12px;color:#62706a;margin:18px 0}} .plan-details summary {{cursor:pointer}}
     :root {{ color-scheme: light; --paper:#f4f5f2; --surface:#fff; --ink:#17201d;
       --muted:#64706b; --line:#d6dbd7; --teal:#087d72; --teal-dark:#075f58;
       --amber:#a8640d; --red:#b23a3a; }}

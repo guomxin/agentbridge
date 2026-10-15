@@ -9,6 +9,29 @@ from agentbridge.core.write_authorizations import WriteAuthorizationStore
 
 
 class TrustedActionCardTests(unittest.TestCase):
+    def test_no_field_lighting_actions_show_precise_decision_and_original_alarm_target(self):
+        from agentbridge.auth.action_card import _render_confirmation
+        for capability, label in (
+            ("smartlight.alarm.work_area.submit", "确认并提交工区"),
+            ("smartlight.alarm.work_area.revoke", "确认并撤回工区提交"),
+            ("smartlight.alarm.dispose", "确认并标记已处置"),
+        ):
+            with self.subTest(capability=capability):
+                html = _render_confirmation({"authorization_id": "a" * 43, "capability_name": capability,
+                    "plan_hash": "original-fingerprint", "summary": {"title": "照明告警操作",
+                    "effect": "本次冻结操作", "authorize_label": "确认并执行", "authorization_notice": "原始后果提示",
+                    "fields": [{"label": "目标告警", "value": "RTU-甲 / 告警 123"}]}},
+                    csrf_token="session", nonce="nonce", presentation_id=None)
+                self.assertIn(f'value="approve" class="primary">{label}', html)
+                self.assertIn("RTU-甲 / 告警 123", html)
+                self.assertIn("原始后果提示", html)
+                self.assertIn("original-fingerprint", html)
+                self.assertNotIn("<textarea", html)
+                self.assertNotIn('style="', html)
+                self.assertEqual('class="notice irreversible"' in html, capability.endswith(".dispose"))
+                if capability.endswith(".dispose"):
+                    self.assertIn("此操作不能由 AgentBridge 恢复", html)
+
     def test_card_displays_frozen_business_summary_and_strict_headers(self):
         with TemporaryDirectory() as tmp:
             store = WriteAuthorizationStore(Path(tmp) / "agentbridge.db")

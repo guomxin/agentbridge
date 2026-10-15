@@ -100,7 +100,7 @@ class MeetingOutcomeUnknown(RuntimeError):
     pass
 
 
-def build_meeting_field_card_schema(adapter, worker, arguments: dict) -> dict:
+def build_meeting_field_card_schema(adapter, worker, arguments: dict, *, allow_empty=False) -> dict:
     """Build a prefilled card from one live, read-only room availability query."""
     seed = _normalize_meeting_card_seed(arguments)
     start_ms = _datetime_ms(seed["start_time"])
@@ -109,7 +109,7 @@ def build_meeting_field_card_schema(adapter, worker, arguments: dict) -> dict:
     _validate_meeting_info(meeting_info)
     room_list = _query_room_list(worker, adapter, start_ms=start_ms, end_ms=end_ms)
     available_rooms = _available_rooms(room_list, start_ms=start_ms, end_ms=end_ms)
-    if not available_rooms:
+    if not available_rooms and not allow_empty:
         raise MeetingContractMismatch(
             "No OA meeting rooms are available for the requested time range."
         )
@@ -163,6 +163,18 @@ def build_meeting_field_card_schema(adapter, worker, arguments: dict) -> dict:
         if part
     )
     return schema
+
+
+def meeting_create_options(adapter, worker, *, start_time: str, end_time: str) -> list[dict]:
+    """Read candidates for the governed meeting profile; no meeting is sent."""
+    inputs = normalize_meeting_inputs({"subject": "查询会议室", "room": "候选查询",
+                                       "start_time": start_time, "end_time": end_time})
+    start_ms, end_ms = _datetime_ms(inputs["start_time"]), _datetime_ms(inputs["end_time"])
+    meeting_info = _ajax(worker, adapter, "meetingInfo", [{"meetingId": "", "templateId": ""}])
+    _validate_meeting_info(meeting_info)
+    rooms = _query_room_list(worker, adapter, start_ms=start_ms, end_ms=end_ms)
+    return [{"id": str(room["roomId"]), "name": str(room["roomName"])}
+            for room in _available_rooms(rooms, start_ms=start_ms, end_ms=end_ms)]
 
 
 def prepare_meeting_create(adapter, worker, arguments: dict) -> dict:

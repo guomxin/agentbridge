@@ -1595,6 +1595,17 @@ class SeeyonCentralAdapter:
             if isinstance(frame, dict)
         )
         parsed_detail = parse_oa_detail("\n".join(html_parts), base_url=final_url)
+        page = getattr(worker, "page", None)
+        frames = getattr(page, "frames", None)
+        if isinstance(frames, (list, tuple)):
+            main_frame = getattr(page, "main_frame", None)
+            expected_frames = [frame for frame in frames if frame is not main_frame]
+            captured_frames = [frame for frame in snapshot.get("frames") or []
+                               if isinstance(frame, dict) and str(frame.get("html") or "").strip()]
+            if len(expected_frames) > len(captured_frames):
+                coverage = parsed_detail["_trusted_materials"]["completeness"]
+                coverage["status"] = "incomplete"
+                coverage["reasons"].append("detail_frame_unavailable")
         return parsed_detail
 
     def open_login(self, worker) -> None:

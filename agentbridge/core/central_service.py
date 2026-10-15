@@ -3821,7 +3821,7 @@ class CentralCapabilityService:
                                 adapter,
                                 worker,
                                 arguments,
-                                **({"allow_empty": True} if capability_name == "oa.meeting_room.application.prepare"
+                                **({"allow_empty": True} if capability_name in {"oa.meeting_room.application.prepare", "oa.meeting.create.prepare"}
                                    and task_id and not self.tasks.get_batch_for_task(parent_task_id=task_id, user_subject=user_subject) else {}),
                             )
                         state = worker.capture_session_state()

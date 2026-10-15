@@ -64,6 +64,7 @@ from agentbridge.adapters.seeyon_missed_punch import (
     MissedPunchOutcomeUnknown,
     approve_missed_punch_request,
     build_missed_punch_approval_batch_field_schema,
+    preflight_missed_punch_approval,
     prepare_missed_punch_approval,
     prepare_missed_punch_draft,
     save_missed_punch_draft,
@@ -330,6 +331,8 @@ _MISSED_PUNCH_APPROVAL_WORKFLOW = WriteWorkflowDefinition(
     outcome_error=MissedPunchOutcomeUnknown,
     field_message="The missed-punch approval opinion must be entered in the trusted field card.",
     authorization_message="The missed-punch approval plan requires confirmation in the trusted action card.",
+    preflight_function=preflight_missed_punch_approval,
+    preflight_profile="missed_punch",
 )
 
 

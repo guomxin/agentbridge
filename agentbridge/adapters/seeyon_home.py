@@ -89,6 +89,7 @@ class _Node:
     attrs: dict[str, str] = field(default_factory=dict)
     children: list["_Node"] = field(default_factory=list)
     text_parts: list[str] = field(default_factory=list)
+    content: list = field(default_factory=list)
 
     def attr(self, name: str) -> str:
         return self.attrs.get(name, "")
@@ -103,6 +104,17 @@ class _Node:
         for child in self.children:
             parts.append(child.text())
         return _clean(" ".join(parts), 20000)
+
+    def material_text(self) -> str:
+        """Preserve source order and paragraphs without the public text cap."""
+        if self.tag in {"script", "style", "head"}:
+            return ""
+        text = "".join(item if isinstance(item, str) else item.material_text() for item in self.content)
+        if self.tag in {"p", "div", "section", "tr", "li", "br", "h1", "h2", "h3"}:
+            return "\n" + text + "\n"
+        if self.tag in {"td", "th"}:
+            return " " + text + " "
+        return text
 
     def descendants(self, include_self: bool = False) -> Iterable["_Node"]:
         if include_self:
@@ -121,7 +133,9 @@ class _TreeBuilder(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         node = _Node(tag.lower(), {key.lower(): value or "" for key, value in attrs})
         self._stack[-1].children.append(node)
-        self._stack.append(node)
+        self._stack[-1].content.append(node)
+        if node.tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self._stack.append(node)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -133,6 +147,7 @@ class _TreeBuilder(HTMLParser):
     def handle_data(self, data: str) -> None:
         if data:
             self._stack[-1].text_parts.append(data)
+            self._stack[-1].content.append(data)
 
 
 def parse_pending_list(html: str, *, base_url: str) -> dict:
@@ -498,7 +513,114 @@ def parse_oa_detail(html: str, *, base_url: str) -> dict:
         "actions": actions,
         "action_count": len(actions),
         "write_hints": _parse_detail_write_hints(root, html, base_url=base_url),
+        # This complete evidence stays inside process adapters and trusted
+        # pages; public read capabilities keep their existing bounded fields.
+        "_trusted_materials": _parse_trusted_materials(root),
     }
+
+
+def _material_text(node: _Node) -> str:
+    return "\n".join(line for line in
+                     (re.sub(r"[^\S\n]+", " ", value).strip() for value in node.material_text().splitlines()) if line)
+
+
+def _parse_trusted_materials(root: _Node) -> dict:
+    from agentbridge.adapters.seeyon_review_materials import (
+        MAX_MATERIAL_FIELDS, MAX_MATERIAL_OPINIONS, MAX_MATERIAL_TEXT, MAX_MATERIAL_VALUE,
+    )
+    text = _material_text(root)
+    fields, opinions, reasons = [], [], []
+    field_characters = 0
+    if len(text) > MAX_MATERIAL_TEXT:
+        reasons.append("rendered_text_limit")
+    for row in _find_all(root, tag="tr"):
+        marker = " ".join(row.attr(name).lower() for name in ("id", "class", "name"))
+        if any(value in marker for value in ("workflow", "process", "opinion")):
+            continue
+        cells = [_material_text(cell) for cell in row.children if cell.tag in {"th", "td"}]
+        cells = [cell for cell in cells if cell]
+        if len(cells) < 2:
+            continue
+        name, value = cells[0].rstrip(":："), "\n".join(cells[1:])
+        if name.lower() in {"node", "opinion", "workflow", "process"}:
+            continue
+        if len(name) > MAX_MATERIAL_VALUE or len(value) > MAX_MATERIAL_VALUE:
+            reasons.append("field_value_limit")
+        field_characters += len(name) + len(value)
+        if field_characters > MAX_MATERIAL_TEXT:
+            reasons.append("field_material_limit")
+            break
+        fields.append({"name": name[:MAX_MATERIAL_VALUE], "value": value[:MAX_MATERIAL_VALUE]})
+        if len(fields) > MAX_MATERIAL_FIELDS:
+            reasons.append("field_count_limit")
+            break
+    candidates = []
+    for node in root.descendants():
+        marker = " ".join(node.attr(name).lower() for name in ("id", "class", "name"))
+        if node.tag in {"tr", "li", "div", "section", "p"} and any(
+                value in marker for value in ("processlog", "opinion", "commentlist", "comment-item")):
+            candidates.append(node)
+    candidate_ids = {id(node) for node in candidates}
+    seen = set()
+    for node in candidates:
+        # A marked parent often repeats all its marked children. Keep leaves.
+        if any(id(child) in candidate_ids for child in node.descendants()):
+            continue
+        value = _material_text(node)
+        if not value or value in seen:
+            continue
+        if not re.search(r"\d{4}-\d{2}-\d{2}|\b(?:opinion|approved|rejected)\b", value, re.I):
+            continue
+        seen.add(value)
+        if len(value) > MAX_MATERIAL_VALUE:
+            reasons.append("opinion_value_limit")
+        opinions.append({"text": value[:MAX_MATERIAL_VALUE]})
+        if len(opinions) > MAX_MATERIAL_OPINIONS:
+            reasons.append("opinion_count_limit")
+            break
+    if not opinions:
+        # Unmarked legacy opinion paragraphs still need their complete text.
+        nodes = [node for node in root.descendants() if node.tag in {"tr", "li", "div", "section", "p"}
+                 and not _looks_like_workflow_noise(_material_text(node))]
+        node_ids = {id(node) for node in nodes}
+        for node in nodes:
+            if any(id(child) in node_ids for child in node.descendants()):
+                continue
+            value = _material_text(node)
+            if value in seen:
+                continue
+            seen.add(value)
+            if len(value) > MAX_MATERIAL_VALUE:
+                reasons.append("opinion_value_limit")
+            opinions.append({"text": value[:MAX_MATERIAL_VALUE]})
+            if len(opinions) > MAX_MATERIAL_OPINIONS:
+                reasons.append("opinion_count_limit")
+                break
+    names = []
+    attachment_characters = 0
+    seen_hrefs = set()
+    for link in _find_all(root, tag="a"):
+        href = link.attr("href").replace("&amp;", "&")
+        name = link.attr("title") or _material_text(link) or "未命名附件"
+        if not href or href in seen_hrefs or not _looks_like_attachment(href, name):
+            continue
+        seen_hrefs.add(href)
+        if len(name) > MAX_MATERIAL_VALUE:
+            reasons.append("attachment_name_limit")
+        attachment_characters += len(name)
+        if attachment_characters > MAX_MATERIAL_TEXT:
+            reasons.append("attachment_material_limit")
+            break
+        if len(names) >= MAX_MATERIAL_OPINIONS:
+            reasons.append("attachment_count_limit")
+            break
+        names.append({"name": name[:MAX_MATERIAL_VALUE]})
+    return {"text": text[:MAX_MATERIAL_TEXT], "fields": fields[:MAX_MATERIAL_FIELDS],
+            "opinions": opinions[:MAX_MATERIAL_OPINIONS],
+            "attachments": names[:MAX_MATERIAL_OPINIONS],
+            "completeness": {"status": "incomplete" if reasons else "complete",
+                             "scope": "rendered_detail", "reasons": sorted(set(reasons))},
+            "truncated": bool(reasons)}
 
 
 def parse_launch_page(html: str, *, base_url: str) -> dict:

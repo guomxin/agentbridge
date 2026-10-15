@@ -1,6 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { interactionStateLabel, operationStatus, terminalPresentation } from "../src/result-state.ts";
+import { readFileSync } from "node:fs";
+import { interactionActionLabel, interactionStateLabel, operationStatus, terminalPresentation } from "../src/result-state.ts";
+import { interactionActionLabel as workspaceLabel } from "../../../agentbridge/workspace/static/workspace_results.mjs";
+
+test("all registered business entry labels match Workspace and never borrow a final action label", () => {
+  const schema = JSON.parse(readFileSync(new URL('../../../schemas/agent-host/v1/interaction-presentation.schema.json',import.meta.url)));
+  const profiles = schema.properties.display.properties.businessView.properties.profileId.enum;
+  assert.equal(profiles.length,25);
+  for (const profileId of profiles) {
+    let recognized=0;
+    for (const viewKind of ['work_log','meeting_room','approval','form','future']) {
+      const view = {schemaVersion:'agentbridge.business-view.v1',profileId,profileVersion:'1',viewKind,
+        entryLabel:'伪造文案',submitLabel:'确认并批准'};
+      const expected=workspaceLabel('business_input',{businessView:view});
+      if(expected!=='填写信息') recognized++;
+      assert.equal(interactionActionLabel('business_input',{businessView:view}),expected);
+      assert.notEqual(expected,'确认并批准');
+      assert.equal(interactionActionLabel('business_input',{businessView:{...view,profileVersion:'2'}}),'填写信息');
+    }
+    assert.equal(recognized,1,profileId);
+  }
+  for (const profileId of ['__proto__','constructor','unknown']) {
+    assert.equal(interactionActionLabel('business_input',{businessView:{schemaVersion:'agentbridge.business-view.v1',profileVersion:'1',profileId}}),'填写信息');
+  }
+  assert.equal(interactionActionLabel('execution_authorization',null),'核对并确认');
+});
 
 test("absent, malformed and interaction-only results never claim business success", () => {
   for (const result of [undefined, null, {}, {structuredContent: {}},

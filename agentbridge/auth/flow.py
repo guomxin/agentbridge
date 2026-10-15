@@ -36,6 +36,21 @@ class TrustedFlowApplication:
         self.applications = {"input": field_application, "authorize": action_application}
         self.draft_application = draft_application or BusinessDraftApplication(service=service)
 
+    def redirect_registered_input(self, resource_id: str, *, presentation_id: str | None) -> AuthCardResponse | None:
+        """Unify new registered sources without rewriting immutable legacy forms."""
+        try:
+            context = self.reader.context("input", resource_id, presentation_id)
+            if not self.draft_application.supports(context):
+                return None
+        except _UNAVAILABLE_ERRORS:
+            return None
+        path = f"/flow/input/{resource_id}" + (f"/present/{presentation_id}" if presentation_id else "")
+        headers = _security_headers(secrets.token_urlsafe(18))
+        # A Location without a fragment preserves the original host lifecycle
+        # fragment in the browser. The destination issues its own scoped CSRF.
+        headers["Location"] = path
+        return AuthCardResponse(303, headers, b"")
+
     def get_card(self, kind: str, resource_id: str, *, presentation_id: str | None,
                  secure_cookie: bool, csrf_cookie: str) -> AuthCardResponse:
         try:
@@ -118,12 +133,18 @@ class TrustedFlowApplication:
         # '<' nonetheless, so the script cannot terminate via future callers.
         config = json.dumps({"statusUrl": path + "/status", "token": token}).replace("<", "\\u003c")
         body = rf"""
+<style nonce="{escape(nonce)}">
+  #flow-continue {{display:inline-block;margin-top:12px;padding:12px 20px;border-radius:5px;background:var(--teal);color:#fff;font-size:14px;text-decoration:none}}
+  #flow-continue[hidden] {{display:none}}
+</style>
 <main class="shell"><section class="card status-card" aria-labelledby="flow-title">
   <div class="status-mark" aria-hidden="true"></div>
   <p class="eyebrow">AGENTBRIDGE · 连续办理</p>
   <h1 id="flow-title">正在读取办理状态</h1>
   <p class="status-copy" id="flow-message" role="status" aria-live="polite">请保留此页，原任务将继续办理。</p>
   <p class="status-copy" id="flow-recovery"></p>
+  <p class="status-copy" id="flow-batch" hidden></p>
+  <a id="flow-continue" hidden>核对下一项</a>
   <noscript><p>请启用 JavaScript 后刷新此页查看办理状态；页面不会自行提交业务。</p></noscript>
 </section></main>
 <script nonce="{escape(nonce)}">
@@ -132,6 +153,8 @@ class TrustedFlowApplication:
   const title = document.getElementById('flow-title');
   const message = document.getElementById('flow-message');
   const recovery = document.getElementById('flow-recovery');
+  const batch = document.getElementById('flow-batch');
+  const continued = document.getElementById('flow-continue');
   let stopped = false;
   let failures = 0;
   async function poll() {{
@@ -147,15 +170,29 @@ class TrustedFlowApplication:
       title.textContent = state.title;
       message.textContent = state.message;
       recovery.textContent = '';
+      continued.hidden = true;
+      continued.removeAttribute('href');
+      batch.hidden = !state.batch;
+      if (state.batch) {{
+        batch.textContent = `本批次已完成 ${{state.batch.completedCount}} / ${{state.batch.totalCount}} 项`;
+        if (state.batch.nextOrdinal) batch.textContent += `；下一项（第 ${{state.batch.nextOrdinal}} 项）：${{state.batch.nextTitle}}`;
+      }}
       failures = 0;
       if (state.nextUrl) {{
         const next = new URL(state.nextUrl, location.origin);
-        if (next.origin !== location.origin || !/^\/flow\/authorize\/[A-Za-z0-9_-]+(?:\/present\/[A-Za-z0-9_-]+)?$/.test(next.pathname) || next.search || next.hash) throw new Error('invalid continuation');
+        if (next.origin !== location.origin || next.username || next.password || !/^\/flow\/authorize\/[A-Za-z0-9_-]{{32,128}}(?:\/present\/[A-Za-z0-9_-]{{32,128}})?$/.test(next.pathname) || next.search || next.hash) throw new Error('invalid continuation');
         stopped = true;
         // Keep the original Telegram lifecycle fragment on same-origin navigation.
         next.hash = location.hash;
         location.replace(next.href);
         return;
+      }}
+      if (state.continueUrl && state.state === 'completed') {{
+        const next = new URL(state.continueUrl, location.origin);
+        if (next.origin !== location.origin || next.username || next.password || !/^\/flow\/input\/[A-Za-z0-9_-]{{32,128}}(?:\/present\/[A-Za-z0-9_-]{{32,128}})?$/.test(next.pathname) || next.search || next.hash) throw new Error('invalid batch continuation');
+        next.hash = location.hash;
+        continued.href = next.href;
+        continued.hidden = false;
       }}
       stopped = state.terminal === true;
     }} catch (_error) {{

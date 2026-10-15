@@ -1,5 +1,7 @@
 from copy import deepcopy
+import http.client
 import json
+from threading import Thread
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
@@ -9,6 +11,7 @@ from agentbridge.auth.business_draft_card import BusinessDraftApplication, UI_PR
 from agentbridge.auth.field_card import _render_review
 from agentbridge.auth.card import AuthCardResponse
 from agentbridge.auth.flow import TrustedFlowApplication
+from agentbridge.auth.server import create_auth_http_server, validate_auth_server_config
 
 
 SOURCE_ID = "s" * 43
@@ -72,6 +75,37 @@ class BusinessDraftCardTests(unittest.TestCase):
         self.assertIn("\\u003c/script>", body)
         self.assertEqual(body.count("</script>"), 2)
 
+    def test_every_registered_profile_renders_original_controls_and_accepts_exact_values(self):
+        from agentbridge.core.business_draft_profiles import PROFILES
+        from agentbridge.core.central_service import _TRUSTED_WRITE_DEFINITIONS
+        for profile in PROFILES:
+            with self.subTest(profile=profile.profile_id):
+                schema = _TRUSTED_WRITE_DEFINITIONS[profile.prepare]["field_schema"]
+                self.state["ui"] = profile.ui(schema)
+                values = {name: "" for name in profile.fields}
+                for field in schema["fields"]:
+                    if field["control"] in {"select", "segmented"}:
+                        values[field["name"]] = str(field["options"][-1]["value"])
+                self.state["values"] = values
+                response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=False)
+                body = response.body.decode()
+                self.assertEqual(response.status, 200)
+                self.assertIn(profile.submit_label, body)
+                self.assertIn(schema["system"], body)
+                for field in schema["fields"]:
+                    self.assertIn(f'id="{field["name"]}"', body)
+                    self.assertIn(f'id="error-{field["name"]}"', body)
+                    if field["control"] == "select":
+                        self.assertIn(f'<select id="{field["name"]}"', body)
+                    if field["control"] == "segmented":
+                        self.assertIn('value="false" checked', body)
+                self.backend.save.return_value = self.state
+                saved = self.app.mutate(SOURCE_ID, presentation_id=None, action="values", token="t",
+                    csrf_cookie="t", content_type="application/json",
+                    body=json.dumps({"expectedRevision": 0, "values": values}).encode())
+                self.assertEqual(saved.status, 200)
+                self.assertEqual(self.backend.save.call_args.kwargs["values"], values)
+
     def test_only_new_marked_bound_taihua_sources_upgrade_while_legacy_keeps_form(self):
         self.assertTrue(self.app.supports(self.context()))
         for key, value in (("task_id", None), ("kind", "authorize")):
@@ -99,6 +133,55 @@ class BusinessDraftCardTests(unittest.TestCase):
         self.assertIsNone(business_draft_target(path + "/other"))
         self.assertIsNone(business_draft_target(path.replace("/input/", "/authorize/")))
         self.assertIsNone(business_draft_target("/flow/input/short/draft/state"))
+
+    def test_batch_header_limits_the_final_action_to_the_original_item(self):
+        self.state["batch"] = {"ordinal": 2, "totalCount": 5, "state": "waiting_user"}
+        response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=False)
+        body = response.body.decode()
+        self.assertIn("批次第 2 / 5 项", body)
+        self.assertIn("本次确认仅处理当前项", body)
+        self.assertNotIn('name="batch', body)
+        self.assertNotIn('name="ordinal', body)
+
+    def test_direct_registered_input_redirects_over_http_and_issues_only_flow_scoped_cookie(self):
+        fields = Mock()
+        fields.get_card.return_value = AuthCardResponse(200, {}, b"legacy field page")
+        flow = TrustedFlowApplication(service=Mock(), field_application=fields,
+            action_application=Mock(), draft_application=self.app)
+        flow.reader.context = Mock(return_value=self.context())
+        config = validate_auth_server_config(host="127.0.0.1", port=0,
+            public_base_url="http://127.0.0.1:0", tls_cert=None, tls_key=None)
+        server = create_auth_http_server(config=config, application=Mock(), field_application=fields, flow_application=flow)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for presentation in (None, PRESENTATION_ID):
+                suffix = f"/present/{presentation}" if presentation else ""
+                path = f"/input/{SOURCE_ID}{suffix}"
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+                connection.request("GET", path)
+                response = connection.getresponse(); response.read()
+                self.assertEqual(response.status, 303)
+                self.assertEqual(response.getheader("Location"), "/flow" + path)
+                self.assertEqual(response.getheader("Cache-Control"), "no-store")
+                self.assertIsNone(response.getheader("Set-Cookie"))
+                connection.request("GET", response.getheader("Location"))
+                response = connection.getresponse(); html = response.read().decode()
+                self.assertEqual(response.status, 200)
+                self.assertIn('id="draft-form"', html)
+                self.assertIn(f"Path=/flow{path};", response.getheader("Set-Cookie"))
+                self.assertIn(f'"apiUrl": "/flow{path}/draft"', html)
+                connection.close()
+            fields.get_card.assert_not_called()
+            flow.reader.context.return_value = self.context(False)
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+            connection.request("GET", f"/input/{SOURCE_ID}")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"legacy field page")
+            connection.close()
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=5)
 
     def test_marked_source_submitted_through_legacy_form_observes_original_flow(self):
         self.backend.has_decision.return_value = False

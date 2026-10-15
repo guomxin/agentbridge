@@ -27,7 +27,7 @@ from agentbridge.core.capability_runtime import (
 )
 
 from agentbridge.core.write_catalog import resolve_write_function
-from agentbridge.core.business_draft_profiles import BY_PREPARE
+from agentbridge.core.business_draft_profiles import BY_PREPARE, profile_for_definition
 
 from agentbridge.core.field_submissions import (
     FieldSubmissionAccessDenied,
@@ -273,9 +273,8 @@ class ControlledWriteExecutor:
                 **_prefill_trusted_field_schema(selected_schema, arguments),
                 "_agentbridge_resume_arguments": context_arguments,
             }
-            profile = BY_PREPARE.get(context.spec.name)
-            if (context.task_id and profile and self._dependencies.business_draft_source_context is not None
-                    and not self._dependencies.tasks.get_batch_for_task(parent_task_id=context.task_id, user_subject=session["user_subject"])):
+            profile = profile_for_definition(context.spec.name, definition)
+            if context.task_id and profile and self._dependencies.business_draft_source_context is not None:
                 submission_schema["_agentbridge_business_draft"] = "v1"
                 submission_schema["_agentbridge_business_draft_profile"] = profile.marker
                 submission_schema["notice"] = "请填写并核对办理内容；明确确认执行前不会向业务系统写入内容。"
@@ -513,6 +512,10 @@ class ControlledWriteExecutor:
                 raise ValueError("the OA confirmation was already authorized") from exc
             if len(existing_validations) >= 5:
                 raise ValueError("too many chained OA confirmations") from exc
+            if plan.get("_business_draft"):
+                # Only the executor may mint this link. Consumption verifies the
+                # exact parent operation, warning response and immutable delta.
+                continued_plan["_business_draft_parent_authorization"] = authorization_id
             continued_plan.pop("business_validation_override", None)
             continued_plan["business_validation_overrides"] = [
                 *existing_validations,

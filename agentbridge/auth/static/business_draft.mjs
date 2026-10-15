@@ -7,6 +7,27 @@ const hasReviewChanged = state => [state.reviewChanged, state.preview?.reviewCha
 export const localDateTime = value => String(value ?? "").replace(" ", "T")
   .replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}):00(?:\.0+)?$/, "$1");
 
+/** One business field may be a native input, a select, or an explicit radio choice. */
+export function bindDraftField(root, definition = {}) {
+  if (!root) throw new Error("办理字段缺失，请从原任务重新打开。");
+  const grouped = definition.control === "segmented";
+  const controls = grouped ? [...root.querySelectorAll('input[type="radio"]')] : [root];
+  if (!controls.length) throw new Error("办理选项缺失，请从原任务重新打开。");
+  return {
+    get value() { return grouped ? controls.find(control => control.checked)?.value || "" : String(root.value ?? ""); },
+    set value(value) {
+      const next = String(value ?? "");
+      if (grouped) controls.forEach(control => { control.checked = control.value === next; });
+      else root.value = next;
+    },
+    get validity() { return {valid: controls.every(control => control.validity?.valid !== false)}; },
+    get validationMessage() { return controls.find(control => control.validity?.valid === false)?.validationMessage || ""; },
+    checkValidity() { return controls.every(control => control.checkValidity()); },
+    set disabled(value) { controls.forEach(control => { control.disabled = value; }); },
+    setAttribute(name, value) { root.setAttribute(name, value); controls.forEach(control => control.setAttribute(name, value)); },
+  };
+}
+
 function decisionKey() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return Array.from(crypto.getRandomValues(new Uint8Array(24)), value => value.toString(16).padStart(2, "0")).join("");
@@ -47,11 +68,15 @@ export function createDraftController({initial, request, readValues, writeValues
     ["start_time", "end_time"].every(name => localDateTime(current.options.dependsOn?.[name]) === localDateTime(readValues()[name])));
   const roomValid = () => viewKind !== "meeting_room" || optionsFresh() &&
     Boolean(current.options.items?.some(item => item.value === readValues().room && item.available));
+  const materialReady = () => {
+    const review = current.preview?.summary || current.ui?.review;
+    return review?.truncated !== true && (!review?.completeness || review.completeness.status === "complete");
+  };
   const ready = () => saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
-    allowed("approve") && current.preview?.revision === current.revision &&
+    materialReady() && allowed("approve") && current.preview?.revision === current.revision &&
     Date.parse(current.preview.expiresAt) > now();
   const view = () => ({current, dirty: saved !== edit, saving, previewing, optionsLoading,
-    optionsFresh: optionsFresh(), reviewChanged, conflict, message,
+    optionsFresh: optionsFresh(), materialReady: materialReady(), reviewChanged, conflict, message,
     fieldErrors, locked: permanentlyLocked || deciding, uncertain: deciding && !permanentlyLocked,
     canApprove: ready(), canEdit: allowed("save") && !deciding,
     canRetry: !conflict && !permanentlyLocked && Boolean(message) && !saving && !previewing && !optionsLoading});
@@ -246,8 +271,28 @@ const KEY_REVIEW_LABELS = new Set(["事项", "申请人", "发起人", "姓名",
   "请假天数", "请假小时", "本次操作", "应付金额合计", "员工与月份", "移交人", "交接日期",
   "事由", "出差事由", "加班事由", "OA 当前确认结论", "日期", "发起日期"]);
 
-export function reviewSections(review) {
+// These layouts select existing evidence; they never calculate or invent business facts.
+export const REVIEW_DESIGNS = {
+  missed_punch: {title: "补签申请", family: "time", keys: ["申请人", "开始时间", "补签原因", "事由说明"]},
+  efficiency_data: {title: "效能数据材料", family: "document", keys: []},
+  travel_expense: {title: "差旅报销材料", family: "expense", keys: ["姓名", "应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项", "关联出差申请单"]},
+  business_trip: {title: "出差行程", family: "journey", keys: ["申请人", "出差始发地", "出差目的地", "出差开始时间", "出差结束时间", "出差工具", "出差天数", "出差小时数", "出差事由"]},
+  labor_contract_renewal: {title: "劳动合同续签材料", family: "personnel", keys: ["员工信息", "合同期限", "综合评价", "续签建议", "综合评价指导意见"]},
+  intellectual_property_declaration: {title: "知识产权申报材料", family: "ownership", keys: ["申报名称", "知识产权类型", "申请人", "申请部门", "权属类型", "权属单位", "发明/设计人", "申请用途"]},
+  overtime: {title: "加班申请", family: "time", keys: ["姓名", "申请开始时间", "实际开始时间", "加班事由"]},
+  leave: {title: "请假申请", family: "time", keys: ["申请人", "请假类型", "开始时间", "结束时间", "请假天数", "请假小时", "事由"]},
+  resignation: {title: "离职申请材料", family: "personnel", keys: ["员工", "所属部门", "岗位", "入职时间", "申请离职时间", "离职原因"]},
+  work_handover: {title: "工作与财务交接", family: "handover", keys: ["移交人", "移交人部门", "交接日期", "交接类别", "监交人"]},
+  flight_application: {title: "乘机申请与航段", family: "journey", keys: ["申请人", "部门", "申请日期"]},
+  attendance_confirmation: {title: "月度考勤核对", family: "attendance", keys: ["员工与月份", "出勤统计", "OA 当前确认结论"]},
+  weekly_report: {title: "周报阅读", family: "document", keys: ["周报名称", "年度", "本周说明"]},
+  standard_collaboration: {title: "协同事项材料", family: "document", keys: []},
+};
+
+export function reviewSections(review, kind = "") {
   const overview = [], groups = new Map();
+  const design = Object.hasOwn(REVIEW_DESIGNS, kind) ? REVIEW_DESIGNS[kind] : null;
+  const keys = design ? new Set(["事项", "发起人", "日期", ...design.keys]) : KEY_REVIEW_LABELS;
   const addGroup = (name, item) => { if (!groups.has(name)) groups.set(name, []); groups.get(name).push(item); };
   const normalize = fields => (Array.isArray(fields) ? fields : []).filter(item => item && typeof item === "object")
     .map(item => ({label: String(item.label ?? "").trim(), value: String(item.value ?? "").trim()}))
@@ -256,7 +301,7 @@ export function reviewSections(review) {
     const group = /^(航段\d+|工作明细\d+|财务明细\d+)\s*·/.exec(item.label);
     const long = item.value.length > 180 || item.value.split("\n").length > 3;
     if (group) addGroup(group[1], item);
-    else if (KEY_REVIEW_LABELS.has(item.label)) {
+    else if (keys.has(item.label)) {
       overview.push(long ? {...item, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
       if (long) addGroup(item.label + " · 全文", item);
     } else addGroup(long ? item.label : "其他申请信息", item);
@@ -279,24 +324,93 @@ function appendReviewRows(document, target, fields, wrapped = true) {
   }
 }
 
-function renderEvidence(document, target, review) {
-  const signature = JSON.stringify(review);
+export function renderEvidence(document, target, review, kind = "") {
+  kind ||= review?.kind || "";
+  const design = Object.hasOwn(REVIEW_DESIGNS, kind) ? REVIEW_DESIGNS[kind] : null;
+  const signature = JSON.stringify([review, kind]);
   if (target.dataset.signature === signature) return;
-  const open = new Set([...target.querySelectorAll("details[open]")].map(item => item.dataset.group));
-  const {overview, groups} = reviewSections(review);
-  const section = document.createElement("section"); section.className = "review";
+  const opened = new Map([...target.querySelectorAll("details")].map(item => [item.dataset.group, item.open]));
+  const {overview, groups} = reviewSections(review, kind);
+  const section = document.createElement("section"); section.className = `review review-${design?.family || "general"}`;
+  section.dataset.reviewKind = kind;
   section.setAttribute("aria-labelledby", "draft-evidence-title");
-  const kicker = document.createElement("p"); kicker.className = "review-kicker"; kicker.textContent = "审批依据";
-  const heading = document.createElement("h2"); heading.id = "draft-evidence-title"; heading.textContent = review?.title || "审批详情";
+  const kicker = document.createElement("p"); kicker.className = "review-kicker"; kicker.textContent = design?.title || "办理依据";
+  const heading = document.createElement("h2"); heading.id = "draft-evidence-title"; heading.textContent = review?.title || design?.title || "办理详情";
   const effect = document.createElement("p"); effect.className = "review-effect"; effect.textContent = review?.effect || "";
   const facts = document.createElement("dl"); facts.className = "review-key-facts";
-  appendReviewRows(document, facts, overview); section.append(kicker, heading, effect, facts);
+  const weeklySections = (review?.sections || []).filter(item => ["current-week", "next-week"].includes(item?.id));
+  const weeklyValues = new Set(weeklySections.flatMap(item => item.fields || []).map(item => String(item.value || "").trim()));
+  const weeklyLabels = new Set(weeklySections.flatMap(item => item.fields || []).map(item => String(item.label || "").trim()));
+  const duplicatedWeekly = item => kind === "weekly_report" && (weeklyLabels.has(item.label) || weeklyValues.has(item.value));
+  appendReviewRows(document, facts, overview.filter(item => !duplicatedWeekly(item)));
+  section.append(kicker, heading, effect, facts);
   for (const [name, fields] of groups) {
+    const visibleFields = fields.filter(item => !duplicatedWeekly(item));
+    if (!visibleFields.length) continue;
     const detail = document.createElement("details"); detail.className = "review-group";
-    detail.dataset.group = name; detail.open = open.has(name);
-    const summary = document.createElement("summary"); summary.textContent = `${name} · ${fields.length} 项`;
-    const rows = document.createElement("dl"); appendReviewRows(document, rows, fields);
+    detail.dataset.group = name; detail.open = opened.get(name) || false;
+    const summary = document.createElement("summary"); summary.textContent = `${name} · ${visibleFields.length} 项`;
+    const rows = document.createElement("dl"); appendReviewRows(document, rows, visibleFields);
     detail.append(summary, rows); section.append(detail);
+  }
+  let weeklyGrid = null;
+  for (const material of Array.isArray(review?.sections) ? review.sections : []) {
+    if (!material || !["facts", "text", "table"].includes(material.kind)) continue;
+    const detail = document.createElement("details"); detail.className = `review-group material-${material.kind}`;
+    detail.dataset.group = `material:${String(material.id || material.title || "")}`;
+    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs"].includes(material.id) ||
+      material.id === "body" && design?.family === "document" && (kind !== "weekly_report" || !weeklySections.length);
+    detail.open = opened.has(detail.dataset.group) ? opened.get(detail.dataset.group) : primary;
+    const summary = document.createElement("summary"); summary.textContent = String(material.title || "原始材料");
+    detail.append(summary);
+    if (material.kind === "facts") {
+      const rows = document.createElement("dl"); appendReviewRows(document, rows, Array.isArray(material.fields) ? material.fields : []); detail.append(rows);
+    } else if (material.kind === "text") {
+      if (!primary && String(material.text || "").length > 1800) {
+        const excerpt = document.createElement("p"); excerpt.className = "material-excerpt";
+        excerpt.textContent = String(material.text).slice(0, 240) + "…（展开下方查看完整材料）";
+        section.append(excerpt);
+      }
+      const text = document.createElement("pre"); text.className = "material-text"; text.tabIndex = 0;
+      text.textContent = String(material.text ?? ""); detail.append(text);
+    } else {
+      const columns = (Array.isArray(material.columns) ? material.columns : []).filter(column => typeof column?.key === "string");
+      const table = document.createElement("table"), head = document.createElement("thead"), body = document.createElement("tbody");
+      const header = document.createElement("tr");
+      for (const column of columns) { const cell = document.createElement("th"); cell.scope = "col"; cell.textContent = String(column.label || column.key); header.append(cell); }
+      head.append(header);
+      for (const row of Array.isArray(material.rows) ? material.rows : []) {
+        const line = document.createElement("tr"); line.dataset.rowId = String(row?.id || "");
+        for (const column of columns) { const cell = document.createElement("td"); cell.textContent = String(row?.cells?.[column.key] ?? ""); line.append(cell); }
+        body.append(line);
+      }
+      table.append(head, body); const scroll = document.createElement("div"); scroll.className = "material-table";
+      scroll.tabIndex = 0; scroll.setAttribute("aria-label", String(material.title || "原始明细表"));
+      scroll.append(table); detail.append(scroll);
+    }
+    if (kind === "weekly_report" && ["current-week", "next-week"].includes(material.id)) {
+      if (!weeklyGrid) { weeklyGrid = document.createElement("div"); weeklyGrid.className = "material-primary-grid"; section.append(weeklyGrid); }
+      weeklyGrid.append(detail);
+    } else section.append(detail);
+  }
+  if (Array.isArray(review?.attachments) && review.attachments.length) {
+    const attachments = document.createElement("section"); attachments.className = "material-attachments";
+    const title = document.createElement("h3"); title.textContent = "附件名称";
+    const list = document.createElement("ul");
+    for (const attachment of review.attachments) { const item = document.createElement("li"); item.textContent = String(attachment?.name || "未命名附件"); list.append(item); }
+    const note = document.createElement("p"); note.textContent = "此处仅列出源页面中的附件名称，附件内容未在本页读取。";
+    attachments.append(title, list, note); section.append(attachments);
+  }
+  if (review?.completeness || review?.truncated === true) {
+    const note = document.createElement("p"); note.className = "material-completeness";
+    const complete = review?.completeness?.status === "complete" && review?.truncated !== true;
+    note.textContent = complete ? "已读取当前受控页面的材料；此状态不包含附件正文或源系统未展开的历史。" :
+      "当前材料尚未完整核对，请查看读取状态并补全材料后继续。";
+    if (!complete) note.setAttribute("role", "status");
+    for (const reason of Array.isArray(review?.completeness?.reasons) ? review.completeness.reasons : []) {
+      const detail = document.createElement("span"); detail.textContent = ` ${String(reason)}`; note.append(detail);
+    }
+    section.append(note);
   }
   target.replaceChildren(section); target.dataset.signature = signature;
 }
@@ -305,7 +419,9 @@ export function mountBusinessDraft(config, document, window) {
   const form = document.getElementById("draft-form");
   const fieldNames = config.fieldNames || DRAFT_FIELDS;
   const viewKind = config.viewKind || config.state.ui?.viewKind || "work_log";
-  const fields = Object.fromEntries(fieldNames.map(name => [name, document.getElementById(name)]));
+  const definitions = config.fields || config.state.ui?.fields || [];
+  const fields = Object.fromEntries(fieldNames.map(name => [name,
+    bindDraftField(document.getElementById(name), definitions.find(field => field.name === name))]));
   const node = id => document.getElementById(id);
   const readValues = () => Object.fromEntries(fieldNames.map(name => [name, fields[name].value]));
   const setText = (id, value) => { node(id).textContent = String(value ?? ""); };
@@ -405,6 +521,7 @@ export function mountBusinessDraft(config, document, window) {
       setText("draft-status", view.locked ? (view.current.receipt ? "已确认，正在接续办理" : view.uncertain ? "正在确认提交状态" : "此草稿已停止编辑") :
         view.conflict ? "需要核对另一页面的修改" : view.saving ? "正在保存草稿" : view.dirty ? "有修改，正在准备检查" :
         view.optionsLoading ? "正在查询空闲会议室" : view.previewing ? (viewKind === "work_log" ? "正在解析项目并检查重复日志" : "正在核对申请信息") :
+        !view.materialReady ? "原始材料尚未完整核对，暂不能确认提交" :
         view.canApprove ? (view.reviewChanged ? "请重新核对更新后的材料，再确认提交" : "已检查，可以确认提交") : "填写完整后自动检查");
       node("draft-conflict").hidden = !view.conflict;
       if (view.conflict) {
@@ -418,11 +535,12 @@ export function mountBusinessDraft(config, document, window) {
         }
       }
       const preview = !view.dirty && view.current.preview?.revision === view.current.revision ? view.current.preview : null;
-      const summary = view.canApprove ? preview?.summary : null;
-      if (viewKind === "approval") renderEvidence(document, node("draft-evidence"), preview?.summary || view.current.ui?.review || {});
+      const summary = !view.conflict ? preview?.summary : null;
+      if (viewKind === "approval" || view.current.ui?.review) renderEvidence(document, node("draft-evidence"),
+        preview?.summary || view.current.ui?.review || {}, view.current.ui?.reviewKind || "");
       node("draft-review").hidden = !summary;
       if (summary) {
-        setText("review-effect", summary.effect || view.current.ui?.effect || "正式创建并提交一条个人工作日志");
+        setText("review-effect", summary.effect || view.current.ui?.effect || "执行已核对的本次操作");
         const normalized = Array.isArray(summary.fields) ? summary.fields : [];
         if (viewKind === "work_log") {
           setText("review-project", summary.project?.name || "未关联项目");

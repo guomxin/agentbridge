@@ -5,7 +5,7 @@ readback are unchanged. The worker implements no external network operation.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -14,6 +14,7 @@ from pathlib import Path
 import threading
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
+from unittest.mock import patch
 
 from agentbridge.adapters.seeyon_central import SeeyonCentralAdapter
 from tests.authorization_fixtures import grant_permissions
@@ -264,7 +265,10 @@ class SyntheticOaWorker(NetworkFreeHttpWorker):
                               for index, item in enumerate(detail["attachments"]))
         html = f"<html><body><h1>{escape(detail['title'])}</h1><table>{rows}</table>{attachments}"
         html += "<div class='processLog'>合成申请人 发起 2026-10-13</div><script>var jsonArrBase = '[{\"codes\":[\"ContinueSubmit\"]}]';</script></body></html>"
-        return {"url": url, "html": html, "frames": []}
+        # Every synthetic form frame is also present in the rendered capture;
+        # real material completeness checks must not be bypassed by the fixture.
+        return {"url": url, "html": "<html><body></body></html>",
+                "frames": [{"url": frame.url, "html": html} for frame in self.page.frames]}
 
     @contextmanager
     def fork_page(self):
@@ -316,8 +320,12 @@ class BusinessViewAcceptanceFixture(BusinessDraftAcceptanceFixture):
             title=f"{title}业务视图验收 · {case_key}")["task"]["taskId"]
         self.service.tasks.append_timeline_message(user_subject=OWNER, source_endpoint_id=self.account["endpoint_id"],
             message_key=f"view:{profile}:{case_key}", role="assistant", text=f"{title}独立验收。OA 下游仅为合成 HTTP/DOM，不连接真实系统。", task_id=task)
-        result = self.service.invoke(user_subject=OWNER, capability_name=capability, arguments=arguments,
-            task_id=task, idempotency_key=f"view-source:{profile}:{case_key}")
+        # Construct a historical source through the original runtime path. The
+        # capability now supports drafts, but old immutable sources stay legacy.
+        with (patch("agentbridge.core.controlled_write_executor.profile_for_definition", return_value=None)
+              if profile == "legacy_overtime" else nullcontext()):
+            result = self.service.invoke(user_subject=OWNER, capability_name=capability, arguments=arguments,
+                task_id=task, idempotency_key=f"view-source:{profile}:{case_key}")
         if result["status"] != "requires_user_action" or result["interaction"]["type"] != "business_input":
             raise RuntimeError(f"Actual OA prepare did not produce a business input: {result}")
         case = {"profile": profile, "key": case_key, "task_id": task, "input_id": result["nextAction"]["inputSubmissionId"],

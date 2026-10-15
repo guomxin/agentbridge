@@ -12,6 +12,7 @@ from agentbridge.auth.field_card import _document, _render_control, _render_revi
 from agentbridge.adapters.taihua import TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA
 from agentbridge.adapters.seeyon_meeting_room_application import MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA
 from agentbridge.adapters.seeyon_pending_actions import LEAVE_APPROVAL_FIELD_CARD_SCHEMA
+from agentbridge.core.business_draft_profiles import PROFILES, profile_for_source
 
 
 UI_PROFILES = {
@@ -26,6 +27,39 @@ UI_PROFILES = {
         "lead": "先核对申请材料，再填写本次处理意见。确认后仅审批通过这条请假申请。"},
 }
 _SCRIPT = Path(__file__).with_name("static").joinpath("business_draft.mjs")
+
+# Group only fields present in the frozen schema. These headings add no inputs
+# and make draft-saving, submitting and reviewing distinct business operations.
+FORM_GROUPS = {
+    "work_log": (("日志内容", ("log_date", "hours", "project", "content")),),
+    "meeting_room_application": (("申请用途", ("purpose",)), ("使用时段与会议室", ("start_time", "end_time", "room"))),
+    "meeting": (("会议主题", ("subject",)), ("会议时段与会议室", ("start_time", "end_time", "room"))),
+    "business_trip": (("出差行程", ("origin", "destination", "start_time", "end_time", "travel_mode")),
+                      ("申请说明与流程设置", ("reason", "has_direct_supervisor"))),
+    "leave": (("请假类型与时段", ("leave_type", "start_time", "end_time")),
+              ("申请说明与流程设置", ("reason", "has_direct_supervisor"))),
+    "missed_punch": (("补签时段", ("start_time", "end_time")), ("地点与补签说明", ("location", "reason_type", "explanation"))),
+    "meeting_room_cancel": (("本次撤销原因", ("cancellation_reason",)),),
+    "workflow_revoke": (("本次撤销说明", ("repeal_comment",)),),
+    "alarm_remark": (("本次更新的备注", ("remark",)),),
+}
+
+
+def _group_controls(controls: dict[str, str], *, kind: str, review_kind: str) -> str:
+    if kind == "approval":
+        groups = (("本次处理意见", ("opinion",)),)
+    else:
+        groups = FORM_GROUPS.get(review_kind, (("填写办理内容", tuple(controls)),))
+    remaining = dict(controls)
+    rendered = []
+    for title, names in groups:
+        fields = [remaining.pop(name) for name in names if name in remaining]
+        if fields:
+            rendered.append(f'<section class="draft-fields"><h2>{escape(title)}</h2>'
+                            f'<div class="form-grid">{"".join(fields)}</div></section>')
+    if remaining:
+        rendered.append('<div class="form-grid">' + "".join(remaining.values()) + '</div>')
+    return "".join(rendered)
 
 
 def business_draft_target(path: str) -> tuple[str, str | None, str] | None:
@@ -50,19 +84,14 @@ class BusinessDraftApplication:
 
     @staticmethod
     def supports(context) -> bool:
-        schema = context.resource.get("form_schema") or {}
-        profile = next((item for item in UI_PROFILES.values()
-                        if item["prepare"] == context.resource.get("capability_name")), None)
-        profile_id = next((key for key, item in UI_PROFILES.items() if item is profile), None)
-        marker = schema.get("_agentbridge_business_draft_profile")
-        return (context.kind == "input" and bool(context.task_id)
-                and profile is not None
-                and schema.get("_agentbridge_business_draft") == "v1"
-                and (marker == {"id": profile_id, "version": "1"}
-                     or marker is None and profile_id == "taihua.work_log.create")
-                and schema.get("schema_version") == profile["schema"]["schema_version"]
-                and {field.get("name") for field in schema.get("fields", [])}
-                    == {field["name"] for field in profile["schema"]["fields"]})
+        if context.kind != "input" or not context.task_id:
+            return False
+        from agentbridge.core.business_drafts import BusinessDraftError
+        try:
+            profile_for_source(context.resource)
+            return True
+        except (BusinessDraftError, KeyError, TypeError, ValueError):
+            return False
 
     def has_decision(self, source_submission_id: str) -> bool:
         return self.backend.has_decision(source_submission_id=source_submission_id)
@@ -122,8 +151,7 @@ class BusinessDraftApplication:
             arguments = dict(source_submission_id=source_submission_id, presentation_id=presentation_id,
                 csrf_token=token, csrf_cookie=csrf_cookie, expected_revision=payload["expectedRevision"])
             if action == "values":
-                supported_fields = [{field["name"] for field in profile["schema"]["fields"]}
-                                    for profile in UI_PROFILES.values()]
+                supported_fields = [set(profile.fields) for profile in PROFILES]
                 if (not isinstance(payload["values"], dict) or set(payload["values"]) not in supported_fields
                         or any(not isinstance(value, str) for value in payload["values"].values())):
                     raise ValueError("invalid values")
@@ -179,37 +207,51 @@ def _room_control(value: str) -> str:
 
 def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     ui = state.get("ui") or {"profileId": "taihua.work_log.create", "profileVersion": "1"}
-    profile = UI_PROFILES.get(ui.get("profileId"))
-    if profile is None or str(ui.get("profileVersion")) != "1":
+    registered = next((profile for profile in PROFILES if profile.profile_id == ui.get("profileId")), None)
+    if registered is None or str(ui.get("profileVersion")) != registered.version:
         raise ValueError("unsupported trusted view")
-    kind = profile["viewKind"]
+    kind = registered.view_kind
     if ui.get("viewKind", kind) != kind:
         raise ValueError("inconsistent trusted view")
-    definitions = ui.get("fields") or profile["schema"]["fields"]
-    if {field["name"] for field in definitions} != {field["name"] for field in profile["schema"]["fields"]}:
+    legacy = UI_PROFILES.get(registered.profile_id, {})
+    definitions = ui.get("fields") or legacy.get("schema", {}).get("fields", [])
+    if {field["name"] for field in definitions} != set(registered.fields):
         raise ValueError("inconsistent trusted fields")
     if kind == "meeting_room":
-        order = ("purpose", "start_time", "end_time", "room")
-        definitions = sorted(definitions, key=lambda field: order.index(field["name"]))
-    title = str(ui.get("title") or profile["title"])
-    effect = str(ui.get("effect") or profile["schema"]["effect"])
-    submit_label = str(ui.get("submitLabel") or profile["submitLabel"])
-    controls = []
+        order = ("purpose", "subject", "start_time", "end_time", "room")
+        definitions = sorted(definitions, key=lambda field: order.index(field["name"]) if field["name"] in order else len(order))
+    title = str(ui.get("title") or registered.title)
+    effect = str(ui.get("effect") or legacy.get("schema", {}).get("effect") or "执行已核对的本次操作")
+    submit_label = str(ui.get("submitLabel") or registered.submit_label)
+    system_name = str(ui.get("systemName") or legacy.get("schema", {}).get("system") or "业务系统")
+    lead = legacy.get("lead") or ("核对下方原始材料并填写本次意见。检查完成后，再明确确认本次操作。"
+        if kind == "approval" else "填写后自动保存和检查。请核对实际办理内容及执行后果，再确认本次操作。")
+    controls = {}
     differences = []
     for field in definitions:
         name = field["name"]
-        value = str(state["values"].get(name) or "")
+        raw = state["values"].get(name)
+        value = "" if raw is None else str(raw)
         control = (_room_control(value) if kind == "meeting_room" and name == "room" else _render_control(field, value))
         control = control.replace(f'name="{name}"', f'name="{name}" aria-describedby="error-{name}"', 1)
-        controls.append(control if kind == "meeting_room" and name == "room" else
-                        control.replace("</div>", f'<p class="field-error" id="error-{name}" aria-live="polite"></p></div>', 1))
+        error_node = f'<p class="field-error" id="error-{name}" aria-live="polite"></p>'
+        controls[name] = (control if kind == "meeting_room" and name == "room" else
+                         control.replace("</fieldset>", error_node + "</fieldset>") if field["control"] == "segmented" else
+                         control.replace("</div>", error_node + "</div>", 1))
         differences.append(f'<div class="draft-difference" id="conflict-row-{name}"><h3>{escape(field["label"])}</h3>'
             f'<div><p>本页输入</p><pre id="conflict-local-{name}"></pre></div>'
             f'<div><p>另一页面的版本</p><pre id="conflict-server-{name}"></pre></div></div>')
     config = json.dumps({"state": state, "csrfToken": token, "apiUrl": path + "/draft",
-                        "fieldNames": [field["name"] for field in definitions], "viewKind": kind},
+                        "fieldNames": [field["name"] for field in definitions], "fields": definitions, "viewKind": kind},
                         ensure_ascii=False).replace("<", "\\u003c")
-    evidence = _render_review(ui.get("review"), element_id="draft-evidence-title") if kind == "approval" else ""
+    has_evidence = kind == "approval" or bool(ui.get("review"))
+    form_controls = _group_controls(controls, kind=kind, review_kind=ui.get("reviewKind", registered.review_kind))
+    batch = state.get("batch") or {}
+    batch_html = (f'<p class="draft-batch">批次第 {int(batch["ordinal"])} / {int(batch["totalCount"])} 项'
+                  ' · 本次确认仅处理当前项，其他项仍需分别核对。</p>'
+                  if type(batch.get("ordinal")) is int and type(batch.get("totalCount")) is int
+                  and 0 < batch["ordinal"] <= batch["totalCount"] else "")
+    evidence = _render_review(ui.get("review"), element_id="draft-evidence-title") if has_evidence else ""
     review_body = ('<dl><dt>实际项目</dt><dd id="review-project"></dd><dt>项目编码</dt><dd id="review-project-code"></dd>'
                    '<dt>重复检查</dt><dd id="review-duplicate"></dd><dt>执行后果</dt><dd id="review-effect"></dd></dl>'
                    '<details><summary>查看将提交的日志正文</summary><pre id="review-content"></pre></details>'
@@ -220,6 +262,9 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   [hidden] {{display:none!important}} .draft-card {{width:760px}} .draft-lead {{color:var(--muted);font-size:14px;line-height:1.6}}
   .draft-card button:disabled {{opacity:.5;cursor:not-allowed}} .draft-card input:disabled,.draft-card textarea:disabled {{background:#f3f5f2;color:#62706a}}
   .draft-card .field:has(#project) {{grid-column:1/-1}} .draft-status {{margin:18px 0 10px;color:var(--teal-dark);font-size:13px;line-height:1.6}}
+  .draft-fields {{margin:24px 0}} .draft-fields h2 {{font-size:16px;margin:0 0 14px}} .draft-fields .form-grid {{margin-top:0}}
+  .draft-outcome,.draft-batch {{padding:12px 14px;background:#f1f5f1;border-left:3px solid var(--teal);font-size:13px;line-height:1.6}}
+  .draft-outcome strong {{display:block;margin-bottom:4px}} .material-excerpt {{font-size:13px;color:var(--muted);line-height:1.7;white-space:pre-wrap}}
   .draft-review {{margin:20px 0;background:#f1f8f5;border:1px solid #c4ded4;border-radius:6px;padding:18px}}
   .draft-review h2,.draft-conflict h2 {{font-size:17px;margin:0 0 12px}} .draft-review dl {{margin:0;display:grid;grid-template-columns:110px 1fr;gap:10px}}
   .draft-review dt {{color:var(--muted);font-size:13px}} .draft-review dd {{margin:0;overflow-wrap:anywhere;font-size:14px;line-height:1.6;white-space:pre-wrap}}
@@ -238,16 +283,25 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   .room-option strong {{display:block;font-size:14px}} .room-option small {{display:block;color:var(--muted);font-size:12px;margin-top:5px}}
   .draft-material-change {{margin:0 0 18px;border:1px solid #c99f53;border-radius:6px;padding:16px;background:#fff6df;color:#664a19;font-size:14px;line-height:1.6}}
   .draft-material-change strong {{display:block;margin-bottom:4px}} .draft-evidence {{margin-top:20px}}
-  @media(max-width:620px) {{.draft-review dl {{grid-template-columns:85px 1fr}} .draft-difference {{grid-template-columns:1fr}}}}
+  .material-text {{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7;margin:14px 0 0;max-height:480px;overflow:auto}}
+  .material-primary-grid {{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}}
+  .material-table {{overflow-x:auto;margin-top:14px}} .material-table table {{border-collapse:collapse;width:100%;font-size:13px}}
+  .material-table th,.material-table td {{padding:10px;text-align:left;vertical-align:top;border:1px solid var(--line);white-space:pre-wrap;min-width:100px}}
+  .material-table th {{background:#f1f5f1;font-weight:600}} .material-attachments {{margin:18px 0}}
+  .material-attachments h3 {{font-size:14px}} .material-attachments li {{overflow-wrap:anywhere;line-height:1.7}}
+  .material-attachments p,.material-completeness {{font-size:12px;line-height:1.6;color:var(--muted)}}
+  .review-expense .review-key-facts,.review-attendance .review-key-facts {{background:#f2f8f4;padding:14px;border-radius:6px}}
+  @media(max-width:620px) {{.draft-review dl {{grid-template-columns:85px 1fr}} .draft-difference,.material-primary-grid {{grid-template-columns:1fr}}}}
 </style>
 <main class="shell"><section class="card draft-card" aria-labelledby="card-title">
   <header class="card-header"><div class="brand-mark" aria-hidden="true"><span></span></div><div>
-    <p class="eyebrow">AGENTBRIDGE · 可信办理</p><h1 id="card-title">{escape(title)}</h1><p class="system-name">{'日志系统' if kind == 'work_log' else 'OA 系统'}</p>
+    <p class="eyebrow">AGENTBRIDGE · 可信办理</p><h1 id="card-title">{escape(title)}</h1><p class="system-name">{escape(system_name)}</p>
   </div></header>
   <div id="draft-material-change" class="draft-material-change" role="alert" hidden><strong>材料已更新，请重新核对</strong>下方已显示最新申请材料。本次尚未提交，请核对变化后再次确认。</div>
-  <p class="draft-lead">{escape(profile['lead'])}</p>
-  <div id="draft-evidence" class="draft-evidence"{' hidden' if kind != 'approval' else ''}>{evidence}</div>
-  <form id="draft-form" method="post" action="{escape(path)}"><div class="form-grid">{''.join(controls)}</div>
+  <p class="draft-lead">{escape(lead)}</p>
+  {batch_html}<p class="draft-outcome"><strong>本次确认后的操作</strong>{escape(effect)}</p>
+  <div id="draft-evidence" class="draft-evidence"{' hidden' if not has_evidence else ''}>{evidence}</div>
+  <form id="draft-form" method="post" action="{escape(path)}">{form_controls}
     <p id="draft-status" class="draft-status" role="status" aria-live="polite">正在读取草稿</p>
     <p id="draft-error" class="form-error" role="alert" hidden></p>
     <section id="draft-conflict" class="draft-conflict" aria-labelledby="conflict-title" hidden>
@@ -258,12 +312,12 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
       </div>
     </section>
     <section id="draft-review" class="draft-review" aria-labelledby="review-title" hidden>
-      <h2 id="review-title">核对本次提交</h2>{review_body}
+      <h2 id="review-title">核对本次操作</h2>{review_body}
     </section>
     <button id="draft-submit" type="submit" disabled>{escape(submit_label)}</button>
     <button id="draft-retry" type="button" class="secondary" hidden>重新检查</button>
   </form>
-  <footer>确认后的操作：{escape(effect)}。草稿仅保存在可信办理服务中；页面到期后，请从原任务重新打开。</footer>
+  <footer>确认后的操作：{escape(effect.rstrip('。'))}。草稿仅保存在可信办理服务中；页面到期后，请从原任务重新打开。</footer>
   <noscript><p class="notice">此办理页需要 JavaScript。请启用后刷新；页面不会自动提交。</p></noscript>
 </section></main>
 <script type="module" nonce="{nonce}">

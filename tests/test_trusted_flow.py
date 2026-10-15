@@ -294,6 +294,33 @@ class TrustedFlowTests(unittest.TestCase):
         _, view = self.status("authorize", authorization, token)
         self.assertEqual(view["nextUrl"], "/flow/authorize/" + continuation["authorization_id"])
 
+    def test_preboundary_warning_reopens_readonly_and_follows_only_its_exact_successor(self):
+        self.submit_source()
+        authorization, _ = self.successor()
+        token = self.approve(authorization)
+        operation = self.operation(self.commit, self.task_id,
+            {"authorization_id": authorization["authorization_id"]}, status="running")
+        continuation, _ = self.successor(prepare_operation=operation)
+        self.service.write_authorizations.supersede(authorization["authorization_id"], user_subject="user-a")
+        self.service.operations.mark_requires_user_action(operation["operation_id"],
+            code="OA_BUSINESS_VALIDATION_CONFIRMATION_REQUIRED", message="warning", next_action={})
+        self.assertIsNone(self.service.write_authorizations.get(authorization["authorization_id"])["commit_operation_id"])
+        self.assertEqual(self.status("authorize", authorization, token)[1]["nextUrl"],
+            "/flow/authorize/" + continuation["authorization_id"])
+        reopened, read_token = self.open("authorize", authorization)
+        self.assertEqual(reopened.status, 200)
+        self.assertEqual(self.status("authorize", authorization, read_token)[1]["nextUrl"],
+            "/flow/authorize/" + continuation["authorization_id"])
+        denied = self.app.submit_card("authorize", authorization["authorization_id"], presentation_id=None,
+            body=urlencode({"csrf_token": read_token, "decision": "approve"}).encode(),
+            content_type="application/x-www-form-urlencoded", csrf_cookie=read_token)
+        self.assertEqual(denied.status, 410)
+        self.assertEqual(self.service.write_authorizations.get(continuation["authorization_id"])["state"], "pending")
+        self.service.operations.mark_requires_user_action(operation["operation_id"],
+            code="UNRELATED_REASON", message="unrelated", next_action={})
+        self.assertNotIn("nextUrl", self.status("authorize", authorization, read_token)[1])
+        self.assertEqual(self.open("authorize", authorization)[0].status, 403)
+
     def test_batch_source_cannot_follow_another_frozen_item(self):
         batch, _ = self.service.tasks.create_batch(parent_task_id=self.task_id, user_subject="user-a", system_id="taihua",
             capability_name=self.prepare.name, selection_summary={}, failure_policy="stop_on_failure",
@@ -320,6 +347,69 @@ class TrustedFlowTests(unittest.TestCase):
         self.assertEqual(response.status, 403)
         self.assertEqual(self.status(token=token)[1]["state"], "superseded")
         self.assertEqual(self.service.field_submissions.get(self.source["submission_id"])["state"], "pending")
+
+    def completed_batch_item(self):
+        batch, _ = self.service.tasks.create_batch(parent_task_id=self.task_id, user_subject="user-a", system_id="taihua",
+            capability_name=self.prepare.name, selection_summary={}, failure_policy="stop_on_failure",
+            items=[{"resource_ref": "affair-a", "display_summary": {"title": "第一项"}},
+                   {"resource_ref": "affair-b", "display_summary": {"title": "第二项待独立核对"}}])
+        self.source = self.source_for(self.task_id, {"batch_id": batch["batch_id"], "affair_id": "affair-a"})
+        self.submit_source()
+        authorization, _ = self.successor()
+        presentation = self.service.write_authorizations.create_presentation(authorization["authorization_id"],
+            user_subject="user-a", endpoint_id=self.endpoint_id)
+        token = self.approve(authorization, presentation["presentation_id"])
+        operation = self.consume(authorization)
+        self.service.operations.mark_succeeded(operation["operation_id"], {"verification": {"confirmed": True}})
+        self.service.tasks.complete_current_batch_item(parent_task_id=self.task_id, user_subject="user-a",
+            operation_id=operation["operation_id"], expected_ordinal=1)
+        following = self.source_for(self.task_id, {"batch_id": batch["batch_id"], "affair_id": "affair-b"})
+        record = self.service.interactions.find_by_resource(interaction_type="business_input",
+            resource_id=following["submission_id"], user_subject="user-a")
+        self.service.tasks.record_batch_item_activity(parent_task_id=self.task_id, user_subject="user-a",
+            operation_id=following["create_operation_id"], interaction_id=record["interaction_id"])
+        return batch, authorization, presentation["presentation_id"], token, operation, following
+
+    def test_completed_batch_item_offers_exact_current_item_without_resuming_or_authorizing(self):
+        batch, authorization, presentation, token, operation, following = self.completed_batch_item()
+        self.service.invoke = Mock(side_effect=AssertionError("reader cannot invoke"))
+        self.service.resume_interaction = Mock(side_effect=AssertionError("reader cannot coordinate"))
+        for _ in range(2):
+            status, view = self.status("authorize", authorization, token, presentation_id=presentation)
+            self.assertEqual(status, 200)
+            self.assertEqual(view["state"], "completed")
+            self.assertNotIn("nextUrl", view)
+            self.assertTrue(view["continueUrl"].startswith(f'/flow/input/{following["submission_id"]}/present/'))
+            self.assertEqual(view["batch"], {"completedCount": 1, "totalCount": 2,
+                "nextOrdinal": 2, "nextTitle": "第二项待独立核对"})
+            next_presentation = self.service.field_submissions.get_presentation(following["submission_id"],
+                view["continueUrl"].split("/")[-1])
+            self.assertEqual(next_presentation["endpoint_id"], self.endpoint_id)
+        self.assertEqual(self.service.field_submissions.get(following["submission_id"])["state"], "pending")
+        self.service.invoke.assert_not_called(); self.service.resume_interaction.assert_not_called()
+        page, _ = self.open("authorize", authorization, presentation, token)
+        self.assertIn(b'id="flow-continue" hidden', page.body)
+        self.assertIn(b'continued.href = next.href', page.body)
+
+    def test_unknown_failed_or_canceled_batch_cannot_offer_a_next_item(self):
+        batch, authorization, presentation, token, operation, following = self.completed_batch_item()
+        for state in ("unknown", "failed"):
+            getattr(self.service.operations, "mark_" + state)(operation["operation_id"], code="TEST", message="test")
+            view = self.status("authorize", authorization, token, presentation_id=presentation)[1]
+            self.assertEqual(view["state"], state)
+            self.assertNotIn("continueUrl", view)
+        self.service.operations.mark_succeeded(operation["operation_id"], {})
+        self.service.tasks.cancel_task(task_id=self.task_id, user_subject="user-a", reason="用户取消")
+        self.assertNotIn("continueUrl", self.status("authorize", authorization, token, presentation_id=presentation)[1])
+
+    def test_foreign_batch_target_cannot_be_selected_by_old_success_receipt(self):
+        batch, authorization, presentation, token, operation, following = self.completed_batch_item()
+        other_task, _ = self.task("foreign-next")
+        other = self.source_for(other_task)
+        original = self.service.interactions.get
+        self.service.interactions.get = lambda interaction_id, **kw: {**original(interaction_id, **kw),
+            "resource_id": other["submission_id"]}
+        self.assertEqual(self.status("authorize", authorization, token, presentation_id=presentation)[0], 403)
 
     def test_resource_integrity_errors_return_safe_unavailable_response(self):
         _, token = self.open()

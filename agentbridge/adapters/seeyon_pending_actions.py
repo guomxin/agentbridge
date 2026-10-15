@@ -6,6 +6,10 @@ import re
 from typing import Any, Callable
 
 from agentbridge.adapters.seeyon_pending_execution import VERIFICATION_METHOD, execute_pending_action
+from agentbridge.adapters.seeyon_review_materials import (
+    MATERIALS_VERSION, material_snapshot, material_fingerprint_payload,
+    require_reviewable_materials, review_materials,
+)
 
 from agentbridge.adapters.seeyon_business_trip import (
     BUSINESS_TRIP_FORM_APP_ID,
@@ -888,6 +892,7 @@ def pending_action_contract_fingerprint(profile_key: str) -> str:
         "selection_policy": "exactly_one_pending_affair_id",
         "internal_binding": "ContinueSubmit",
         "verification": VERIFICATION_METHOD,
+        "review_materials_version": MATERIALS_VERSION,
     }
     return _fingerprint(contract)
 
@@ -960,6 +965,7 @@ def preflight_pending_action(
             "title": str(source.get("title") or summary["title"]),
             "effect": summary["effect"],
             "fields": review_fields,
+            **review_materials(profile_key, detail, target.get("business_snapshot")),
         },
     }
 
@@ -1055,6 +1061,7 @@ def _validate_target(
     page,
     affair_id: str,
 ) -> dict:
+    require_reviewable_materials(detail, PendingActionContractMismatch)
     title = str(source.get("title") or detail.get("title") or "").strip()
     if not _title_matches(profile["title_rule"], title):
         raise PendingActionContractMismatch(
@@ -1797,6 +1804,7 @@ def _summary(
         {"label": "日期", "value": target["date"]},
     ]
     values = _field_values(detail)
+    material = material_snapshot(detail)
     if profile_key == "travel_expense":
         for name in (
             "姓名",
@@ -1916,18 +1924,18 @@ def _summary(
     elif profile_key == "flight_application":
         fields.extend(flight_application_summary_fields(target["business_snapshot"]))
     elif profile_key == "weekly_report":
-        for name in ("周报名称", "年度", "本周说明"):
+        for name in ("周报名称", "年度", "本周说明", "下周说明", "本周工作", "下周计划"):
             if values.get(name):
                 fields.append({"label": name, "value": values[name]})
     fields.extend(
         [
             {
                 "label": "附件数量",
-                "value": str(len(detail.get("attachments") or [])),
+                "value": str(len(material["attachments"])),
             },
             {
                 "label": "已有意见数量",
-                "value": str(len(detail.get("workflow") or [])),
+                "value": str(len(material["opinions"])),
             },
             {"label": "本次操作", "value": profile["action_display"]},
             {"label": "处理意见", "value": opinion},
@@ -1944,6 +1952,7 @@ def _summary(
         "authorize_label": profile["authorize_label"],
         "fields": fields,
         "processed_count": 1,
+        **review_materials(profile_key, detail, target.get("business_snapshot")),
     }
 
 
@@ -2007,34 +2016,18 @@ def _title_matches(rule: dict, title: str) -> bool:
 
 def _field_values(detail: dict) -> dict[str, str]:
     values: dict[str, str] = {}
-    for item in detail.get("fields") or []:
+    for item in material_snapshot(detail)["fields"]:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name") or "").strip()
-        value = re.sub(r"\s+", " ", str(item.get("value") or "")).strip()
+        name = re.sub(r"\s+", " ", str(item.get("name") or "")).strip()
+        value = str(item.get("value") or "").strip()
         if name and value and name not in values:
-            values[name] = value[:500]
+            values[name] = value
     return values
 
 
 def _detail_fingerprint(source: dict, detail: dict) -> str:
-    value = {
-        "title": str(source.get("title") or detail.get("title") or ""),
-        "fields": [
-            {
-                "name": str(item.get("name") or ""),
-                "value": str(item.get("value") or ""),
-            }
-            for item in detail.get("fields") or []
-            if isinstance(item, dict)
-        ],
-        "attachments": [
-            str(item.get("name") or "")
-            for item in detail.get("attachments") or []
-            if isinstance(item, dict)
-        ],
-    }
-    return _fingerprint(value)
+    return _fingerprint(material_fingerprint_payload(source, detail))
 
 
 def _profile(profile_key: str) -> dict:

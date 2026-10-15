@@ -1190,10 +1190,10 @@ class TaskHubStore:
         user_subject: str,
         operation_id: str | None,
         interaction_id: str | None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict | None:
         now = _utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             task = self._select_owned_task(
                 connection,
                 parent_task_id,
@@ -1226,6 +1226,9 @@ class TaskHubStore:
                         batch,
                         include_resource_refs=True,
                     )
+            if (operation_id == item["operation_id"] and interaction_id == item["interaction_id"]
+                    and item["state"] == ("waiting_user" if interaction_id else "preparing")):
+                return self._batch_snapshot(connection, batch, include_resource_refs=True)
             previous_state = str(item["state"])
             item_state = "waiting_user" if interaction_id else "preparing"
             connection.execute(

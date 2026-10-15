@@ -20,9 +20,19 @@
           "required": ["schemaVersion", "profileId", "profileVersion", "viewKind", "entryLabel", "submitLabel"],
           "properties": {
             "schemaVersion": {"const": "agentbridge.business-view.v1"},
-            "profileId": {"enum": ["taihua.work_log.create", "oa.meeting_room.application.create", "oa.leave.approval"]},
+            "profileId": {"enum": [
+              "taihua.work_log.create", "oa.meeting_room.application.create", "oa.meeting.create",
+              "oa.meeting_room.application.cancel", "oa.workflow.revoke",
+              "oa.business_trip.save_draft", "oa.business_trip.submit", "oa.leave.save_draft", "oa.leave.submit",
+              "oa.missed_punch.save_draft", "smartlight.alarm.remark.update",
+              "oa.missed_punch.approval", "oa.efficiency_data.approval", "oa.travel_expense.approval",
+              "oa.business_trip.approval", "oa.labor_contract_renewal.approval",
+              "oa.intellectual_property_declaration.approval", "oa.overtime.approval", "oa.leave.approval",
+              "oa.resignation.approval", "oa.work_handover.approval", "oa.flight_application.approval",
+              "oa.standard_collaboration.approval", "oa.attendance_confirmation", "oa.weekly_report.acknowledgement"
+            ]},
             "profileVersion": {"const": "1"},
-            "viewKind": {"enum": ["work_log", "meeting_room", "approval"]},
+            "viewKind": {"enum": ["work_log", "meeting_room", "approval", "form"]},
             "entryLabel": {"type": "string", "maxLength": 40},
             "submitLabel": {"type": "string", "maxLength": 40}
           }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {createDraftController, mountBusinessDraft, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
+import {bindDraftField, createDraftController, mountBusinessDraft, renderEvidence, REVIEW_DESIGNS, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
 import {createDocument, descendants} from "./workspace_dom_fixture.mjs";
 
 const values = {log_date: "2026-10-13", hours: "8", project: "P001", content: "本页日志"};
@@ -13,6 +13,41 @@ const reviewed = (state, version = state.version + 1) => ({...state, version,
     expiresAt: "2099-01-01T00:00:00Z", summary: {project: {name: "项目", code: "P001"}}}});
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => {resolve = a; reject = b;}); return {promise, resolve, reject}; };
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test("explicit segmented false remains a chosen value through draft restore and locking", () => {
+  const document = createDocument();
+  const root = document.createElement("fieldset");
+  const controls = ["true", "false"].map(value => {
+    const control = document.createElement("input");
+    control.value = value; control.validity = {valid: true}; control.checkValidity = () => true;
+    return control;
+  });
+  root.querySelectorAll = () => controls;
+  const field = bindDraftField(root, {control: "segmented"});
+  assert.equal(field.value, "");
+  field.value = "false";
+  assert.equal(field.value, "false");
+  assert.deepEqual(controls.map(control => control.checked), [false, true]);
+  field.disabled = true;
+  assert.ok(controls.every(control => control.disabled));
+  field.setAttribute("aria-invalid", "true");
+  assert.ok(controls.every(control => control.attributes["aria-invalid"] === "true"));
+  field.value = "true";
+  assert.deepEqual(controls.map(control => control.checked), [true, false]);
+});
+
+test("enum values are saved as exact source options and native validation remains authoritative", () => {
+  const document = createDocument(), select = document.createElement("select");
+  select.value = "火车"; select.validity = {valid: false}; select.validationMessage = "请选择有效选项";
+  select.checkValidity = () => false;
+  const field = bindDraftField(select, {control: "select"});
+  assert.equal(field.value, "火车");
+  assert.equal(field.checkValidity(), false);
+  assert.equal(field.validity.valid, false);
+  assert.equal(field.validationMessage, "请选择有效选项");
+  field.value = "轮渡";
+  assert.equal(select.value, "轮渡");
+});
 
 function harness(request, state = initial()) {
   let local = {...state.values};
@@ -441,4 +476,90 @@ test('changed-material metadata requires explicit booleans rather than truthy st
   state.ui = {review: {snapshot: 'preview', reviewChanged: 'source'}};
   const h = harness(async () => state, state);
   assert.equal(h.controller.state().reviewChanged, false);
+});
+
+test('explicitly incomplete or unverified material never enables the final business action', async () => {
+  for (const completeness of [{status: 'incomplete'}, {status: 'unverified'}, {status: 'complete'}]) {
+    const state = reviewed({...initial(), values: {opinion: '同意'}, ui: {viewKind: 'approval'}});
+    state.preview.summary = {completeness, fields: [{label: '事项', value: '待核对申请'}]};
+    const h = harness(async () => { throw new Error('must not approve incomplete evidence'); }, state);
+    assert.equal(h.controller.state().canApprove, completeness.status === 'complete');
+    if (completeness.status !== 'complete') { await h.controller.approve(); assert.equal(h.calls.length, 0); }
+  }
+  const state = reviewed(initial()); state.preview.summary.truncated = true;
+  assert.equal(harness(async () => state, state).controller.state().canApprove, false);
+});
+
+test('attendance evidence preserves the source decision as read-only and full tabular material is inert text', () => {
+  const document = createDocument(), target = document.createElement('div'); target.querySelectorAll = () => [];
+  renderEvidence(document, target, {title: '考勤确认', fields: [
+    {label: '员工与月份', value: '甲 / 10月'}, {label: 'OA 当前确认结论', value: '有异议'},
+  ], sections: [{id: 'original', kind: 'text', title: '原始材料', text: '<script>原文</script>'},
+    {id: 'rows', kind: 'table', title: '明细', columns: [{key: 'item', label: '项目'}],
+      rows: [{id: '1', cells: {item: '<img src=x onerror=alert(1)>'}}]}],
+    attachments: [{name: '原始证明.pdf'}], completeness: {status: 'complete'}}, 'attendance_confirmation');
+  assert.match(target.textContent, /有异议/);
+  assert.match(target.textContent, /<script>原文<\/script>/);
+  assert.match(target.textContent, /<img src=x onerror=alert\(1\)>/);
+  assert.match(target.textContent, /附件内容未在本页读取/);
+  assert.ok(!descendants(target).some(node => ['input', 'select', 'script', 'img', 'a'].includes(node.tag)));
+  assert.equal(descendants(target).filter(node => node.tag === 'td').length, 1);
+  assert.equal(descendants(target).find(node => node.dataset.reviewKind)?.dataset.reviewKind, 'attendance_confirmation');
+});
+
+test('weekly report and handover layouts retain full source material and distinct item rows', () => {
+  const document = createDocument(), target = document.createElement('div'); target.querySelectorAll = () => [];
+  const text = '完整周报正文'.repeat(1000);
+  renderEvidence(document, target, {fields: [{label: '周报名称', value: '本周周报'}], sections: [
+    {id: 'report', kind: 'text', title: '本周工作总结', text},
+    {id: 'plan', kind: 'text', title: '下周工作计划', text: '既有计划'},
+  ]}, 'weekly_report');
+  assert.ok(target.textContent.includes(text));
+  assert.match(target.textContent, /本周工作总结/);
+  assert.match(target.textContent, /下周工作计划/);
+  renderEvidence(document, target, {fields: [{label: '移交人', value: '甲'}], sections: [
+    {id: 'work', kind: 'table', title: '工作交接', columns: [{key: 'receiver', label: '接收人'}],
+      rows: [{id: 'a', cells: {receiver: '乙'}}, {id: 'b', cells: {receiver: '丙'}}]},
+  ]}, 'work_handover');
+  assert.deepEqual(descendants(target).filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId), ['a', 'b']);
+});
+
+test('all fourteen named materials expose their existing key facts without editable decisions', () => {
+  assert.equal(Object.keys(REVIEW_DESIGNS).length, 14);
+  for (const [kind, design] of Object.entries(REVIEW_DESIGNS)) {
+    const document = createDocument(), target = document.createElement('div');
+    target.querySelectorAll = () => [];
+    renderEvidence(document, target, {fields: [{label: '事项', value: '源标题'},
+      ...design.keys.map(label => ({label, value: `原始${label}`}))]}, kind);
+    assert.match(target.textContent, new RegExp(design.title));
+    assert.ok(descendants(target).some(node => node.className === `review review-${design.family}`));
+    for (const label of design.keys) assert.ok(target.textContent.includes(`原始${label}`));
+    assert.ok(!descendants(target).some(node => ['input', 'select', 'button'].includes(node.tag)));
+  }
+});
+
+test('primary weekly and itinerary sections open initially but preserve an explicit collapse across updates', () => {
+  const document = createDocument(), target = document.createElement('div');
+  target.querySelectorAll = selector => selector === 'details' ? descendants(target).filter(node => node.tag === 'details') : [];
+  const review = {sections: [{id:'current-week',title:'本周工作',kind:'text',text:'原文'},
+    {id:'existing-opinions',title:'已有意见',kind:'text',text:'只读意见'}]};
+  renderEvidence(document,target,review,'weekly_report');
+  let primary = descendants(target).find(node=>node.dataset.group === 'material:current-week');
+  assert.equal(primary.open,true);
+  assert.equal(descendants(target).find(node=>node.dataset.group === 'material:existing-opinions').open,false);
+  primary.open=false;
+  renderEvidence(document,target,{...review,title:'新标题'},'weekly_report');
+  primary = descendants(target).find(node=>node.dataset.group === 'material:current-week');
+  assert.equal(primary.open,false);
+});
+
+test('weekly overview does not repeat the same content shown in its primary side by side sections', () => {
+  const document=createDocument(),target=document.createElement('div'); target.querySelectorAll=()=>[];
+  renderEvidence(document,target,{fields:[{label:'周报名称',value:'合成周报'},{label:'本周说明',value:'独特本周说明'}],
+    sections:[{id:'current-week',title:'本周工作',kind:'facts',fields:[{label:'本周说明',value:'独特本周说明'}]},
+      {id:'next-week',title:'下周计划',kind:'facts',fields:[{label:'计划',value:'独特下周计划'}]}]},'weekly_report');
+  assert.equal(target.textContent.split('独特本周说明').length,2);
+  const grid=descendants(target).find(node=>node.className==='material-primary-grid');
+  assert.equal(grid.children.length,2);
+  assert.ok(grid.children.every(node=>node.open));
 });

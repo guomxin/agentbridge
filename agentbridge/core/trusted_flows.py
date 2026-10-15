@@ -119,7 +119,9 @@ class TrustedFlowReader:
         store, _ = self._store(context.kind)
         now = store.clock().astimezone(timezone.utc)
         expires = datetime.fromisoformat(context.resource["expires_at"])
-        if context.resource["state"] in {"pending", "expired", "superseded"} or now >= expires:
+        if context.resource["state"] in {"pending", "expired"} or now >= expires:
+            raise TrustedFlowDenied("cannot reopen this flow")
+        if context.resource["state"] == "superseded" and self._warning_successor(context) is None:
             raise TrustedFlowDenied("cannot reopen this flow")
         token = secrets.token_urlsafe(32)
         table, id_column = (
@@ -141,6 +143,9 @@ class TrustedFlowReader:
         resource_state = resource["state"]
         if resource_state == "pending" and not context.actionable:
             return self._view(context, "superseded")
+        warning = self._warning_successor(context)
+        if warning is not None:
+            return warning
         if resource_state in {"expired", "superseded", "rejected"}:
             state = "declined" if resource_state == "rejected" else resource_state
             return self._view(context, state)
@@ -177,7 +182,76 @@ class TrustedFlowReader:
             # pending action whose result is unknown.
             return self._successor(context, operation_id)
         projected = {"succeeded": "completed", "failed": "failed", "unknown": "unknown"}.get(state, "processing")
-        return self._view(context, projected, operation_id=operation_id)
+        view = self._view(context, projected, operation_id=operation_id)
+        return self._batch_continuation(context, view) if projected == "completed" else view
+
+    def _warning_successor(self, context: FlowContext) -> dict | None:
+        # A recognized OA warning may supersede the original authorization
+        # before its write boundary. Follow only its exact resumed operation.
+        if (context.kind != "authorize" or context.resource["state"] != "superseded"
+                or context.resource.get("commit_operation_id")):
+            return None
+        operation = self._resumed_operation(context)
+        if (operation and operation["status"] == "requires_user_action"
+                and operation.get("error_code") == "OA_BUSINESS_VALIDATION_CONFIRMATION_REQUIRED"):
+            return self._successor(context, operation["operation_id"])
+        return None
+
+    def _batch_continuation(self, context: FlowContext, view: dict) -> dict:
+        """Offer a separately confirmed current item after this exact item succeeded.
+
+        This is a read projection, not a coordinator: no task resumption or
+        business operation runs here, and a stale receipt cannot supply a target.
+        """
+        batch_id = context.resume_arguments.get("batch_id")
+        if not batch_id:
+            return view
+        subject = context.resource["user_subject"]
+        task = self.service.tasks.get_task(context.task_id, user_subject=subject)
+        batch = self.service.tasks.get_batch_for_task(parent_task_id=context.task_id,
+            user_subject=subject, include_resource_refs=True)
+        if not batch or batch["batch_id"] != batch_id:
+            raise TrustedFlowDenied("batch continuation binding differs")
+        source_items = [item for item in batch["items"] if item["resource_ref"] == context.resume_arguments.get("affair_id")]
+        if len(source_items) != 1:
+            raise TrustedFlowDenied("batch source is ambiguous")
+        source = source_items[0]
+        progress = {"completedCount": batch["succeeded_count"], "totalCount": batch["total_count"]}
+        view = {**view, "batch": progress}
+        if (task["status"] not in {"active", "running", "waiting_user"}
+                or batch["state"] not in {"running", "waiting_user"}):
+            return view
+        if source["state"] != "succeeded":
+            # The coordinator has not yet recorded this confirmed result.
+            return {**view, "terminal": False}
+        if source["operation_id"] != view.get("operationId"):
+            raise TrustedFlowDenied("completed batch operation differs")
+        current = next((item for item in batch["items"] if item["ordinal"] == batch["current_ordinal"]), None)
+        if not current or current["ordinal"] <= source["ordinal"]:
+            return view
+        if current["state"] in {"queued", "preparing"}:
+            return {**view, "terminal": False}
+        if (current["state"] != "waiting_user" or not current.get("interaction_id")
+                or current["interaction_id"] != task.get("current_interaction_id")):
+            return view
+        interaction = self.service.interactions.get(current["interaction_id"], user_subject=subject)
+        if interaction["interaction_type"] != "business_input":
+            return view
+        following = self.context("input", interaction["resource_id"], None)
+        if (following.task_id != context.task_id or following.resource["state"] != "pending" or not following.actionable
+                or following.resource["user_subject"] != subject
+                or following.resource["system_id"] != context.resource["system_id"]
+                or following.resume_arguments.get("batch_id") != batch_id
+                or following.resume_arguments.get("affair_id") != current["resource_ref"]):
+            raise TrustedFlowDenied("next batch item binding differs")
+        path = f"/flow/input/{interaction['resource_id']}"
+        if context.endpoint_id is not None:
+            presentation = self.service.field_submissions.create_presentation(interaction["resource_id"],
+                user_subject=subject, endpoint_id=context.endpoint_id)
+            path += f"/present/{presentation['presentation_id']}"
+        return {**view, "continueUrl": path, "batch": {**progress,
+            "nextOrdinal": current["ordinal"],
+            "nextTitle": str(current["display_summary"].get("title") or following.resource["form_schema"].get("title") or "下一项")}}
 
     def _successor(self, context: FlowContext, operation_id: str) -> dict:
         resource = context.resource

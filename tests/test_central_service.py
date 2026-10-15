@@ -62,6 +62,15 @@ PENDING_PREFLIGHT_CASES = tuple(
 )
 
 
+def _unit_missed_punch_preflight(_adapter, _worker, arguments, profile):
+    """Read-only material fixture for coordinator-only tests without OA DOM."""
+    assert profile == "missed_punch"
+    return {"matched": True, "profile": profile, "affair_id": arguments["affair_id"],
+            "review_fingerprint": "sha256:unit-material-" + arguments["affair_id"],
+            "review": {"title": "合成补签材料", "fields": [{"label": "事项", "value": arguments["affair_id"]}],
+                       "completeness": {"status": "complete", "scope": "synthetic_unit_fixture"}}}
+
+
 class CentralCapabilityServiceTests(unittest.TestCase):
     def test_task_notifications_use_business_labels(self):
         self.assertEqual(
@@ -1906,6 +1915,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
         self.assertEqual(maximum_active, 1)
         self.assertTrue(all(response["status"] == "succeeded" for response in responses))
 
+    @patch("agentbridge.core.write_catalog.preflight_missed_punch_approval", new=_unit_missed_punch_preflight)
     def test_static_business_cards_prefill_all_supplied_fields(self):
         cases = [
             (
@@ -1980,6 +1990,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                     if isinstance(value, str) and value not in resume_arguments.values():
                         self.assertNotIn(value, str(started["nextAction"]))
 
+    @patch("agentbridge.core.write_catalog.preflight_missed_punch_approval", new=_unit_missed_punch_preflight)
     def test_same_write_capability_keeps_distinct_target_cards_active(self):
         with TemporaryDirectory() as tmp:
             service = self._service(tmp, FakeWorker())
@@ -2710,6 +2721,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "submitted",
             )
 
+    @patch("agentbridge.core.write_catalog.preflight_missed_punch_approval", new=_unit_missed_punch_preflight)
     def test_missed_punch_approval_field_card_freezes_affair_context(self):
         with TemporaryDirectory() as tmp:
             service = self._service(tmp, FakeWorker())
@@ -2815,6 +2827,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 "arguments": {"affair_id": "affair-1"},
             })
 
+    @patch("agentbridge.core.write_catalog.preflight_missed_punch_approval", new=_unit_missed_punch_preflight)
     def test_missed_punch_batch_advances_cards_until_every_item_succeeds(self):
         with TemporaryDirectory() as tmp:
             service = self._service(tmp, FakeWorker())

@@ -26,6 +26,15 @@ SCHEMA_DIR = ROOT / "schemas" / "agent-host" / "v1"
 
 
 class HostContractSchemaTests(unittest.TestCase):
+    def test_business_view_schema_covers_exact_registered_profile_set(self):
+        from agentbridge.core.business_draft_profiles import PROFILES
+        schema = json.loads((SCHEMA_DIR / "interaction-presentation.schema.json").read_text())
+        hints = schema["properties"]["display"]["properties"]["businessView"]["properties"]
+        self.assertEqual(set(hints["profileId"]["enum"]), {profile.profile_id for profile in PROFILES})
+        self.assertEqual(set(hints["viewKind"]["enum"]), {profile.view_kind for profile in PROFILES})
+        for profile in PROFILES:
+            self.assertEqual(profile.presentation()["profileVersion"], hints["profileVersion"]["const"])
+
     def test_every_contract_schema_is_valid_json(self) -> None:
         names = {
             "host-capability-profile.schema.json",

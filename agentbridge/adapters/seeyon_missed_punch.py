@@ -11,6 +11,10 @@ from urllib.parse import parse_qs, urlparse
 
 from agentbridge.adapters.seeyon_cap4 import wait_for_cap4_interactive
 from agentbridge.adapters.seeyon_pending_execution import VERIFICATION_METHOD, execute_pending_action
+from agentbridge.adapters.seeyon_review_materials import (
+    MATERIALS_VERSION, material_snapshot, material_fingerprint_payload,
+    require_reviewable_materials, review_materials,
+)
 
 
 MISSED_PUNCH_PREPARE_CAPABILITY = "oa.missed_punch.prepare"
@@ -376,6 +380,34 @@ def save_missed_punch_draft(
         raise
 
 
+def preflight_missed_punch_approval(
+    adapter, worker, arguments: dict, profile_key: str,
+) -> dict:
+    """Read and bind the review before collecting the user's approval opinion."""
+    if profile_key != "missed_punch":
+        raise MissedPunchContractMismatch("The missed-punch review profile is unsupported.")
+    affair_id = _bounded_identifier(arguments.get("affair_id"), "affair_id")
+    source, detail = adapter.resolve_workflow_detail(
+        worker, collection="pending", affair_id=affair_id,
+    )
+    signals = _validate_approval_target(source, detail, worker.page, affair_id)
+    target = _approval_target(source, detail, signals)
+    summary = missed_punch_approval_summary(source, detail, "")
+    return {
+        "matched": True,
+        "profile": profile_key,
+        "affair_id": str(source.get("affair_id") or affair_id),
+        "review_fingerprint": target["review_fingerprint"],
+        "review": {
+            "title": str(source.get("title") or summary["title"]),
+            "effect": summary["effect"],
+            "fields": [dict(field) for field in summary["fields"]
+                       if field.get("label") != "审批意见"],
+            **review_materials(profile_key, detail),
+        },
+    }
+
+
 def prepare_missed_punch_approval(adapter, worker, arguments: dict) -> dict:
     inputs = normalize_missed_punch_approval_inputs(arguments)
     source, detail = adapter.resolve_workflow_detail(
@@ -506,6 +538,7 @@ def missed_punch_draft_summary(inputs: dict) -> dict:
 
 def missed_punch_approval_summary(source: dict, detail: dict, opinion: str) -> dict:
     values = _approval_field_values(detail)
+    material = material_snapshot(detail)
     fields = [
         {"label": "事项", "value": str(source.get("title") or "")},
         {"label": "发起人", "value": str(source.get("sender") or "")},
@@ -516,10 +549,10 @@ def missed_punch_approval_summary(source: dict, detail: dict, opinion: str) -> d
             fields.append({"label": name, "value": values[name]})
     fields.extend(
         [
-            {"label": "附件数量", "value": str(len(detail.get("attachments") or []))},
+            {"label": "附件数量", "value": str(len(material["attachments"]))},
             {
                 "label": "已有意见数量",
-                "value": str(len(detail.get("opinions") or detail.get("workflow") or [])),
+                "value": str(len(material["opinions"])),
             },
             {"label": "审批意见", "value": opinion},
         ]
@@ -532,6 +565,7 @@ def missed_punch_approval_summary(source: dict, detail: dict, opinion: str) -> d
         "authorize_label": "授权审批通过",
         "fields": fields,
         "submitted_count": 1,
+        **review_materials("missed_punch", detail),
     }
 
 
@@ -553,6 +587,7 @@ def missed_punch_approval_contract_fingerprint() -> str:
     return _fingerprint(
         {
             "version": MISSED_PUNCH_APPROVAL_CONTRACT_VERSION,
+            "review_materials_version": MATERIALS_VERSION,
             "title_prefix": MISSED_PUNCH_TEMPLATE_TITLE,
             "template_id": MISSED_PUNCH_TEMPLATE_ID,
             "form_app_id": MISSED_PUNCH_FORM_APP_ID,
@@ -747,40 +782,23 @@ def _validate_draft_plan(plan: dict) -> None:
 
 def _approval_field_values(detail: dict) -> dict[str, str]:
     values: dict[str, str] = {}
-    for item in detail.get("fields") or []:
+    for item in material_snapshot(detail)["fields"]:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name") or "").strip()
-        value = re.sub(r"\s+", " ", str(item.get("value") or "")).strip()
+        name = re.sub(r"\s+", " ", str(item.get("name") or "")).strip()
+        value = str(item.get("value") or "").strip()
         if name and value and name not in values:
-            values[name] = value[:1000]
+            values[name] = value
     return values
 
 
 def _approval_detail_fingerprint(source: dict, detail: dict) -> str:
-    return _fingerprint(
-        {
-            "title": str(source.get("title") or detail.get("title") or ""),
-            "fields": [
-                {
-                    "name": str(item.get("name") or ""),
-                    "value": str(item.get("value") or ""),
-                }
-                for item in detail.get("fields") or []
-                if isinstance(item, dict)
-            ],
-            "attachments": [
-                str(item.get("name") or "")
-                for item in detail.get("attachments") or []
-                if isinstance(item, dict)
-            ],
-        }
-    )
+    return _fingerprint(material_fingerprint_payload(source, detail))
 
 
 def _approval_target(source: dict, detail: dict, signals: dict) -> dict:
     identity = signals["identity"]
-    return {
+    target = {
         "affair_id": str(source.get("affair_id") or ""),
         "summary_id": str(identity.get("summary_id") or ""),
         "process_id": str(identity.get("process_id") or ""),
@@ -794,6 +812,8 @@ def _approval_target(source: dict, detail: dict, signals: dict) -> dict:
         "node_policy_name": str(signals.get("node_policy_name") or ""),
         "detail_fingerprint": _approval_detail_fingerprint(source, detail),
     }
+    target["review_fingerprint"] = _fingerprint(target)
+    return target
 
 
 def _assert_approval_target(expected: dict, actual: dict) -> None:
@@ -805,6 +825,7 @@ def _assert_approval_target(expected: dict, actual: dict) -> None:
 
 
 def _validate_approval_target(source: dict, detail: dict, page, affair_id: str) -> dict:
+    require_reviewable_materials(detail, MissedPunchContractMismatch)
     title = str(source.get("title") or detail.get("title") or "")
     if not title.startswith(MISSED_PUNCH_TEMPLATE_TITLE):
         raise MissedPunchContractMismatch(

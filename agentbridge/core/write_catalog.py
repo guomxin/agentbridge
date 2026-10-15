@@ -120,6 +120,7 @@ from agentbridge.adapters.seeyon_missed_punch import (
     MissedPunchOutcomeUnknown,
     approve_missed_punch_request,
     build_missed_punch_approval_batch_field_schema,
+    preflight_missed_punch_approval,
     prepare_missed_punch_approval,
     prepare_missed_punch_draft,
     save_missed_punch_draft,
