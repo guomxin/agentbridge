@@ -51,6 +51,10 @@ def run(tmp_path, monkeypatch):
             monkeypatch.setattr("agentbridge.core.write_catalog." + definition["prepare_function"], prepare)
             monkeypatch.setattr("agentbridge.core.write_catalog." + definition["commit_function"], commit)
     monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action", lambda *_a, **_kw: None)
+    # Coordinator-only workers have no OA DOM. The missed-punch workflow now
+    # reads materials before creating its field card, including after restart.
+    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_missed_punch_approval",
+                        helpers._unit_missed_punch_preflight)
     monkeypatch.setattr(service.adapter, "list_workflows", lambda *_a, **_kw: pending(rows))
     return service, tid, rows, prepared, committed
 
@@ -123,6 +127,7 @@ def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run,
         return {"workflow_approved": True, "verification": {"confirmed": True}}
 
     monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action", preflight)
+    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_missed_punch_approval", preflight)
     for profile, prepare_name, commit_name, _capability in cases:
         monkeypatch.setattr("agentbridge.core.write_catalog." + prepare_name, partial(prepare, profile))
         monkeypatch.setattr("agentbridge.core.write_catalog." + commit_name, partial(commit, profile))
@@ -133,11 +138,9 @@ def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run,
         assert schema["_agentbridge_resume_arguments"] == {
             "batch_id": field["batch"]["batchId"], "affair_id": f"affair-{ordinal}",
         }
-        if profile == "missed_punch":
-            assert "review" not in schema
-        else:
-            assert schema["review"]["title"] == profile
-        assert preflights == [(name, f"affair-{i}") for i, (name, *_rest) in enumerate(cases[:min(ordinal, 2)], 1)]
+        assert schema["review"]["title"] == profile
+        assert schema["_agentbridge_review_fingerprint"] == "sha256:" + profile
+        assert preflights == [(name, f"affair-{i}") for i, (name, *_rest) in enumerate(cases[:ordinal], 1)]
         auth = authorize(service, field)
         authorization = service.write_authorizations.get(auth["nextAction"]["authorizationId"], include_plan=True)
         authorization_ids.append(authorization["authorization_id"])
@@ -150,7 +153,7 @@ def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run,
         assert committed[-1] == (profile, f"affair-{ordinal}")
     assert len(set(authorization_ids)) == 3
     assert prepared == committed == [(profile, f"affair-{i}") for i, (profile, *_rest) in enumerate(cases, 1)]
-    assert preflights == [("efficiency_data", "affair-1"), ("weekly_report", "affair-2")]
+    assert preflights == [("efficiency_data", "affair-1"), ("weekly_report", "affair-2"), ("missed_punch", "affair-3")]
     assert field["batch"]["state"] == "succeeded"
 
 
