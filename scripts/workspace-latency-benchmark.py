@@ -36,6 +36,10 @@ def main():
     parser.add_argument("--history-tasks", type=int, default=0)
     parser.add_argument("--observe-workspace-http", action="store_true")
     parser.add_argument("--repeat", type=int, default=30)
+    parser.add_argument("--selected-preparation", action="store_true",
+                        help="Fresh query selection to trusted input; separate from the original six scenarios")
+    parser.add_argument("--query-profile", action="append", default=[],
+                        help="Additional synthetic pending types for query-only Chrome selection; does not seed an active batch")
     parser.add_argument("--scenario", action="append", choices=("query", "single", "mixed", "legacy", "drift", "unknown"))
     parser.add_argument("--io-delay", type=float, default=.02)
     parser.add_argument("--worker-start-delay", type=float, default=.01)
@@ -47,6 +51,10 @@ def main():
         parser.error("--source-root must contain an AgentBridge checkout or immutable git archive")
     if args.repeat < 1:
         parser.error("--repeat must be positive")
+    if args.selected_preparation and (args.serve or args.scenario):
+        parser.error("Selected preparation is an independent automated workload")
+    if args.selected_preparation and not (source / "agentbridge/core/actionable_results.py").is_file():
+        parser.error("This source revision does not implement direct selected-result preparation; no comparable baseline exists")
     if args.serve_case and "legacy" in args.serve_case and "mixed" in args.serve_case:
         parser.error("Use separate homes for active legacy and mixed batches")
     sys.path.insert(0, str(source))
@@ -56,6 +64,7 @@ def main():
         git_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
         git_dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=source, text=True).strip())
     spec = importlib.util.spec_from_file_location("latency_acceptance_workload", Path(__file__).resolve().parents[1] / "tests/support/latency_acceptance.py")
+    harness_hash = hashlib.sha256(Path(__file__).read_bytes() + b"\0" + Path(spec.origin).read_bytes()).hexdigest()
     workload = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(workload)
     home = args.home or Path(tempfile.mkdtemp(prefix="agentbridge-latency-"))
@@ -70,7 +79,7 @@ def main():
             if name == "single":
                 fixture.add_pending_case("attendance_confirmation", case_key="browser-single")
             elif name == "query":
-                fixture.add_query_case()
+                fixture.add_query_case(extra_profiles=args.query_profile)
             else:
                 fixture.add_pending_batch(("missed_punch", "missed_punch") if name == "legacy"
                                           else ("missed_punch", "weekly_report"), legacy=name == "legacy")
@@ -84,11 +93,17 @@ def main():
         threads.append(thread)
     try:
         metadata = {**fixture.public_metadata(), "label": args.label, "sourceRoot": str(source),
+                    "harnessContentSha256": harness_hash,
                     "sourceContentSha256": fingerprint, "sourceRevision": git_head, "sourceGitDirty": git_dirty,
                     "sourceIsArchive": not (source / ".git").exists(), "home": str(home),
                     "measurementKind": "chrome-manual-fixture" if args.serve else "automated-loopback-http",
                     "humanThinkTimeIncluded": False, "warmupsExcluded": 0,
                     "entryBoundary": "Prepare/query enter real Central in-process; draft/card/projection calls use real loopback HTTP. No model/gateway benchmark."}
+        if args.selected_preparation:
+            metadata.update(benchmarkContract="latency-selected-preparation-v1",
+                entryBoundary="After a fresh source query/public choice exists: real Workspace CSRF POST to queued intent, synthetic Python host preparation loop, real OA preflight, HTTP task polling and trusted draft GET. No OpenClaw private RPC/lease or model performance claim.",
+                preparationHost="Synthetic Python fixture coordinator", preparationHostPollIntervalSeconds=.05,
+                queryPreparationExcluded=True, existingPreparedTaskSamplesAllowed=False)
         workload.write_metadata(fixture.home / "benchmark-runtime.json", metadata)
         if args.serve:
             threading.Thread(target=fixture.coordinate, daemon=True).start()
@@ -98,11 +113,13 @@ def main():
             fixture.stop_event.wait()
             return
         samples = []
-        runner = workload.HttpWorkload(fixture)
-        for scenario in args.scenario or workload.SCENARIOS:
+        if args.selected_preparation:
+            threading.Thread(target=fixture.coordinate, daemon=True).start()
+        runner = workload.SelectedPreparationWorkload(fixture) if args.selected_preparation else workload.HttpWorkload(fixture)
+        for scenario in (("selected_preparation",) if args.selected_preparation else args.scenario or workload.SCENARIOS):
             for index in range(args.repeat):
                 try:
-                    sample = runner.process(scenario)
+                    sample = runner.selected_preparation() if args.selected_preparation else runner.process(scenario)
                 except Exception as exc:
                     sample = {"error": type(exc).__name__ + ": " + str(exc)}
                 samples.append({"scenario": scenario, "sample": index + 1, **sample})
@@ -110,6 +127,13 @@ def main():
         metadata.update(sourceEndContentSha256=end_fingerprint, sourceChangedDuringRun=end_fingerprint != fingerprint)
         result = {"metadata": metadata, "summary": workload.summarize(samples), "samples": samples,
                   "ledgerAudit": fixture.audit()}
+        if args.selected_preparation:
+            result["selectionAudit"] = {"uniqueSourceTasks": len(runner.source_tasks),
+                "uniqueSourceOperations": len(runner.source_operations), "uniquePreparedTasks": len(runner.prepared_tasks),
+                "uniqueSourceHashes": len({sample["sourceHash"] for sample in samples if "sourceHash" in sample}),
+                "modelCalls": sum(sample.get("modelCalls", 0) for sample in samples),
+                "gatewayMethods": sorted(set(runner.gateway_calls)),
+                "preparationHostBoundary": "Python fixture only; OpenClaw private RPC L3/lease are verified separately"}
         if args.compare:
             result["comparison"] = workload.compare_reports(json.loads(args.compare.read_text()), result)
         if args.output:

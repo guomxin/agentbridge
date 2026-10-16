@@ -7,12 +7,14 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
 
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
+import { createActionableResults } from "./workspace_actionable.mjs";
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, prepareTargets, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   state.taskFeedback ||= new Map();
+  const actionable = createActionableResults({ document, state, prepareTargets });
   let feedbackViewId = 0;
   const element = (tag, className = "") => {
     const node = document.createElement(tag);
@@ -157,6 +159,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const history = disclosure("办理记录", "business-disclosure interaction-history");
     const feedback = createFeedbackView(taskId);
     const artifacts = element("div");
+    const query = element("div");
     const actions = element("div", "application-card-actions");
     const progress = element("button", "secondary");
     progress.type = "button";
@@ -167,8 +170,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     });
     actions.append(progress);
     card.append(header, description, facts.root, active.root, batch.root,
-      history.root, artifacts, feedback.root, actions);
-    return { title, status, description, facts, active, batch, history, artifacts, feedback, progress };
+      history.root, artifacts, query, feedback.root, actions);
+    return { title, status, description, facts, active, batch, history, artifacts, query, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -348,6 +351,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     renderHistory(view.history, result, active);
     updateArtifacts(view, result, true);
     updateFeedback(view.feedback, result);
+    actionable.render(view.query, result.actionableResults);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
     return nearBottom;
   }
@@ -410,10 +414,11 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
       const history = disclosure("办理记录", "business-disclosure interaction-history");
       const artifacts = element("div");
+      const query = element("div");
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, plan, active.root, batch.root, history.root, artifacts, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, facts, plan, active, batch, history, artifacts, feedback, timeline};
+      detail.append(heading, facts.root, plan, active.root, batch.root, history.root, artifacts, query, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, facts, plan, active, batch, history, artifacts, query, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -439,6 +444,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     renderHistory(view.history, result, active);
     updateArtifacts(view, result, false);
     updateFeedback(view.feedback, result);
+    actionable.render(view.query, result.actionableResults);
     const nodes = [];
     for (const event of [...(result.events || [])].reverse()) {
       const key = event.event_id || `${event.event_type}:${event.created_at}`;

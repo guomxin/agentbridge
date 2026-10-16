@@ -207,6 +207,18 @@
         "maximum": 8,
         "default": 4
       },
+      "skillCatalogCache": {
+        "type": "boolean", "default": true,
+        "description": "Use bounded catalog singleflight/cache keyed by authenticated identity and catalog/permission versions. Execution authorization remains live."
+      },
+      "boundSkillToolGuard": {
+        "type": "boolean", "default": true,
+        "description": "Keep a loaded supported Skill inside its closed execution tool scope; Central remains authoritative."
+      },
+      "toolScope": {
+        "type": "string", "enum": ["all", "oa_pending"], "default": "all",
+        "description": "Static per-agent tool presentation scope; retain all for the production general-purpose agent."
+      },
       "pollIntervalSeconds": {
         "type": "integer",
         "minimum": 1,

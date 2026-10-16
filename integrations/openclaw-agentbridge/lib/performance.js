@@ -42,11 +42,11 @@ export function createHostPerformance({ identityRouter, sharedState = {},
     const runKey = JSON.stringify([sessionKey, runId]);
     let run = runId ? state.runs.get(runKey) : null;
     if (!run && runId) {
-      run = { requestId: state.turns.get(sessionKey)?.requestId, at: now() };
+      run = { requestId: safeId(context.requestId) || state.turns.get(sessionKey)?.requestId, at: now() };
       state.runs.set(runKey, run);
       while (state.runs.size > MAX_RUNS) state.runs.delete(state.runs.keys().next().value);
     }
-    return { sessionKey, requestId: run?.requestId || (!runId ? state.turns.get(sessionKey)?.requestId : undefined),
+    return { sessionKey, requestId: run?.requestId || (!runId ? safeId(context.requestId) || state.turns.get(sessionKey)?.requestId : undefined),
       runId, toolCallId: safeId(context.toolCallId), taskId: safeId(context.taskId),
       toolName: safeLabel(context.toolName) };
   }

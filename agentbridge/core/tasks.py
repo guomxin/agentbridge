@@ -848,6 +848,7 @@ class TaskHubStore:
         active_conversation_ref: str,
         title: str,
         summary: dict[str, Any] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> tuple[dict, bool]:
         user_subject = _required_text(user_subject, "user_subject", 256)
         agent_host = _required_text(agent_host, "agent_host", 80)
@@ -861,8 +862,7 @@ class TaskHubStore:
         summary_json = _canonical_json(_safe_object(summary))
         now = _utc_now()
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             endpoint = self._select_endpoint(connection, origin_endpoint_id)
             if endpoint["user_subject"] != user_subject:
                 raise TaskIntegrityError("task endpoint belongs to another user")

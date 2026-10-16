@@ -357,6 +357,7 @@ HOST_COORDINATION_TOOL_NAMES = (
     "agentbridge_host_coordinator_lease_get",
     "agentbridge_host_coordinator_lease_release",
     "agentbridge_host_task_ensure",
+    "agentbridge_host_task_prepare",
     "agentbridge_host_timeline_append",
     "agentbridge_host_task_observe",
     "agentbridge_host_task_finish",
@@ -1014,6 +1015,7 @@ def create_central_mcp_server(
         from agentbridge.core.business_skills import skill_catalog
         identity = _request_identity(identity_store)
         result = await asyncio.to_thread(skill_catalog, service, identity["user_subject"])
+        result.update(await asyncio.to_thread(service.skill_catalog_stamps, identity["user_subject"], catalog=result))
         result["authoring"] = await asyncio.to_thread(service.skill_authoring.preferences, identity["user_subject"])
         return result
 
@@ -5496,7 +5498,9 @@ def create_central_mcp_server(
         allowed_tools = user_grants.available_tools(
             identity["user_subject"]
         )
+        stamps = await asyncio.to_thread(service.skill_catalog_stamps, identity["user_subject"])
         return {
+            **stamps,
             "schemaVersion": "agentbridge.host-identity-profile.v1",
             "status": "succeeded",
             "identity": {
@@ -5582,6 +5586,33 @@ def create_central_mcp_server(
             host_instance_id=host_context["hostInstanceId"],
             host_version=host_context["hostVersion"],
         )
+
+    @mcp.tool(
+        name="agentbridge_host_task_prepare",
+        title="Prepare Selected Workspace Task",
+        description=("Host-private fixed prepare command. Requires the original Workspace session, "
+            "registered coordinator lease and a durable command; it does not authorize or commit business writes."),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True),
+        structured_output=True,
+    )
+    async def agentbridge_host_task_prepare(
+        ctx: Context,
+        task_id: Annotated[str, Field(min_length=16, max_length=128)],
+        command_key: Annotated[str, Field(min_length=1, max_length=256)],
+        session_key: Annotated[str, Field(min_length=1, max_length=1024)],
+        endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
+    ) -> dict[str, Any]:
+        identity = _request_identity(identity_store)
+        runtime_context = _request_runtime_context(ctx)
+        version = runtime_context.get("coordinatorLeaseVersion")
+        if _request_task_id(ctx) != task_id or version is None or not str(version).isdigit() or int(version) < 1:
+            raise HostContractError("prepare command requires the exact task and coordinator lease version")
+        _host_context, registration = await _require_registered_host_call(ctx, service=service, identity=identity,
+            task_id=task_id, require_coordinator_lease=True)
+        response = await asyncio.to_thread(service.prepare_host_task, user_subject=identity["user_subject"],
+            task_id=task_id, command_key=command_key, session_key=session_key, endpoint_key=endpoint_key,
+            registration=registration, runtime_context=runtime_context)
+        return package_interaction_result(response)
 
     @mcp.tool(
         name="agentbridge_host_timeline_append",

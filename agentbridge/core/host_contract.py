@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
+from agentbridge.core.store_transactions import store_transaction
 
 
 HOST_CONTRACT_SCHEMA = "agentbridge.host.v1"
@@ -728,13 +729,13 @@ class HostContractStore:
         lease_seconds: int = 60,
         takeover: bool = False,
         expected_version: int | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         lease_seconds = min(max(int(lease_seconds), 15), 600)
         now = datetime.now(timezone.utc)
         now_text = now.isoformat()
         expires_at = (now + timedelta(seconds=lease_seconds)).isoformat()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             row = connection.execute(
                 "SELECT * FROM agent_task_coordinator_leases WHERE task_id = ?",
                 (task_id,),

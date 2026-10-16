@@ -757,6 +757,22 @@ code {
   margin: 14px 16px 0;
 }
 
+.actionable-results { margin-top: 1rem; border-top: 1px solid var(--border, #dce2e7); padding-top: .8rem; }
+.actionable-results h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.actionable-results > p { font-size: .85rem; color: var(--muted, #667085); }
+.actionable-results-list { display: grid; gap: .6rem; margin-bottom: .8rem; }
+.actionable-result-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .4rem .8rem; }
+.actionable-result-row label { display: flex; flex-direction: row; align-items: flex-start; gap: .6rem; min-width: 0; cursor: pointer; }
+.actionable-result-row input[type="checkbox"] { width: 1rem; height: 1rem; margin-top: .25rem; flex: 0 0 auto; }
+.actionable-result-row strong, .actionable-result-row small { display: block; overflow-wrap: anywhere; }
+.actionable-result-row small, .actionable-result-row p { font-size: .8rem; color: var(--muted, #667085); }
+.actionable-result-row p { grid-column: 1; margin: 0; }
+.actionable-result-row button { grid-column: 2; grid-row: 1 / span 2; }
+@media (max-width: 600px) {
+  .actionable-result-row { grid-template-columns: minmax(0, 1fr); }
+  .actionable-result-row button { grid-column: 1; grid-row: auto; justify-self: start; }
+}
+
 .business-interaction {
   padding: 13px;
   border: 1px solid #c6d9d1;

@@ -4,6 +4,7 @@ export function createHostRuntimeReporter({
   identityRouter,
   coordinator,
   performanceRecorder = null,
+  taskCommandRunner = null,
   logger = null,
   intervalMs = 60_000,
   initialDelayMs = 5_000,
@@ -57,6 +58,8 @@ export function createHostRuntimeReporter({
           throw error;
         }
         results.push({ bindingKey: binding.key, response });
+        identityRouter.rememberCatalogVersions?.(binding, response);
+        taskCommandRunner?.recover(response.pendingCommands, { binding, client });
       } catch (error) {
         transportErrorCount += 1;
         lastErrorCode = safeErrorCode(error);

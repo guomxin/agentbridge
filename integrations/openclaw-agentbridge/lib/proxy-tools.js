@@ -3,7 +3,8 @@ import {
   AGENTBRIDGE_USER_TURN_SOURCE_TOOLS,
 } from "./tool-catalog.js";
 import { extractToolPayload } from "./mcp-client.js";
-import { skillBindingMeta, rememberSkillBinding, skillRunKey, draftSampleGuard, workspaceSkillTrialGuard } from "./business-skills.js";
+import { skillBindingMeta, rememberSkillBinding, skillRunKey, draftSampleGuard, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
+import { staticToolScope } from "./tool-scopes.js";
 import {
   HOST_CONTEXT_META_KEY,
   TASK_CONTEXT_META_KEY,
@@ -146,11 +147,13 @@ export function createAgentBridgeProxyTools({
   const allowedToolNames = identity.bound
     ? identityRouter.allowedToolNamesForBinding?.(identity.binding)
     : null;
-  const visibleCatalog = allowedToolNames
+  const authorizedCatalog = allowedToolNames
     ? AGENTBRIDGE_AGENT_FACING_TOOL_CATALOG.filter((descriptor) =>
         allowedToolNames.has(descriptor.name),
       )
     : AGENTBRIDGE_AGENT_FACING_TOOL_CATALOG;
+  const scope = staticToolScope(identityRouter.config?.toolScope);
+  const visibleCatalog = scope ? authorizedCatalog.filter(descriptor => scope.has(descriptor.name)) : authorizedCatalog;
   return [
     statusTool,
     ...visibleCatalog.map((descriptor) =>
@@ -259,6 +262,8 @@ function createProxyTool({
       const skillContext = { ...context, runId: (skillRun && skillRun !== toolCallId ? skillRun : null) || context.runId };
       const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
       if (sampleBlocked) return jsonToolResult(sampleBlocked);
+      const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
+      if (scopeBlocked) return jsonToolResult(scopeBlocked);
       if (descriptor.name === "agentbridge_skill_get" && !skillRunKey(skillContext, identity)) {
         return jsonToolResult({ status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED", message: "当前宿主缺少独立回合上下文，无法安全加载业务助手。" } });
       }
@@ -352,7 +357,7 @@ function createProxyTool({
       }
       const taskId = resolution?.taskId || null;
       const coordinatorLease = taskId
-        ? await renewCoordinatorLease({
+        ? resolution?.coordinatorLease || await renewCoordinatorLease({
             client: identity.client,
             taskId,
             logger,
@@ -709,7 +714,8 @@ async function resolveTaskId({
     } else {
       if (!independentReadCall) taskIdBinder?.(sessionKey, descriptor.name, taskId);
     }
-    return { taskId };
+    return { taskId, ...(reusableEnsureLease(response?.coordinatorLease, taskId)
+      ? { coordinatorLease: response.coordinatorLease } : {}) };
   } catch (error) {
     logger?.warn?.(
       `AgentBridge task creation unavailable; business call stopped (${safeErrorCode(error)})`,
@@ -730,13 +736,21 @@ function workspaceSubject(endpointKey) {
 }
 
 async function observeTaskResult({ client, taskId, result, logger, signal }) {
-  const references = collectTaskReferences(extractToolPayload(result));
+  const payload = extractToolPayload(result);
+  const references = collectTaskReferences(payload);
   if (
     references.operationIds.length === 0 &&
     references.interactionIds.length === 0
   ) {
     return false;
   }
+  const receipt = payload?.taskObservation;
+  if (receipt?.schemaVersion === "agentbridge.task-observation.v1" && receipt.taskId === taskId
+      && Number.isInteger(receipt.taskVersion) && receipt.taskVersion > 0
+      && ["active", "waiting_user", "running", "succeeded", "failed", "outcome_unknown", "canceled",
+        "expired", "superseded", "partially_succeeded"].includes(receipt.taskStatus)
+      && exactReferences(receipt.operationIds, references.operationIds)
+      && exactReferences(receipt.interactionIds, references.interactionIds)) return true;
   try {
     await client.callTool(
       "agentbridge_host_task_observe",
@@ -754,6 +768,18 @@ async function observeTaskResult({ client, taskId, result, logger, signal }) {
     );
   }
   return true;
+}
+
+function exactReferences(receipt, actual) {
+  if (!Array.isArray(receipt) || receipt.length !== actual.length || new Set(receipt).size !== receipt.length) return false;
+  return receipt.every(value => typeof value === "string" && actual.includes(value));
+}
+
+function reusableEnsureLease(lease, taskId) {
+  return lease?.schema === "agentbridge.coordinator-lease.v1" && lease.taskId === taskId
+    && lease.hostInstanceId === "openclaw-gateway" && lease.agentHost === "openclaw" && lease.state === "active"
+    && Number.isInteger(lease.version) && lease.version > 0
+    && Number.isFinite(Date.parse(lease.expiresAt)) && Date.parse(lease.expiresAt) - Date.now() >= 300_000;
 }
 
 async function finishHostTask({

@@ -47,6 +47,19 @@ class BusinessDraftBoundaryTests(unittest.TestCase):
         self.assertEqual(self.query("SELECT COUNT(*) FROM write_authorizations"), [(0,)])
         self.assertEqual(self.fixture.transport.write_calls, 0)
 
+    def test_prepare_response_receipt_proves_exact_task_references_already_observed(self):
+        response = self.service.invoke(user_subject=OWNER, capability_name=PREPARE, arguments={},
+            task_id=self.source["task_id"], idempotency_key="draft-source:" + self.source["key"])
+        receipt = response["taskObservation"]
+        self.assertEqual(receipt["schemaVersion"], "agentbridge.task-observation.v1")
+        self.assertEqual(receipt["taskId"], self.source["task_id"])
+        self.assertEqual(receipt["operationIds"], [response["operationId"]])
+        self.assertEqual(receipt["interactionIds"], [response["interaction"]["interactionId"]])
+        task = self.service.tasks.get_task(self.source["task_id"], user_subject=OWNER)
+        self.assertEqual(receipt["taskVersion"], task["version"])
+        self.assertEqual(receipt["taskStatus"], task["status"])
+        self.assertEqual(self.query("SELECT COUNT(*) FROM write_authorizations"), [(0,)])
+
     def approve(self, ready):
         return self.app.approve(**self.args, expected_revision=ready["revision"],
                                 preview_id=ready["preview"]["previewId"], request_key="boundary-approve-01")

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from http.client import HTTPConnection
 from http.cookies import SimpleCookie
 import json
+import hashlib
 import math
 from pathlib import Path
 import re
@@ -154,7 +155,16 @@ class LatencyAcceptanceFixture(FullBusinessAcceptanceFixture):
                 "historyShape": self.meta.get("latency_history", {"messages": 0, "tasks": 0}),
                 "evidenceBoundary": "Real Central, adapters, material checks, draft/authorization ledgers, HTTP cards and Workspace; synthetic downstream. No model or real browser startup measurement."}
 
-    def add_query_case(self, *, case_key="browser-query"):
+    def add_query_case(self, *, case_key="browser-query", extra_profiles=()):
+        for profile in extra_profiles:
+            affair_id = "latency-query-extra-" + profile
+            if affair_id not in self.oa.data["affairs"]:
+                self.oa.add_affair(affair_id, profile=profile)
+        settings = self.service.skills.config("user:" + OWNER)
+        if "oa-pending" not in settings["value"]:
+            self.service.skills.save("user:" + OWNER, {**settings["value"], "oa-pending": {
+                "profiles": ["single", "batch"], "source_id": "", "detail": "standard"}},
+                expected_revision=settings["revision"], actor="synthetic-benchmark", reason="Synthetic selected-result preparation")
         task_id = self.service.ensure_host_task(user_subject=OWNER, token_id="fixture-token", agent_host="openclaw",
             host_task_key=f"latency-query|{case_key}", endpoint_key=self.account["endpoint_key"], client_type="web",
             external_subject=self.account["account_id"], conversation_ref=self.account["openclaw_session_key"],
@@ -170,6 +180,36 @@ class LatencyAcceptanceFixture(FullBusinessAcceptanceFixture):
         self.meta.setdefault("query_cases", []).append(case)
         write_metadata(self.meta_path, self.meta)
         return case
+
+    def coordinate(self):
+        # Only this explicit fixture host drives prepared commands. Production
+        # uses the registered OpenClaw coordinator, its lease and private tool.
+        def prepare_commands():
+            from agentbridge.core.actionable_results import pending_preparations, execute_preparation
+            while not self.stop_event.wait(.05):
+                for command in pending_preparations(self.service, OWNER):
+                    try:
+                        result = execute_preparation(self.service, OWNER, command["taskId"], command["commandKey"],
+                            runtime_context={"endpointId": self.account["endpoint_id"], "hostType": "openclaw",
+                                             "hostInstanceId": "synthetic-host-coordinator"})
+                        if result.get("interaction"):
+                            with self.lock:
+                                if not any(c["task_id"] == command["taskId"] for c in self.meta["draft_cases"]):
+                                    self.meta["draft_cases"].append({"task_id": command["taskId"]})
+                    except Exception as exc:
+                        self.coordinator_errors.append(type(exc).__name__ + ": " + str(exc))
+                        self.coordinator_errors[:] = self.coordinator_errors[-10:]
+        # Old frozen source archives do not expose selected-result preparation.
+        try:
+            from agentbridge.core.actionable_results import pending_preparations
+        except ImportError:
+            return super().coordinate()
+        thread = threading.Thread(target=prepare_commands, daemon=True)
+        thread.start()
+        try:
+            super().coordinate()
+        finally:
+            thread.join(timeout=2)
 
     def seed_history(self, *, messages=600, tasks=30):
         if not 0 <= messages <= 10000 or not 0 <= tasks <= 1000:
@@ -251,7 +291,7 @@ class JsonHttpClient:
         self.host, self.port, self.origin = parsed.hostname, parsed.port, origin
         self.cookies = {}
 
-    def request(self, method, path, body=None, *, draft_token=None, form=None):
+    def request(self, method, path, body=None, *, draft_token=None, form=None, csrf=False):
         if body is not None and form is not None:
             raise ValueError("Use one request body format")
         headers = {"Origin": self.origin, "Sec-Fetch-Site": "same-origin"}
@@ -263,6 +303,8 @@ class JsonHttpClient:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         if draft_token:
             headers["X-AgentBridge-Draft-Token"] = draft_token
+        if csrf:
+            headers["X-AgentBridge-CSRF"] = self.cookies.get("agentbridge_workspace_csrf", "")
         started = time.monotonic()
         connection = HTTPConnection(self.host, self.port, timeout=60)
         try:
@@ -278,8 +320,8 @@ class JsonHttpClient:
         finally:
             connection.close()
 
-    def json(self, method, path, body=None, *, draft_token=None):
-        status, payload, elapsed = self.request(method, path, body, draft_token=draft_token)
+    def json(self, method, path, body=None, *, draft_token=None, csrf=False):
+        status, payload, elapsed = self.request(method, path, body, draft_token=draft_token, csrf=csrf)
         return status, json.loads(payload), elapsed
 
 
@@ -448,4 +490,124 @@ def compare_reports(baseline, candidate):
                                     "baselineP95": old["p95"], "candidateP95": metric["p95"],
                                     "medianChangePercent": (metric["median"] / old["median"] - 1) * 100 if old["median"] else None}
     return rows
+
+
+class SelectedPreparationWorkload(HttpWorkload):
+    """Measure fresh exact selections; the preparation host is an explicit fixture.
+
+    The measured interval begins AFTER a unique query and its public choices are
+    ready. No existing prepared task is reused as a new sample. Real Workspace
+    CSRF/ownership/Skill/source checks and real OA preflight remain in the path.
+    """
+    def __init__(self, fixture):
+        if set(fixture.oa.data["affairs"]) != {"latency-query-target"}:
+            raise ValueError("Selected preparation samples require exactly one isolated leave affair")
+        super().__init__(fixture)
+        self.source_tasks, self.source_operations, self.prepared_tasks = set(), set(), set()
+        self.gateway_calls = []
+        original = fixture.app.gateway
+        calls = self.gateway_calls
+
+        class ObservedReadOnlyGateway:
+            def call(self, method, *args, **kwargs):
+                calls.append(method)
+                return original.call(method, *args, **kwargs)
+
+            def send_stream(self, **kwargs):
+                calls.append("chat.send_stream")
+                raise AssertionError("Performance preparation cannot call a model")
+
+            def stream(self, **kwargs):
+                return original.stream(**kwargs)
+
+        fixture.app.gateway = ObservedReadOnlyGateway()
+
+    def selected_preparation(self):
+        setup_started = time.monotonic()
+        source = self.fixture.add_query_case(case_key="selected-" + uuid4().hex)
+        if source["task_id"] in self.source_tasks or source["operation_id"] in self.source_operations:
+            raise AssertionError("Each sample must create a fresh source query task and operation")
+        self.source_tasks.add(source["task_id"])
+        self.source_operations.add(source["operation_id"])
+        status, source_detail, source_projection = self.workspace.json("GET", "/api/tasks/" + source["task_id"])
+        if status != 200:
+            raise AssertionError((status, source_detail))
+        groups = source_detail.get("actionableResults", [])
+        if len(groups) != 1 or len(groups[0]["targets"]) != 1 or not groups[0]["targets"][0]["enabled"]:
+            raise AssertionError("Selected preparation requires one exact enabled public choice")
+        group = groups[0]
+        if group["operationId"] != source["operation_id"]:
+            raise AssertionError("Public query choice belongs to a different source operation")
+        source_result = self.fixture.service.operations.get(source["operation_id"])["result"]
+        source_hash = hashlib.sha256(json.dumps(source_result, ensure_ascii=False, sort_keys=True,
+                                               separators=(",", ":")).encode()).hexdigest()
+        setup_seconds = time.monotonic() - setup_started
+        body = {"operationId": group["operationId"], "targetKeys": [group["targets"][0]["targetKey"]],
+                "requestKey": uuid4().hex}
+        path = "/api/tasks/" + source["task_id"] + "/prepare-selection"
+        offset = self.fixture.latency.snapshot()
+        started = time.monotonic()
+        status, queued, post_seconds = self.workspace.json("POST", path, body, csrf=True)
+        if status != 202 or queued.get("status") != "queued":
+            raise AssertionError((status, queued))
+        prepared_id = queued["taskId"]
+        if prepared_id in self.prepared_tasks:
+            raise AssertionError("A new performance sample reused an existing prepared task")
+        self.prepared_tasks.add(prepared_id)
+        polls, poll_http_seconds = 0, 0
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            status, detail, elapsed = self.workspace.json("GET", "/api/tasks/" + prepared_id)
+            polls += 1
+            poll_http_seconds += elapsed
+            if status != 200:
+                raise AssertionError((status, detail))
+            interaction = detail.get("interaction") or {}
+            preparation_state = (detail["task"].get("summary") or {}).get("preparation", {}).get("state")
+            if (interaction.get("type") == "business_input" and interaction.get("state") == "pending"
+                    and preparation_state == "requires_user_action"):
+                break
+            if detail["task"]["status"] in {"failed", "canceled", "succeeded", "unknown"}:
+                raise AssertionError("Selected prepare ended without an actionable business input")
+            time.sleep(.02)
+        else:
+            raise AssertionError("Selected preparation did not become actionable within 15 seconds")
+        uri = urlsplit(interaction["presentation"]["url"])
+        if f"{uri.scheme}://{uri.netloc}" != self.fixture.card_url:
+            raise AssertionError("Prepared card did not use the isolated trusted origin")
+        status, page, card_seconds = self.cards.request("GET", uri.path + ("?" + uri.query if uri.query else ""))
+        if status != 200 or "mountBusinessDraft(" not in page:
+            raise AssertionError("Prepared business input did not open as a real trusted draft")
+        config = json.loads(re.search(r"mountBusinessDraft\((\{[^\n]+\}), document, window\);", page)[1])
+        if config["state"]["ui"]["reviewKind"] != "leave":
+            raise AssertionError("Prepared business view differs from the exact selected leave affair")
+        ready_seconds = time.monotonic() - started
+        repeated_status, repeated, replay_seconds = self.workspace.json("POST", path, body, csrf=True)
+        if repeated_status != 202 or repeated["taskId"] != prepared_id or repeated["commandKey"] != queued["commandKey"]:
+            raise AssertionError("Idempotent request did not observe the exact existing preparation")
+        task = self.fixture.service.tasks.get_task(prepared_id, user_subject=OWNER)
+        command = task["summary"]["command"]
+        if command["sourceHash"] != source_hash or command["operationIdSource"] != source["operation_id"]:
+            raise AssertionError("Prepared command changed its frozen source")
+        if command["capabilityName"] != "oa.leave.approval.prepare" or command["state"] != "requires_user_action":
+            raise AssertionError("Prepared command is not the exact selected read-only leave preparation")
+        with sqlite3.connect(self.fixture.service.db_path) as connection:
+            event_count = connection.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='task.prepare.requested'",
+                                             (prepared_id,)).fetchone()[0]
+            if event_count != 1:
+                raise AssertionError("One source selection created multiple durable commands")
+        ledger = self.fixture.audit()
+        if ledger["decisionCount"] or ledger["authorizationStates"] or ledger["downstreamWriteCount"]:
+            raise AssertionError("Preparing selected results created authorization or business writes")
+        model_calls = [method for method in self.gateway_calls if method.startswith("chat.send") or method == "agentbridge.skills.complete"]
+        if model_calls:
+            raise AssertionError("Selected preparation invoked a model")
+        return {"selectionToReadySeconds": ready_seconds, "queuePostSeconds": post_seconds,
+                "pollHttpSeconds": poll_http_seconds, "cardGetSeconds": card_seconds,
+                "replayPostSeconds": replay_seconds, "querySetupExcludedSeconds": setup_seconds,
+                "sourceProjectionSetupExcludedSeconds": source_projection, "polls": polls,
+                "sourceTaskId": source["task_id"], "sourceOperationId": source["operation_id"],
+                "preparedTaskId": prepared_id, "sourceHash": source_hash, "modelCalls": 0,
+                "authorizationCount": 0, "businessWriteCount": 0, "duplicateRequestSameTask": True,
+                **self.fixture.latency.since(offset)}
 

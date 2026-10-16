@@ -1,7 +1,7 @@
 """Versioned business instructions and user assignments; never grants business access."""
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib.resources import files
@@ -12,6 +12,7 @@ import sqlite3
 from uuid import uuid4
 
 from agentbridge.core.user_grants import UserGrantConflict
+from agentbridge.core.store_transactions import store_transaction
 
 PROTOCOL = "agentbridge.skills.v1"
 META_KEY = "agentbridge/skill"
@@ -170,6 +171,13 @@ class SkillStore:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def _connect(self):
+        # Match store_transaction's connection ownership contract. Shared
+        # transactions remain owned and committed by the caller.
+        with closing(self.connect()) as db, db:
+            yield db
+
     def current(self, sid, connection=None):
         if connection is None:
             with closing(self.connect()) as db:
@@ -291,9 +299,8 @@ class SkillStore:
             self._allowed(subject, sid, profile, db)
             return self.current(sid, db)
 
-    def bind(self, subject, sid, profile, source_id=None, expected_version=None):
-        with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+    def bind(self, subject, sid, profile, source_id=None, expected_version=None, *, connection=None):
+        with store_transaction(self, connection) as db:
             item = self.current(sid, db)
             if expected_version and expected_version != item["manifest"]["version"]:
                 raise SkillRejected("SKILL_VERSION_CHANGED", "业务助手版本已更新，请刷新目录")
@@ -321,9 +328,8 @@ class SkillStore:
         result["settings"] = json.loads(row["settings_json"])
         return result
 
-    def attach(self, subject, task_id, binding_id):
-        with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
+    def attach(self, subject, task_id, binding_id, *, connection=None):
+        with store_transaction(self, connection) as db:
             self.binding(subject, binding_id, db)
             old = db.execute("SELECT * FROM skill_task_bindings WHERE task_id=?", (task_id,)).fetchone()
             if old and (old["binding_id"] != binding_id or old["user_subject"] != subject):

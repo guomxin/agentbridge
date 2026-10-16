@@ -262,6 +262,25 @@ resume claim、原协调租约、fencing 版本及稳定幂等键仍决定唯一
 delivery 去重和中央业务账本保护；进程崩溃后的原交互恢复、业务租约和权威结果核验保留。
 租期只影响通知恢复时机，不授予或扩张业务提交权限。
 
+查询结果中已明确选择的 OA 事项通过 `agentbridge.task.wake` 进入原任务准备：Gateway 先兑换
+原 Workspace 一次性绑定 grant，再由原宿主获取租约、调用 host-private prepare。该通道只接
+task/command/session/endpoint 标识，不接 capability 或业务参数；任务及目标来源由 Central
+冻结验证。接口立即返回受理状态，准备与材料读取在有界后台队列执行，所得卡片进入原协调器
+状态长轮询。runtime snapshot 中同身份的 pendingCommands 仅用于丢失唤醒后的恢复。
+
+业务助手目录按实际 MCP transport 捕获的身份凭据、端点、目录及权限版本隔离缓存，重复读取
+合并，最长 60 秒；版本改变、过期或失败不使用旧目录替代新读。执行 Skill 加载、绑定、资源、
+材料和授权继续实时检查。原子 ensure 返回精确且剩余至少 300 秒的 600 秒租约时省一次续租；
+业务响应的 taskObservation 仅在 task、全部 operation/interaction 引用、状态和版本精确匹配
+时省一次 observe。缺失、短租约或不完整回执均保留原调用。
+
+`toolScope=all` 保持生产通用 agent 的全部业务工具；独立 OA agent 或隔离同题测试可显式选择
+`oa_pending` 静态目录。已成功加载 OA 待办助手后，原 run 的执行 guard 将其限制在对应 single/
+batch 工具及固定资料/反馈入口，包含宿主 builtin 工具检查。OpenClaw 2026.7.1 的已核对 hooks
+不能动态删改同 run 后续模型工具 schema；本实现不声称做到动态 schema 裁剪。目录缓存与
+该附加 guard 可分别用 `skillCatalogCache=false`、`boundSkillToolGuard=false` 回退，中央授权
+规则始终保留。生产主 agent 不因隔离模型对照切换 scope 或模型。
+
 ## 十一、测试与打包
 
 ```sh

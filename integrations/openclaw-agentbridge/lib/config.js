@@ -9,6 +9,9 @@ const DEFAULTS = Object.freeze({
   syncTimeline: true,
   notificationLongPoll: true,
   notificationConcurrency: 4,
+  skillCatalogCache: true,
+  boundSkillToolGuard: true,
+  toolScope: "all",
 });
 
 export function resolvePluginConfig(raw) {
@@ -62,6 +65,9 @@ export function resolvePluginConfig(raw) {
     ),
     notificationLongPoll: booleanValue(source.notificationLongPoll, DEFAULTS.notificationLongPoll),
     notificationConcurrency: boundedInteger(source.notificationConcurrency, DEFAULTS.notificationConcurrency, 1, 8),
+    skillCatalogCache: booleanValue(source.skillCatalogCache, DEFAULTS.skillCatalogCache),
+    boundSkillToolGuard: booleanValue(source.boundSkillToolGuard, DEFAULTS.boundSkillToolGuard),
+    toolScope: source.toolScope === "oa_pending" ? "oa_pending" : "all",
   });
 }
 

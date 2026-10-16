@@ -1,4 +1,5 @@
 import { rankSkillCandidates } from "./skill-ranking.js";
+import { boundToolScope } from "./tool-scopes.js";
 
 // This context comes only from the redeemed Workspace dispatch, never the chat text.
 export function workspaceSkillTrialContext(trial) {
@@ -30,7 +31,7 @@ export function skillRunKey(context, identity) {
 export function skillBindingMeta(router, context, identity) {
   const key = skillRunKey(context, identity);
   const id = key && bindings.get(router)?.get(key);
-  return id ? { "agentbridge/skill": { bindingId: id } } : {};
+  return id ? { "agentbridge/skill": { bindingId: typeof id === "string" ? id : id.bindingId } } : {};
 }
 export function rememberSkillBinding(router, context, identity, payload) {
   const key = skillRunKey(context, identity);
@@ -39,11 +40,25 @@ export function rememberSkillBinding(router, context, identity, payload) {
   if (!entries) { entries = new Map(); bindings.set(router, entries); }
   // Bound memory. An evicted active binding must fail closed rather than lose its guard.
   if (!entries.has(key) && entries.size >= 4096) throw new Error("Skill run binding capacity exceeded");
-  entries.set(key, payload.binding_id);
+  entries.set(key, { bindingId: payload.binding_id, skillId: payload.skill_id, profile: payload.profile });
 }
 
-export async function businessSkillContext(identity, prompt = "") {
-  const catalog = await identity.client.callTool("agentbridge_skill_catalog", {});
+export function boundSkillToolGuard(router, context, identity, toolName, params) {
+  if (router.config?.boundSkillToolGuard === false) return null;
+  const binding = bindings.get(router)?.get(skillRunKey(context, identity));
+  const scope = boundToolScope(binding);
+  if (!scope) return null;
+  const reject = () => ({ status: "rejected", error: { code: "SKILL_TOOL_SCOPE_REQUIRED",
+    message: "当前任务已绑定 OA 待办办理，仅能调用该助手的查询、准备和原任务控制工具。其他业务请在独立任务中执行。" } });
+  if (!scope.has(toolName)) return reject();
+  if (toolName === "agentbridge_skill_get" && (params?.skill_id !== binding.skillId || params?.profile !== binding.profile)) return reject();
+  if (toolName === "agentbridge_skill_authoring" && (!["resource", "feedback"].includes(params?.action)
+      || params?.data?.binding_id !== binding.bindingId)) return reject();
+  return null;
+}
+
+export async function businessSkillContext(identity, prompt = "", options = {}) {
+  const catalog = await skillCatalog(identity, options);
   const authoring = catalog?.authoring ? "业务助手创作：所有已认证用户均可用 agentbridge_skill_authoring，无需业务权限。用户要求做助手时，优先 generate(material,request_key) 后台提炼并用 jobs 查看；也可 save 按工具结构化 schema 保存。先 list/get 检查已有草稿，inspect 查看诊断与差异。过程材料只含用户选定范围，删除业务原文、姓名、凭据；未知历史不编造。试用分为 test/test_result 人工样例和 evaluate 独立无工具评测，均不代表真实业务通过。发布用 submit，默认仅自己，必须管理员审批。自动沉淀只在总开关与范围授权同时开启时由后台处理，不能自行开启或自动提交。当前总开关：" + (catalog.authoring.value?.auto_draft ? "已开启。" : "关闭。") + "工具说明含完整参数。\n" : "";
   if (!Array.isArray(catalog?.items) || !catalog.items.length) return authoring || null;
   const items = rankSkillCandidates(catalog.items, prompt).slice(0, 20);
@@ -56,6 +71,41 @@ export async function businessSkillContext(identity, prompt = "") {
     "3. 多个候选按任务目标选择，只有歧义影响结果时才询问。每个独立任务使用一个主要助手；多步骤需求先用 composition 预检输入输出和依赖，再沿现有持久计划拆为独立任务，不能在已绑定任务中替换助手；数据库助手从当前用户获准且满足依赖的数据源中选择 source_id：只有一个适用来源时自动选择；多个来源按用户请求选择，无法确定再询问。\n" +
     "4. 加载成功会一次返回主说明及该模式必读资料，必读约束不得省略。optional_resources 列出的可选资料需要时用 authoring resource(binding_id,path) 按固定版本读取。加载助手与业务执行路径相互独立：仍按能力要求走原子工具或持久计划；允许直接调用工具不表示可以跳过适用助手。已选助手加载失败必须说明，不得静默退回直接工具完成同一业务方法。\n" +
     "5. 本轮独立任务不能用历史对话中的加载记录代替当前加载和绑定；已有任务续办沿用其绑定与状态。未分配、停用或缺依赖不得冒充已执行助手；不绕过失败的来源或写入约束。";
+}
+
+const catalogFlights = new WeakMap();
+export async function skillCatalog(identity, { router = null, now = () => Date.now(), maxAgeMs = 60_000, enabled = true } = {}) {
+  const key = enabled && router?.catalogCacheKeyForBinding?.(identity.binding);
+  const cache = router?.catalogCache;
+  if (!key || !(cache instanceof Map)) return identity.client.callTool("agentbridge_skill_catalog", {});
+  const versions = router.catalogVersionsForBinding?.(identity.binding);
+  const cached = cache.get(key);
+  if (cached && versions && now() - cached.at < Math.min(maxAgeMs, 60_000)
+      && versions.catalogVersion === cached.catalog.catalogVersion && versions.permissionVersion === cached.catalog.permissionVersion) {
+    return cached.catalog;
+  }
+  let flights = catalogFlights.get(cache);
+  if (!flights) { flights = new Map(); catalogFlights.set(cache, flights); }
+  if (flights.has(key)) return flights.get(key);
+  const promise = (async () => {
+    const catalog = await identity.client.callTool("agentbridge_skill_catalog", {});
+    const latest = router.catalogVersionsForBinding?.(identity.binding);
+    const changedDuringRead = versions && latest && (latest.catalogVersion !== versions.catalogVersion
+      || latest.permissionVersion !== versions.permissionVersion);
+    const valid = /^(?:sha256:)?[a-f0-9]{64}$/u.test(catalog?.catalogVersion || "") && /^(?:sha256:)?[a-f0-9]{64}$/u.test(catalog?.permissionVersion || "");
+    if (valid && (!changedDuringRead || (catalog.catalogVersion === latest.catalogVersion && catalog.permissionVersion === latest.permissionVersion))) {
+      router.rememberCatalogVersions?.(identity.binding, catalog);
+      const copy = structuredClone(catalog);
+      if (JSON.stringify(copy).length <= 1_000_000) {
+        cache.set(key, { at: now(), catalog: copy });
+        while (cache.size > 128) cache.delete(cache.keys().next().value);
+      }
+    }
+    return catalog;
+  })();
+  flights.set(key, promise);
+  try { return await promise; }
+  finally { if (flights.get(key) === promise) flights.delete(key); }
 }
 
 const sampleRuns = new WeakMap();

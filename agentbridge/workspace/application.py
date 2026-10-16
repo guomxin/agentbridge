@@ -84,6 +84,8 @@ class WorkspaceApplication:
         self._dispatch_stop = threading.Event()
         self._dispatch_workers_lock = threading.Lock()
         self._dispatch_workers: dict[str, threading.Thread] = {}
+        self._preparation_workers: dict[str, threading.Thread] = {}
+        self._preparation_queue: dict[str, tuple[dict, dict]] = {}
         self._readiness_lock = threading.Lock()
         self._readiness_cache: tuple[float, dict] | None = None
         if gateway is not None:
@@ -271,6 +273,7 @@ class WorkspaceApplication:
         )
         return {
             "task": _public_task(task),
+            "actionableResults": self.actionable_results(account, task_id),
             "skill": self.service.skills.task_presentation(account["user_subject"], task_id),
             "feedback": self.service.skill_authoring.workbench.task_feedback(account["user_subject"], task_id),
             "plan": task_plan_response(plan) if plan is not None else None,
@@ -280,6 +283,59 @@ class WorkspaceApplication:
             "interactions": interactions,
             "batch": workspace_batch_projection(batch),
         }
+
+    def actionable_results(self, account: dict, task_id: str) -> list[dict]:
+        from agentbridge.core.actionable_results import list_actionable_results
+        return list_actionable_results(self.service, account["user_subject"], task_id)
+
+    def prepare_selected_results(self, account: dict, task_id: str, body: dict) -> dict:
+        from agentbridge.core.actionable_results import queue_preparation
+        result = queue_preparation(self.service, account, task_id, body)
+        queued_task = self.service.tasks.get_task(result["taskId"], user_subject=account["user_subject"])
+        try:
+            requested_at = queued_task["summary"]["command"]["requestedAt"]
+            governance = self.service.runtime_governance
+            trace, _ = governance.ensure_trace(user_subject=account["user_subject"], task_id=result["taskId"],
+                request_id=result["commandKey"], origin_endpoint_id=account["endpoint_id"],
+                host_type="openclaw", request_kind="interaction", lock_timeout=.02)
+            governance.record_timing(trace_id=trace["trace_id"], stage="workspace.preparation.queued",
+                started_at=requested_at, finished_at=requested_at, duration_ms=0,
+                metadata={"clockSource": "central.wall", "measurementKind": "event", "requestId": result["commandKey"]},
+                dedupe_key="preparation-queued:" + result["commandKey"])
+        except Exception as exc:
+            _LOG.debug("Workspace preparation timing unavailable: %s", type(exc).__name__)
+        # The HTTP request records an intent. Only the original host obtains a
+        # coordinator lease and prepares the fixed, source-bound business action.
+        if self.gateway is not None and queued_task["summary"]["command"]["state"] == "pending":
+            with self._dispatch_workers_lock:
+                if result["taskId"] not in self._preparation_workers and len(self._preparation_queue) < 32:
+                    self._preparation_queue[result["taskId"]] = (dict(account), dict(result))
+                    self._start_preparation_workers_locked()
+        return {**result, "detail": self.task_detail(account, result["taskId"])}
+
+    def _start_preparation_workers_locked(self) -> None:
+        while self._preparation_queue and len(self._preparation_workers) < 4 and not self._dispatch_stop.is_set():
+            task_id = next(iter(self._preparation_queue))
+            account, command = self._preparation_queue.pop(task_id)
+            worker = threading.Thread(target=self._wake_preparation, args=(account, command), daemon=True)
+            self._preparation_workers[task_id] = worker
+            worker.start()
+
+    def _wake_preparation(self, account: dict, command: dict) -> None:
+        try:
+            grant = self.store.issue_gateway_grant(account["account_id"])
+            self._gateway().call("agentbridge.task.wake", {
+                "sessionKey": grant["session_key"], "endpointKey": grant["endpoint_key"],
+                "grant": grant["grant"], "taskId": command["taskId"], "commandKey": command["commandKey"],
+            }, timeout_seconds=60)
+        except Exception as exc:
+            # The committed command remains recoverable through the host runtime
+            # channel. Never execute a business action from this worker.
+            _LOG.debug("Workspace preparation wake unavailable: %s", type(exc).__name__)
+        finally:
+            with self._dispatch_workers_lock:
+                self._preparation_workers.pop(command["taskId"], None)
+                self._start_preparation_workers_locked()
 
     def task_feedback(self, account: dict, task_id: str, body: dict) -> dict:
         if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
@@ -649,7 +705,8 @@ class WorkspaceApplication:
         self.service.skill_authoring.workbench.close()
         self._dispatch_stop.set()
         with self._dispatch_workers_lock:
-            workers = list(self._dispatch_workers.values())
+            self._preparation_queue.clear()
+            workers = [*self._dispatch_workers.values(), *self._preparation_workers.values()]
         for worker in workers:
             worker.join(timeout=2)
 
@@ -1576,7 +1633,14 @@ def _public_task(task: dict) -> dict:
         "updated_at",
         "finished_at",
     )
-    return {name: task.get(name) for name in names}
+    result = {name: task.get(name) for name in names}
+    summary = dict(task.get("summary") or {})
+    command = summary.pop("command", None)
+    if isinstance(command, dict):
+        summary["preparation"] = {"state": command.get("state"),
+            "selectedCount": len(command.get("selectedItems") or [])}
+    result["summary"] = summary
+    return result
 
 
 def _public_event(event: dict) -> dict:

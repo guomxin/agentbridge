@@ -78,7 +78,7 @@ const { consumeChatStream } = createChatStream({
 const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback,
+  submitTaskFeedback, prepareTargets,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -110,7 +110,7 @@ function scopedApi(scope) {
 function resetWorkspaceState() {
   clearWorkspaceTimings();
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
-    "syncedMessages", "taskCards", "taskFeedback", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
+    "syncedMessages", "taskCards", "taskFeedback", "actionableGroups", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
     state[name].clear();
   }
   state.tasks = [];
@@ -1238,6 +1238,18 @@ async function submitTaskFeedback(taskId, payload) {
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/feedback`,
     {method: "POST", body: payload, csrf: true});
   scope.assertCurrent();
+  return result;
+}
+
+async function prepareTargets(sourceTaskId, payload) {
+  const scope = sessionScope;
+  markWorkspaceTiming("selection_sent", {requestId: payload.requestKey});
+  const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(sourceTaskId)}/prepare-selection`,
+    { method: "POST", body: payload, csrf: true });
+  scope.assertCurrent();
+  markWorkspaceTiming("selection_queued", {requestId: payload.requestKey, runId: result.commandKey, taskId: result.taskId});
+  if (result.detail) upsertTaskCard(result.detail);
+  if (result.taskId) scheduleTaskSync(result.taskId, "task.prepare.requested");
   return result;
 }
 

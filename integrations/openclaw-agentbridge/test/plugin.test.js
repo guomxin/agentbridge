@@ -7621,6 +7621,70 @@ function bindDeliveryRoute(
   );
 }
 
+test("prepared-task wake redeems a one-use binding and returns before exact private preparation", async () => {
+  const taskId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const sessionKey = "agent:main:agentbridge-workspace:direct:wake-test";
+  const endpointKey = "workspace:wake-test";
+  const binding = { key: "owner", channel: "telegram" };
+  let bound = false, grantValid = true, release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  const client = { async callTool(name, params, options) {
+    calls.push({ name, params, options });
+    if (name === "agentbridge_host_workspace_session_bind") return grantValid
+      ? { status: "succeeded", binding: { sessionKey, endpointKey } } : { status: "failed" };
+    if (name === "agentbridge_host_coordinator_lease_acquire") return { coordinatorLease: {
+      taskId, hostInstanceId: "openclaw-gateway", state: "active", version: 9,
+      expiresAt: new Date(Date.now() + 600_000).toISOString() } };
+    if (name === "agentbridge_host_task_prepare") { await waiting; return { status: "requires_user_action",
+      interaction: interaction({ type: "business_input" }) }; }
+    return { status: "succeeded" };
+  } };
+  const identityRouter = { enabled: true, configuredIdentities: () => [{ binding, client }],
+    resolveToolContext: () => ({ bound, binding, client }), resolvePinnedSession: () => ({ bound, binding, client }),
+    restoreSessionBinding(value) { bound = value.sessionKey === sessionKey && value.endpointKey === endpointKey; return bound; },
+    endpointKeyForSession: key => bound && key === sessionKey ? endpointKey : null,
+    clientForSession: () => client,
+  };
+  const harness = fakeApi({ autoPoll: false });
+  const coordinator = registerAgentBridgeInteractions(harness.api, { identityRouter });
+  const method = harness.gatewayMethods.get("agentbridge.task.wake");
+  assert.equal(method.options.scope, "operator.write");
+  const responses = [];
+  const params = { taskId, commandKey: "command-test", sessionKey, endpointKey, grant: "synthetic-one-use-grant" };
+  await method.handler({ params, respond(ok, payload) { responses.push({ ok, payload }); } });
+  assert.equal(responses[0].payload.status, "accepted");
+  release(); await coordinator.taskCommandRunner.waitForIdle();
+  const prepare = calls.find(call => call.name === "agentbridge_host_task_prepare");
+  assert.deepEqual(prepare.params, { task_id: taskId, command_key: "command-test", session_key: sessionKey, endpoint_key: endpointKey });
+  assert.equal(prepare.options.meta["io.agentbridge/task"].coordinatorLeaseVersion, "9");
+  assert.equal(coordinator.pendingForSession(sessionKey)[0].type, "business_input");
+  assert.equal(coordinator.records.get("interaction-1234567890").taskId, taskId);
+  const before = calls.length;
+  grantValid = false;
+  await method.handler({ params, respond(ok) { responses.push({ ok }); } });
+  assert.equal(responses.at(-1).ok, false);
+  assert.equal(calls.length, before + 1);
+  await method.handler({ params: { ...params, business_args: {} }, respond(ok) { responses.push({ ok }); } });
+  assert.equal(responses.at(-1).ok, false);
+  assert.equal(calls.length, before + 1);
+});
+
+test("a loaded OA Skill blocks builtin execution in the real host hook and releases at a new run", async () => {
+  const sessionKey = "agent:main:telegram:direct:1001";
+  const client = { async callToolResult() { return { structuredContent: { status: "succeeded",
+    binding_id: "fixed-oa-binding", skill_id: "oa-pending", profile: "single" } }; } };
+  const identityRouter = { enabled: true, resolveToolContext: () => ({ bound: true, binding: { key: "owner" }, client }) };
+  const harness = fakeApi({ autoPoll: false });
+  registerAgentBridgeInteractions(harness.api, { identityRouter });
+  harness.hooks.before_tool_call({ toolCallId: "load-scope", toolName: "agentbridge_skill_get", runId: "scope-run", params: {} }, { sessionKey, runId: "scope-run" });
+  const tools = harness.toolFactory({ sessionKey, runId: "scope-run" });
+  await tools.find(tool => tool.name === "agentbridge_skill_get").execute("load-scope", { skill_id: "oa-pending", profile: "single" });
+  const blocked = harness.hooks.before_tool_call({ toolCallId: "builtin-call", toolName: "exec", runId: "scope-run", params: {} }, { sessionKey, runId: "scope-run" });
+  assert.equal(blocked.block, true);
+  assert.equal(harness.hooks.before_tool_call({ toolCallId: "other-call", toolName: "exec", runId: "other-run", params: {} }, { sessionKey, runId: "other-run" }), undefined);
+});
+
 function fakeApi(pluginConfig) {
   const hooks = {};
   const logs = { info: [], warn: [] };

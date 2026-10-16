@@ -1,5 +1,5 @@
 import { resolvePluginConfig } from "./config.js";
-import { businessSkillContext, releaseSkillRun, workspaceSkillTrialContext, workspaceSkillTrialGuard } from "./business-skills.js";
+import { businessSkillContext, releaseSkillRun, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
 import { registerSkillCompletion } from "./skill-completion.js";
 import {
   createInteractionSharedState,
@@ -24,6 +24,7 @@ import {
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
 import { createHostPerformance } from "./performance.js";
+import { createTaskCommandRunner } from "./task-commands.js";
 
 export const PLUGIN_VERSION = "0.4.114";
 
@@ -72,6 +73,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       sessionBindings: identitySessionBindings,
       sessionEndpoints: identitySessionEndpoints,
       planningPolicies: identityPlanningPolicies,
+      catalogVersions: sharedState.catalogVersions || (sharedState.catalogVersions = new Map()),
+      catalogCache: sharedState.catalogCache || (sharedState.catalogCache = new Map()),
     });
   const mcpClient = identityRouter.enabled
     ? null
@@ -109,6 +112,10 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
           })
       : null,
   });
+  const taskCommandRunner = sharedState.taskCommandRunner || (sharedState.taskCommandRunner = createTaskCommandRunner({
+    identityRouter, coordinator, performanceRecorder, logger: api.logger,
+  }));
+  coordinator.taskCommandRunner = taskCommandRunner;
   const timelinePublisher =
     config.syncTimeline && identityRouter.enabled
       ? new TimelinePublisher({
@@ -126,6 +133,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         identityRouter,
         coordinator,
         performanceRecorder,
+        taskCommandRunner,
         logger: api.logger,
         sleep: dependencies.runtimeReporterSleep,
         now: dependencies.now,
@@ -213,6 +221,18 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       ? "agentbridge_skill_authoring" : event.toolName;
     const trialBlock = workspaceSkillTrialGuard(trial, trialTool, event.params);
     if (trialBlock) return { block: true, blockReason: trialBlock.error.message };
+    const identity = identityRouter.resolveToolContext({ ...context, sessionKey: event.sessionKey || context.sessionKey });
+    if (identity?.bound) {
+      const scopeRun = coordinator.taskRunRefForToolCall(event.toolCallId || context.toolCallId,
+        event.sessionKey || context.sessionKey, "agentbridge_skill_get");
+      const toolName = AGENTBRIDGE_AGENT_FACING_TOOL_NAMES.includes(event.toolName)
+        ? event.toolName : AGENTBRIDGE_AGENT_FACING_TOOL_NAMES.find(name => `openclaw${name}` === event.toolName) || event.toolName;
+      const scopeBlocked = boundSkillToolGuard(identityRouter, { ...context,
+        sessionKey: event.sessionKey || context.sessionKey,
+        runId: (scopeRun && scopeRun !== event.toolCallId ? scopeRun : null) || event.runId || context.runId },
+      identity, toolName, event.params);
+      if (scopeBlocked) return { block: true, blockReason: scopeBlocked.error.message };
+    }
     if (
       identityRouter.enabled &&
       String(event.toolName || "").startsWith(`${config.mcpServerName}__`)
@@ -442,6 +462,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
 
   api.on("gateway_stop", () => {
     hostRuntimeReporter?.stop();
+    taskCommandRunner.stop();
     coordinator.stopAll();
   });
 
@@ -511,6 +532,9 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         }),
       { scope: "operator.write" },
     );
+    api.registerGatewayMethod("agentbridge.task.wake", options => wakePreparedTask({
+      ...options, identityRouter, coordinator, taskCommandRunner, performanceRecorder, logger: api.logger,
+    }), { scope: "operator.write" });
   } else {
     api.logger.warn(
       "AgentBridge workspace binding is unavailable because this OpenClaw host does not expose registerGatewayMethod",
@@ -677,7 +701,8 @@ async function composedTaskPlanningContext({ context, identityRouter, prompt }) 
   const policy = planning?.modelContext || "";
   if (planning?.skillProtocol !== "agentbridge.skills.v1") return policy || null;
   try {
-    return [policy, await businessSkillContext(identity, prompt)].filter(Boolean).join("\n\n") || null;
+    return [policy, await businessSkillContext(identity, prompt, { router: identityRouter,
+      enabled: identityRouter.config?.skillCatalogCache !== false })].filter(Boolean).join("\n\n") || null;
   } catch {
     return [policy, "当前业务助手目录暂不可用，不使用旧缓存新开 Skill 任务。普通原子工具仍按原权限使用；不可绕过来源派生写入约束。"].filter(Boolean).join("\n\n");
   }
@@ -1209,6 +1234,27 @@ async function bindWorkspaceGatewaySession({
     code: "FORBIDDEN",
     message: "AgentBridge workspace identity binding was rejected.",
   });
+}
+
+async function wakePreparedTask({ params, respond, identityRouter, coordinator,
+  taskCommandRunner, performanceRecorder, logger }) {
+  const allowed = new Set(["taskId", "commandKey", "sessionKey", "endpointKey", "grant"]);
+  if (!params || typeof params !== "object" || Object.keys(params).some(key => !allowed.has(key))
+      || !safeText(params.taskId, 128) || !safeText(params.commandKey, 256)) {
+    respond(false, undefined, { code: "INVALID_REQUEST", message: "Invalid prepared-task wake request." });
+    return;
+  }
+  let bound = false;
+  await bindWorkspaceGatewaySession({ params: { sessionKey: params.sessionKey, endpointKey: params.endpointKey, grant: params.grant },
+    respond(ok) { bound = ok; }, identityRouter, coordinator, performanceRecorder, logger });
+  if (!bound || identityRouter.endpointKeyForSession(params.sessionKey) !== params.endpointKey) {
+    respond(false, undefined, { code: "FORBIDDEN", message: "Prepared-task identity binding was rejected." });
+    return;
+  }
+  const command = { taskId: params.taskId, commandKey: params.commandKey,
+    sessionKey: params.sessionKey, endpointKey: params.endpointKey };
+  const scheduled = taskCommandRunner.schedule(command);
+  respond(true, { status: scheduled.accepted ? "accepted" : "deferred", taskId: params.taskId, commandKey: params.commandKey });
 }
 
 async function recoverHostTasks({ coordinator, identityRouter, logger }) {

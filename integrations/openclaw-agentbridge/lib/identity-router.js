@@ -1,6 +1,7 @@
 import { matchIdentityBinding, resolveMcpEndpoint } from "./config.js";
 import { isPrivateSessionKey } from "./interaction.js";
 import { createAgentBridgeMcpClient } from "./mcp-client.js";
+import { createHash } from "node:crypto";
 import {
   assertAcceptedHostNegotiation,
   hostContextMeta,
@@ -16,6 +17,8 @@ export class AgentBridgeIdentityRouter {
     sessionBindings = new Map(),
     sessionEndpoints = new Map(),
     planningPolicies = new Map(),
+    catalogVersions = new Map(),
+    catalogCache = new Map(),
   }) {
     this.config = config;
     this.endpoint = resolveMcpEndpoint(config, hostConfig);
@@ -25,8 +28,11 @@ export class AgentBridgeIdentityRouter {
       config.identityBindings.map((binding) => [binding.key, binding]),
     );
     this.clients = new Map();
+    this.clientCatalogKeys = new Map();
     this.identityProfiles = new Map();
     this.planningPolicies = planningPolicies;
+    this.catalogVersions = catalogVersions;
+    this.catalogCache = catalogCache;
     this.sessionBindings = sessionBindings;
     this.sessionEndpoints = sessionEndpoints;
   }
@@ -198,6 +204,7 @@ export class AgentBridgeIdentityRouter {
           planningPolicy: normalizePlanningPolicy(serverProfile?.planning),
         });
         this.identityProfiles.set(binding.key, profile);
+        this.rememberCatalogVersions(binding, result);
         const policyKey = JSON.stringify([this.endpoint?.url, binding.key]);
         if (profile.planningPolicy) {
           this.planningPolicies.set(policyKey, profile.planningPolicy);
@@ -222,6 +229,22 @@ export class AgentBridgeIdentityRouter {
   allowedToolNamesForBinding(binding) {
     return binding ? this.identityProfiles.get(binding.key)?.allowedToolNames || null : null;
   }
+
+  catalogCacheKeyForBinding(binding) {
+    if (!binding) return null;
+    this.clientForBinding(binding);
+    return this.clientCatalogKeys.get(binding.key) || null;
+  }
+
+  rememberCatalogVersions(binding, value) {
+    const key = this.catalogCacheKeyForBinding(binding);
+    if (!key || !/^(?:sha256:)?[a-f0-9]{64}$/u.test(value?.catalogVersion || "")
+        || !/^(?:sha256:)?[a-f0-9]{64}$/u.test(value?.permissionVersion || "")) return;
+    this.catalogVersions.set(key, { catalogVersion: value.catalogVersion, permissionVersion: value.permissionVersion });
+    while (this.catalogVersions.size > 256) this.catalogVersions.delete(this.catalogVersions.keys().next().value);
+  }
+
+  catalogVersionsForBinding(binding) { return this.catalogVersions.get(this.catalogCacheKeyForBinding(binding)); }
 
   planningPolicyForBinding(binding) {
     return binding
@@ -387,6 +410,11 @@ export class AgentBridgeIdentityRouter {
     });
     if (client) {
       this.clients.set(binding.key, client);
+      // Bind to the credential captured by this exact transport instance;
+      // changing an environment object later cannot relabel an old client.
+      const token = this.env[binding.tokenEnv];
+      this.clientCatalogKeys.set(binding.key, JSON.stringify([this.endpoint.url, binding.key,
+        createHash("sha256").update(token.trim()).digest("hex")]));
     }
     return client;
   }

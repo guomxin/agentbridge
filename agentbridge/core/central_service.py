@@ -151,6 +151,7 @@ from agentbridge.core.task_plans import (
     task_plan_response,
 )
 from agentbridge.core.write_authorizations import WriteAuthorizationStateError
+from agentbridge.core.store_transactions import store_transaction
 
 
 WorkerFactory = Callable[[dict, object], object]
@@ -291,6 +292,31 @@ class CentralCapabilityService:
             envelope = build_interaction_envelope(record, authorization)
             self.tasks.link_interaction(task_id=row["task_id"], user_subject=authorization["user_subject"],
                 interaction_record=record, interaction=envelope, connection=connection)
+
+    def prepare_host_task(self, *, user_subject, task_id, command_key, session_key, endpoint_key, registration, runtime_context=None):
+        """The registered coordinator may prepare only its exact Workspace task."""
+        from agentbridge.core.actionable_results import execute_preparation
+        runtime_context = runtime_context or {}
+        lease_version = runtime_context.get("coordinatorLeaseVersion")
+        if lease_version is None or not str(lease_version).isdigit() or int(lease_version) < 1:
+            raise TaskIntegrityError("prepare command requires the exact coordinator lease version")
+        self.validate_host_call_context(user_subject=user_subject, registration=registration, task_id=task_id,
+            endpoint_id=runtime_context.get("endpointId"), expected_lease_version=int(lease_version), require_coordinator_lease=True)
+        task = self.tasks.get_task(task_id, user_subject=user_subject)
+        account = self.workspace.resolve_gateway_session(user_subject=user_subject, session_key=session_key)
+        endpoint = self.tasks.get_endpoint(task["origin_endpoint_id"], user_subject=user_subject)
+        if (task["active_conversation_ref"] != session_key or endpoint["endpoint_key"] != endpoint_key
+                or endpoint["client_type"] != "web" or endpoint["state"] != "active"
+                or account["endpoint_id"] != endpoint["endpoint_id"] or account["endpoint_key"] != endpoint_key
+                or endpoint["conversation_ref"] != session_key or endpoint["agent_host"] != registration["agentHost"]):
+            raise TaskIntegrityError("prepare command does not match the task's Workspace session and endpoint")
+        verified = {**runtime_context, "hostType": registration["agentHost"], "hostInstanceId": registration["hostInstanceId"],
+            "endpointId": endpoint["endpoint_id"]}
+        return execute_preparation(self, user_subject, task_id, command_key, runtime_context=verified)
+
+    def skill_catalog_stamps(self, user_subject, *, catalog=None):
+        from agentbridge.core.skill_catalog_version import skill_catalog_stamps
+        return skill_catalog_stamps(self, user_subject, catalog=catalog)
 
 
     def list_capabilities(self, *, system: str | None = None) -> dict:
@@ -845,7 +871,7 @@ class CentralCapabilityService:
             "interaction_resume",
         }:
             linked_interaction = observed_response.get("interaction")
-            self.observe_host_task(
+            observation = self.observe_host_task(
                 user_subject=user_subject,
                 task_id=task_id,
                 operation_ids=[operation["operation_id"]],
@@ -856,6 +882,14 @@ class CentralCapabilityService:
                     else []
                 ),
             )
+            observed_response["taskObservation"] = {
+                "schemaVersion": "agentbridge.task-observation.v1",
+                "taskId": task_id,
+                "operationIds": observation["linked"]["operationIds"],
+                "interactionIds": observation["linked"]["interactionIds"],
+                "taskVersion": observation["task"]["version"],
+                "taskStatus": observation["task"]["status"],
+            }
         return observed_response
 
     def _apply_batch_operation_response(
@@ -2007,16 +2041,6 @@ class CentralCapabilityService:
                 control = self._planning_control("本轮已完成业务读取，请使用独立修复计划继续，不能复用已终结的原子任务。")
             if control:
                 return {"protocolVersion": "0.1", "taskId": source_task["task_id"], **control}
-        task, task_reused = self.tasks.ensure_task(
-            user_subject=user_subject,
-            agent_host=agent_host,
-            host_task_key=host_task_key,
-            origin_endpoint_id=endpoint["endpoint_id"],
-            active_conversation_ref=conversation_ref,
-            title=title,
-            summary={"workspaceQueryGroup": workspace_query_group}
-            if workspace_query_group else None,
-        )
         coordinator_lease = None
         if host_instance_id and host_version:
             self.host_contract.require_registration(
@@ -2026,12 +2050,27 @@ class CentralCapabilityService:
                 host_version=host_version,
                 minimum_level="L3",
             )
-            coordinator_lease = self.host_contract.acquire_coordinator_lease(
-                task_id=task["task_id"],
+        with store_transaction(self.tasks) as connection:
+            task, task_reused = self.tasks.ensure_task(
                 user_subject=user_subject,
-                host_instance_id=host_instance_id,
                 agent_host=agent_host,
+                host_task_key=host_task_key,
+                origin_endpoint_id=endpoint["endpoint_id"],
+                active_conversation_ref=conversation_ref,
+                title=title,
+                summary={"workspaceQueryGroup": workspace_query_group}
+                if workspace_query_group else None,
+                connection=connection,
             )
+            if host_instance_id and host_version:
+                coordinator_lease = self.host_contract.acquire_coordinator_lease(
+                    task_id=task["task_id"],
+                    user_subject=user_subject,
+                    host_instance_id=host_instance_id,
+                    agent_host=agent_host,
+                    lease_seconds=600,
+                    connection=connection,
+                )
         trace, _trace_reused = self.runtime_governance.ensure_trace(
             user_subject=user_subject,
             task_id=task["task_id"],
@@ -2137,6 +2176,9 @@ class CentralCapabilityService:
         )
         if "timingEvents" in snapshot:
             result["timingEvents"] = self._record_host_timing_events(user_subject, registration, snapshot["timingEvents"])
+        from agentbridge.core.actionable_results import pending_preparations
+        result.update(self.skill_catalog_stamps(user_subject))
+        result["pendingCommands"] = pending_preparations(self, user_subject, limit=16)
         return result
 
     def _record_host_timing_events(self, user_subject, registration, events):
