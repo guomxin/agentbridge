@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "0fa0687c5587"
+    "1acae4c34a71"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Extend trusted draft handling to all 25 field-bearing business actions and all 14 OA review types; preserve the three fieldless direct authorizations. Existing databases and immutable source contracts remain unchanged. Verified all four production schema-only reconstructions against candidate initialization and a second startup: 277/4/6/3 objects unchanged, with exact matching schema fingerprints and user_version values. Old unmarked field cards retain their original contract. No historical operation replay or business data rollback."
+  "reason": "Apply five latency batches: privacy-safe stage timing, transactional decision wake with durable fallback, exact selected-result preparation, per-invocation adapter reuse and material readiness, and current-first Workspace with authenticated status waits and same-run final history. Preserve original authorization, material freshness, business verification, and unknown no-replay. No schema migration: all four production schema-only reconstructions and second initialization retain exact fingerprints and 277/4/6/3 objects. Existing 0.4.114 compatibility remains; add reviewed 0.4.115 host compatibility. No historical business operation replay or data rollback."
 }
