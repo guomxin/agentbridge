@@ -275,6 +275,22 @@ class CentralCapabilityService:
             transforms=self.transforms,
         )
         self._task_plan_authority_resolver = None
+        self.write_authorizations.decision_observer = self._record_authorization_decision
+
+    def _record_authorization_decision(self, connection, authorization):
+        """Persist the exact task's continuation event in the decision transaction."""
+        from agentbridge.core.interactions import _interaction_from_row
+        rows = connection.execute(
+            "SELECT i.*,t.task_id FROM interactions i JOIN task_interactions t ON t.interaction_id=i.interaction_id "
+            "WHERE i.resource_id=? AND i.interaction_type='execution_authorization' AND i.user_subject=?",
+            (authorization["authorization_id"], authorization["user_subject"]),
+        ).fetchall()
+        # Standalone legacy authorizations have no task coordinator to notify.
+        for row in rows:
+            record = _interaction_from_row(row)
+            envelope = build_interaction_envelope(record, authorization)
+            self.tasks.link_interaction(task_id=row["task_id"], user_subject=authorization["user_subject"],
+                interaction_record=record, interaction=envelope, connection=connection)
 
 
     def list_capabilities(self, *, system: str | None = None) -> dict:

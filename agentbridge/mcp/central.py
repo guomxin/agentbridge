@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agentbridge.core.skill_contracts import SkillAuthoringData
+from agentbridge.core.commit_notifications import current_version, wait_for_change_async
 
 import asyncio
 from functools import wraps
@@ -421,6 +422,42 @@ async def _run_host_control(
                 elapsed_ms,
                 user_subject,
             )
+
+
+async def _claim_host_notifications_with_wait(service, *, wait_seconds=0, **kwargs):
+    """Long-poll durable deliveries without reserving an executor thread."""
+    wait_seconds = min(max(float(wait_seconds), 0.0), 20.0)
+    started = perf_counter()
+    deadline = started + wait_seconds
+    subject = kwargs["user_subject"]
+    version = current_version(service.db_path, user_subject=subject, topic="notifications")
+    while True:
+        response = await _run_host_control("agentbridge_host_notification_claim", service.claim_host_notifications, **kwargs)
+        remaining = deadline - perf_counter()
+        if response.get("count") or remaining <= 0:
+            return {**response, "waitSupported": True, "waitSeconds": wait_seconds,
+                "waitedMs": round((perf_counter() - started) * 1000)}
+        await wait_for_change_async(service.db_path, user_subject=subject, topic="notifications",
+            after_version=version, timeout=min(remaining, 2.0))
+        version = current_version(service.db_path, user_subject=subject, topic="notifications")
+
+
+async def _get_interaction_with_wait(service, *, user_subject, interaction_id, wait_seconds=0):
+    """Observe an active interaction, including Workspace without companions."""
+    wait_seconds = min(max(float(wait_seconds), 0.0), 20.0)
+    started = perf_counter()
+    deadline = started + wait_seconds
+    version = current_version(service.db_path, user_subject=user_subject, topic="notifications")
+    while True:
+        response = await asyncio.to_thread(service.get_interaction, user_subject=user_subject, interaction_id=interaction_id)
+        interaction = response.get("interaction") or {}
+        remaining = deadline - perf_counter()
+        if interaction.get("state") not in {"pending", "processing"} or remaining <= 0:
+            return {**response, "waitSupported": True, "waitSeconds": wait_seconds,
+                "waitedMs": round((perf_counter() - started) * 1000)}
+        await wait_for_change_async(service.db_path, user_subject=user_subject, topic="notifications",
+            after_version=version, timeout=min(remaining, 2.0))
+        version = current_version(service.db_path, user_subject=user_subject, topic="notifications")
 
 
 async def _require_registered_host_call(
@@ -5132,12 +5169,14 @@ def create_central_mcp_server(
     )
     async def agentbridge_interaction_get(
         interaction_id: Annotated[str, Field(min_length=16, max_length=128)],
+        wait_seconds: Annotated[float, Field(ge=0, le=20)] = 0,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        response = await asyncio.to_thread(
-            service.get_interaction,
+        response = await _get_interaction_with_wait(
+            service,
             user_subject=identity["user_subject"],
             interaction_id=interaction_id,
+            wait_seconds=wait_seconds,
         )
         return package_interaction_result(response)
 
@@ -5937,6 +5976,7 @@ def create_central_mcp_server(
         endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
         limit: Annotated[int, Field(ge=1, le=100)] = 10,
         lease_seconds: Annotated[int, Field(ge=5, le=300)] = 30,
+        wait_seconds: Annotated[float, Field(ge=0, le=20)] = 0,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         await _require_registered_host_call(
@@ -5945,14 +5985,14 @@ def create_central_mcp_server(
             identity=identity,
             agent_host=agent_host,
         )
-        return await _run_host_control(
-            "agentbridge_host_notification_claim",
-            service.claim_host_notifications,
+        return await _claim_host_notifications_with_wait(
+            service,
             user_subject=identity["user_subject"],
             agent_host=agent_host,
             endpoint_key=endpoint_key,
             limit=limit,
             lease_seconds=lease_seconds,
+            wait_seconds=wait_seconds,
         )
 
     @mcp.tool(

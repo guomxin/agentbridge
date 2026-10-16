@@ -1,5 +1,8 @@
 from __future__ import annotations
 from agentbridge.core.store_transactions import store_transaction
+from agentbridge.core.commit_notifications import (
+    track_transaction, mark_transaction_change, transaction_committed, transaction_closed,
+)
 import re
 
 from contextlib import contextmanager, nullcontext
@@ -86,13 +89,16 @@ class TaskHubStore:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        track_transaction(connection, self.db_path)
         try:
             yield connection
             connection.commit()
+            transaction_committed(connection)
         except Exception:
             connection.rollback()
             raise
         finally:
+            transaction_closed(connection)
             connection.close()
 
     def _initialize(self) -> None:
@@ -4566,6 +4572,7 @@ class TaskHubStore:
                     created_at,
                 ),
             )
+        mark_transaction_change(connection, user_subject=user_subject)
         return event_id
 
     @staticmethod
@@ -4576,6 +4583,7 @@ class TaskHubStore:
         source_endpoint_id: str,
         notify_source: bool = False,
     ) -> None:
+        mark_transaction_change(connection, user_subject=entry["user_subject"])
         source = connection.execute(
             """
             SELECT endpoint_id, client_type, label

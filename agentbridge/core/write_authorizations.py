@@ -1,5 +1,6 @@
 from __future__ import annotations
 from agentbridge.core.store_transactions import store_transaction
+from agentbridge.core.commit_notifications import track_transaction, transaction_committed, transaction_closed
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -38,19 +39,23 @@ class WriteAuthorizationStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.decision_observer: Callable[[sqlite3.Connection, dict], None] | None = None
         self._initialize()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        track_transaction(connection, self.db_path)
         try:
             yield connection
             connection.commit()
+            transaction_committed(connection)
         except Exception:
             connection.rollback()
             raise
         finally:
+            transaction_closed(connection)
             connection.close()
 
     def _initialize(self) -> None:
@@ -525,6 +530,8 @@ class WriteAuthorizationStore:
                 ),
             )
             row = self._select(connection, authorization_id)
+            if self.decision_observer is not None:
+                self.decision_observer(connection, _authorization_from_row(row, include_plan=False))
         return _authorization_from_row(row, include_plan=False)
 
     def supersede(self, authorization_id: str, *, user_subject: str, pending_only: bool = False, before_supersede: Callable[[sqlite3.Connection], None] | None = None) -> None:

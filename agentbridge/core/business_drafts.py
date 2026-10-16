@@ -21,6 +21,7 @@ from agentbridge.adapters.base import AdapterBusinessRuleRejected, AdapterLoginR
 from agentbridge.adapters.taihua import TaihuaDuplicateWorkLog
 from agentbridge.core.business_draft_profiles import BY_PREPARE, BATCH_PREPARES, profile_for_source, meeting_times, review_payload, room_choice
 from agentbridge.core.capability_runtime import CapabilityContext
+from agentbridge.core.commit_notifications import track_transaction, transaction_committed, transaction_closed
 from agentbridge.core.field_submissions import _submission_from_row
 from agentbridge.core.field_values import _normalize_submission
 from agentbridge.core.interactions import _interaction_from_row, build_interaction_envelope
@@ -105,13 +106,16 @@ class BusinessDraftStore:
     def _connect(self):
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        track_transaction(connection, self.db_path)
         try:
             yield connection
             connection.commit()
+            transaction_committed(connection)
         except Exception:
             connection.rollback()
             raise
         finally:
+            transaction_closed(connection)
             connection.close()
 
     def cleanup(self):

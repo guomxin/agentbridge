@@ -206,5 +206,8 @@ class BusinessDraftWarningChainTests(unittest.TestCase):
             return {"workflow_submitted": True}
         with patch("agentbridge.core.write_catalog.submit_leave_request", side_effect=commit), ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: self.resume(warning["interaction"]["interactionId"]), range(2)))
-        self.assertTrue(all(result["status"] == "succeeded" for result in results), results)
+        self.assertTrue(all(result["status"] in {"succeeded", "already_resumed"} for result in results), results)
+        operations = [result.get("operation") if result["status"] == "already_resumed" else result for result in results]
+        self.assertTrue(all(operation["status"] == "succeeded" for operation in operations), operations)
+        self.assertEqual(len({operation["operationId"] for operation in operations}), 1)
         self.assertEqual(len(self.writes), 1)

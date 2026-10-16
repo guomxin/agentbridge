@@ -10810,6 +10810,13 @@
             "minLength": 16,
             "title": "Interaction Id",
             "type": "string"
+          },
+          "wait_seconds": {
+            "default": 0,
+            "maximum": 20,
+            "minimum": 0,
+            "title": "Wait Seconds",
+            "type": "number"
           }
         },
         "required": [

@@ -7,6 +7,8 @@ const DEFAULTS = Object.freeze({
   maxPollSeconds: 1800,
   wakeAgentOnComplete: true,
   syncTimeline: true,
+  notificationLongPoll: true,
+  notificationConcurrency: 4,
 });
 
 export function resolvePluginConfig(raw) {
@@ -58,6 +60,8 @@ export function resolvePluginConfig(raw) {
       source.syncTimeline,
       DEFAULTS.syncTimeline,
     ),
+    notificationLongPoll: booleanValue(source.notificationLongPoll, DEFAULTS.notificationLongPoll),
+    notificationConcurrency: boundedInteger(source.notificationConcurrency, DEFAULTS.notificationConcurrency, 1, 8),
   });
 }
 

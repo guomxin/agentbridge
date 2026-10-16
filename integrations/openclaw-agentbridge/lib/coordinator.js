@@ -61,7 +61,9 @@ const QUIET_COMPANION_TASK_EVENTS = new Set([
   "plan.authorization.waiting",
 ]);
 const PULL_BASED_CHANNELS = new Set(["web", "webchat"]);
-const MAX_NOTIFICATION_IDLE_INTERVAL_MS = 10_000;
+const MAX_NOTIFICATION_IDLE_INTERVAL_MS = 2_000;
+const MAX_NOTIFICATION_JOBS = 32;
+const NOTIFICATION_WAIT_SECONDS = 20;
 const PREPARED_DOCUMENT_NATIVE_ATTEMPTS = 2;
 const PREPARED_DOCUMENT_RETRY_DELAY_MS = 1_000;
 const PREPARED_DOCUMENT_RECEIPT_TTL_MS = 10 * 60 * 1000;
@@ -119,6 +121,11 @@ export class InteractionCoordinator {
     this.abortControllers = new Map();
     this.notificationController = null;
     this.notificationPump = null;
+    this.notificationJobs = new Map();
+    this.notificationQueue = [];
+    this.notificationActiveTasks = new Set();
+    this.notificationWorkerCount = 0;
+    this.notificationClaimReservations = 0;
     this.toolBindings = new Map();
     this.sessionRoutes = sharedState.sessionRoutes;
     this.directDeliveries = sharedState.directDeliveries;
@@ -944,10 +951,11 @@ export class InteractionCoordinator {
         existing.sessionKey === sessionKey &&
         existing.taskId === taskId,
     );
-    const presented =
-      (await this.presentInteractions([interaction], sessionKey)) || [
-        interaction,
-      ];
+    // A completed, exact decision is ready for the original coordinator. It
+    // does not need a new presentation URL before the existing lease/resume.
+    const presented = interactionResumeAllowed(interaction)
+      ? [interaction]
+      : (await this.presentInteractions([interaction], sessionKey)) || [interaction];
     const record = this.upsert({
       interaction: presented[0],
       sessionKey,
@@ -1073,6 +1081,12 @@ export class InteractionCoordinator {
     this.notificationController?.abort();
     this.notificationController = null;
     this.notificationPump = null;
+    // Queued deliveries remain unacknowledged in the durable outbox. A running
+    // resume keeps its existing stable idempotency and fencing semantics.
+    for (const job of this.notificationQueue.splice(0)) {
+      this.notificationJobs.delete(job.deliveryKey);
+      job.resolve(false);
+    }
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
@@ -1116,8 +1130,10 @@ export class InteractionCoordinator {
   }
 
   async runNotificationPump(identityRouter, signal, intervalMs) {
+    const identities = identityRouter.configuredIdentities();
+    this.notificationEndpointCount = identities.length;
     await Promise.all(
-      identityRouter.configuredIdentities().map(({ binding, client }) =>
+      identities.map(({ binding, client }) =>
         this.runEndpointNotificationPump(
           identityRouter,
           binding,
@@ -1136,22 +1152,40 @@ export class InteractionCoordinator {
     signal,
     intervalMs,
   ) {
-    let idleRounds = 0;
+    // Idle endpoints reserve one slot each, rather than ten. If configuration
+    // exceeds all queue slots, bounded polling avoids twenty-second permit
+    // starvation for endpoints later in the configured list.
+    let waitEnabled = this.config.notificationLongPoll !== false
+      && (this.notificationEndpointCount || 1) <= MAX_NOTIFICATION_JOBS;
     while (!signal.aborted) {
-      const notificationCount = await this.deliverEndpointNotifications(
+      const capacity = MAX_NOTIFICATION_JOBS - this.notificationJobs.size - this.notificationClaimReservations;
+      if (capacity <= 0) {
+        await this.notificationSleep(250, signal);
+        continue;
+      }
+      const limit = Math.min(waitEnabled ? 1 : 10, capacity);
+      this.notificationClaimReservations += limit;
+      let claim;
+      try {
+        claim = await this.deliverEndpointNotifications(
         identityRouter,
         binding,
         client,
         signal,
-      );
+        { enqueue: true,
+          waitSeconds: waitEnabled ? NOTIFICATION_WAIT_SECONDS : 0, limit },
+        );
+      } finally { this.notificationClaimReservations -= limit; }
       if (signal.aborted) {
         return;
       }
-      idleRounds = notificationCount > 0 ? 0 : idleRounds + 1;
-      await this.notificationSleep(
-        notificationPumpDelay(intervalMs, idleRounds),
-        signal,
-      );
+      if (waitEnabled && !claim.waitSupported) waitEnabled = false;
+      // Long polls already wait on a durable outbox and a post-commit wake.
+      // Old servers and transport failures retain a <=2 second recovery poll.
+      const delay = claim.waitSupported
+        ? (claim.count === 0 && claim.waitedMs < 250 ? 250 : 0)
+        : notificationPumpDelay(intervalMs, 0);
+      if (delay) await this.notificationSleep(delay, signal);
     }
   }
 
@@ -1160,6 +1194,7 @@ export class InteractionCoordinator {
     binding,
     client,
     signal,
+    { enqueue = false, waitSeconds = 0, limit = 10 } = {},
   ) {
     let response;
     try {
@@ -1168,8 +1203,9 @@ export class InteractionCoordinator {
         {
           agent_host: "openclaw",
           endpoint_key: binding.key,
-          limit: 10,
-          lease_seconds: 30,
+          limit,
+          lease_seconds: enqueue ? 300 : 30,
+          ...(waitSeconds > 0 ? { wait_seconds: waitSeconds } : {}),
         },
         { signal, meta: hostContextMeta() },
       );
@@ -1179,7 +1215,7 @@ export class InteractionCoordinator {
           `AgentBridge endpoint notification claim unavailable (${safeErrorCode(error)})`,
         );
       }
-      return 0;
+      return enqueue ? { count: 0, waitSupported: false, waitedMs: 0 } : 0;
     }
     const endpoint = response?.endpoint;
     const notifications = Array.isArray(response?.notifications)
@@ -1195,6 +1231,61 @@ export class InteractionCoordinator {
       }
     }
     for (const notification of notifications) {
+      const deliver = () => this.processEndpointNotification(
+        identityRouter, binding, client, signal, endpoint, notification,
+      );
+      if (enqueue) this.enqueueNotification(binding, notification, signal, deliver);
+      else await deliver();
+    }
+    return enqueue ? { count: notifications.length,
+      waitSupported: waitSeconds > 0 && response?.waitSupported === true,
+      waitedMs: Number.isFinite(response?.waitedMs) ? response.waitedMs : 0 } : notifications.length;
+  }
+
+  enqueueNotification(binding, notification, signal, deliver) {
+    const deliveryId = safeRoutePart(notification?.deliveryId);
+    if (!deliveryId || signal.aborted) return false;
+    const deliveryKey = `${binding.key}\u0000${deliveryId}`;
+    if (this.notificationJobs.has(deliveryKey)) return true;
+    if (this.notificationJobs.size >= MAX_NOTIFICATION_JOBS) return false;
+    // Timeline messages without tasks preserve endpoint ordering too.
+    const taskId = safeRoutePart(notification?.task?.taskId);
+    const taskKey = taskId ? `task:${taskId}` : `endpoint:${binding.key}`;
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    const job = { deliveryKey, taskKey, signal, deliver, resolve, promise };
+    this.notificationJobs.set(deliveryKey, job);
+    this.notificationQueue.push(job);
+    this.drainNotificationQueue();
+    return true;
+  }
+
+  drainNotificationQueue() {
+    const limit = Math.min(8, Math.max(1, Number(this.config.notificationConcurrency) || 4));
+    while (this.notificationWorkerCount < limit) {
+      const index = this.notificationQueue.findIndex(job => !this.notificationActiveTasks.has(job.taskKey));
+      if (index < 0) break;
+      const [job] = this.notificationQueue.splice(index, 1);
+      if (job.signal.aborted) {
+        this.notificationJobs.delete(job.deliveryKey);
+        job.resolve(false);
+        continue;
+      }
+      this.notificationWorkerCount += 1;
+      this.notificationActiveTasks.add(job.taskKey);
+      Promise.resolve().then(job.deliver).catch(error => {
+        if (!job.signal.aborted) this.api.logger.warn(`AgentBridge notification delivery retained for recovery (${safeErrorCode(error)})`);
+      }).finally(() => {
+        this.notificationWorkerCount -= 1;
+        this.notificationActiveTasks.delete(job.taskKey);
+        this.notificationJobs.delete(job.deliveryKey);
+        job.resolve(true);
+        this.drainNotificationQueue();
+      });
+    }
+  }
+
+  async processEndpointNotification(identityRouter, binding, client, signal, endpoint, notification) {
       let delivered = false;
       const sessionKey = endpoint?.conversationRef;
       const route = endpoint?.route;
@@ -1311,8 +1402,6 @@ export class InteractionCoordinator {
           );
         }
       }
-    }
-    return notifications.length;
   }
 
   async restoreInteractionFromNotification(notification, client, { identityRouter, binding, endpoint }) {
@@ -1404,6 +1493,7 @@ export class InteractionCoordinator {
   async waitForIdle() {
     await Promise.allSettled([
       ...this.polls.values(),
+      ...[...this.notificationJobs.values()].map(job => job.promise),
       ...(this.timelinePublisher
         ? [this.timelinePublisher.waitForIdle()]
         : []),
@@ -1476,28 +1566,41 @@ export class InteractionCoordinator {
       interactionDeadline(record.interaction) ?? Number.POSITIVE_INFINITY,
     );
     let consecutiveErrors = 0;
+    let waitEnabled = this.config.notificationLongPoll !== false;
+    let delayBeforeNext = !waitEnabled;
 
     while (!signal.aborted && this.now() < deadline) {
       const intervalMs = consecutiveErrors >= MAX_POLL_ERRORS
         ? Math.max(this.config.pollIntervalSeconds * 1000, 30_000)
         : this.config.pollIntervalSeconds * 1000;
-      await this.sleep(Math.min(intervalMs, Math.max(0, deadline - this.now())), signal);
+      if (delayBeforeNext || consecutiveErrors > 0) {
+        await this.sleep(Math.min(intervalMs, Math.max(0, deadline - this.now())), signal);
+      }
       if (signal.aborted) {
         return;
       }
       if (this.now() >= deadline) break;
       let response;
+      const waitSeconds = waitEnabled ? Math.min(NOTIFICATION_WAIT_SECONDS, Math.floor((deadline - this.now()) / 1000)) : 0;
       try {
         response = await record.mcpClient.callTool(
           "agentbridge_interaction_get",
-          { interaction_id: record.interaction.interactionId },
+          { interaction_id: record.interaction.interactionId,
+            ...(waitSeconds > 0 ? { wait_seconds: waitSeconds } : {}) },
           { signal },
         );
         if (consecutiveErrors >= MAX_POLL_ERRORS) {
           this.api.logger.info("AgentBridge trusted interaction polling recovered");
         }
         consecutiveErrors = 0;
+        if (signal.aborted) return;
+        const supported = waitSeconds > 0 && response?.waitSupported === true;
+        if (waitEnabled && !supported) waitEnabled = false;
+        delayBeforeNext = !supported || !Number.isFinite(response?.waitedMs) || response.waitedMs < 250;
       } catch (error) {
+        if (signal.aborted) return;
+        waitEnabled = false;
+        delayBeforeNext = true;
         consecutiveErrors += 1;
         if (consecutiveErrors >= MAX_POLL_ERRORS) {
           if (error?.retryable === true) {
@@ -3364,8 +3467,8 @@ export function notificationPumpDelay(
   idleRounds,
   maximumMs = MAX_NOTIFICATION_IDLE_INTERVAL_MS,
 ) {
-  const base = Math.max(250, Number(intervalMs) || 0);
-  const maximum = Math.max(base, Number(maximumMs) || base);
+  const base = Math.min(MAX_NOTIFICATION_IDLE_INTERVAL_MS, Math.max(250, Number(intervalMs) || 0));
+  const maximum = Math.min(MAX_NOTIFICATION_IDLE_INTERVAL_MS, Math.max(base, Number(maximumMs) || base));
   const exponent = Math.min(Math.max(Number(idleRounds) - 1, 0), 8);
   return Math.min(maximum, base * 2 ** exponent);
 }

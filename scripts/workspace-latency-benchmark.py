@@ -30,8 +30,11 @@ def main():
     parser.add_argument("--label", default="candidate")
     parser.add_argument("--source-revision", help="Exact commit for a source archive, when available")
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--serve-case", action="append", choices=("single", "mixed", "legacy"),
+    parser.add_argument("--serve-case", action="append", choices=("single", "mixed", "legacy", "query"),
                         help="Chrome seed cases; default single+mixed. Legacy uses a separate fixture.")
+    parser.add_argument("--history-messages", type=int, default=0)
+    parser.add_argument("--history-tasks", type=int, default=0)
+    parser.add_argument("--observe-workspace-http", action="store_true")
     parser.add_argument("--repeat", type=int, default=30)
     parser.add_argument("--scenario", action="append", choices=("query", "single", "mixed", "legacy", "drift", "unknown"))
     parser.add_argument("--io-delay", type=float, default=.02)
@@ -59,14 +62,21 @@ def main():
     latency = workload.LatencyContract(io_delay_seconds=args.io_delay, worker_start_seconds=args.worker_start_delay,
                                       fixed_wait_scale=args.fixed_wait_scale)
     fixture = workload.LatencyAcceptanceFixture(home, latency=latency, seed=False)
-    if args.serve and not fixture.meta["full_cases"]:
+    if args.serve and (args.history_messages or args.history_tasks):
+        fixture.seed_history(messages=args.history_messages, tasks=args.history_tasks)
+    if args.serve and not fixture.meta["full_cases"] and not any(
+            case.get("key") == "browser-query" for case in fixture.meta.get("query_cases", [])):
         for name in args.serve_case or ("single", "mixed"):
             if name == "single":
                 fixture.add_pending_case("attendance_confirmation", case_key="browser-single")
+            elif name == "query":
+                fixture.add_query_case()
             else:
                 fixture.add_pending_batch(("missed_punch", "missed_punch") if name == "legacy"
                                           else ("missed_punch", "weekly_report"), legacy=name == "legacy")
     servers = fixture.servers()
+    if args.observe_workspace_http:
+        fixture.observe_workspace_http(servers[1])
     threads = []
     for server in servers:
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .02}, daemon=True)

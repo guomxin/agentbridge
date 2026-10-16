@@ -4047,14 +4047,15 @@ test("defers an undeliverable WeChat notification until the next inbound activit
   assert.equal(acknowledgement.params.defer_until_activity, true);
 });
 
-test("backs off idle notification polling and resets after activity", () => {
+test("keeps recovery notification polling within two seconds", () => {
   assert.deepEqual(
     [1, 2, 3, 4, 5].map((idleRounds) =>
       notificationPumpDelay(2_000, idleRounds),
     ),
-    [2_000, 4_000, 8_000, 10_000, 10_000],
+    [2_000, 2_000, 2_000, 2_000, 2_000],
   );
   assert.equal(notificationPumpDelay(2_000, 0), 2_000);
+  assert.equal(notificationPumpDelay(10_000, 5), 2_000);
 });
 
 test("starts an independent notification pump for every configured identity", async () => {

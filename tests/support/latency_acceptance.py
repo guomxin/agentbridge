@@ -150,7 +150,85 @@ class LatencyAcceptanceFixture(FullBusinessAcceptanceFixture):
     def public_metadata(self):
         return {**super().public_metadata(), "benchmarkContract": CONTRACT,
                 "latencyContract": self.latency.public(), "synthetic_password": PASSWORD,
+                "queryCases": self.meta.get("query_cases", []),
+                "historyShape": self.meta.get("latency_history", {"messages": 0, "tasks": 0}),
                 "evidenceBoundary": "Real Central, adapters, material checks, draft/authorization ledgers, HTTP cards and Workspace; synthetic downstream. No model or real browser startup measurement."}
+
+    def add_query_case(self, *, case_key="browser-query"):
+        task_id = self.service.ensure_host_task(user_subject=OWNER, token_id="fixture-token", agent_host="openclaw",
+            host_task_key=f"latency-query|{case_key}", endpoint_key=self.account["endpoint_key"], client_type="web",
+            external_subject=self.account["account_id"], conversation_ref=self.account["openclaw_session_key"],
+            title=f"OA 待办查询性能验收 · {case_key}")["task"]["taskId"]
+        self.service.tasks.append_timeline_message(user_subject=OWNER, source_endpoint_id=self.account["endpoint_id"],
+            message_key=f"latency-query:{case_key}", role="assistant", text="待办查询结果来自真实 OA 解析器和合成材料。", task_id=task_id)
+        result = self.service.invoke(user_subject=OWNER, capability_name="oa.workflow.pending.list", arguments={},
+                                     task_id=task_id, idempotency_key=f"latency-query:{case_key}")
+        if result["status"] != "succeeded":
+            raise AssertionError(result)
+        self.service.finish_host_task(user_subject=OWNER, task_id=task_id, outcome="succeeded", reason="synthetic_query_completed")
+        case = {"profile": "query", "key": case_key, "task_id": task_id, "operation_id": result["operationId"]}
+        self.meta.setdefault("query_cases", []).append(case)
+        write_metadata(self.meta_path, self.meta)
+        return case
+
+    def seed_history(self, *, messages=600, tasks=30):
+        if not 0 <= messages <= 10000 or not 0 <= tasks <= 1000:
+            raise ValueError("History fixture exceeds its explicit bound")
+        shape = {"messages": messages, "tasks": tasks}
+        if self.meta.get("latency_history"):
+            if self.meta["latency_history"] != shape:
+                raise ValueError("Existing history fixture has a different data shape")
+            return
+        for index in range(messages):
+            self.service.tasks.append_timeline_message(user_subject=OWNER, source_endpoint_id=self.account["endpoint_id"],
+                message_key=f"latency-history-message:{index}", role="user" if index % 2 == 0 else "assistant",
+                text=f"合成历史消息 {index + 1}。" + "此内容仅用于长历史加载验收。" * 12)
+        for index in range(tasks):
+            self.add_query_case(case_key=f"history-{index:03d}")
+        self.meta["latency_history"] = shape
+        write_metadata(self.meta_path, self.meta)
+
+    def observe_workspace_http(self, server):
+        """Count real requests without recording IDs, queries, headers or bodies."""
+        original = server.RequestHandlerClass
+        events, lock = [], threading.Lock()
+        output = self.home / "benchmark-workspace-http.json"
+
+        def flush():
+            temporary = output.with_suffix(".tmp")
+            write_metadata(temporary, {"requestCount": len(events), "requests": events})
+            temporary.replace(output)
+
+        def category(path):
+            path = urlsplit(path).path
+            if re.fullmatch(r"/api/tasks/[0-9a-f-]{36}", path):
+                return "task-detail"
+            if path in {"/api/timeline", "/api/timeline/stream", "/api/tasks", "/api/login", "/api/skills/history"}:
+                return path
+            return "static" if path.startswith("/static/") else "other-api" if path.startswith("/api/") else "document"
+
+        class ObservedHandler(original):
+            def measured(self, method, handler):
+                started = time.monotonic()
+                with lock:
+                    event = {"method": method, "route": category(self.path), "startedMonotonic": started}
+                    events.append(event)
+                    flush()
+                try:
+                    return handler()
+                finally:
+                    with lock:
+                        event["durationSeconds"] = time.monotonic() - started
+                        flush()
+
+            def do_GET(self):
+                return self.measured("GET", super().do_GET)
+
+            def do_POST(self):
+                return self.measured("POST", super().do_POST)
+
+        server.RequestHandlerClass = ObservedHandler
+        return output
 
     def audit(self):
         with sqlite3.connect(self.service.db_path) as connection:
@@ -173,18 +251,23 @@ class JsonHttpClient:
         self.host, self.port, self.origin = parsed.hostname, parsed.port, origin
         self.cookies = {}
 
-    def request(self, method, path, body=None, *, draft_token=None):
+    def request(self, method, path, body=None, *, draft_token=None, form=None):
+        if body is not None and form is not None:
+            raise ValueError("Use one request body format")
         headers = {"Origin": self.origin, "Sec-Fetch-Site": "same-origin"}
         if self.cookies:
             headers["Cookie"] = "; ".join(f"{key}={value}" for key, value in self.cookies.items())
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if form is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
         if draft_token:
             headers["X-AgentBridge-Draft-Token"] = draft_token
         started = time.monotonic()
         connection = HTTPConnection(self.host, self.port, timeout=60)
         try:
-            connection.request(method, path, json.dumps(body).encode() if body is not None else None, headers)
+            payload = json.dumps(body).encode() if body is not None else form.encode() if form is not None else None
+            connection.request(method, path, payload, headers)
             response = connection.getresponse()
             payload = response.read().decode()
             for key, value in response.getheaders():
