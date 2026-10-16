@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from agentbridge.core.business_drafts import BusinessDraftError, BusinessDraftService
+from agentbridge.core.draft_read_scheduler import DRAFT_READS, DraftReadBusy
 from tests.authorization_fixtures import grant_permissions
 from tests.support.business_view_acceptance import BusinessViewAcceptanceFixture, OWNER, ROOM_VALUES
 
@@ -89,16 +90,40 @@ class BusinessDraftProfileBoundaryTests(unittest.TestCase):
         with sqlite3.connect(self.service.db_path) as connection:
             frozen = connection.execute("SELECT plan_json FROM business_draft_previews WHERE preview_id=?", (state["preview"]["previewId"],)).fetchone()[0]
         original = self.drafts._prepare
-        def unlocked_read(*args):
+        def unlocked_read(*args, **kwargs):
+            self.assertIs(kwargs.get("priority"), True)
             with sqlite3.connect(self.service.db_path, timeout=0.1) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.rollback()
-            return original(*args)
-        with patch.object(self.drafts, "_prepare", side_effect=unlocked_read):
+            return original(*args, **kwargs)
+        before = len(self.fixture.oa.data["calls"])
+        with patch.object(self.drafts, "_prepare", side_effect=unlocked_read), \
+             patch.object(DRAFT_READS, "singleflight", side_effect=AssertionError("final recheck must remain fresh")):
             receipt = self.approve(state)["receipt"]
+        self.assertGreater(len(self.fixture.oa.data["calls"]), before)
         with sqlite3.connect(self.service.db_path) as connection:
             approved = connection.execute("SELECT plan_json FROM write_authorizations WHERE authorization_id=?", (receipt["authorizationId"],)).fetchone()[0]
         self.assertEqual(approved, frozen)
+
+    def test_busy_final_recheck_preserves_ready_preview_and_does_not_authorize(self):
+        from contextlib import contextmanager
+        ready = self.leave_preview()
+
+        @contextmanager
+        def full(*_args, **_kwargs):
+            raise DraftReadBusy("synthetic queue full")
+            yield
+
+        with patch.object(DRAFT_READS, "slot", full):
+            with self.assertRaises(BusinessDraftError) as caught:
+                self.approve(ready)
+        self.assertEqual(caught.exception.code, "DRAFT_PREVIEW_BUSY")
+        current = self.drafts.state(**self.args)
+        self.assertEqual(current["preview"]["previewId"], ready["preview"]["previewId"])
+        self.assertEqual(current["state"], "ready")
+        with sqlite3.connect(self.service.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM write_authorizations").fetchone()[0], 0)
+        self.assertEqual(self.fixture.oa.writes, [])
 
     def test_target_identity_change_invalidates_preview_without_approval(self):
         state = self.leave_preview()

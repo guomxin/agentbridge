@@ -26,6 +26,7 @@ from tests.support.full_business_acceptance import (
 )
 from tests.support.interaction_acceptance import write_metadata
 from tests.test_workspace import PASSWORD
+from agentbridge.browser import central as central_browser
 
 CONTRACT = "latency-isolated-http-v1"
 SCENARIOS = ("query", "single", "mixed", "legacy", "drift", "unknown")
@@ -79,7 +80,8 @@ class LatencyContract:
         return {"downstreamIoDelaySeconds": self.io_delay_seconds,
                 "workerStartupDelaySeconds": self.worker_start_seconds,
                 "fixedWaitScale": self.fixed_wait_scale,
-                "readyDom": "Synthetic complete DOM is immediately available",
+                "readyDom": "Synthetic complete DOM is immediately available; detail readiness models only its minimum stable window",
+                "snapshotReadinessStabilityMs": getattr(central_browser, "OA_DETAIL_STABILITY_MS", 300),
                 "coordinator": "Fixture Central resume loop; not OpenClaw notification pump"}
 
 
@@ -122,8 +124,15 @@ class TimedWorker(FullOaWorker):
 
     def rendered_snapshot(self, *args, **kwargs):
         self.transport.latency.io("material")
-        self.transport.latency.pause("snapshotSettleWait", max(float(kwargs.get("settle_ms", 0)), 0) / 1000
-                                     * self.transport.latency.fixed_wait_scale)
+        if kwargs.get("readiness") is not None:
+            self.transport.latency.pause(
+                "snapshotReadinessWait",
+                getattr(central_browser, "OA_DETAIL_STABILITY_MS", 300) / 1000
+                * self.transport.latency.fixed_wait_scale,
+            )
+        else:
+            self.transport.latency.pause("snapshotSettleWait", max(float(kwargs.get("settle_ms", 0)), 0) / 1000
+                                         * self.transport.latency.fixed_wait_scale)
         return super().rendered_snapshot(*args, **kwargs)
 
     @contextmanager

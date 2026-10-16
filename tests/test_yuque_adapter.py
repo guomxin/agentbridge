@@ -102,6 +102,74 @@ class YuqueAdapterTests(unittest.TestCase):
             {"credential", "token"},
         )
 
+    def test_selected_read_reuses_only_its_own_public_area_discovery(self):
+        worker = FakeYuqueWorker()
+        arguments = {"book": "共享文档", "document": "对接设备清单"}
+
+        first = self.adapter.read_document(worker, arguments)
+        first_paths = [urlparse(url).path for url in worker.urls]
+        self.assertEqual(len(first_paths), 3)
+        self.assertEqual(first_paths.count("/api/mine"), 0)
+        self.assertEqual(first_paths.count("/api/modules/org_wiki/wiki/show"), 1)
+        self.assertTrue(first["redaction"]["applied"])
+
+        # No authority-bearing public-area cache survives another invocation.
+        self.adapter.read_document(worker, arguments)
+        self.assertEqual(len(worker.urls), 6)
+        self.assertEqual(worker.urls[:3], worker.urls[3:])
+
+        worker.login_required = True
+        with self.assertRaises(YuqueLoginRequired):
+            self.adapter.read_document(worker, arguments)
+        self.assertEqual(urlparse(worker.urls[-1]).path, first_paths[0])
+
+    def test_selected_read_keeps_ambiguous_documents_closed(self):
+        class AmbiguousWorker(FakeYuqueWorker):
+            def request(self, method, url, **kwargs):
+                response = super().request(method, url, **kwargs)
+                if urlparse(url).path == "/api/docs":
+                    document = response["json"]["data"][0]
+                    response["json"]["data"].append(
+                        {**document, "id": "another-document", "slug": "another-slug"}
+                    )
+                return response
+
+        worker = AmbiguousWorker()
+        with self.assertRaisesRegex(ValueError, "selector is ambiguous"):
+            self.adapter.read_document(
+                worker, {"book": "共享文档", "document": "对接设备清单"}
+            )
+        self.assertEqual(len(worker.urls), 2)
+
+    def test_reused_catalog_keeps_public_selector_and_ambiguity_redaction(self):
+        class SensitiveTitleWorker(FakeYuqueWorker):
+            duplicate = False
+
+            def request(self, method, url, **kwargs):
+                response = super().request(method, url, **kwargs)
+                if urlparse(url).path == "/api/docs":
+                    document = response["json"]["data"][0]
+                    document["title"] = "密码：catalog-title-secret"
+                    if self.duplicate:
+                        response["json"]["data"].append(
+                            {**document, "id": "another-document", "slug": "another-slug"}
+                        )
+                return response
+
+        worker = SensitiveTitleWorker()
+        arguments = {"book": "共享文档", "document": "密码：[REDACTED]"}
+        result = self.adapter.read_document(worker, arguments)
+        self.assertNotIn("catalog-title-secret", str(result))
+        self.assertEqual(len(worker.urls), 3)
+
+        worker = SensitiveTitleWorker()
+        worker.duplicate = True
+        with self.assertRaisesRegex(ValueError, "selector is ambiguous") as caught:
+            self.adapter.read_document(worker, arguments)
+        self.assertNotIn("catalog-title-secret", str(caught.exception))
+        self.assertIn("[REDACTED]", str(caught.exception))
+        self.assertEqual(len(worker.urls), 2)
+
     def test_lake_text_and_redaction_helpers_are_conservative(self):
         text = lake_to_plain_text(
             "<!doctype lake><p>第一行<br>第二行</p><script>bad()</script>"

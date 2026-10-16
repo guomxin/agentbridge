@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
 from urllib.parse import urlencode, urljoin
 
@@ -63,6 +64,7 @@ _CERTIFICATE_CATEGORIES = {
     "software_copyright_certificate": "2-\u8457\u4f5c\u6743\u8bc1\u4e66\u626b\u63cf\u4ef6",
 }
 
+_READINESS_POLL_MS = 75
 _RESULT_SETTLE_MS = 900
 _MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 _SOFTWARE_VERSION_SUFFIX = re.compile(
@@ -501,16 +503,17 @@ def _open_certificate_category(
     base_url: str,
     category_label: str,
 ):
+    deadline = time.monotonic() + 60
     page = worker.goto(base_url, timeout_seconds=60)
-    page.wait_for_timeout(_RESULT_SETTLE_MS)
-    if _has_login_form(page.context.pages):
-        raise AdapterLoginRequired("the central OA session is not logged in or has expired")
-    if not _click_exact_visible_text(page.context.pages, _ALL_APPS_LABEL):
-        raise SeeyonDocumentContractMismatch("OA All Apps entry was not found")
-    page.wait_for_timeout(_RESULT_SETTLE_MS)
-    if not _search_all_apps(page.context.pages, _DOCUMENT_CENTER_LABEL):
-        raise SeeyonDocumentContractMismatch("OA app search field was not found")
-    page.wait_for_timeout(_RESULT_SETTLE_MS)
+    pages = lambda: page.context.pages
+    _wait_for_ui(page, lambda: _find_exact_visible_text(pages(), _ALL_APPS_LABEL),
+                 "OA All Apps entry was not found", deadline=deadline)
+    if not _click_exact_visible_text(pages(), _ALL_APPS_LABEL):
+        raise SeeyonDocumentContractMismatch("OA All Apps entry changed")
+    _wait_for_ui(page, lambda: _find_app_search(pages()),
+                 "OA app search field was not found", deadline=deadline)
+    if not _search_all_apps(pages(), _DOCUMENT_CENTER_LABEL):
+        raise SeeyonDocumentContractMismatch("OA app search field changed")
     for label in (
         _DOCUMENT_CENTER_LABEL,
         _UNIT_DOCUMENTS_LABEL,
@@ -518,16 +521,16 @@ def _open_certificate_category(
         _GROUP_CERTIFICATES_LABEL,
         category_label,
     ):
-        if not _click_exact_visible_text(page.context.pages, label):
-            raise SeeyonDocumentContractMismatch(
-                f"OA document center entry is unavailable: {label}"
-            )
-        page.wait_for_timeout(_RESULT_SETTLE_MS)
-    frame = _find_document_frame(page.context.pages)
-    if frame is None:
-        raise SeeyonDocumentContractMismatch(
-            "OA certificate folder search controls were not found"
-        )
+        _wait_for_ui(page, lambda: _find_exact_visible_text(pages(), label),
+                     f"OA document center entry is unavailable: {label}", deadline=deadline)
+        if not _click_exact_visible_text(pages(), label):
+            raise SeeyonDocumentContractMismatch(f"OA document center entry changed: {label}")
+    frame = _wait_for_ui(page, lambda: _find_document_frame(pages()),
+                         "OA certificate folder search controls were not found", deadline=deadline)
+    # The observed UI contract has no per-query response/generation identifier.
+    # Retain the existing result settle path until that completion signal is known;
+    # identical or empty results must not be treated as a failed refresh.
+    page.wait_for_timeout(_RESULT_SETTLE_MS)
     return frame
 
 
@@ -577,6 +580,21 @@ def _search_current_folder(worker, *, frame, query: str) -> list[dict]:
     ]
 
 
+def _wait_for_ui(page, observe, message, *, timeout_seconds=20, deadline=None):
+    deadline = min(deadline, time.monotonic() + timeout_seconds) if deadline is not None else time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _has_login_form(page.context.pages):
+            raise AdapterLoginRequired("the central OA session is not logged in or has expired")
+        try:
+            result = observe()
+        except Exception:
+            result = None  # Frame navigation may temporarily invalidate a locator.
+        if result:
+            return result
+        page.wait_for_timeout(_READINESS_POLL_MS)
+    raise SeeyonDocumentContractMismatch(message)
+
+
 def _find_document_frame(pages):
     for page in pages:
         for frame in page.frames:
@@ -587,6 +605,23 @@ def _find_document_frame(pages):
 
 
 def _search_all_apps(pages, value: str) -> bool:
+    candidate = _find_app_search(pages)
+    if candidate is None:
+        return False
+    candidate.fill("", timeout=5000)
+    candidate.press_sequentially(value, delay=35, timeout=10000)
+    return bool(candidate.evaluate(
+        """(input) => {
+          const icon = input.parentElement
+            && input.parentElement.querySelector('i.vportal.vp-search-large');
+          if (!icon) return false;
+          icon.click();
+          return true;
+        }"""
+    ))
+
+
+def _find_app_search(pages):
     for page in pages:
         for frame in page.frames:
             locator = frame.get_by_placeholder(_APP_SEARCH_PLACEHOLDER, exact=True)
@@ -594,24 +629,23 @@ def _search_all_apps(pages, value: str) -> bool:
                 candidate = locator.nth(index)
                 if not candidate.is_visible():
                     continue
-                candidate.fill("", timeout=5000)
-                candidate.press_sequentially(value, delay=35, timeout=10000)
-                clicked = candidate.evaluate(
-                    """
-                    (input) => {
-                      const icon = input.parentElement
-                        && input.parentElement.querySelector('i.vportal.vp-search-large');
-                      if (!icon) return false;
-                      icon.click();
-                      return true;
-                    }
-                    """
-                )
-                return bool(clicked)
-    return False
+                return candidate
+    return None
 
 
 def _click_exact_visible_text(pages, label: str) -> bool:
+    found = _find_exact_visible_text(pages, label)
+    if found is None:
+        return False
+    candidate, selector_index = found
+    if selector_index == 0:
+        candidate.click(timeout=5000)
+    else:
+        candidate.evaluate("(element) => element.click()")
+    return True
+
+
+def _find_exact_visible_text(pages, label: str):
     selectors = (
         "a,button,[role='button'],[onclick]",
         ".menu-expand-font,.menu-list-li-title,.quick-search-menu-item,.menu_btn.text_overflow",
@@ -625,12 +659,8 @@ def _click_exact_visible_text(pages, label: str) -> bool:
                     text = " ".join((candidate.inner_text() or "").split())
                     if text != label or not candidate.is_visible():
                         continue
-                    if selector_index == 0:
-                        candidate.click(timeout=5000)
-                    else:
-                        candidate.evaluate("(element) => element.click()")
-                    return True
-    return False
+                    return candidate, selector_index
+    return None
 
 
 def _has_login_form(pages) -> bool:

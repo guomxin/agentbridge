@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime
 from html import unescape
 from html.parser import HTMLParser
@@ -716,6 +718,29 @@ class SeeyonCentralAdapter:
             raise ValueError("Seeyon base URL must include an http(s) origin")
         self.origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
         self.template_center_url = urljoin(base_url, TEMPLATE_CENTER_API_URL)
+        self._capability_state = ContextVar("seeyon_capability_state", default=None)
+
+    @contextmanager
+    def capability_scope(self, worker):
+        """Reuse navigation/probe proof only for this worker's current invocation.
+
+        Pending coverage, rendered materials and write decisions are deliberately
+        absent: preparation and final freshness checks must read them again.
+        ContextVar also keeps concurrent accounts and nested readback workers apart.
+        """
+        current = self._scope_for(worker)
+        if current is not None:
+            yield
+            return
+        token = self._capability_state.set({"worker": worker})
+        try:
+            yield
+        finally:
+            self._capability_state.reset(token)
+
+    def _scope_for(self, worker):
+        state = self._capability_state.get()
+        return state if state is not None and state["worker"] is worker else None
 
     def authentication_contract(self) -> dict:
         fingerprint_input = {
@@ -805,6 +830,9 @@ class SeeyonCentralAdapter:
         )
 
     def list_templates(self, worker) -> dict:
+        scope = self._scope_for(worker)
+        if scope is not None and "templates" in scope:
+            return deepcopy(scope["templates"])
         try:
             response = worker.request("GET", self.template_center_url)
         except Exception as exc:
@@ -838,10 +866,13 @@ class SeeyonCentralAdapter:
                 f"({_safe_response_diagnostics(response)})."
             )
         result = parse_template_center_response(payload, base_url=self.base_url)
-        return {
+        result = {
             **result,
             "transport": "central_http_session",
         }
+        if scope is not None:
+            scope["templates"] = deepcopy(result)
+        return result
 
     def probe_session(self, worker) -> dict:
         templates = self.list_templates(worker)
@@ -854,6 +885,9 @@ class SeeyonCentralAdapter:
     def probe_business_draft_session(self, worker) -> dict:
         """Observe the account on the authenticated home page before draft reads."""
         worker.goto(self.base_url)
+        scope = self._scope_for(worker)
+        if scope is not None:
+            scope["home_observed"] = True
         probe = self.probe_session(worker)
         return {**probe, "observed_principal_ref": _principal_from_title(worker.page_title)}
 
@@ -1545,7 +1579,12 @@ class SeeyonCentralAdapter:
         *,
         timeout_seconds: float = 10,
     ) -> str:
-        worker.goto(self.base_url)
+        scope = self._scope_for(worker)
+        if scope is not None and "pending_route" in scope:
+            return scope["pending_route"]
+        if not (scope is not None and scope.get("home_observed")
+                and worker.page_url == self.base_url):
+            worker.goto(self.base_url)
         deadline = time.monotonic() + max(timeout_seconds, 0.1)
         while time.monotonic() < deadline:
             if _looks_like_login_url(worker.page_url):
@@ -1555,10 +1594,13 @@ class SeeyonCentralAdapter:
                 "pendingSection",
             )
             if section_url:
-                return _section_url_with_arguments(
+                route = _section_url_with_arguments(
                     section_url,
                     {"sectionBeanId": "pendingSection"},
                 )
+                if scope is not None:
+                    scope["pending_route"] = route
+                return route
             time.sleep(0.25)
         raise SeeyonReadContractMismatch(
             "The OA home page did not expose the pending section contract in time."
@@ -1584,7 +1626,21 @@ class SeeyonCentralAdapter:
         detail_url = str(source_item.get("href") or "")
         if not detail_url:
             raise SeeyonReadContractMismatch("The selected workflow does not expose a detail page.")
-        snapshot = worker.rendered_snapshot(detail_url, settle_ms=1800, include_frames=True)
+        try:
+            snapshot = worker.rendered_snapshot(
+                detail_url, settle_ms=0, include_frames=True,
+                readiness={"kind": "oa_workflow_detail",
+                           "affair_id": str(source_item.get("affair_id") or ""),
+                           "title": str(source_item.get("title") or "")},
+            )
+        except TimeoutError as exc:
+            if _looks_like_login_url(worker.page_url):
+                raise SeeyonLoginRequired(
+                    "The central OA session expired while rendering workflow detail."
+                ) from exc
+            raise SeeyonReadContractMismatch(
+                "The OA workflow detail did not expose stable, complete target materials in time."
+            ) from exc
         final_url = str(snapshot.get("url") or detail_url)
         if _looks_like_login_url(final_url):
             raise SeeyonLoginRequired("The central OA session expired while rendering workflow detail.")

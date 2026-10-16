@@ -2,6 +2,7 @@ from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from contextlib import contextmanager
 
 import pytest
 
@@ -155,6 +156,78 @@ def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run,
     assert prepared == committed == [(profile, f"affair-{i}") for i, (profile, *_rest) in enumerate(cases, 1)]
     assert preflights == [("efficiency_data", "affair-1"), ("weekly_report", "affair-2"), ("missed_punch", "affair-3")]
     assert field["batch"]["state"] == "succeeded"
+
+
+def test_batch_context_preflight_and_prepare_share_one_worker_per_invocation(run, monkeypatch):
+    service, tid, _rows, _prepared, committed = run
+    events = []
+
+    class Worker(helpers.FakeWorker):
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, kind, *_args):
+            events.append(("exit", kind.__name__ if kind else None))
+
+        def restore_session_state(self, state):
+            events.append("restore")
+            super().restore_session_state(state)
+
+        def capture_session_state(self):
+            events.append("capture")
+            return super().capture_session_state()
+
+    @contextmanager
+    def scope(worker):
+        assert isinstance(worker, Worker)
+        events.append("scope_enter")
+        try:
+            yield
+        finally:
+            events.append("scope_exit")
+
+    service._worker_factories_by_system["oa"] = lambda *_: Worker()
+    monkeypatch.setattr(service.adapter, "capability_scope", scope, raising=False)
+    field = start(service, tid)
+    assert field["error"]["code"] == "FIELD_INPUT_REQUIRED"
+    assert events.count("enter") == events.count("restore") == events.count("scope_enter") == 1
+    assert events.count("capture") == 2  # Batch checkpoint and material checkpoint are still saved.
+    assert events[-2:] == ["scope_exit", ("exit", "RequiresUserAction")]
+    events.clear()
+    auth = authorize(service, field)
+    assert auth["error"]["code"] == "WRITE_AUTHORIZATION_REQUIRED"
+    assert events.count("enter") == events.count("restore") == events.count("scope_enter") == 1
+    assert events[-2:] == ["scope_exit", ("exit", "RequiresUserAction")]
+    assert committed == []
+
+
+def test_preflight_failure_releases_real_worker_scope_and_execution_mutex(run, monkeypatch):
+    service, tid, _rows, prepared, committed = run
+    events = []
+
+    class Worker(helpers.FakeWorker):
+        def __exit__(self, kind, *_args):
+            events.append(("exit", kind.__name__ if kind else None))
+
+    @contextmanager
+    def scope(_worker):
+        events.append("scope_enter")
+        try:
+            yield
+        finally:
+            events.append("scope_exit")
+
+    service._worker_factories_by_system["oa"] = lambda *_: Worker()
+    monkeypatch.setattr(service.adapter, "capability_scope", scope, raising=False)
+    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action",
+                        lambda *_: (_ for _ in ()).throw(RuntimeError("synthetic preflight failed")))
+    result = start(service, tid)
+    assert result["status"] == "failed"
+    assert events == ["scope_enter", "scope_exit", ("exit", "RuntimeError")]
+    session = service.sessions.find(user_subject="user-a", system_id="oa")
+    assert not service._session_mutex(session["session_id"]).locked()
+    assert prepared == committed == []
 
 
 def test_success_before_progress_crash_recovers_without_resubmission(run, tmp_path, monkeypatch):

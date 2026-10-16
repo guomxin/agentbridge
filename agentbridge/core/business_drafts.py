@@ -5,7 +5,7 @@ in one transaction; only the existing interaction coordinator can execute it.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -15,13 +15,14 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
-from threading import BoundedSemaphore
+from time import perf_counter
 
 from agentbridge.adapters.base import AdapterBusinessRuleRejected, AdapterLoginRequired
 from agentbridge.adapters.taihua import TaihuaDuplicateWorkLog
 from agentbridge.core.business_draft_profiles import BY_PREPARE, BATCH_PREPARES, profile_for_source, meeting_times, review_payload, room_choice
 from agentbridge.core.capability_runtime import CapabilityContext
 from agentbridge.core.commit_notifications import track_transaction, transaction_committed, transaction_closed
+from agentbridge.core.draft_read_scheduler import DRAFT_READS, DraftReadBusy, SharedDraftReadFailure
 from agentbridge.core.field_submissions import _submission_from_row
 from agentbridge.core.field_values import _normalize_submission
 from agentbridge.core.interactions import _interaction_from_row, build_interaction_envelope
@@ -34,7 +35,6 @@ from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
 PREPARE = "taihua.work_log.create.prepare"
 COMMIT = "taihua.work_log.create"
 FIELDS = ("log_date", "hours", "project", "content")
-_PREVIEWS = BoundedSemaphore(2)
 
 
 def _json(value):
@@ -251,8 +251,39 @@ class BusinessDraftService:
             return self._view(connection, self._draft(connection, source_submission_id), presentation_id, endpoint)
 
     def preview(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie, expected_revision):
-        if not _PREVIEWS.acquire(blocking=False):
-            raise BusinessDraftError("DRAFT_PREVIEW_BUSY", "预检正在处理其他请求，请稍后重试。", status=429)
+        with store_transaction(self.store) as connection:
+            source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+            self._editable(connection, draft, source, expected_revision, presentation_id, endpoint)
+            binding = self._authority(connection, source, interaction, task_id)
+            values, _selection = self._values(connection, source, draft)
+            key = (str(self.store.db_path.resolve()), source["user_subject"], source["session_id"],
+                   source_submission_id, expected_revision, _hash(values), _hash(binding))
+        arguments = dict(source_submission_id=source_submission_id, presentation_id=presentation_id,
+                         csrf_token=csrf_token, csrf_cookie=csrf_cookie, expected_revision=expected_revision)
+        try:
+            result, joined = DRAFT_READS.singleflight(key, lambda: self._preview(**arguments))
+        except DraftReadBusy as exc:
+            raise BusinessDraftError("DRAFT_PREVIEW_BUSY", "预检正在处理其他请求，请稍后重试。", status=429) from exc
+        except SharedDraftReadFailure as exc:
+            cause = exc.cause
+            if isinstance(cause, BusinessDraftError):
+                current = self.state(**{name: value for name, value in arguments.items() if name != "expected_revision"})
+                raise BusinessDraftError(cause.code, cause.message, status=cause.status,
+                    field_errors=dict(cause.field_errors), current=current if cause.current is not None else None) from cause
+            raise self._read_error(cause) from cause
+        if not joined:
+            return result
+        # The shared result contains no authority: authenticate the follower and
+        # rebuild its view, including its own presentation, from the same ledger.
+        with store_transaction(self.store) as connection:
+            source, interaction, task_id, endpoint, current = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+            self._editable(connection, current, source, expected_revision, presentation_id, endpoint)
+            self._authority(connection, source, interaction, task_id)
+            if current["preview_id"] != (result.get("preview") or {}).get("previewId"):
+                self._conflict(connection, current, presentation_id, endpoint)
+            return self._view(connection, current, presentation_id, endpoint)
+
+    def _preview(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie, expected_revision):
         started_version = None
         try:
             with store_transaction(self.store) as connection:
@@ -264,7 +295,9 @@ class BusinessDraftService:
                 connection.execute("UPDATE business_drafts SET state='previewing',version=?,preview_id=NULL,updated_at=? WHERE draft_id=?",
                                    (started_version, self.store.clock().isoformat(), draft["draft_id"]))
             with self._timing(source, task_id, "draft.preview"):
-                prepared = self._prepare(source, task_id, values)
+                prepared = self._prepare(source, task_id, values, validate=lambda: self._validate_queued_read(
+                    source_submission_id, presentation_id, csrf_token, csrf_cookie,
+                    expected_revision, started_version, binding))
             self._check_selection(prepared, selection)
             with store_transaction(self.store) as connection:
                 source, interaction, task_id, endpoint, current = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
@@ -288,14 +321,10 @@ class BusinessDraftService:
             if hasattr(exc, "code"):
                 raise BusinessDraftError(exc.code, str(exc), status=403) from exc
             raise BusinessDraftError("DRAFT_PREVIEW_UNAVAILABLE", "预检暂不可用，草稿已保留，请稍后重试。", status=503) from exc
-        finally:
-            _PREVIEWS.release()
 
     def options(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie, expected_revision):
         from agentbridge.adapters.seeyon_meeting_room_application import meeting_room_application_options
         from agentbridge.adapters.seeyon_meeting import meeting_create_options
-        if not _PREVIEWS.acquire(blocking=False):
-            raise BusinessDraftError("DRAFT_PREVIEW_BUSY", "查询正在处理其他请求，请稍后重试。", status=429)
         try:
             with store_transaction(self.store) as connection:
                 source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
@@ -310,7 +339,9 @@ class BusinessDraftService:
                 connection.execute("UPDATE business_drafts SET version=?,state='editing',preview_id=NULL WHERE draft_id=?",
                                    (started_version, draft["draft_id"]))
             query = meeting_create_options if profile_for_source(source).prepare == "oa.meeting.create.prepare" else meeting_room_application_options
-            rooms = self._read_downstream(source, lambda adapter, worker, session: query(adapter, worker, **times))
+            rooms = self._read_downstream(source, lambda adapter, worker, session: query(adapter, worker, **times),
+                validate=lambda: self._validate_queued_read(source_submission_id, presentation_id, csrf_token, csrf_cookie,
+                    expected_revision, started_version, binding))
             with store_transaction(self.store) as connection:
                 source, interaction, task_id, endpoint, current = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
                 self._editable(connection, current, source, expected_revision, presentation_id, endpoint)
@@ -335,8 +366,20 @@ class BusinessDraftService:
             raise
         except Exception as exc:
             raise self._read_error(exc) from exc
-        finally:
-            _PREVIEWS.release()
+
+    def _validate_queued_read(self, source_id, presentation_id, token, cookie, revision, version, binding, preview_id=None):
+        """Revalidate after queue admission, before any downstream read."""
+        with store_transaction(self.store) as connection:
+            source, interaction, task_id, endpoint, current = self._checked(connection, source_id, presentation_id, token, cookie)
+            self._editable(connection, current, source, revision, presentation_id, endpoint)
+            if (current["version"] != version or binding != self._authority(connection, source, interaction, task_id)
+                    or (preview_id is not None and (current["preview_id"] != preview_id or current["state"] != "ready"))):
+                self._conflict(connection, current, presentation_id, endpoint)
+            if preview_id is not None:
+                preview = connection.execute("SELECT expires_at FROM business_draft_previews WHERE preview_id=? AND draft_id=?",
+                                             (preview_id, current["draft_id"])).fetchone()
+                if not preview or self.store.clock() >= datetime.fromisoformat(preview["expires_at"]):
+                    raise BusinessDraftError("DRAFT_PREVIEW_STALE", "预检版本已失效，请重新预检后确认。", status=409)
 
     def _option_body(self, connection, draft, *, include_stale=False):
         row = connection.execute("SELECT * FROM business_draft_options WHERE draft_id=?", (draft["draft_id"],)).fetchone()
@@ -463,20 +506,20 @@ class BusinessDraftService:
             if _json(binding) != preview["binding_json"] or _hash(values) != preview["values_hash"]:
                 raise BusinessDraftError("DRAFT_CONTEXT_CHANGED", "账号或业务上下文已变化，请重新预检。", status=409)
             version, old_semantic, old_plan = draft["version"], preview["semantic_review_hash"], json.loads(preview["plan_json"])
-        if not _PREVIEWS.acquire(blocking=False):
-            raise BusinessDraftError("DRAFT_PREVIEW_BUSY", "业务状态正在核对，请稍后重试。", status=429)
         failure = None
         try:
             with self._timing(source, task_id, "draft.recheck"):
-                prepared = self._prepare(source, task_id, values)
+                prepared = self._prepare(source, task_id, values, priority=True,
+                    validate=lambda: self._validate_queued_read(source_id, presentation_id, csrf_token, csrf_cookie,
+                        expected_revision, version, binding, preview_id))
             self._check_selection(prepared, selection)
             if any(old_plan["target"].get(key) != prepared["plan"]["target"].get(key) for key in profile.identity_fields):
                 raise BusinessDraftError("DRAFT_TARGET_CHANGED", "办理目标身份已变化，请从原任务重新准备。", status=409)
             changed = _hash(review_payload(profile, prepared)[1]) != old_semantic
         except Exception as exc:
+            if isinstance(exc, BusinessDraftError) and exc.code == "DRAFT_PREVIEW_BUSY":
+                raise
             failure = self._read_error(exc)
-        finally:
-            _PREVIEWS.release()
         with store_transaction(self.store) as connection:
             source, interaction, task_id, endpoint, current = self._checked(connection, source_id, presentation_id, csrf_token, csrf_cookie)
             if connection.execute("SELECT 1 FROM business_draft_decisions WHERE draft_id=?", (current["draft_id"],)).fetchone():
@@ -570,7 +613,7 @@ class BusinessDraftService:
             connection.execute("DELETE FROM business_draft_options WHERE draft_id=?", (draft["draft_id"],))
             return self._view(connection, self._draft(connection, source_submission_id), presentation_id, endpoint)
 
-    def _prepare(self, source, task_id, values):
+    def _prepare(self, source, task_id, values, *, priority=False, validate=None):
         profile = profile_for_source(source)
         trace = self._trace(source, task_id)
         def prepare(adapter, worker, session):
@@ -585,7 +628,7 @@ class BusinessDraftService:
                     **({"context_fields": ("batch_id", "affair_id")} if source["capability_name"] in BATCH_PREPARES else {})})
             prepared["plan"]["_business_draft"] = self._plan_marker(source, task_id)
             return prepared
-        return self._read_downstream(source, prepare)
+        return self._read_downstream(source, prepare, priority=priority, validate=validate)
 
     def _trace(self, source, task_id=None):
         return (self.service.runtime_governance.trace_for_operation(source["create_operation_id"])
@@ -605,7 +648,7 @@ class BusinessDraftService:
             marker["profile"] = profile_for_source(source).marker
         return marker
 
-    def _read_downstream(self, source, read):
+    def _read_downstream(self, source, read, *, priority=False, validate=None):
         runtime = self.service._runtime_for_system(source["system_id"])
         if runtime is None:
             raise BusinessDraftError("DRAFT_RUNTIME_UNAVAILABLE", "业务系统暂不可用。", status=503)
@@ -613,15 +656,21 @@ class BusinessDraftService:
         trace = self._trace(source)
         trace_id = (trace or {}).get("trace_id")
         timing_context = {"trace_id": trace_id, "operation_id": source["create_operation_id"]}
-        with self.service._session_lock(source["session_id"], **timing_context, purpose="draft"):
+        with self._scheduled_session(source, trace_id, priority=priority):
+            if validate is not None:
+                validate()
             session = self.service.sessions.get(source["session_id"])
             if session["state"] != "active":
                 raise BusinessDraftError("DRAFT_SESSION_REQUIRED", "请先恢复原任务的登录。", status=409)
             state = self.service.session_states.load(source["session_id"])
             if state is None:
                 raise BusinessDraftError("DRAFT_SESSION_REQUIRED", "请先恢复原任务的登录。", status=409)
-            with self.service.runtime_governance.timing(**timing_context, stage="draft.worker_lifecycle"), worker_factory(session, adapter) as worker:
+            with self.service.runtime_governance.timing(**timing_context, stage="draft.worker_lifecycle"), ExitStack() as worker_stack:
+                worker = worker_stack.enter_context(worker_factory(session, adapter))
                 worker.restore_session_state(state)
+                scope = getattr(adapter, "capability_scope", None)
+                if callable(scope):
+                    worker_stack.enter_context(scope(worker))
                 with self.service.runtime_governance.timing(**timing_context, stage="draft.identity_probe"):
                     probe = getattr(adapter, "probe_business_draft_session", adapter.probe_session)(worker)
                 observed = str(probe.get("observed_principal_ref") or "").strip()
@@ -632,6 +681,27 @@ class BusinessDraftService:
                     result = read(adapter, worker, session)
                 self.service.session_states.save(source["session_id"], worker.capture_session_state())
                 return result
+
+    @contextmanager
+    def _scheduled_session(self, source, trace_id, *, priority=False):
+        started_at, started = _now().isoformat(), perf_counter()
+        acquired_at, waited_ms = None, None
+        key = (str(self.store.db_path.resolve()), source["user_subject"], source["session_id"])
+        try:
+            with DRAFT_READS.slot(key, self.service._session_mutex(source["session_id"]), priority=priority):
+                acquired_at, waited_ms = _now().isoformat(), round((perf_counter() - started) * 1000)
+                yield
+        except DraftReadBusy as exc:
+            raise BusinessDraftError("DRAFT_PREVIEW_BUSY", "预检正在处理其他请求，请稍后重试。", status=429) from exc
+        finally:
+            # Persist diagnostics only after the execution mutex is released.
+            self.service.runtime_governance.record_timing(trace_id=trace_id, stage="draft.queue_wait",
+                operation_id=source["create_operation_id"], started_at=started_at,
+                finished_at=acquired_at or _now().isoformat(),
+                duration_ms=waited_ms if waited_ms is not None else round((perf_counter() - started) * 1000),
+                status="succeeded" if acquired_at else "failed", error_code=None if acquired_at else "DRAFT_PREVIEW_BUSY",
+                metadata={"priority": "final_recheck" if priority else "preview", "acquired": acquired_at is not None,
+                          "durationClock": "central.monotonic"})
 
     def resume_successor(self, source_submission_id, *, user_subject):
         """Resolve a durable decision; dispatch remains with the original caller."""

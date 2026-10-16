@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
 import time
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 
@@ -219,8 +220,15 @@ class CentralBrowserWorker:
         settle_ms: int = 1500,
         include_frames: bool = True,
         timeout_seconds: float = 30,
+        readiness: dict | None = None,
     ) -> dict:
+        deadline = time.monotonic() + timeout_seconds if readiness is not None else None
         page = self.goto(url, timeout_seconds=timeout_seconds)
+        if readiness is not None:
+            return _wait_for_detail_snapshot(
+                page, self._validate_url, readiness,
+                include_frames=include_frames, timeout_seconds=deadline - time.monotonic(),
+            )
         if settle_ms > 0:
             page.wait_for_timeout(settle_ms)
         snapshot = {
@@ -610,8 +618,15 @@ class CentralBrowserPageWorker:
         settle_ms: int = 1500,
         include_frames: bool = True,
         timeout_seconds: float = 30,
+        readiness: dict | None = None,
     ) -> dict:
+        deadline = time.monotonic() + timeout_seconds if readiness is not None else None
         page = self.goto(url, timeout_seconds=timeout_seconds)
+        if readiness is not None:
+            return _wait_for_detail_snapshot(
+                page, self._owner._validate_url, readiness,
+                include_frames=include_frames, timeout_seconds=deadline - time.monotonic(),
+            )
         if settle_ms > 0:
             page.wait_for_timeout(settle_ms)
         snapshot = {
@@ -652,6 +667,113 @@ class CentralBrowserPageWorker:
     @property
     def page_url(self) -> str:
         return self.page.url
+
+
+OA_DETAIL_STABILITY_MS = 300
+
+_DETAIL_STATE_SCRIPT = r"""
+() => {
+  const visible = (node) => !!(node && node.getClientRects().length);
+  const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+  const busy = Array.from(document.querySelectorAll(
+    '[aria-busy="true"],.cap4-loading,.loading-mask,.loadmask'
+  )).some(visible);
+  const pairedRow = Array.from(document.querySelectorAll('tr')).some((row) =>
+    Array.from(row.children).filter((cell) => /^(TH|TD)$/.test(cell.tagName)
+      && (cell.innerText || '').trim()).length >= 2);
+  const formField = Array.from(document.querySelectorAll('[id^="field"][id$="_id"]'))
+    .some((field) => visible(field) && (field.innerText || '').trim());
+  const declared = window.frameElement?.getAttribute('src') || '';
+  let currentDocument = true;
+  if (declared && !declared.startsWith('javascript:')) {
+    const target = new URL(declared, window.parent.location.href);
+    const current = new URL(window.location.href);
+    target.hash = ''; current.hash = '';
+    currentDocument = target.href === current.href;
+  }
+  // An explicit, still-empty about:blank placeholder is not business material.
+  // Keep its HTML and URL in the stability fingerprint so late loads reset it.
+  const placeholder = window.location.href === 'about:blank' && !text
+    && (!declared || declared === 'about:blank')
+    && !document.querySelector('iframe,frame,input,table,article,[contenteditable]');
+  return {ready: document.readyState === 'complete' && currentDocument
+                   && (!!text || placeholder) && !busy, placeholder,
+          material: pairedRow || formField || text.length >= 80, text};
+}
+"""
+
+
+def _wait_for_detail_snapshot(
+    page, validate_url, readiness, *, include_frames, timeout_seconds,
+):
+    """Read all target documents anew; never reuse a previous navigation's HTML.
+
+    The window is a debounce after semantic readiness, not a replacement for
+    adapter material/fingerprint validation. A missing, busy or unreadable frame
+    resets it and a timeout returns no partial snapshot.
+    """
+    if readiness.get("kind") != "oa_workflow_detail":
+        raise ValueError("unsupported rendered snapshot readiness contract")
+    affair_id = str(readiness.get("affair_id") or "")
+    if not affair_id or not include_frames:
+        raise ValueError("OA detail readiness requires an affair and complete frames")
+    expected_title = "".join(str(readiness.get("title") or "").split()).rstrip(".…")
+    if timeout_seconds <= 0:
+        raise TimeoutError("OA detail navigation exhausted the snapshot budget")
+    deadline = time.monotonic() + timeout_seconds
+    previous_digest, stable_since = None, None
+    while time.monotonic() < deadline:
+        snapshot = {"url": page.url, "title": page.title(), "html": "", "frames": []}
+        states, complete = [], True
+        main_frame = getattr(page, "main_frame", page)
+        frames = [main_frame] + [frame for frame in list(page.frames)
+                                 if frame is not main_frame]
+        frame_manifest = [(id(frame), str(getattr(frame, "url", "") or "")) for frame in frames]
+        for frame in frames:
+            frame_url = str(getattr(frame, "url", "") or "")
+            try:
+                if frame_url and frame_url != "about:blank":
+                    validate_url(frame_url)
+                state = frame.evaluate(_DETAIL_STATE_SCRIPT)
+                html = frame.content()
+            except Exception:
+                complete = False
+                break
+            if (not isinstance(state, dict) or state.get("ready") is not True or not html
+                    or (frame is main_frame and state.get("placeholder"))):
+                complete = False
+                break
+            frame_affair = parse_qs(urlparse(frame_url).query).get("affairId", [])
+            if frame_affair and frame_affair != [affair_id]:
+                complete = False
+                break
+            states.append(state)
+            if frame is main_frame:
+                snapshot["html"] = html
+            else:
+                snapshot["frames"].append({"url": frame_url, "html": html})
+        current_frames = [main_frame] + [frame for frame in list(page.frames)
+                                         if frame is not main_frame]
+        if frame_manifest != [(id(frame), str(getattr(frame, "url", "") or ""))
+                              for frame in current_frames]:
+            complete = False
+        query = parse_qs(urlparse(str(page.url)).query)
+        same_target = query.get("affairId", query.get("affair_id", [])) == [affair_id]
+        text = "".join((str(snapshot["title"]) + " ".join(
+            str(state.get("text") or "") for state in states)).split())
+        semantic_ready = (complete and same_target and any(state.get("material") for state in states)
+                          and (not expected_title or expected_title in text))
+        if semantic_ready:
+            digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).digest()
+            now = time.monotonic()
+            if digest != previous_digest:
+                previous_digest, stable_since = digest, now
+            elif stable_since is not None and now - stable_since >= OA_DETAIL_STABILITY_MS / 1000:
+                return snapshot
+        else:
+            previous_digest, stable_since = None, None
+        page.wait_for_timeout(75)
+    raise TimeoutError("OA detail target documents did not become complete and stable")
 
 
 def _start_playwright():

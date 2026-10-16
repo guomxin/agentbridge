@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import (
     datetime,
@@ -3897,9 +3897,21 @@ class CentralCapabilityService:
             field_submission = None
             effective_arguments = arguments
             try:
-                if capability_name in {MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY, PENDING_BATCH_PREPARE_CAPABILITY}:
-                    with worker_factory(session, adapter) as worker:
-                        worker.restore_session_state(state)
+                with ExitStack() as worker_stack:
+                    worker = None
+
+                    def acquire_worker():
+                        nonlocal worker
+                        if worker is None:
+                            worker = worker_stack.enter_context(worker_factory(session, adapter))
+                            worker.restore_session_state(state)
+                            scope = getattr(adapter, "capability_scope", None)
+                            if callable(scope):
+                                worker_stack.enter_context(scope(worker))
+                        return worker
+
+                    if capability_name in {MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY, PENDING_BATCH_PREPARE_CAPABILITY}:
+                        worker = acquire_worker()
                         arguments, empty_batch_result = (
                             self._resolve_approval_batch_context(
                                 context=context,
@@ -3912,25 +3924,24 @@ class CentralCapabilityService:
                         )
                         state = worker.capture_session_state()
                         self.session_states.save(session["session_id"], state)
-                    if empty_batch_result is not None:
-                        return empty_batch_result
-                    effective_arguments = arguments
-                    if capability_name == PENDING_BATCH_PREPARE_CAPABILITY:
-                        prepare_definition = self._pending_batch_definition(
-                            task_id=task_id, user_subject=user_subject, arguments=arguments,
+                        if empty_batch_result is not None:
+                            return empty_batch_result
+                        effective_arguments = arguments
+                        if capability_name == PENDING_BATCH_PREPARE_CAPABILITY:
+                            prepare_definition = self._pending_batch_definition(
+                                task_id=task_id, user_subject=user_subject, arguments=arguments,
+                            )
+                    dynamic_field_schema = None
+                    preflight_result = None
+                    if (
+                        prepare_definition is not None
+                        and not str(arguments.get("input_submission_id") or "").strip()
+                        and (
+                            prepare_definition.get("field_schema_function")
+                            or prepare_definition.get("preflight_function")
                         )
-                dynamic_field_schema = None
-                preflight_result = None
-                if (
-                    prepare_definition is not None
-                    and not str(arguments.get("input_submission_id") or "").strip()
-                    and (
-                        prepare_definition.get("field_schema_function")
-                        or prepare_definition.get("preflight_function")
-                    )
-                ):
-                    with worker_factory(session, adapter) as worker:
-                        worker.restore_session_state(state)
+                    ):
+                        worker = acquire_worker()
                         preflight_function_name = prepare_definition.get(
                             "preflight_function"
                         )
@@ -3977,41 +3988,40 @@ class CentralCapabilityService:
                             session["session_id"],
                             state,
                         )
-                if (
-                    isinstance(preflight_result, dict)
-                    and isinstance(preflight_result.get("review"), dict)
-                ):
-                    schema = deepcopy(
-                        dynamic_field_schema or prepare_definition["field_schema"]
-                    )
-                    schema["review"] = deepcopy(preflight_result["review"])
-                    review_fingerprint = str(
-                        preflight_result.get("review_fingerprint") or ""
-                    ).strip()
-                    if review_fingerprint:
-                        schema["_agentbridge_review_fingerprint"] = review_fingerprint
-                    dynamic_field_schema = schema
-                if capability_name == PENDING_BATCH_PREPARE_CAPABILITY:
-                    schema = deepcopy(dynamic_field_schema or prepare_definition["field_schema"])
-                    schema["title"] += f"（第 {arguments['batch_ordinal']}/{arguments['batch_total']} 条）"
-                    schema["notice"] = (
-                        f"当前事项：{arguments['target_title']} | {arguments['target_sender']} | {arguments['target_date']}。"
-                        "本条仍需独立授权；权威核验成功后自动进入下一条。拒绝或失败会停止整个批次。"
-                    )
-                    dynamic_field_schema = schema
-                if prepare_definition is not None:
-                    if prepare_definition.get("field_schema") is None:
-                        effective_arguments = dict(arguments)
-                    else:
-                        field_submission, effective_arguments = self._controlled_writes().resolve_field_input(
-                            context=context,
-                            session=session,
-                            arguments=arguments,
-                            definition=prepare_definition,
-                            form_schema=dynamic_field_schema,
+                    if (
+                        isinstance(preflight_result, dict)
+                        and isinstance(preflight_result.get("review"), dict)
+                    ):
+                        schema = deepcopy(
+                            dynamic_field_schema or prepare_definition["field_schema"]
                         )
-                with worker_factory(session, adapter) as worker:
-                    worker.restore_session_state(state)
+                        schema["review"] = deepcopy(preflight_result["review"])
+                        review_fingerprint = str(
+                            preflight_result.get("review_fingerprint") or ""
+                        ).strip()
+                        if review_fingerprint:
+                            schema["_agentbridge_review_fingerprint"] = review_fingerprint
+                        dynamic_field_schema = schema
+                    if capability_name == PENDING_BATCH_PREPARE_CAPABILITY:
+                        schema = deepcopy(dynamic_field_schema or prepare_definition["field_schema"])
+                        schema["title"] += f"（第 {arguments['batch_ordinal']}/{arguments['batch_total']} 条）"
+                        schema["notice"] = (
+                            f"当前事项：{arguments['target_title']} | {arguments['target_sender']} | {arguments['target_date']}。"
+                            "本条仍需独立授权；权威核验成功后自动进入下一条。拒绝或失败会停止整个批次。"
+                        )
+                        dynamic_field_schema = schema
+                    if prepare_definition is not None:
+                        if prepare_definition.get("field_schema") is None:
+                            effective_arguments = dict(arguments)
+                        else:
+                            field_submission, effective_arguments = self._controlled_writes().resolve_field_input(
+                                context=context,
+                                session=session,
+                                arguments=arguments,
+                                definition=prepare_definition,
+                                form_schema=dynamic_field_schema,
+                            )
+                    worker = acquire_worker()
                     if prepare_definition is not None:
                         result = self._controlled_writes().prepare(
                             context=context,
@@ -4980,8 +4990,7 @@ class CentralCapabilityService:
         operation_id: str | None = None,
         purpose: str = "session",
     ) -> Iterator[None]:
-        with self._locks_guard:
-            lock = self._session_locks.setdefault(session_id, threading.Lock())
+        lock = self._session_mutex(session_id)
         started_at = datetime.now(timezone.utc).isoformat()
         started = perf_counter()
         acquired = (
@@ -5011,6 +5020,11 @@ class CentralCapabilityService:
                 self.runtime_governance.record_timing(trace_id=trace_id, stage="session.lock_wait",
                     operation_id=operation_id, started_at=started_at, finished_at=acquired_at,
                     duration_ms=wait_ms, metadata={"purpose": purpose, "acquired": True})
+
+    def _session_mutex(self, session_id: str):
+        """Share the exact execution lock with the read-only draft scheduler."""
+        with self._locks_guard:
+            return self._session_locks.setdefault(session_id, threading.Lock())
 
     def _record_user_activity(self, *, user_subject: str, system_id: str, trace_id: str | None = None) -> None:
         session = self.sessions.find(user_subject=user_subject, system_id=system_id)

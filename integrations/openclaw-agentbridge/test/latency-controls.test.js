@@ -223,6 +223,48 @@ test('unconstrained legacy reads survive absent hooks but explicit conflict cann
   assert.equal(calls,1);
 });
 
+test('lazy-factory telemetry uses only an exact bound run and never a rejected factory run', async () => {
+  const recorded = [];
+  const router = { config: {}, resolveToolContext: () => ({ bound: true, binding,
+    client: { async callToolResult() { return { structuredContent: { status: 'succeeded' } }; } } }) };
+  const run = async (factoryContext, exact) => {
+    const tools = createAgentBridgeProxyTools({ context: factoryContext, identityRouter: router,
+      serverName: 'agentbridge', taskRunRefResolver: () => exact.runId || null,
+      taskRunContextResolver: () => exact,
+      performanceRecorder: { run(observed, callback) { recorded.push(observed); return callback(); } } });
+    return tools.find(t => t.name === 'agentbridge_skill_catalog').execute('exact-call', {});
+  };
+  await run({ sessionKey: context.sessionKey }, { status: 'bound', runId: 'native-exact-run' });
+  assert.equal(recorded.at(-1).runId, 'native-exact-run');
+  const rejected = await run(context, { status: 'rejected' });
+  assert.equal(recorded.at(-1).runId, undefined);
+  assert.equal(JSON.parse(rejected.content[0].text).error.code, 'SKILL_RUN_CONTEXT_REQUIRED');
+  await run(context, { status: 'missing' });
+  assert.equal(recorded.at(-1).runId, context.runId);
+});
+
+test('a failed telemetry lookup preserves unbound identity results and original execution errors', async () => {
+  const observed = [];
+  const failure = new Error('original identity resolution failed');
+  let rejectIdentity = false;
+  const tools = createAgentBridgeProxyTools({ context, serverName: 'agentbridge',
+    identityRouter: { config: {}, resolveToolContext() {
+      return { bound: false, reason: 'identity-unbound' };
+    }, async resolveWorkspaceSession() {
+      if (rejectIdentity) throw failure;
+      return { bound: false, reason: 'identity-unbound' };
+    } },
+    taskRunContextResolver() { throw new Error('diagnostic context lookup failed'); },
+    performanceRecorder: { run(value, callback) { observed.push(value); return callback(); } } });
+  const tool = tools.find(t => t.name === 'agentbridge_skill_catalog');
+  const result = await tool.execute('unbound-call', {});
+  assert.equal(JSON.parse(result.content[0].text).status, 'unbound');
+  assert.equal(observed.at(-1).runId, undefined);
+  rejectIdentity = true;
+  await assert.rejects(tool.execute('failed-call', {}), error => error === failure);
+  assert.equal(observed.at(-1).runId, undefined);
+});
+
 test('active scope and sample constraints survive long turns and missing-call context',()=>{
   let now=1000;
   const router={config:{boundSkillToolGuard:true},skillRunNow:()=>now},identity={binding};

@@ -182,9 +182,14 @@ class YuqueCentralAdapter:
             "items": books,
         }
 
-    @_public_output
     def list_documents(self, worker, arguments: dict) -> dict:
         public_area, books = self._public_area(worker)
+        return self._list_documents_in_area(worker, arguments, public_area, books)
+
+    @_public_output
+    def _list_documents_in_area(
+        self, worker, arguments: dict, public_area: dict, books: list[dict]
+    ) -> dict:
         selector = str(arguments.get("book") or "").strip()
         selected_books = [_select_book(books, selector)] if selector else books
         keyword = str(arguments.get("keyword") or "").strip()
@@ -332,8 +337,9 @@ class YuqueCentralAdapter:
             raise ValueError("document is required")
         book_selector = str(arguments.get("book") or "").strip()
         if book_selector:
-            book = self._resolve_book(worker, book_selector)
-            document = self._resolve_document(worker, book, selector)
+            public_area, books = self._public_area(worker)
+            book = _select_book(books, book_selector)
+            document = self._resolve_document(worker, book, selector, public_area)
         else:
             book, document = self._resolve_document_across_books(worker, selector)
         params = {
@@ -578,10 +584,16 @@ class YuqueCentralAdapter:
     def _resolve_book(self, worker, selector: Any) -> dict:
         _public_area, books = self._public_area(worker)
         return _select_book(books, str(selector or "共享文档"))
-    def _resolve_document(self, worker, book: dict, selector: str) -> dict:
-        catalog = self.list_documents(
+    def _resolve_document(
+        self, worker, book: dict, selector: str, public_area: dict
+    ) -> dict:
+        # Reuse only the public-area discovery from this read. Keep the same
+        # catalog filtering, ordering and bounds without another permission scan.
+        catalog = self._list_documents_in_area(
             worker,
             {"book": str(book["id"]), "limit": 500},
+            public_area,
+            [book],
         )["items"]
         folded = selector.casefold()
         exact = [

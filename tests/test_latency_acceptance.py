@@ -149,6 +149,23 @@ def test_measurement_contract_rejects_external_origins_and_records_actual_delay(
     assert distribution(list(range(1, 31))) == {"count": 30, "median": 15, "p95": 29, "max": 30, "min": 1}
 
 
+@pytest.mark.parametrize("scale", [0, 1])
+def test_fixed_wait_measurement_separates_legacy_settle_from_new_readiness_window(scale):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from agentbridge.browser.central import OA_DETAIL_STABILITY_MS
+    from tests.support.latency_acceptance import TimedWorker, FullOaWorker
+    worker = object.__new__(TimedWorker)
+    latency = LatencyContract(io_delay_seconds=0, worker_start_seconds=0, fixed_wait_scale=scale)
+    worker.transport = SimpleNamespace(latency=latency)
+    with (patch.object(FullOaWorker, "rendered_snapshot", return_value={}),
+          patch.object(latency, "pause") as pause):
+        worker.rendered_snapshot("detail", settle_ms=1800)
+        worker.rendered_snapshot("detail", settle_ms=0, readiness={"kind": "oa_workflow_detail"})
+    assert pause.call_args_list[1].args == ("snapshotSettleWait", 1.8 * scale)
+    assert pause.call_args_list[3].args == ("snapshotReadinessWait", OA_DETAIL_STABILITY_MS / 1000 * scale)
+
+
 def test_comparison_rejects_incompatible_delay_and_failed_samples():
     report = {"metadata": {"benchmarkContract": "v1", "latencyContract": {"io": 1},
                            "measurementKind": "automated-loopback-http"},

@@ -494,9 +494,20 @@ function createProxyTool({
           )
         : nativeResult;
       };
-      return performanceRecorder
-        ? performanceRecorder.run({ ...context, toolCallId, toolName: descriptor.name }, execute, "host.tool_call")
-        : execute();
+      if (!performanceRecorder) return execute();
+      // Lazy OpenClaw factories may omit runId. Use the exact observed call
+      // binding for telemetry as well as execution; a rejected binding must
+      // never inherit the factory's possibly conflicting run.
+      let timingRunId;
+      try {
+        const exact = taskRunContextResolver?.(toolCallId, context.sessionKey, context.runId);
+        timingRunId = exact?.status === "bound" ? exact.runId
+          : exact?.status === "rejected" || (descriptor.name === "agentbridge_skill_get" && taskRunRefResolver)
+            ? undefined : context.runId;
+      } catch { /* A telemetry lookup cannot replace the original business result or error. */ }
+      return performanceRecorder.run(
+        { ...context, runId: timingRunId, toolCallId, toolName: descriptor.name }, execute, "host.tool_call",
+      );
     },
   };
 }
