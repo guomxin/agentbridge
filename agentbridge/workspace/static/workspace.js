@@ -9,7 +9,7 @@ import { createSkillForms } from "./workspace_skills.mjs";
 import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
-import { createProjectionQueue, applyCurrentSnapshot } from "./workspace_projection.mjs";
+import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot } from "./workspace_projection.mjs";
 
 const state = {
   account: null,
@@ -97,8 +97,14 @@ const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
 const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor } = createSkillForms({
   document, state, $, api, switchView, startTrial, clearTrial: clearComposerTrial, getScope: () => viewScope,
 });
+const projectionOrder = createProjectionOrder({ onOverflow: () => scheduleChatRefresh(100, 1) });
 const projectionQueue = createProjectionQueue({
-  fetchBatch: ids => scopedApi(sessionScope)(`/api/tasks/projections?ids=${encodeURIComponent(ids.join(","))}`),
+  fetchBatch: async ids => {
+    const ticket = projectionOrder.begin();
+    const result = await scopedApi(sessionScope)(`/api/tasks/projections?ids=${encodeURIComponent(ids.join(","))}`);
+    return { items: (result.items || []).filter(item => projectionOrder.accept(item.taskId, ticket)),
+      unavailableTaskIds: (result.unavailableTaskIds || []).filter(id => projectionOrder.accept(id, ticket)) };
+  },
   apply: detail => {
     upsertTaskCard(detail, { render: false });
     if (state.activeView === "tasks" && state.selectedTaskId === detail.task.task_id) loadTaskDetail(detail.task.task_id);
@@ -131,6 +137,7 @@ function scopedApi(scope) {
 
 function resetWorkspaceState() {
   projectionQueue.reset();
+  projectionOrder.reset();
   historyControls = null;
   clearWorkspaceTimings();
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
@@ -505,10 +512,13 @@ async function loadChat() {
   const api = scopedApi(scope);
   const container = $("#chat-messages");
   try {
+    const ticket = projectionOrder.begin();
     const snapshot = await api("/api/current?active_limit=20&recent_limit=8&message_limit=80");
     scope.assertCurrent();
     const initial = applyCurrentSnapshot(state, snapshot, {
-      ingest: ingestTimelineEntry, upsert: upsertTaskCard, retire: retireTaskCard,
+      ingest: ingestTimelineEntry,
+      upsert: (detail, options) => { if (projectionOrder.accept(detail?.task?.task_id, ticket)) upsertTaskCard(detail, options); },
+      retire: id => { if (projectionOrder.accept(id, ticket)) retireTaskCard(id); },
     });
     dismissTerminalLiveMessages();
     restoreActiveDispatches(snapshot.dispatches?.items || []);
@@ -759,10 +769,13 @@ async function loadTaskHistory() {
     scope.assertCurrent();
     const ids = (page.items || []).map(task => task.task_id);
     if (ids.length) {
+      const ticket = projectionOrder.begin();
       const projections = await request(`/api/tasks/projections?ids=${encodeURIComponent(ids.join(","))}`);
       scope.assertCurrent();
-      for (const item of projections.items || []) if (item.detail) upsertTaskCard(item.detail, { render: false });
-      for (const id of projections.unavailableTaskIds || []) retireTaskCard(id);
+      for (const item of projections.items || []) {
+        if (item.detail && projectionOrder.accept(item.taskId, ticket)) upsertTaskCard(item.detail, { render: false });
+      }
+      for (const id of projections.unavailableTaskIds || []) if (projectionOrder.accept(id, ticket)) retireTaskCard(id);
     }
     state.taskHistoryCursor = page.nextCursor || null;
     state.taskHistoryHasMore = Boolean(page.hasMore);
@@ -1149,6 +1162,7 @@ function retireTaskCard(taskId) {
 
 function scheduleTaskSync(taskId, eventType) {
   if (!taskId) return;
+  projectionOrder.invalidate(taskId);
   projectionQueue.enqueue(taskId);
   lifecycle.clearTimer(state.taskListTimer);
   state.taskListTimer = sessionScope.timeout(loadTasks, 260);
@@ -1190,9 +1204,17 @@ async function loadTaskDetail(taskId) {
   const preserveDetail = detail.dataset.taskId === taskId && detail.querySelector(".detail-heading");
   if (!preserveDetail) detail.replaceChildren(emptyState("正在读取任务"));
   try {
+    const ticket = projectionOrder.begin();
     const result = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
     scope.assertCurrent();
-    if (state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) renderTaskDetail(result);
+    if (state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) {
+      if (projectionOrder.accept(taskId, ticket)) {
+        upsertTaskCard(result, { render: false });
+        renderChatTimeline();
+        renderTaskDetail(result);
+      }
+      else scope.timeout(() => loadTaskDetail(taskId), 80);
+    }
   } catch (error) {
     if (isCancellation(error)) return;
     if (detailRequest === state.taskDetailRequest) {
@@ -1215,12 +1237,15 @@ async function submitTaskFeedback(taskId, payload) {
 
 async function prepareTargets(sourceTaskId, payload) {
   const scope = sessionScope;
+  const ticket = projectionOrder.begin();
   markWorkspaceTiming("selection_sent", {requestId: payload.requestKey});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(sourceTaskId)}/prepare-selection`,
     { method: "POST", body: payload, csrf: true });
   scope.assertCurrent();
   markWorkspaceTiming("selection_queued", {requestId: payload.requestKey, runId: result.commandKey, taskId: result.taskId});
-  if (result.detail) upsertTaskCard(result.detail);
+  if (result.detail) {
+    if (projectionOrder.accept(result.detail.task?.task_id, ticket)) upsertTaskCard(result.detail);
+  }
   if (result.taskId) scheduleTaskSync(result.taskId, "task.prepare.requested");
   return result;
 }
@@ -1510,15 +1535,18 @@ async function reissueArtifact(taskId, artifactId, button) {
   button.disabled = true;
   button.textContent = "正在重新获取";
   try {
+    const ticket = projectionOrder.begin();
     const result = await api(
       `/api/tasks/${encodeURIComponent(taskId)}/artifacts/` +
         `${encodeURIComponent(artifactId)}/reissue`,
       { method: "POST", body: {}, csrf: true },
     );
     scope.assertCurrent();
-    upsertTaskCard(result);
+    const fresh = projectionOrder.accept(taskId, ticket);
+    if (fresh) upsertTaskCard(result);
     scope.assertCurrent();
-    if (state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) renderTaskDetail(result);
+    if (fresh && state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) renderTaskDetail(result);
+    if (!fresh) scheduleTaskSync(taskId, "task.artifact.refreshed");
     toast(
       "新的下载链接已生成，30 分钟内有效。",
       false,

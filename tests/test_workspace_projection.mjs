@@ -75,3 +75,41 @@ test('refresh preserves replay position, older loaded messages, and unsent local
   assert.equal(state.chatTimelineHasOlder,false);assert.equal(state.localMessages.get('pending'),'draft');
   assert.deepEqual(retired,['revoked']);
 });
+
+test('current, history and event reads share retirement tombstones even at the same task version', async () => {
+  const { createProjectionOrder } = await import('../agentbridge/workspace/static/workspace_projection.mjs');
+  const order=createProjectionOrder(), cards=new Map();
+  const callbacks=ticket=>({ingest(){},upsert(detail){if(order.accept(detail.task.task_id,ticket))cards.set(detail.task.task_id,detail);},
+    retire(id){if(order.accept(id,ticket))cards.delete(id);}});
+  const initial={schemaVersion:'agentbridge.workspace-current.v1',cards:[{task:{task_id:'a',version:7}}]};
+  const state={}, oldSnapshot=order.begin();
+  order.invalidate('a');const eventRead=order.begin();
+  assert.equal(order.accept('a',eventRead),true);cards.delete('a');
+  applyCurrentSnapshot(state,initial,callbacks(oldSnapshot));
+  assert.equal(cards.has('a'),false,'an older snapshot cannot resurrect revoked controls');
+  const oldHistory=order.begin(),newCurrent=order.begin();
+  applyCurrentSnapshot(state,initial,callbacks(newCurrent));
+  assert.equal(cards.has('a'),true);
+  if(order.accept('a',oldHistory))cards.delete('a');
+  assert.equal(cards.has('a'),true,'old unavailable must not retire a newer permitted result');
+});
+
+test('an incoming event invalidates every older source while independent task rows remain usable', async () => {
+  const { createProjectionOrder } = await import('../agentbridge/workspace/static/workspace_projection.mjs');
+  const order=createProjectionOrder(),read=order.begin();order.invalidate('a');
+  assert.equal(order.accept('a',read),false);assert.equal(order.accept('b',read),true);
+  const followup=order.begin();assert.equal(order.accept('a',followup),true);
+  assert.equal(order.accept('a',read),false);
+});
+
+test('account epochs and bounded tombstone rollover never re-enable an ancient response', async () => {
+  const { createProjectionOrder } = await import('../agentbridge/workspace/static/workspace_projection.mjs');
+  let overflow=0;const order=createProjectionOrder({capacity:2,onOverflow:()=>overflow++});
+  const first=order.begin();assert.equal(order.accept('a',first),true);
+  const second=order.begin();assert.equal(order.accept('b',second),true);
+  assert.equal(order.accept('c',order.begin()),false);assert.equal(overflow,1);
+  assert.equal(order.accept('a',first),false);assert.equal(order.accept('b',second),false);
+  assert.equal(order.accept('c',order.begin()),true);
+  const old=order.begin();order.reset();const next=order.begin();
+  assert.equal(order.accept('c',old),false);assert.equal(order.accept('c',next),true);
+});

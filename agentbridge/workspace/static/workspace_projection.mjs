@@ -1,3 +1,27 @@
+// Share ordering across current snapshots, history pages and event batches.
+// Keep retirement tombstones until every older read is ineligible, including
+// same-version changes to access, query TTL or signed presentation URLs.
+export function createProjectionOrder({ capacity = 4096, onOverflow = () => {} } = {}) {
+  let epoch = 0, serial = 0, floor = 0;
+  const latest = new Map();
+  function room(id) {
+    if (!latest.has(id) && latest.size >= capacity) {
+      floor = ++serial; latest.clear(); onOverflow();
+    }
+  }
+  return {
+    begin: () => ({ epoch, sequence: ++serial }),
+    invalidate(id) { room(id); latest.set(id, ++serial); },
+    accept(id, ticket) {
+      if (!id || ticket?.epoch !== epoch || ticket.sequence < floor || ticket.sequence < (latest.get(id) || 0)) return false;
+      room(id);
+      if (ticket.sequence < floor) return false;
+      latest.set(id, ticket.sequence); return true;
+    },
+    reset() { epoch++; serial = 0; floor = 0; latest.clear(); },
+  };
+}
+
 // Snapshot rows are independent of event replay: a later projection cannot
 // advance the durable cursor past events that the browser has never received.
 export function applyCurrentSnapshot(state, snapshot, { ingest, upsert, retire }) {
