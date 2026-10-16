@@ -212,8 +212,8 @@
         "description": "Use bounded catalog singleflight/cache keyed by authenticated identity and catalog/permission versions. Execution authorization remains live."
       },
       "boundSkillToolGuard": {
-        "type": "boolean", "default": true,
-        "description": "Keep a loaded supported Skill inside its closed execution tool scope; Central remains authoritative."
+        "type": "boolean", "default": false,
+        "description": "Opt in for dedicated OA agents only: constrain a supported Skill's run to its execution tools. Keep false for the general-purpose agent so independent tasks and plan recovery remain available; Central remains authoritative."
       },
       "toolScope": {
         "type": "string", "enum": ["all", "oa_pending"], "default": "all",

@@ -253,15 +253,22 @@ def test_runtime_uses_normalized_observation_without_second_ps(host, tmp_path):
     from datetime import datetime, timezone
     start = datetime(2026, 9, 30, 1, 23, 25).astimezone(timezone.utc).isoformat()
     version = common.read(common.ROOT / 'integrations/openclaw-agentbridge/package.json')['version']
+    common.save(Path(host['configPath']), {'plugins': {'entries': {
+        'agentbridge-interactions': {'hooks': {'allowConversationAccess': True}}}}})
+    Path(host['runtimeDir']).mkdir()
+    Path(host['runtimeDir'], 'gateway.out.log').write_text(start + ' [gateway] ready\n')
     (tmp_path / 'openclaw-test.log').write_text(json.dumps({'time': start,
         'message': f'AgentBridge interaction plugin registered (version={version}, state=test)'}) + '\n')
     responses = [{'rpc': {'ok': True}, 'cli': {'version': '2026.7.1'},
                   'gateway': {'version': '2026.7.1'}, 'pluginVersionDrift': {'drifts': []}},
-                 {'plugin': {'status': 'loaded', 'version': version}}]
+                 {'plugin': {'status': 'loaded', 'version': version},
+                  'policy': {'allowConversationAccess': True},
+                  'typedHooks': [{'name': name} for name in acceptance.REQUIRED_AGENTBRIDGE_HOOKS]}]
     with mock.patch.object(lifecycle, 'observe', return_value=observed), \
-         mock.patch.object(acceptance, 'host_run', side_effect=responses), \
+         mock.patch.object(acceptance, 'host_run', side_effect=responses) as inspected, \
          mock.patch.object(acceptance, 'run', side_effect=AssertionError('Unexpected second ps')):
         assert acceptance.runtime(host)['rpc'] == 'ok'
+    assert '--runtime' in inspected.call_args_list[1].args[1]
 
 
 def registered_host(host, private):

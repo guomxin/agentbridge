@@ -10,6 +10,7 @@ const OA_PENDING_PREPARES = [
 const OA_PENDING_READS = ["oa_workflow_pending_list", "oa_workflow_detail_get", "oa_workflow_opinions_list",
   "oa_session_status", "oa_session_login", "agentbridge_interaction_get", "agentbridge_task_get", "agentbridge_task_cancel",
   "agentbridge_operation_get", "agentbridge_skill_catalog", "agentbridge_skill_get", "agentbridge_skill_authoring",
+  "agentbridge_task_plan_catalog",
   "agentbridge_identity_status", "agentbridge_server_profile"];
 const OA_PENDING_BATCHES = ["oa_workflow_pending_batch_prepare", "oa_missed_punch_approval_batch_prepare"];
 

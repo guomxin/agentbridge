@@ -275,11 +275,12 @@ task/command/session/endpoint 标识，不接 capability 或业务参数；任�
 时省一次 observe。缺失、短租约或不完整回执均保留原调用。
 
 `toolScope=all` 保持生产通用 agent 的全部业务工具；独立 OA agent 或隔离同题测试可显式选择
-`oa_pending` 静态目录。已成功加载 OA 待办助手后，原 run 的执行 guard 将其限制在对应 single/
-batch 工具及固定资料/反馈入口，包含宿主 builtin 工具检查。OpenClaw 2026.7.1 的已核对 hooks
-不能动态删改同 run 后续模型工具 schema；本实现不声称做到动态 schema 裁剪。目录缓存与
-该附加 guard 可分别用 `skillCatalogCache=false`、`boundSkillToolGuard=false` 回退，中央授权
-规则始终保留。生产主 agent 不因隔离模型对照切换 scope 或模型。
+`oa_pending` 静态目录。专用 OA agent 可显式开启 `boundSkillToolGuard=true`：加载 OA 待办助手后，
+将原 run 限制在对应 single/batch、固定资料/反馈及只读发现/组合预检入口，包含宿主 builtin
+工具检查。通用 agent 默认关闭此附加 guard，以保留同一轮的独立任务与原 PLAN_REQUIRED
+计划恢复；中央原任务绑定、权限、材料和授权校验不受影响。OpenClaw 2026.7.1 的已核对 hooks
+不能动态删改同 run 后续模型工具 schema；本实现不声称做到动态 schema 裁剪。目录缓存可用
+`skillCatalogCache=false` 独立回退。生产主 agent 不因隔离模型对照切换 scope 或模型。
 
 ## 十一、测试与打包
 

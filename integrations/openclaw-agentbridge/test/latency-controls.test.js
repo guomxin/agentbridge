@@ -69,16 +69,32 @@ test("general-purpose tool presentation remains complete; a separate static scop
   assert.equal(narrow.length < all.length, true);
 });
 
-test("loaded OA scopes reject unrelated tools, batch under single and another Skill; server binding remains attached", () => {
-  const router = { config: {} }, identity = { binding };
+test("opt-in loaded OA scopes reject unrelated tools, batch under single and another Skill; server binding remains attached", () => {
+  const router = { config: { boundSkillToolGuard: true } }, identity = { binding };
   rememberSkillBinding(router, context, identity, { status: "succeeded", binding_id: "fixed-binding", skill_id: "oa-pending", profile: "single" });
   for (const name of ["exec", "taihua_work_log_create_prepare", "oa_workflow_pending_batch_prepare", "agentbridge_task_plan_prepare"]) {
     assert.equal(boundSkillToolGuard(router, context, identity, name, {}).error.code, "SKILL_TOOL_SCOPE_REQUIRED");
   }
   assert.equal(boundSkillToolGuard(router, context, identity, "oa_missed_punch_approval_prepare", {}), null);
   assert.equal(boundSkillToolGuard(router, context, identity, "agentbridge_skill_authoring", { action: "resource", data: { binding_id: "fixed-binding" } }), null);
+  for (const action of ["discover", "composition"]) {
+    assert.equal(boundSkillToolGuard(router, context, identity, "agentbridge_skill_authoring", { action, data: {} }), null);
+  }
+  assert.equal(boundSkillToolGuard(router, context, identity, "agentbridge_task_plan_catalog", {}), null);
+  for (const action of ["save", "submit", "test"]) {
+    assert.equal(boundSkillToolGuard(router, context, identity, "agentbridge_skill_authoring", { action, data: {} }).error.code, "SKILL_TOOL_SCOPE_REQUIRED");
+  }
   assert.ok(boundSkillToolGuard(router, context, identity, "agentbridge_skill_get", { skill_id: "log-review", profile: "review" }));
   assert.equal(boundSkillToolGuard(router, { ...context, runId: "other-run" }, identity, "exec", {}), null);
+});
+
+test("the general-purpose agent retains independent tasks and plan recovery after loading an OA Skill", () => {
+  const router = { config: resolvePluginConfig({}) }, identity = { binding };
+  rememberSkillBinding(router, context, identity, { status: "succeeded", binding_id: "fixed-binding", skill_id: "oa-pending", profile: "single" });
+  assert.equal(router.config.boundSkillToolGuard, false);
+  for (const name of ["agentbridge_task_plan_prepare", "taihua_work_log_create_prepare", "agentbridge_skill_get"]) {
+    assert.equal(boundSkillToolGuard(router, context, identity, name, { skill_id: "log-review", profile: "review" }), null);
+  }
 });
 
 function catalogRouter({ token = "first-test-token", cache = new Map(), versions = new Map() } = {}) {

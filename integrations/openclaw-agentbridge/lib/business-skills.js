@@ -44,7 +44,7 @@ export function rememberSkillBinding(router, context, identity, payload) {
 }
 
 export function boundSkillToolGuard(router, context, identity, toolName, params) {
-  if (router.config?.boundSkillToolGuard === false) return null;
+  if (router.config?.boundSkillToolGuard !== true) return null;
   const binding = bindings.get(router)?.get(skillRunKey(context, identity));
   const scope = boundToolScope(binding);
   if (!scope) return null;
@@ -52,8 +52,13 @@ export function boundSkillToolGuard(router, context, identity, toolName, params)
     message: "当前任务已绑定 OA 待办办理，仅能调用该助手的查询、准备和原任务控制工具。其他业务请在独立任务中执行。" } });
   if (!scope.has(toolName)) return reject();
   if (toolName === "agentbridge_skill_get" && (params?.skill_id !== binding.skillId || params?.profile !== binding.profile)) return reject();
-  if (toolName === "agentbridge_skill_authoring" && (!["resource", "feedback"].includes(params?.action)
-      || params?.data?.binding_id !== binding.bindingId)) return reject();
+  if (toolName === "agentbridge_skill_authoring") {
+    // Read-only discovery and composition preflight do not replace this run's
+    // binding or execute another business step. Keep recovery planning usable.
+    if (["discover", "composition"].includes(params?.action)) return null;
+    if (!["resource", "feedback"].includes(params?.action)
+        || params?.data?.binding_id !== binding.bindingId) return reject();
+  }
   return null;
 }
 

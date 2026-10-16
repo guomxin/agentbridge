@@ -7670,12 +7670,12 @@ test("prepared-task wake redeems a one-use binding and returns before exact priv
   assert.equal(calls.length, before + 1);
 });
 
-test("a loaded OA Skill blocks builtin execution in the real host hook and releases at a new run", async () => {
+test("an opt-in OA Skill guard blocks builtin execution in the real host hook and releases at a new run", async () => {
   const sessionKey = "agent:main:telegram:direct:1001";
   const client = { async callToolResult() { return { structuredContent: { status: "succeeded",
     binding_id: "fixed-oa-binding", skill_id: "oa-pending", profile: "single" } }; } };
-  const identityRouter = { enabled: true, resolveToolContext: () => ({ bound: true, binding: { key: "owner" }, client }) };
-  const harness = fakeApi({ autoPoll: false });
+  const identityRouter = { enabled: true, config: { boundSkillToolGuard: true }, resolveToolContext: () => ({ bound: true, binding: { key: "owner" }, client }) };
+  const harness = fakeApi({ autoPoll: false, boundSkillToolGuard: true });
   registerAgentBridgeInteractions(harness.api, { identityRouter });
   harness.hooks.before_tool_call({ toolCallId: "load-scope", toolName: "agentbridge_skill_get", runId: "scope-run", params: {} }, { sessionKey, runId: "scope-run" });
   const tools = harness.toolFactory({ sessionKey, runId: "scope-run" });

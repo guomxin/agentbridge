@@ -16,6 +16,12 @@ from common import ROOT, environment_file, external, private_file, read, run, sa
 LABELS = {'gateway': 'ai.agentbridge.gateway', 'tunnel': 'ai.agentbridge.workspace-tunnel'}
 
 
+def require_agentbridge_conversation_hooks(host_config):
+    entry = host_config.get('plugins', {}).get('entries', {}).get('agentbridge-interactions', {})
+    if entry.get('hooks', {}).get('allowConversationAccess') is not True:
+        raise ValueError('Reviewed AgentBridge host config requires hooks.allowConversationAccess=true')
+
+
 def settings(path):
     value = read(private_file(path))
     value['profileSha256'] = sha(private_file(path).read_bytes())
@@ -31,6 +37,7 @@ def settings(path):
     for name in ('configPath', 'envFile'):
         private_file(value[name])
     host_config = read(value['configPath'])
+    require_agentbridge_conversation_hooks(host_config)
     diagnostics = host_config.get('diagnostics', {})
     if (diagnostics.get('stuckSessionWarnMs') != 30000
             or diagnostics.get('stuckSessionAbortMs') != 120000):

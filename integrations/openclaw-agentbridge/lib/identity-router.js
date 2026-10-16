@@ -30,6 +30,7 @@ export class AgentBridgeIdentityRouter {
     this.clients = new Map();
     this.clientCatalogKeys = new Map();
     this.identityProfiles = new Map();
+    this.identityProfileRefreshes = new Map();
     this.planningPolicies = planningPolicies;
     this.catalogVersions = catalogVersions;
     this.catalogCache = catalogCache;
@@ -158,76 +159,99 @@ export class AgentBridgeIdentityRouter {
       .filter((item) => item.client);
   }
 
-  async refreshIdentityProfiles({ logger = null, signal } = {}) {
+  async refreshIdentityProfiles({ logger = null, signal, bindingKey = null } = {}) {
     const profiles = [];
     for (const { binding, client } of this.configuredIdentities()) {
+      if (bindingKey !== null && binding.key !== bindingKey) continue;
+      let refresh = this.identityProfileRefreshes.get(binding.key);
+      if (!refresh) {
+        refresh = this._refreshIdentityProfile({ binding, client }, { logger, signal });
+        this.identityProfileRefreshes.set(binding.key, refresh);
+      }
       try {
-        const serverProfile = await client.callTool(
-          "agentbridge_server_profile",
-          {},
-          { signal, meta: hostRegistrationMeta() },
-        );
-        const acceptedHostLevel = assertAcceptedHostNegotiation(
-          serverProfile?.negotiation,
-          "L3",
-        );
-        const result = await client.callTool(
-          "agentbridge_host_identity_profile",
-          { agent_host: "openclaw" },
-          {
-            signal,
-            meta: hostContextMeta(),
-          },
-        );
-        const allowedToolNames = Array.isArray(
-          result?.agentToolAccess?.allowedToolNames,
-        )
-          ? result.agentToolAccess.allowedToolNames.filter(
-              (name) => typeof name === "string" && name.trim(),
-            )
-          : null;
-        if (!allowedToolNames) {
-          throw new Error("AgentBridge identity profile omitted tool access");
+        const profile = await refresh;
+        if (profile) profiles.push(profile);
+      } finally {
+        if (this.identityProfileRefreshes.get(binding.key) === refresh) {
+          this.identityProfileRefreshes.delete(binding.key);
         }
-        const profile = Object.freeze({
-          userSubject: identityPart(result?.identity?.userSubject, false),
-          scopes: Object.freeze(
-            Array.isArray(result?.identity?.scopes)
-              ? result.identity.scopes.filter(
-                  (scope) => typeof scope === "string" && scope.trim(),
-                )
-              : [],
-          ),
-          allowedToolNames: new Set(allowedToolNames),
-          expiresAt: identityPart(result?.identity?.expiresAt, false),
-          acceptedHostLevel,
-          planningPolicy: normalizePlanningPolicy(serverProfile?.planning),
-        });
-        this.identityProfiles.set(binding.key, profile);
-        this.rememberCatalogVersions(binding, result);
-        const policyKey = JSON.stringify([this.endpoint?.url, binding.key]);
-        if (profile.planningPolicy) {
-          this.planningPolicies.set(policyKey, profile.planningPolicy);
-        } else {
-          this.planningPolicies.delete(policyKey);
-        }
-        profiles.push({
-          bindingKey: binding.key,
-          userSubject: profile.userSubject,
-          allowedToolCount: profile.allowedToolNames.size,
-          acceptedHostLevel,
-        });
-      } catch (error) {
-        logger?.warn?.(
-          `AgentBridge identity tool profile unavailable for ${binding.label || binding.key}; existing fail-open catalog is retained (${safeErrorCode(error)})`,
-        );
       }
     }
     return profiles;
   }
 
+  async _refreshIdentityProfile({ binding, client }, { logger, signal }) {
+    try {
+      const serverProfile = await client.callTool(
+        "agentbridge_server_profile",
+        {},
+        { signal, meta: hostRegistrationMeta() },
+      );
+      const acceptedHostLevel = assertAcceptedHostNegotiation(
+        serverProfile?.negotiation,
+        "L3",
+      );
+      const result = await client.callTool(
+        "agentbridge_host_identity_profile",
+        { agent_host: "openclaw" },
+        {
+          signal,
+          meta: hostContextMeta(),
+        },
+      );
+      const allowedToolNames = Array.isArray(
+        result?.agentToolAccess?.allowedToolNames,
+      )
+        ? result.agentToolAccess.allowedToolNames.filter(
+            (name) => typeof name === "string" && name.trim(),
+          )
+        : null;
+      if (!allowedToolNames) {
+        throw new Error("AgentBridge identity profile omitted tool access");
+      }
+      const profile = Object.freeze({
+        userSubject: identityPart(result?.identity?.userSubject, false),
+        scopes: Object.freeze(
+          Array.isArray(result?.identity?.scopes)
+            ? result.identity.scopes.filter(
+                (scope) => typeof scope === "string" && scope.trim(),
+              )
+            : [],
+        ),
+        allowedToolNames: new Set(allowedToolNames),
+        expiresAt: identityPart(result?.identity?.expiresAt, false),
+        acceptedHostLevel,
+        planningPolicy: normalizePlanningPolicy(serverProfile?.planning),
+        permissionVersion: validCatalogVersion(result?.permissionVersion),
+      });
+      this.identityProfiles.set(binding.key, profile);
+      this.rememberCatalogVersions(binding, result);
+      const policyKey = JSON.stringify([this.endpoint?.url, binding.key]);
+      if (profile.planningPolicy) {
+        this.planningPolicies.set(policyKey, profile.planningPolicy);
+      } else {
+        this.planningPolicies.delete(policyKey);
+      }
+      return {
+        bindingKey: binding.key,
+        userSubject: profile.userSubject,
+        allowedToolCount: profile.allowedToolNames.size,
+        acceptedHostLevel,
+      };
+    } catch (error) {
+      logger?.warn?.(
+        `AgentBridge identity tool profile unavailable for ${binding.label || binding.key}; existing fail-open catalog is retained (${safeErrorCode(error)})`,
+      );
+      return null;
+    }
+  }
+
   allowedToolNamesForBinding(binding) {
     return binding ? this.identityProfiles.get(binding.key)?.allowedToolNames || null : null;
+  }
+
+  permissionVersionForBinding(binding) {
+    return binding ? this.identityProfiles.get(binding.key)?.permissionVersion || null : null;
   }
 
   catalogCacheKeyForBinding(binding) {
@@ -532,6 +556,11 @@ function identityPart(value, lowercase) {
   }
   const normalized = String(value).trim().slice(0, 512);
   return normalized ? (lowercase ? normalized.toLowerCase() : normalized) : null;
+}
+
+function validCatalogVersion(value) {
+  return typeof value === "string" && /^(?:sha256:)?[a-f0-9]{64}$/u.test(value)
+    ? value : null;
 }
 
 function safeErrorCode(error) {

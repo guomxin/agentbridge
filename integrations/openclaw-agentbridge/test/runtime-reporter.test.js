@@ -109,3 +109,55 @@ test("a structured runtime rejection is counted as a failed signal", async () =>
   assert.equal(result[0].errorCode, "HOST_REGISTRATION_REQUIRED");
   assert.equal(reporter.status().transportErrorCount, 1);
 });
+
+test("only a changed valid permission stamp refreshes the corresponding identity profile", async () => {
+  const oldVersion = "1".repeat(64);
+  const newVersion = "2".repeat(64);
+  const stamps = new Map([["a", oldVersion], ["b", oldVersion]]);
+  const responses = new Map([["a", oldVersion], ["b", newVersion]]);
+  const refreshes = [];
+  const reporter = createHostRuntimeReporter({
+    identityRouter: {
+      configuredIdentities: () => ["a", "b"].map(key => ({ binding: { key },
+        client: { callTool: async () => ({ status: "succeeded", permissionVersion: responses.get(key) }) } })),
+      permissionVersionForBinding: binding => stamps.get(binding.key),
+      async refreshIdentityProfiles({ bindingKey }) {
+        refreshes.push(bindingKey);
+        stamps.set(bindingKey, responses.get(bindingKey));
+      },
+    },
+  });
+  await reporter.collectOnce();
+  await reporter.collectOnce();
+  assert.deepEqual(refreshes, ["b"]);
+  responses.set("a", "untrusted freeform field");
+  await reporter.collectOnce();
+  assert.deepEqual(refreshes, ["b"]);
+});
+
+test("a failed identity profile refresh is retried on the next snapshot without altering signal success", async () => {
+  const oldVersion = "1".repeat(64);
+  const newVersion = "2".repeat(64);
+  let current = oldVersion;
+  let attempts = 0;
+  const reporter = createHostRuntimeReporter({
+    identityRouter: {
+      configuredIdentities: () => [{ binding: { key: "a" }, client: {
+        callTool: async () => ({ status: "succeeded", permissionVersion: newVersion }),
+      } }],
+      permissionVersionForBinding: () => current,
+      async refreshIdentityProfiles() {
+        attempts += 1;
+        if (attempts > 1) current = newVersion;
+        return [];
+      },
+    },
+  });
+  assert.equal((await reporter.collectOnce())[0].response.status, "succeeded");
+  assert.equal(current, oldVersion);
+  await reporter.collectOnce();
+  await reporter.collectOnce();
+  assert.equal(attempts, 2);
+  assert.equal(current, newVersion);
+  assert.equal(reporter.status().transportErrorCount, 0);
+});

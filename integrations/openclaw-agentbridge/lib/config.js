@@ -10,7 +10,7 @@ const DEFAULTS = Object.freeze({
   notificationLongPoll: true,
   notificationConcurrency: 4,
   skillCatalogCache: true,
-  boundSkillToolGuard: true,
+  boundSkillToolGuard: false,
   toolScope: "all",
 });
 

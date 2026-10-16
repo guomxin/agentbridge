@@ -60,6 +60,12 @@ export function createHostRuntimeReporter({
         results.push({ bindingKey: binding.key, response });
         identityRouter.rememberCatalogVersions?.(binding, response);
         taskCommandRunner?.recover(response.pendingCommands, { binding, client });
+        if (/^(?:sha256:)?[a-f0-9]{64}$/u.test(response.permissionVersion || "")
+            && identityRouter.permissionVersionForBinding?.(binding) !== response.permissionVersion) {
+          await identityRouter.refreshIdentityProfiles?.({
+            bindingKey: binding.key, logger, signal,
+          });
+        }
       } catch (error) {
         transportErrorCount += 1;
         lastErrorCode = safeErrorCode(error);
