@@ -87,3 +87,61 @@ def test_historical_or_other_plugin_warning_does_not_reject_current_gateway(tmp_
 def test_current_gateway_streams_required_for_hook_acceptance(tmp_path):
     with pytest.raises(ValueError, match='logs unavailable'):
         acceptance.require_gateway_hooks_unblocked({'runtimeDir': str(tmp_path)}, 0)
+
+
+@pytest.mark.parametrize('structured', [True, False])
+def test_current_gateway_registration_accepts_actual_stream_formats(tmp_path, structured):
+    from datetime import datetime
+    message = 'AgentBridge interaction plugin registered (version=0.4.test, state=test, agentTools=107)'
+    timestamp = '2026-10-16T12:00:01.226+08:00'
+    line = json.dumps({'time': timestamp, 'message': message}) if structured else f'{timestamp} [plugins] {message}'
+    (tmp_path / 'gateway.out.log').write_text(line + '\n')
+    acceptance.require_gateway_hooks_unblocked({'runtimeDir': str(tmp_path)},
+        datetime.fromisoformat('2026-10-16T12:00:00+08:00').timestamp(),
+        expected_version='0.4.test')
+
+
+@pytest.mark.parametrize(('timestamp', 'version'), [
+    ('2026-10-16T11:59:59.999+08:00', '0.4.test'),
+    ('2026-10-16T12:00:01.226+08:00', '0.4.old'),
+])
+def test_historical_or_wrong_version_registration_cannot_prove_current_gateway(tmp_path, timestamp, version):
+    from datetime import datetime
+    (tmp_path / 'gateway.out.log').write_text(
+        f'{timestamp} [plugins] AgentBridge interaction plugin registered (version={version}, state=test)\n')
+    with pytest.raises(ValueError, match='No registration from current Gateway'):
+        acceptance.require_gateway_hooks_unblocked({'runtimeDir': str(tmp_path)},
+            datetime.fromisoformat('2026-10-16T12:00:00+08:00').timestamp(),
+            expected_version='0.4.test')
+
+
+def test_cli_runtime_registration_in_shared_log_cannot_certify_gateway(tmp_path):
+    from datetime import datetime, timezone
+    runtime_dir = tmp_path / 'runtime'
+    runtime_dir.mkdir()
+    config = tmp_path / 'openclaw.json'
+    config.write_text(json.dumps(config_with_hooks()))
+    host = {'configPath': str(config), 'runtimeDir': str(runtime_dir),
+            'openclawLogDir': str(tmp_path)}
+    observed = {'pid': 123, 'started': 'Wed Sep 30 01:23:25 2026'}
+    timestamp = datetime(2026, 9, 30, 1, 23, 26).astimezone(timezone.utc).isoformat()
+    (runtime_dir / 'gateway.out.log').write_text(timestamp + ' [gateway] ready\n')
+    version = acceptance.read(acceptance.ROOT / 'integrations/openclaw-agentbridge/package.json')['version']
+
+    def inspected(_host, args):
+        if args[0] == 'gateway':
+            return {'rpc': {'ok': True}, 'cli': {'version': '2026.7.1'},
+                    'gateway': {'version': '2026.7.1'}, 'pluginVersionDrift': {'drifts': []}}
+        # The official isolated CLI inspection also registers the plugin. Its
+        # process shares /tmp/openclaw, but it is not the managed Gateway.
+        (tmp_path / 'openclaw-cli.log').write_text(json.dumps({'time': timestamp,
+            'message': f'AgentBridge interaction plugin registered (version={version}, state=cli)'}) + '\n')
+        return {'plugin': {'status': 'loaded', 'version': version},
+                'policy': {'allowConversationAccess': True},
+                'typedHooks': [{'name': name} for name in acceptance.REQUIRED_AGENTBRIDGE_HOOKS]}
+
+    with mock.patch.object(lifecycle, 'observe', return_value=observed), \
+         mock.patch.object(acceptance, 'host_run', side_effect=inspected) as inspect:
+        with pytest.raises(ValueError, match='No registration from current Gateway'):
+            acceptance.runtime(host)
+    assert '--runtime' in inspect.call_args_list[1].args[1]

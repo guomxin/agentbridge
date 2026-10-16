@@ -25,13 +25,14 @@ def require_runtime_hooks(plugin):
         raise ValueError('AgentBridge native runtime hooks missing or conversation access blocked')
 
 
-def require_gateway_hooks_unblocked(host, started_at):
+def require_gateway_hooks_unblocked(host, started_at, expected_version=None):
     # These are the managed launchd process's own streams, not shared logs from
     # an isolated CLI inspection or another Gateway. Native 2026.7.1 reports
     # rejected typed-hook registrations here. Successful emission remains a
     # separate per-harness measurement; a registration is not a TTFT sample.
     from datetime import datetime
     observed_log = False
+    registered = False
     for name in ('gateway.out.log', 'gateway.err.log'):
         path = Path(host['runtimeDir']) / name
         if not path.is_file():
@@ -47,7 +48,7 @@ def require_gateway_hooks_unblocked(host, started_at):
                     continue
                 timestamp, message = parts
             try:
-                if datetime.fromisoformat(timestamp.replace('Z', '+00:00')).timestamp() < started_at - 5:
+                if datetime.fromisoformat(timestamp.replace('Z', '+00:00')).timestamp() < started_at:
                     continue
             except (ValueError, TypeError):
                 continue
@@ -56,8 +57,13 @@ def require_gateway_hooks_unblocked(host, started_at):
             if ('agentbridge-interactions' in message and 'typed hook' in message
                     and 'blocked' in message):
                 raise ValueError('Current Gateway blocked AgentBridge native hook registration')
+            match = re.match(r'(?:\[plugins\]\s+)?AgentBridge interaction plugin registered \(version=([^,]+),', message)
+            if expected_version is not None and match and match[1] == expected_version:
+                registered = True
     if not observed_log:
         raise ValueError('Current Gateway hook registration logs unavailable')
+    if expected_version is not None and not registered:
+        raise ValueError('No registration from current Gateway process')
 
 
 def host_run(host, args, timeout=180):
@@ -151,20 +157,8 @@ def runtime(host):
     month_number = ('Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split().index(month) + 1)
     started_at = datetime(int(year), month_number, int(day),
                           *map(int, clock.split(':'))).timestamp()
-    require_gateway_hooks_unblocked(host, started_at)
-    log_dir = Path(host.get('openclawLogDir', '/tmp/openclaw'))
-    registered = False
-    for path in log_dir.glob('openclaw-*.log'):
-        for line in path.read_text(errors='replace').splitlines()[-4000:]:
-            try:
-                item = json.loads(line)
-                message = item.get('message', '')
-                match = re.match(r'AgentBridge interaction plugin registered \(version=([^,]+),', message)
-                if match and match[1] == expected and datetime.fromisoformat(item['time'].replace('Z', '+00:00')).timestamp() >= started_at - 5:
-                    registered = True
-            except (ValueError, KeyError, TypeError):
-                continue
-    if not registered or lifecycle.observe(host) != observed:
+    require_gateway_hooks_unblocked(host, started_at, expected_version=expected)
+    if lifecycle.observe(host) != observed:
         raise ValueError('No registration from current Gateway process')
     return {'rpc': 'ok', 'version': '2026.7.1', 'pluginVersion': expected,
             'nativeHooks': sorted(REQUIRED_AGENTBRIDGE_HOOKS),

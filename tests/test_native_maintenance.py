@@ -256,9 +256,8 @@ def test_runtime_uses_normalized_observation_without_second_ps(host, tmp_path):
     common.save(Path(host['configPath']), {'plugins': {'entries': {
         'agentbridge-interactions': {'hooks': {'allowConversationAccess': True}}}}})
     Path(host['runtimeDir']).mkdir()
-    Path(host['runtimeDir'], 'gateway.out.log').write_text(start + ' [gateway] ready\n')
-    (tmp_path / 'openclaw-test.log').write_text(json.dumps({'time': start,
-        'message': f'AgentBridge interaction plugin registered (version={version}, state=test)'}) + '\n')
+    Path(host['runtimeDir'], 'gateway.out.log').write_text(
+        start + f' [plugins] AgentBridge interaction plugin registered (version={version}, state=test)\n')
     responses = [{'rpc': {'ok': True}, 'cli': {'version': '2026.7.1'},
                   'gateway': {'version': '2026.7.1'}, 'pluginVersionDrift': {'drifts': []}},
                  {'plugin': {'status': 'loaded', 'version': version},
