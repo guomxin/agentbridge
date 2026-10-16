@@ -95,8 +95,7 @@ class ThreadedTLSHTTPServerTests(unittest.TestCase):
                     raise BrokenPipeError()
             handler = Handler()
             handler.server = server
-            with self.assertRaises(BrokenPipeError):
-                handler.stream({'user_subject': 'charlie'})
+            self.assertIsNone(handler.stream({'user_subject': 'charlie'}))
             self.assertNotIn('charlie', server._stream_counts)
             for _ in range(6):
                 server.release_stream('alice')

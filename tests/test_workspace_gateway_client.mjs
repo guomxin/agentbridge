@@ -69,6 +69,43 @@ function runScenario(scenario, overrides = {}) {
   return { events, trace };
 }
 
+test("normal final uses only same-socket persisted text and a local exact-run receipt", () => {
+  const { events, trace } = runScenario("final_authoritative");
+  const final = events.at(-1);
+  assert.equal(final.text, "persisted final");
+  assert.equal(final.agentbridgeFinalHistory.schemaVersion, "agentbridge.gateway-final.v1");
+  assert.equal(final.agentbridgeFinalHistory.sessionKey, sessionKey);
+  assert.equal(final.agentbridgeFinalHistory.runId, "initial-run");
+  assert.equal(trace.filter(item => item.method === "chat.send").length, 1);
+  assert.equal(trace.filter(item => item.method === "chat.history").length, 1);
+});
+
+test("exhausted total run budget adds no final-history delay", () => {
+  const { events, trace } = runScenario("final_authoritative", { remainingRunMs: 0 });
+  assert.equal(events.at(-1).agentbridgeFinalHistory, undefined);
+  assert.equal(trace.filter(item => item.method === "chat.history").length, 0);
+  assert.equal(trace.filter(item => item.method === "chat.send").length, 1);
+});
+
+for (const scenario of ["final_wrong_session", "final_wrong_run", "final_late_tool", "final_wrong_response_id", "final_history_error", "final_forged_remote"]) {
+  test(`missing final evidence retains independent Python reconciliation: ${scenario}`, () => {
+    const { events, trace } = runScenario(scenario);
+    const final = events.at(-1);
+    assert.equal(final.state, "final");
+    assert.equal(final.agentbridgeFinalHistory, undefined);
+    assert.equal(trace.filter(item => item.method === "chat.send").length, 1);
+    assert.equal(trace.filter(item => item.method === "chat.abort" && item.runId).length, 0);
+    assert.ok(trace.filter(item => item.method === "chat.history").length <= 6);
+  });
+}
+
+test("connection loss during final verification never replays or aborts the accepted run", () => {
+  const { events, trace } = runScenario("final_close");
+  assert.equal(events.at(-1).error.code, "GATEWAY_CONNECTION_CLOSED");
+  assert.equal(trace.filter(item => item.method === "chat.send").length, 1);
+  assert.equal(trace.filter(item => item.method === "chat.abort" && item.runId).length, 0);
+});
+
 test("waits for the previous run to become idle before sending", () => {
   const { events, trace } = runScenario("preflight_wait");
   const methods = trace.map((item) => item.method);
@@ -80,6 +117,7 @@ test("waits for the previous run to become idle before sending", () => {
       "sessions.list",
       "agentbridge.workspace.bind",
       "chat.send",
+      "chat.history",
     ],
   );
   assert.deepEqual(
@@ -164,7 +202,7 @@ test("recovers a registered current run that emitted no real progress", () => {
     1,
   );
   assert.equal(
-    trace.filter((item) => item.method === "chat.history").length,
+    trace.filter((item) => item.method === "chat.history" && !item.requestId.startsWith("final-history-")).length,
     1,
   );
   assert.equal(events.at(-1).state, "final");
@@ -201,7 +239,7 @@ test("recovers an accepted run that disappeared before startup", () => {
     0,
   );
   assert.equal(
-    trace.filter((item) => item.method === "chat.history").length,
+    trace.filter((item) => item.method === "chat.history" && !item.requestId.startsWith("final-history-")).length,
     1,
   );
   assert.equal(events.at(-1).state, "final");

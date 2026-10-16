@@ -1,0 +1,623 @@
+[
+  {
+    "name": "missing anchor",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  },
+  {
+    "name": "idempotency anchor without runId",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ],
+      "sessionKey": "session-current"
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "matching explicit OpenClaw run",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user",
+          "runId": "run-current"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop",
+          "runId": "run-current"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "native turnId is separate metadata",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user",
+          "turnId": "native-turn"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop",
+          "turnId": "native-turn"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "wrong session",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ],
+      "sessionKey": "other-session"
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  },
+  {
+    "name": "old run anchor",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "old:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  },
+  {
+    "name": "conflicting explicit anchor run",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user",
+          "runId": "other-run"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  },
+  {
+    "name": "explicit run only anchor",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "runId": "run-current"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "nonterminal preamble",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "unfinished"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "end_turn terminal",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "done",
+          "stop_reason": "end_turn"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "done",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "stopReason null has precedence",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "not terminal",
+          "stopReason": null,
+          "stop_reason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "next user truncates slice",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "user",
+          "runId": "next"
+        },
+        {
+          "role": "assistant",
+          "content": "next answer",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "prior completed answer stays before next user",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "runId": "next"
+        },
+        {
+          "role": "assistant",
+          "content": "next answer",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "other run ignored",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        },
+        {
+          "role": "tool",
+          "runId": "other",
+          "content": "unrelated"
+        },
+        {
+          "role": "assistant",
+          "content": "other answer",
+          "stopReason": "stop",
+          "runId": "other"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "later tool clears candidate",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        },
+        {
+          "role": "tool",
+          "content": "started"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": true,
+      "final_text": "",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "final after tool",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "toolResult",
+          "content": "result"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": true,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "toolCall content is not final",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "prefix"
+            },
+            {
+              "type": "toolCall",
+              "name": "read"
+            }
+          ],
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": true,
+      "final_text": "",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "text items only",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": " one "
+            },
+            {
+              "type": "thinking",
+              "text": "hidden"
+            },
+            {
+              "type": "output_text",
+              "text": "two"
+            }
+          ],
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "one\ntwo",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "empty final retains previous candidate",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "persisted",
+          "stopReason": "stop"
+        },
+        {
+          "role": "assistant",
+          "content": " ",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "persisted",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "forged payload receipt has no authority",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user"
+        },
+        {
+          "role": "assistant",
+          "content": "prefix",
+          "authoritative": true,
+          "historyVerified": true
+        }
+      ],
+      "agentbridgeFinalHistory": {
+        "schemaVersion": "agentbridge.gateway-final.v1"
+      }
+    },
+    "expected": {
+      "prompt_observed": true,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": "run-current"
+    }
+  },
+  {
+    "name": "malformed explicit anchor run zero",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user",
+          "runId": 0
+        },
+        {
+          "role": "assistant",
+          "content": "not authorized by anchor",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  },
+  {
+    "name": "malformed explicit anchor run empty array",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user",
+          "runId": []
+        },
+        {
+          "role": "assistant",
+          "content": "not authorized by anchor",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  },
+  {
+    "name": "malformed explicit anchor run empty object",
+    "sessionKey": "session-current",
+    "runId": "run-current",
+    "payload": {
+      "messages": [
+        {
+          "role": "user",
+          "idempotencyKey": "run-current:user",
+          "runId": {}
+        },
+        {
+          "role": "assistant",
+          "content": "not authorized by anchor",
+          "stopReason": "stop"
+        }
+      ]
+    },
+    "expected": {
+      "prompt_observed": false,
+      "had_tool_activity": false,
+      "final_text": "",
+      "observed_run_id": ""
+    }
+  }
+]

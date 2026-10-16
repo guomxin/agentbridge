@@ -350,6 +350,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     renderBatch(view.batch, result.batch);
     renderHistory(view.history, result, active);
     updateArtifacts(view, result, true);
+    text(view.progress, result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});

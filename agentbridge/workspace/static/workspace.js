@@ -9,6 +9,7 @@ import { createSkillForms } from "./workspace_skills.mjs";
 import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
+import { createProjectionQueue, applyCurrentSnapshot } from "./workspace_projection.mjs";
 
 const state = {
   account: null,
@@ -29,9 +30,16 @@ const state = {
   clientVersionTimer: null,
   clientVersionCheckActive: false,
   timelineCursor: 0,
+  currentLoaded: false,
+  timelineReconnectFailures: 0,
   chatTimelineOldestSequence: 0,
   chatTimelineHasOlder: false,
   chatTimelineLoadingOlder: false,
+  legacyHistoryLoaded: false,
+  legacyHistoryLoading: false,
+  taskHistoryCursor: null,
+  taskHistoryHasMore: true,
+  taskHistoryLoading: false,
   liveMessages: new Map(),
   activeStreams: new Map(),
   historyMessages: new Map(),
@@ -47,6 +55,8 @@ const state = {
   composerAttachments: [],
   composerSkillTrial: null,
 };
+
+let historyControls = null;
 
 const GATEWAY_STATUS_ONLINE_POLL_MS = 30000;
 const GATEWAY_STATUS_OFFLINE_POLL_MS = 5000;
@@ -87,6 +97,18 @@ const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
 const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor } = createSkillForms({
   document, state, $, api, switchView, startTrial, clearTrial: clearComposerTrial, getScope: () => viewScope,
 });
+const projectionQueue = createProjectionQueue({
+  fetchBatch: ids => scopedApi(sessionScope)(`/api/tasks/projections?ids=${encodeURIComponent(ids.join(","))}`),
+  apply: detail => {
+    upsertTaskCard(detail, { render: false });
+    if (state.activeView === "tasks" && state.selectedTaskId === detail.task.task_id) loadTaskDetail(detail.task.task_id);
+  },
+  retire: retireTaskCard,
+  render: renderChatTimeline,
+  onError: error => { if (!isCancellation(error)) toast(`更新任务失败：${friendlyError(error)}`, true, "task-projections"); },
+  onOverflow: () => scheduleChatRefresh(100, 1),
+  timers: { setTimeout: (fn, ms) => sessionScope.timeout(fn, ms), clearTimeout: id => lifecycle.clearTimer(id) },
+});
 
 document.addEventListener("DOMContentLoaded", bootstrap);
 window.addEventListener("pagehide", () => {
@@ -108,6 +130,8 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  projectionQueue.reset();
+  historyControls = null;
   clearWorkspaceTimings();
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
     "syncedMessages", "taskCards", "taskFeedback", "actionableGroups", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
@@ -119,9 +143,16 @@ function resetWorkspaceState() {
   state.composerAttachments = [];
   clearComposerTrial();
   state.timelineCursor = 0;
+  state.currentLoaded = false;
+  state.timelineReconnectFailures = 0;
   state.chatTimelineOldestSequence = 0;
   state.chatTimelineHasOlder = false;
   state.chatTimelineLoadingOlder = false;
+  state.legacyHistoryLoaded = false;
+  state.legacyHistoryLoading = false;
+  state.taskHistoryCursor = null;
+  state.taskHistoryHasMore = true;
+  state.taskHistoryLoading = false;
   state.gatewayStatusCheckActive = false;
   for (const selector of ["#chat-messages", "#task-list", "#task-detail", "#endpoint-list",
     "#skill-list", "#skill-authoring", "#composer-attachments", "#toast-region"]) $(selector).replaceChildren();
@@ -474,61 +505,21 @@ async function loadChat() {
   const api = scopedApi(scope);
   const container = $("#chat-messages");
   try {
-    const [history, taskTimeline, chatTimeline, dispatches] = await Promise.all([
-      api("/api/chat/history?limit=120"),
-      api("/api/timeline?entry_type=task_event&limit=240"),
-      api("/api/timeline?entry_type=chat_message&limit=500"),
-      api("/api/chat/dispatches?active_only=true&limit=20"),
-    ]);
+    const snapshot = await api("/api/current?active_limit=20&recent_limit=8&message_limit=80");
     scope.assertCurrent();
-    state.historyMessages.clear();
-    history.messages.forEach((message, index) => {
-      const key = historyMessageKey(message, index);
-      const item = messageElement(message);
-      setTimelineNode(item, {
-        key,
-        createdAt: message.timestamp,
-        order: index,
-      });
-      state.historyMessages.set(key, item);
+    const initial = applyCurrentSnapshot(state, snapshot, {
+      ingest: ingestTimelineEntry, upsert: upsertTaskCard, retire: retireTaskCard,
     });
-    state.localMessages.clear();
-    taskTimeline.items.forEach((entry) => ingestTimelineEntry(entry, false));
-    chatTimeline.items.forEach((entry) => ingestTimelineEntry(entry, false));
-    state.chatTimelineOldestSequence = Math.min(
-      ...[
-        Number(chatTimeline.oldestSequence) || 0,
-        ...[...state.syncedMessages.values()].map(
-          (item) => Number(item.dataset.timelineOrder) || 0,
-        ),
-      ].filter((sequence) => sequence > 0),
-    );
-    if (!Number.isFinite(state.chatTimelineOldestSequence)) {
-      state.chatTimelineOldestSequence = 0;
-    }
-    state.chatTimelineHasOlder = Boolean(chatTimeline.hasMore);
-    state.timelineCursor = Math.max(
-      state.timelineCursor,
-      Number(taskTimeline.cursor) || 0,
-      Number(chatTimeline.cursor) || 0,
-    );
     dismissTerminalLiveMessages();
-    restoreActiveDispatches(dispatches.items || []);
-    await hydrateTaskCards({ render: false, scope });
-    scope.assertCurrent();
+    restoreActiveDispatches(snapshot.dispatches?.items || []);
     renderChatTimeline();
-    container.scrollTop = container.scrollHeight;
+    if (initial) container.scrollTop = container.scrollHeight;
     markWorkspaceTiming("chat_loaded");
   } catch (error) {
     if (isCancellation(error)) return;
     if (container.childElementCount === 0) {
-      container.replaceChildren(
-        messageElement({
-          role: "system",
-          text: `智能体暂时不可用：${friendlyError(error)}`,
-        }),
-      );
-    }
+      container.replaceChildren(messageElement({ role: "system", text: `工作区暂时不可用：${friendlyError(error)}` }));
+    } else toast(friendlyError(error), true, "current-load");
   }
 }
 
@@ -617,10 +608,10 @@ function setTimelineNode(node, { key, createdAt, order = 0 }) {
   node.dataset.timelineOrder = String(Number(order) || 0);
 }
 
-function ingestTimelineEntry(entry, render = true) {
+function ingestTimelineEntry(entry, render = true, advanceCursor = true) {
   markWorkspaceTiming("timeline_received", {taskId:entry?.task_id});
   const sequence = Number(entry?.sequence) || 0;
-  state.timelineCursor = Math.max(state.timelineCursor, sequence);
+  if (advanceCursor) state.timelineCursor = Math.max(state.timelineCursor, sequence);
   if (entry?.entry_type === "chat_message") {
     if (entry.source?.is_origin) {
       reconcileOriginChatMessage(entry, render);
@@ -688,34 +679,101 @@ function renderChatTimeline() {
   const live = [...state.liveMessages.values()]
     .map((item) => item.item)
     .filter((item) => item?.isConnected);
+  const controls = olderChatControl();
   if (stable.length === 0 && live.length === 0) {
-    container.replaceChildren(
-      messageElement({
-        role: "system",
-        text: "开始一个新的工作会话",
-      }),
-    );
+    reconcileChildren(container, [controls, messageElement({ role: "system", text: "开始一个新的工作会话" })]);
     return;
   }
-  const olderControl = state.chatTimelineHasOlder
-    ? [olderChatControl()]
-    : [];
-  reconcileChildren(container, [...olderControl, ...groupQueryCards(stable), ...live]);
+  reconcileChildren(container, [controls, ...groupQueryCards(stable), ...live]);
 }
 
 function olderChatControl() {
-  const wrapper = document.createElement("div");
-  wrapper.className = "chat-history-control";
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary compact";
-  button.disabled = state.chatTimelineLoadingOlder;
-  button.textContent = state.chatTimelineLoadingOlder
-    ? "正在加载..."
-    : "加载更早消息";
-  button.addEventListener("click", loadOlderChatMessages);
-  wrapper.append(button);
-  return wrapper;
+  if (!historyControls) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "chat-history-control";
+    const make = (label, handler) => {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "secondary compact";
+      button.textContent = label; button.addEventListener("click", handler);
+      wrapper.append(button); return button;
+    };
+    historyControls = { wrapper,
+      messages: make("加载更早消息", loadOlderChatMessages),
+      tasks: make("加载较早任务与文件", loadTaskHistory),
+      legacy: make("加载历史会话与助手记录", loadLegacyHistory),
+    };
+  }
+  for (const [name, visible, loading, label] of [
+    ["messages", state.chatTimelineHasOlder, state.chatTimelineLoadingOlder, "加载更早消息"],
+    ["tasks", state.taskHistoryHasMore, state.taskHistoryLoading, "加载较早任务与文件"],
+    ["legacy", !state.legacyHistoryLoaded, state.legacyHistoryLoading, "加载历史会话与助手记录"],
+  ]) {
+    const button = historyControls[name];
+    button.hidden = !visible; button.disabled = loading;
+    button.textContent = loading ? "正在加载…" : label;
+  }
+  historyControls.wrapper.hidden = !state.chatTimelineHasOlder && !state.taskHistoryHasMore && state.legacyHistoryLoaded;
+  return historyControls.wrapper;
+}
+
+async function loadLegacyHistory() {
+  if (state.legacyHistoryLoading || state.legacyHistoryLoaded) return;
+  const scope = sessionScope.replace("legacy-history");
+  state.legacyHistoryLoading = true; renderChatTimeline();
+  try {
+    const history = await scopedApi(scope)("/api/chat/history?limit=120");
+    scope.assertCurrent();
+    for (const [index, message] of (history.messages || []).entries()) {
+      const key = historyMessageKey(message, index), hash = textHash(message.text);
+      const timestamp = parseTimestampMilliseconds(message.timestamp);
+      const alreadySynced = [...state.syncedMessages.values()].some(item =>
+        item.dataset.messageRole === String(message.role || "") && item.dataset.messageTextHash === hash &&
+        (!Number.isFinite(timestamp) || Math.abs(Number(item.dataset.timelineAt) - timestamp) <= 5 * 60 * 1000));
+      if (alreadySynced) continue;
+      const item = messageElement(message);
+      setTimelineNode(item, { key, createdAt: message.timestamp, order: index });
+      state.historyMessages.set(key, item);
+    }
+    await hydrateSkillCards({ render: false, scope });
+    scope.assertCurrent();
+    state.legacyHistoryLoaded = true;
+  } catch (error) {
+    if (!isCancellation(error)) toast(`加载历史会话失败：${friendlyError(error)}`, true);
+  } finally {
+    if (scope.current()) { state.legacyHistoryLoading = false; renderChatTimeline(); }
+  }
+}
+
+async function loadTaskHistory() {
+  if (state.taskHistoryLoading || !state.taskHistoryHasMore) return;
+  const scope = sessionScope.replace("task-history"), request = scopedApi(scope);
+  const container = $("#chat-messages"), height = container.scrollHeight, top = container.scrollTop;
+  state.taskHistoryLoading = true; renderChatTimeline();
+  try {
+    const query = new URLSearchParams({ limit: "32" });
+    if (state.taskHistoryCursor) {
+      query.set("before_updated_at", state.taskHistoryCursor.updatedAt);
+      query.set("before_task_id", state.taskHistoryCursor.taskId);
+    }
+    const page = await request(`/api/tasks/history?${query}`);
+    scope.assertCurrent();
+    const ids = (page.items || []).map(task => task.task_id);
+    if (ids.length) {
+      const projections = await request(`/api/tasks/projections?ids=${encodeURIComponent(ids.join(","))}`);
+      scope.assertCurrent();
+      for (const item of projections.items || []) if (item.detail) upsertTaskCard(item.detail, { render: false });
+      for (const id of projections.unavailableTaskIds || []) retireTaskCard(id);
+    }
+    state.taskHistoryCursor = page.nextCursor || null;
+    state.taskHistoryHasMore = Boolean(page.hasMore);
+  } catch (error) {
+    if (!isCancellation(error)) toast(`加载较早任务失败：${friendlyError(error)}`, true);
+  } finally {
+    if (scope.current()) {
+      state.taskHistoryLoading = false; renderChatTimeline();
+      container.scrollTop = top + container.scrollHeight - height;
+    }
+  }
 }
 
 async function loadOlderChatMessages() {
@@ -734,7 +792,7 @@ async function loadOlderChatMessages() {
     );
     scope.assertCurrent();
     const items = Array.isArray(result.items) ? result.items : [];
-    items.forEach((entry) => ingestTimelineEntry(entry, false));
+    items.forEach((entry) => ingestTimelineEntry(entry, false, false));
     const oldest = Number(result.oldestSequence) || 0;
     if (oldest) state.chatTimelineOldestSequence = oldest;
     state.chatTimelineHasOlder = Boolean(result.hasMore);
@@ -1072,117 +1130,31 @@ async function hydrateSkillCards({ render = true, scope = sessionScope } = {}) {
   } catch { /* Keep existing evidence; absence of a response is not a failed Skill. */ }
 }
 
-async function hydrateTaskCards({ render = true, scope = sessionScope } = {}) {
-  const api = scopedApi(scope);
-  await hydrateSkillCards({ render: false, scope });
-  if (!scope.current()) return;
-  try {
-    const [taskResponse, historyResponse] = await Promise.allSettled([
-      api("/api/tasks?active_only=false&limit=30"),
-      api("/api/artifacts/history?limit=20"),
-    ]);
-    if (taskResponse.status !== "fulfilled") {
-      throw taskResponse.reason;
-    }
-    const result = taskResponse.value;
-    const artifactHistory = historyResponse.status === "fulfilled"
-      ? historyResponse.value.items || []
-      : [];
-    const active = new Set(["active", "waiting_user", "running"]);
-    const recentCutoff = Date.now() - 6 * 60 * 60 * 1000;
-    const recentCandidates = result.items
-      .filter((task) => {
-        const updatedAt = Date.parse(task.updated_at || "");
-        return active.has(task.status) ||
-          (Number.isFinite(updatedAt) && updatedAt >= recentCutoff);
-      })
-      .slice(0, 30);
-    const recentIds = new Set(
-      recentCandidates.map((task) => task.task_id),
-    );
-    const historicalDetails = new Map(
-      artifactHistory
-        .filter((detail) => detail?.task?.task_id)
-        .map((detail) => [detail.task.task_id, detail]),
-    );
-    const candidates = [
-      ...recentCandidates,
-      ...artifactHistory
-        .map((detail) => detail.task)
-        .filter((task) => !recentIds.has(task.task_id)),
-    ].reverse();
-    const details = await Promise.allSettled(
-      candidates.map((task) => {
-        if (!recentIds.has(task.task_id)) {
-          return Promise.resolve(historicalDetails.get(task.task_id));
-        }
-        return api(`/api/tasks/${encodeURIComponent(task.task_id)}`);
-      }),
-    );
-    scope.assertCurrent();
-    const candidateIds = new Set(candidates.map((task) => task.task_id));
-    details.forEach((result) => {
-      if (result.status === "fulfilled") {
-        upsertTaskCard(result.value, { render: false });
-      }
-    });
-    state.taskCards.forEach((card, cardKey) => {
-      if (!candidateIds.has(card.dataset.taskId || cardKey)) {
-        card.remove();
-        state.taskCards.delete(cardKey);
-        state.taskCardMeta.delete(cardKey);
-      }
-    });
-    if (render) renderChatTimeline();
-  } catch {}
+function retireTaskCard(taskId) {
+  for (const [key, card] of state.taskCards) {
+    if (card.dataset.taskId !== taskId) continue;
+    card.remove(); state.taskCards.delete(key); state.taskCardMeta.delete(key);
+  }
+  state.taskFeedback.delete(taskId);
+  for (const [key, model] of state.actionableGroups) {
+    if (model.group?.sourceTaskId === taskId) state.actionableGroups.delete(key);
+  }
+  if (state.selectedTaskId === taskId) {
+    state.taskDetailRequest += 1;
+    viewScope.replace("task-detail");
+    $("#task-detail").replaceChildren(emptyState("此任务已不可访问。"));
+    delete $("#task-detail").dataset.taskId;
+  }
 }
 
 function scheduleTaskSync(taskId, eventType) {
   if (!taskId) return;
-  lifecycle.clearTimer(state.taskSyncTimers.get(taskId));
-  state.taskSyncTimers.set(
-    taskId,
-    sessionScope.timeout(async () => {
-      state.taskSyncTimers.delete(taskId);
-      await syncTaskCard(taskId);
-    }, 220),
-  );
+  projectionQueue.enqueue(taskId);
   lifecycle.clearTimer(state.taskListTimer);
   state.taskListTimer = sessionScope.timeout(loadTasks, 260);
-  if (
-    ["task.operation.failed", "task.operation.outcome_unknown"].includes(
-      eventType,
-    )
-  ) {
-    toast(
-      eventType === "task.operation.outcome_unknown"
-        ? "一项业务操作的最终结果需要核对。"
-        : "一项业务操作执行失败。",
-      true,
-      `task:${taskId}:failure`,
-    );
-  }
-}
-
-async function syncTaskCard(taskId) {
-  const detailRequest = state.selectedTaskId === taskId ? ++state.taskDetailRequest : null;
-  const scope = sessionScope.replace(`task:${taskId}`);
-  const api = scopedApi(scope);
-  try {
-    const result = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
-    scope.assertCurrent();
-    upsertTaskCard(result);
-    scope.assertCurrent();
-    if (state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) renderTaskDetail(result);
-  } catch (error) {
-    if (isCancellation(error)) return;
-    if (error.code !== "TASK_NOT_FOUND") {
-      toast(
-        friendlyError(error),
-        true,
-        `task:${taskId}:${error.code || "sync"}`,
-      );
-    }
+  if (["task.operation.failed", "task.operation.outcome_unknown"].includes(eventType)) {
+    toast(eventType === "task.operation.outcome_unknown" ? "一项业务操作的最终结果需要核对。" : "一项业务操作执行失败。",
+      true, `task:${taskId}:failure`);
   }
 }
 
@@ -1367,7 +1339,7 @@ async function reconcileTimeline() {
   } finally {
     if (!scope.current()) return;
     state.timelineReconcileActive = false;
-    await hydrateSkillCards({ scope });
+    if (state.legacyHistoryLoaded) await hydrateSkillCards({ scope });
   }
 }
 
@@ -1396,7 +1368,7 @@ function openTimelineStream() {
   lifecycle.clearTimer(state.timelineReconnectTimer);
   state.timelineReconnectTimer = null;
   state.eventSource?.close();
-  const query = state.timelineCursor
+  const query = state.currentLoaded || state.timelineCursor
     ? `?after=${encodeURIComponent(state.timelineCursor)}`
     : "";
   const source = new EventSource(`/api/timeline/stream${query}`);
@@ -1422,13 +1394,18 @@ function openTimelineStream() {
     );
     ingestTimelineEntry(payload);
   });
-  source.onerror = () => {
-    if (!scope.current() || state.eventSource !== source) return;
-    source.close();
-    state.eventSource = null;
-    lifecycle.clearTimer(state.timelineReconnectTimer);
-    state.timelineReconnectTimer = sessionScope.timeout(openTimelineStream, 5000);
+  source.onopen = () => {
+    if (scope.current() && state.eventSource === source) state.timelineReconnectFailures = 0;
   };
+  const reconnect = planned => {
+    if (!scope.current() || state.eventSource !== source) return;
+    source.close(); state.eventSource = null;
+    lifecycle.clearTimer(state.timelineReconnectTimer);
+    const delay = planned ? 0 : Math.min(10000, 250 * 2 ** Math.min(state.timelineReconnectFailures++, 6));
+    state.timelineReconnectTimer = sessionScope.timeout(openTimelineStream, delay);
+  };
+  source.addEventListener("reconnect", () => reconnect(true));
+  source.onerror = () => reconnect(false);
   state.eventSource = source;
 }
 

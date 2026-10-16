@@ -3068,6 +3068,9 @@ class TaskHubStore:
         user_subject: str,
         endpoint_id: str | None = None,
         active_only: bool = False,
+        terminal_only: bool = False,
+        before_updated_at: str | None = None,
+        before_task_id: str | None = None,
         limit: int = 100,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 500)
@@ -3078,7 +3081,16 @@ class TaskHubStore:
             parameters.append(endpoint_id)
         if active_only:
             query += " AND status IN ('active', 'waiting_user', 'running')"
-        query += " ORDER BY updated_at DESC LIMIT ?"
+        if terminal_only:
+            if active_only:
+                raise ValueError("active_only and terminal_only are mutually exclusive")
+            query += " AND status NOT IN ('active', 'waiting_user', 'running')"
+        if (before_updated_at is None) != (before_task_id is None):
+            raise ValueError("both task cursor fields are required")
+        if before_updated_at is not None:
+            query += " AND (updated_at < ? OR (updated_at = ? AND task_id < ?))"
+            parameters.extend((before_updated_at, before_updated_at, before_task_id))
+        query += " ORDER BY updated_at DESC, task_id DESC LIMIT ?"
         parameters.append(limit)
         with self._connect() as connection:
             self._expire_orphan_task_shells(connection)

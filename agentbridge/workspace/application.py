@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 from typing import Any, Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from agentbridge.core.central_service import CentralCapabilityService
 from agentbridge.core.user_grants import UserGrantConflict
@@ -203,6 +203,29 @@ class WorkspaceApplication:
         ]
 
     def task_detail(self, account: dict, task_id: str) -> dict:
+        return self._task_projection(account, task_id, include_history=True)
+
+    def task_history(self, account: dict, *, before_updated_at: str | None = None,
+                     before_task_id: str | None = None, limit: int = 32) -> dict:
+        if (before_updated_at is None) != (before_task_id is None):
+            raise ValueError("both task cursor fields are required")
+        if before_updated_at is not None:
+            if (not isinstance(before_updated_at, str) or len(before_updated_at) > 40
+                    or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:\+00:00|Z)", before_updated_at)):
+                raise ValueError("task cursor timestamp must be UTC ISO-8601")
+            before_updated_at = datetime.fromisoformat(before_updated_at.replace("Z", "+00:00")).isoformat()
+            if not isinstance(before_task_id, str) or str(UUID(before_task_id)) != before_task_id:
+                raise ValueError("task cursor id must be a canonical UUID")
+        limit = min(max(int(limit), 1), 32)
+        tasks = self.service.tasks.list_tasks(user_subject=account["user_subject"],
+            before_updated_at=before_updated_at, before_task_id=before_task_id, limit=limit + 1)
+        has_more = len(tasks) > limit
+        items = tasks[:limit]
+        return {"items": [_public_task(task) for task in items], "hasMore": has_more,
+                "nextCursor": {"updatedAt": items[-1]["updated_at"], "taskId": items[-1]["task_id"]}
+                if has_more else None}
+
+    def _task_projection(self, account: dict, task_id: str, *, include_history: bool) -> dict:
         self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
         task = self.service.tasks.get_task(
             task_id,
@@ -212,12 +235,15 @@ class WorkspaceApplication:
             task_id=task_id,
             user_subject=account["user_subject"],
             limit=200,
-        )
+        ) if include_history else []
         artifacts = self.service.tasks.list_artifacts(
             task_id=task_id,
             user_subject=account["user_subject"],
-            limit=100,
+            limit=100 if include_history else 6,
         )
+        artifacts_have_more = not include_history and len(artifacts) > 5
+        if not include_history:
+            artifacts = artifacts[:5]
         artifacts.sort(
             key=lambda item: (
                 str(item.get("created_at") or ""),
@@ -282,7 +308,68 @@ class WorkspaceApplication:
             "interaction": interaction,
             "interactions": interactions,
             "batch": workspace_batch_projection(batch),
+            **({"artifactsHasMore": artifacts_have_more, "historyIncluded": False} if not include_history else {}),
         }
+
+    def task_projections(self, account: dict, task_ids: list[str], *, versions: list[int] | None = None) -> dict:
+        if not isinstance(task_ids, list) or not 1 <= len(task_ids) <= 32:
+            raise ValueError("task ids must contain between 1 and 32 identifiers")
+        if versions is not None and (not isinstance(versions, list) or len(versions) != len(task_ids)
+                or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in versions)):
+            raise ValueError("versions must match the bounded task identifiers")
+        normalized = []
+        for task_id in task_ids:
+            if not isinstance(task_id, str):
+                raise ValueError("task id must be a UUID")
+            try:
+                canonical = str(UUID(task_id))
+            except (ValueError, AttributeError) as exc:
+                raise ValueError("task id must be a UUID") from exc
+            if canonical != task_id.lower():
+                raise ValueError("task id must be a UUID")
+            if canonical not in normalized:
+                normalized.append(canonical)
+        items, unavailable = [], []
+        for task_id in normalized:
+            try:
+                # Version hints never bypass live access, presentation expiry,
+                # actionable source TTL or a freshly signed active interaction.
+                detail = self._task_projection(account, task_id, include_history=False)
+            except (KeyError, PermissionError):
+                unavailable.append(task_id)
+                continue
+            items.append({"taskId": task_id, "version": detail["task"]["version"],
+                          "unchanged": False, "detail": detail})
+        return {"items": items, "unavailableTaskIds": unavailable}
+
+    def current(self, account: dict, *, active_limit=20, recent_limit=8, message_limit=80) -> dict:
+        active_limit = min(max(int(active_limit), 1), 20)
+        recent_limit = min(max(int(recent_limit), 0), 8)
+        message_limit = min(max(int(message_limit), 1), 80)
+        # Watermarks precede every snapshot read. Bound chat to this watermark;
+        # subsequent commits are replayed by SSE, including an explicit zero.
+        timeline_cursor = self.timeline_cursor(account)
+        event_cursor = self.event_cursor(account)
+        active = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=True,
+                                               limit=active_limit + 1)
+        recent = self.service.tasks.list_tasks(user_subject=account["user_subject"], terminal_only=True,
+                                               limit=recent_limit + 1) if recent_limit else []
+        selected = active[:active_limit] + recent[:recent_limit]
+        projections = self.task_projections(account, [task["task_id"] for task in selected]) if selected else {
+            "items": [], "unavailableTaskIds": []}
+        messages = self.list_timeline(account, entry_type="chat_message", before_sequence=timeline_cursor + 1,
+                                      limit=message_limit + 1)
+        more_messages = len(messages) > message_limit
+        messages = messages[-message_limit:]
+        return {"schemaVersion": "agentbridge.workspace-current.v1",
+                "cards": [item["detail"] for item in projections["items"]],
+                "unavailableTaskIds": projections["unavailableTaskIds"],
+                "timeline": {"items": messages, "cursor": timeline_cursor,
+                             "oldestSequence": messages[0]["sequence"] if messages else None,
+                             "hasMore": more_messages},
+                "dispatches": {"items": self.list_chat_dispatches(account, active_only=True, limit=20)},
+                "cursors": {"timeline": timeline_cursor, "event": event_cursor},
+                "hasMoreActive": len(active) > active_limit, "hasMoreRecent": len(recent) > recent_limit}
 
     def actionable_results(self, account: dict, task_id: str) -> list[dict]:
         from agentbridge.core.actionable_results import list_actionable_results

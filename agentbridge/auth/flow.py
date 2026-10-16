@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 from html import escape
+import hashlib
+import hmac
 import json
+import math
+from pathlib import Path
 import re
 import secrets
+import threading
+import time
 
 from agentbridge.auth.card import AuthCardResponse
 from agentbridge.auth.business_draft_card import BusinessDraftApplication
@@ -15,10 +21,15 @@ from agentbridge.core.tasks import TaskIntegrityError
 from agentbridge.core.trusted_flows import TrustedFlowReader
 from agentbridge.core.trusted_flows import TrustedFlowDenied
 from agentbridge.core.write_authorizations import WriteAuthorizationIntegrityError
+from agentbridge.core.commit_notifications import current_version, wait_for_change
 
 
 _UNAVAILABLE_ERRORS = (KeyError, ValueError, PermissionError, FieldSubmissionIntegrityError,
                        InteractionIntegrityError, TaskIntegrityError, WriteAuthorizationIntegrityError)
+_WAITING_SCRIPT = Path(__file__).with_name("static").joinpath("flow_waiting.mjs")
+_MAX_STATUS_WAIT_SECONDS = 20
+_STATUS_RECHECK_SECONDS = 2
+_PEER_CHECK_SECONDS = .2
 
 
 def flow_target(path: str) -> tuple[str, str, str | None, bool] | None:
@@ -35,6 +46,12 @@ class TrustedFlowApplication:
         self.reader = TrustedFlowReader(service)
         self.applications = {"input": field_application, "authorize": action_application}
         self.draft_application = draft_application or BusinessDraftApplication(service=service)
+        self._status_secret = secrets.token_bytes(32)
+        self._wait_lock = threading.Lock()
+        self._wait_owners = {}
+        self._wait_count = 0
+        self._max_waits = 32
+        self._max_waits_per_owner = 4
 
     def redirect_registered_input(self, resource_id: str, *, presentation_id: str | None) -> AuthCardResponse | None:
         """Unify new registered sources without rewriting immutable legacy forms."""
@@ -103,15 +120,107 @@ class TrustedFlowApplication:
             return self._unavailable()
 
     def status(self, kind: str, resource_id: str, *, presentation_id: str | None,
-               token: str, csrf_cookie: str) -> AuthCardResponse:
+               token: str, csrf_cookie: str, after: str = "", wait: str | float = 0,
+               cancelled=None, request_allowed=None) -> AuthCardResponse | None:
+        """Wait only for an authenticated read projection; never resume work.
+
+        Capture the commit hint before each fresh durable snapshot. A commit
+        between the snapshot and wait therefore cannot be lost. Other processes
+        and missed hints are recovered by the bounded durable recheck.
+        """
+        admitted_owner = None
         try:
-            context = self.reader.context(kind, resource_id, presentation_id)
-            self.reader.authenticate(context, token=token, cookie=csrf_cookie)
-            value = self.reader.status(context)
+            def authenticate():
+                if request_allowed is not None and not request_allowed():
+                    raise TrustedFlowDenied("flow request origin is unavailable")
+                context = self.reader.context(kind, resource_id, presentation_id)
+                self.reader.authenticate(context, token=token, cookie=csrf_cookie)
+                return context
+
+            initial = authenticate()  # Authorization precedes parameter/capacity admission.
+            owner = initial.resource["user_subject"]
+            binding = self._status_binding(initial, resource_id)
+            try:
+                duration = float(wait)
+            except (TypeError, ValueError):
+                duration = -1
+            if (not math.isfinite(duration) or not 0 <= duration <= _MAX_STATUS_WAIT_SECONDS
+                    or not isinstance(after, str) or (after and not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", after))):
+                return self._json(400, {"state": "unavailable", "terminal": True,
+                    "title": "状态请求无效", "message": "请刷新可信办理页面。"})
+            deadline = time.monotonic() + duration
+            namespace = self.reader.service.tasks.db_path
+
+            def snapshot():
+                version = current_version(namespace, user_subject=owner, topic="timeline")
+                context = authenticate()
+                if self._status_binding(context, resource_id) != binding:
+                    raise TrustedFlowDenied("flow read binding changed")
+                value = self.reader.status(context)
+                signature = hmac.new(self._status_secret, json.dumps(
+                    [binding, hashlib.sha256(token.encode()).hexdigest(), value],
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode(), hashlib.sha256).hexdigest()
+                return version, {**value, "stateVersion": signature}
+
+            def respond(value):
+                # Recheck the original credential, owner and origin immediately
+                # before returning, including heartbeat and terminal responses.
+                if self._status_binding(authenticate(), resource_id) != binding:
+                    raise TrustedFlowDenied("flow read binding changed")
+                return self._json(200, value)
+
+            version, value = snapshot()
+            if not after or not duration or value["stateVersion"] != after or value.get("terminal") or value.get("nextUrl"):
+                return respond(value)
+            with self._wait_lock:
+                if (self._wait_count >= self._max_waits
+                        or self._wait_owners.get(owner, 0) >= self._max_waits_per_owner):
+                    busy = True
+                else:
+                    busy = False
+                    self._wait_count += 1
+                    self._wait_owners[owner] = self._wait_owners.get(owner, 0) + 1
+                    admitted_owner = owner
+            if busy:
+                if self._status_binding(authenticate(), resource_id) != binding:
+                    raise TrustedFlowDenied("flow read binding changed")
+                response = self._json(429, {"state": "busy", "terminal": False,
+                    "title": "正在等待办理状态", "message": "状态读取繁忙，请稍后重试。"})
+                response.headers["Retry-After"] = "1"
+                return response
+            next_recheck = time.monotonic() + _STATUS_RECHECK_SECONDS
+            while True:
+                if cancelled is not None and cancelled():
+                    return None
+                now = time.monotonic()
+                if now >= deadline:
+                    return respond(snapshot()[1])
+                changed = current_version(namespace, user_subject=owner, topic="timeline") != version
+                if changed or now >= next_recheck:
+                    version, value = snapshot()
+                    if value["stateVersion"] != after or value.get("terminal") or value.get("nextUrl"):
+                        return respond(value)
+                    next_recheck = time.monotonic() + _STATUS_RECHECK_SECONDS
+                wait_for_change(namespace, user_subject=owner, topic="timeline", after_version=version,
+                                timeout=min(_PEER_CHECK_SECONDS, deadline - now, max(0, next_recheck - now)))
         except _UNAVAILABLE_ERRORS:
             return self._json(403, {"state": "unavailable", "terminal": True,
                                     "title": "办理页面不可用", "message": "请从原任务重新打开有效入口。"})
-        return self._json(200, value)
+        finally:
+            if admitted_owner is not None:
+                with self._wait_lock:
+                    self._wait_count -= 1
+                    remaining = self._wait_owners[admitted_owner] - 1
+                    if remaining:
+                        self._wait_owners[admitted_owner] = remaining
+                    else:
+                        del self._wait_owners[admitted_owner]
+
+    @staticmethod
+    def _status_binding(context, resource_id):
+        return (context.kind, resource_id, context.resource["user_subject"], context.resource["session_id"],
+                context.task_id, context.interaction["interaction_id"], context.presentation_id, context.endpoint_id)
 
     @staticmethod
     def _adapt(response: AuthCardResponse, kind: str, resource_id: str,
@@ -132,6 +241,9 @@ class TrustedFlowApplication:
         # All configuration values are opaque IDs, never business fields. Escape
         # '<' nonetheless, so the script cannot terminate via future callers.
         config = json.dumps({"statusUrl": path + "/status", "token": token}).replace("<", "\\u003c")
+        script = _WAITING_SCRIPT.read_text(encoding="utf-8").replace(
+            "export function mountTrustedFlow", "function mountTrustedFlow", 1,
+        )
         body = rf"""
 <style nonce="{escape(nonce)}">
   #flow-continue {{display:inline-block;margin-top:12px;padding:12px 20px;border-radius:5px;background:var(--teal);color:#fff;font-size:14px;text-decoration:none}}
@@ -148,61 +260,8 @@ class TrustedFlowApplication:
   <noscript><p>请启用 JavaScript 后刷新此页查看办理状态；页面不会自行提交业务。</p></noscript>
 </section></main>
 <script nonce="{escape(nonce)}">
-(() => {{
-  const config = {config};
-  const title = document.getElementById('flow-title');
-  const message = document.getElementById('flow-message');
-  const recovery = document.getElementById('flow-recovery');
-  const batch = document.getElementById('flow-batch');
-  const continued = document.getElementById('flow-continue');
-  let stopped = false;
-  let failures = 0;
-  async function poll() {{
-    if (stopped) return;
-    try {{
-      const response = await fetch(config.statusUrl, {{
-        credentials: 'same-origin', cache: 'no-store',
-        headers: {{'X-AgentBridge-Flow-Token': config.token}}
-      }});
-      const state = await response.json();
-      if (!response.ok && response.status !== 403) throw new Error('status unavailable');
-      if (typeof state.title !== 'string' || typeof state.message !== 'string') throw new Error('invalid status');
-      title.textContent = state.title;
-      message.textContent = state.message;
-      recovery.textContent = '';
-      continued.hidden = true;
-      continued.removeAttribute('href');
-      batch.hidden = !state.batch;
-      if (state.batch) {{
-        batch.textContent = `本批次已完成 ${{state.batch.completedCount}} / ${{state.batch.totalCount}} 项`;
-        if (state.batch.nextOrdinal) batch.textContent += `；下一项（第 ${{state.batch.nextOrdinal}} 项）：${{state.batch.nextTitle}}`;
-      }}
-      failures = 0;
-      if (state.nextUrl) {{
-        const next = new URL(state.nextUrl, location.origin);
-        if (next.origin !== location.origin || next.username || next.password || !/^\/flow\/authorize\/[A-Za-z0-9_-]{{32,128}}(?:\/present\/[A-Za-z0-9_-]{{32,128}})?$/.test(next.pathname) || next.search || next.hash) throw new Error('invalid continuation');
-        stopped = true;
-        // Keep the original Telegram lifecycle fragment on same-origin navigation.
-        next.hash = location.hash;
-        location.replace(next.href);
-        return;
-      }}
-      if (state.continueUrl && state.state === 'completed') {{
-        const next = new URL(state.continueUrl, location.origin);
-        if (next.origin !== location.origin || next.username || next.password || !/^\/flow\/input\/[A-Za-z0-9_-]{{32,128}}(?:\/present\/[A-Za-z0-9_-]{{32,128}})?$/.test(next.pathname) || next.search || next.hash) throw new Error('invalid batch continuation');
-        next.hash = location.hash;
-        continued.href = next.href;
-        continued.hidden = false;
-      }}
-      stopped = state.terminal === true;
-    }} catch (_error) {{
-      failures += 1;
-      recovery.textContent = '连接暂不可用，正在等待恢复。已提交内容不会重发。';
-    }}
-    if (!stopped) window.setTimeout(poll, Math.min(10000, 2000 * (failures + 1)));
-  }}
-  poll();
-}})();
+{script}
+mountTrustedFlow({config});
 </script>"""
         headers = _security_headers(nonce)
         headers["Content-Security-Policy"] += "; connect-src 'self'"

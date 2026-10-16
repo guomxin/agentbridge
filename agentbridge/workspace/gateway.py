@@ -197,6 +197,7 @@ class OpenClawGatewayClient:
         }
 
         def guarded_stream() -> Iterator[dict[str, Any]]:
+            run_deadline = time.monotonic() + timeout_seconds
             run_id: str | None = None
             terminal = False
             source = None
@@ -213,6 +214,10 @@ class OpenClawGatewayClient:
                                 binding_grant_provider
                             ),
                         }
+                    attempt_payload = {
+                        **attempt_payload,
+                        "remainingRunMs": max(0, int((run_deadline - time.monotonic()) * 1000)),
+                    }
                     source = self._stream_payload(attempt_payload)
                     try:
                         for item in source:
@@ -227,9 +232,18 @@ class OpenClawGatewayClient:
                                 # Only the same accepted run's persisted final answer is authoritative.
                                 if not run_id or item.get("runId") != run_id:
                                     continue
-                                authoritative, _ = self._reconcile_accepted_run(
-                                    session_key=normalized["sessionKey"], run_id=run_id,
-                                )
+                                if _local_final_history_receipt(item, normalized["sessionKey"], run_id):
+                                    self._record_success()
+                                    _LOG.info(
+                                        "Verified accepted OpenClaw run from same-socket authoritative history run_id=%s",
+                                        run_id,
+                                    )
+                                    authoritative = item
+                                else:
+                                    authoritative, _ = self._reconcile_accepted_run(
+                                        session_key=normalized["sessionKey"], run_id=run_id,
+                                        deadline=run_deadline,
+                                    )
                                 if authoritative is None:
                                     terminal = True  # host already ended; never abort/replay it
                                     raise GatewayRequestError(
@@ -256,6 +270,7 @@ class OpenClawGatewayClient:
                                 self._reconcile_accepted_run(
                                     session_key=normalized["sessionKey"],
                                     run_id=run_id,
+                                    deadline=run_deadline,
                                 )
                             )
                             if recovered:
@@ -337,11 +352,18 @@ class OpenClawGatewayClient:
         *,
         session_key: str,
         run_id: str,
+        deadline: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         observed_tool_activity = False
         for delay_seconds in _POST_ACCEPT_RECONCILE_DELAYS_SECONDS:
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining < delay_seconds + 1:
+                break
             if delay_seconds:
                 self._retry_sleep(delay_seconds)
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining < 1:
+                break
             try:
                 history = self.call(
                     "chat.history",
@@ -350,7 +372,7 @@ class OpenClawGatewayClient:
                         "limit": 200,
                         "maxChars": 200_000,
                     },
-                    timeout_seconds=5,
+                    timeout_seconds=min(5, remaining) if remaining is not None else 5,
                 )
             except GatewayRequestError:
                 continue
@@ -596,7 +618,7 @@ def _should_retry_before_accept(
 
 def _history_evidence_for_run(payload: Any, run_id: str, *, session_key: str | None = None) -> dict[str, Any]:
     messages = payload.get("messages") if isinstance(payload, dict) else None
-    if (not isinstance(messages, list) or (session_key and payload.get("sessionKey")
+    if (not isinstance(messages, list) or (session_key and payload.get("sessionKey") not in (None, "")
                                           and payload["sessionKey"] != session_key)):
         return {
             "prompt_observed": False,
@@ -615,6 +637,9 @@ def _history_evidence_for_run(payload: Any, run_id: str, *, session_key: str | N
             message.get("idempotencyKey") == prompt_key
             or message.get("runId") == run_id
         ):
+            if message.get("runId") not in (None, "") and message["runId"] != run_id:
+                return {"prompt_observed": False, "had_tool_activity": False,
+                        "final_text": "", "observed_run_id": ""}
             prompt_index = index
             observed_run_id = str(message.get("runId") or run_id).strip()
             break
@@ -633,7 +658,7 @@ def _history_evidence_for_run(payload: Any, run_id: str, *, session_key: str | N
             continue
         if value.get("role") == "user":
             break
-        if value.get("runId") and value["runId"] != run_id:
+        if value.get("runId") not in (None, "") and value["runId"] != run_id:
             continue
         message_tool_activity = _history_message_has_tool_activity(value)
         had_tool_activity = had_tool_activity or message_tool_activity
@@ -650,6 +675,21 @@ def _history_evidence_for_run(payload: Any, run_id: str, *, session_key: str | N
         "final_text": final_text,
         "observed_run_id": observed_run_id,
     }
+
+
+def _local_final_history_receipt(item: dict, session_key: str, run_id: str) -> bool:
+    receipt = item.get("agentbridgeFinalHistory")
+    return bool(
+        isinstance(receipt, dict)
+        and item.get("type") == "chat" and item.get("state") == "final"
+        and item.get("runId") == run_id
+        and receipt.get("schemaVersion") == "agentbridge.gateway-final.v1"
+        and receipt.get("source") == "local-same-socket-history"
+        and receipt.get("sessionKey") == session_key
+        and receipt.get("runId") == run_id
+        and receipt.get("observedRunId") == run_id
+        and isinstance(item.get("text"), str) and item["text"].strip()
+    )
 
 
 def _history_message_has_tool_activity(message: dict[str, Any]) -> bool:

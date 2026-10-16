@@ -16,6 +16,7 @@ import { dirname } from "node:path";
 import { normalizeGatewayEvent } from "./gateway_events.mjs";
 import {
   canRecoverStartup,
+  historyEvidenceForRun,
   recoveryIdempotencyKey,
   sessionRunState,
 } from "./gateway_run_guard.mjs";
@@ -26,6 +27,8 @@ const gatewayToken = requiredEnv("AB_GATEWAY_TOKEN");
 const identityPath = requiredEnv("AB_GATEWAY_IDENTITY_PATH");
 const input = JSON.parse(readFileSync(0, "utf8"));
 const timeoutMs = clampInteger(input.timeoutMs, 1_000, 300_000, 30_000);
+const invocationDeadlineMs = Date.now() + Math.min(timeoutMs,
+  clampInteger(input.remainingRunMs, 0, 300_000, timeoutMs));
 const mode = ["stream", "send-stream"].includes(input.mode)
   ? input.mode
   : "call";
@@ -110,6 +113,14 @@ let recoveryEvidenceRequestId = null;
 let sessionIdleDeadline = 0;
 let requestStage = "connect";
 let preflightFallbackSent = false;
+let pendingFinal = null;
+let finalHistoryRequestId = null;
+let finalHistoryTimer = null;
+let finalHistoryBudgetTimer = null;
+let finalHistoryStartedAtMs = 0;
+let finalHistoryDeadlineMs = 0;
+let finalHistoryAttempt = 0;
+const FINAL_HISTORY_OFFSETS_MS = [0, 50, 150, 350, 750, 1_550];
 const connectId = `connect-${randomUUID()}`;
 const preflightAbortRequestId = `preflight-abort-${randomUUID()}`;
 const preflightAbortFallbackRequestId =
@@ -174,6 +185,10 @@ socket.addEventListener("message", (event) => {
             : "智能体运行被外部停止，尚未调用业务工具，可以安全地重新发送。";
         }
       }
+      if (mode === "send-stream" && streamAccepted && normalized.type === "chat" && normalized.state === "final") {
+        beginFinalHistory(normalized);
+        return;
+      }
       process.stdout.write(`${JSON.stringify(normalized)}\n`);
       if (
         normalized.type === "chat" &&
@@ -185,6 +200,10 @@ socket.addEventListener("message", (event) => {
     return;
   }
   if (frame?.type !== "res") {
+    return;
+  }
+  if (finalHistoryRequestId && frame.id === finalHistoryRequestId) {
+    handleFinalHistoryResponse(frame);
     return;
   }
   if (frame.id === connectId) {
@@ -346,6 +365,10 @@ socket.addEventListener("message", (event) => {
 });
 
 function handleRequestTimeout() {
+  if (pendingFinal) {
+    finishPendingFinal();
+    return;
+  }
   if (mode === "stream" && connected) {
     finish();
     return;
@@ -359,6 +382,61 @@ function handleRequestTimeout() {
     "OpenClaw Gateway request timed out.",
     stageDetails(),
   );
+}
+
+function beginFinalHistory(candidate) {
+  // normalizeGatewayEvent constructs a whitelist; no remote receipt or
+  // authoritative/historyVerified field can enter this local evidence path.
+  if (pendingFinal) return;
+  pendingFinal = candidate;
+  requestStage = "final_history";
+  clearTimeout(timer);
+  clearStartupTimer();
+  clearSessionStateTimer();
+  finalHistoryStartedAtMs = Date.now();
+  finalHistoryDeadlineMs = Math.min(invocationDeadlineMs, finalHistoryStartedAtMs + 2_000);
+  const remaining = finalHistoryDeadlineMs - Date.now();
+  if (remaining <= 0) return finishPendingFinal();
+  finalHistoryBudgetTimer = setTimeout(finishPendingFinal, remaining);
+  requestFinalHistory();
+}
+
+function requestFinalHistory() {
+  if (settled || !pendingFinal) return;
+  if (Date.now() >= finalHistoryDeadlineMs) return finishPendingFinal();
+  finalHistoryRequestId = `final-history-${randomUUID()}`;
+  try {
+    socket.send(JSON.stringify({ type: "req", id: finalHistoryRequestId, method: "chat.history",
+      params: { sessionKey: streamSessionKey, limit: 200, maxChars: 200_000 } }));
+  } catch { finishPendingFinal(); }
+}
+
+function handleFinalHistoryResponse(frame) {
+  finalHistoryRequestId = null;
+  if (settled || !pendingFinal) return;
+  if (Date.now() >= finalHistoryDeadlineMs) return finishPendingFinal();
+  const evidence = frame.ok ? historyEvidenceForRun(frame.payload, streamRunId, streamSessionKey) : null;
+  if (evidence?.final_text && evidence.observed_run_id === streamRunId) {
+    process.stdout.write(`${JSON.stringify({ type: "chat", runId: streamRunId, state: "final",
+      text: evidence.final_text, replace: true, recovered: true, hadToolActivity: evidence.had_tool_activity,
+      agentbridgeFinalHistory: { schemaVersion: "agentbridge.gateway-final.v1", source: "local-same-socket-history",
+        sessionKey: streamSessionKey, runId: streamRunId, observedRunId: evidence.observed_run_id } })}\n`);
+    finish();
+    return;
+  }
+  finalHistoryAttempt += 1;
+  if (!frame.ok || finalHistoryAttempt >= FINAL_HISTORY_OFFSETS_MS.length) return finishPendingFinal();
+  const next = finalHistoryStartedAtMs + FINAL_HISTORY_OFFSETS_MS[finalHistoryAttempt];
+  if (next >= finalHistoryDeadlineMs) return finishPendingFinal();
+  finalHistoryTimer = setTimeout(requestFinalHistory, Math.max(0, next - Date.now()));
+}
+
+function finishPendingFinal() {
+  if (settled || !pendingFinal) return;
+  // This candidate carries no receipt. Python must use its existing independent
+  // authoritative history reconciliation before showing it as final.
+  process.stdout.write(`${JSON.stringify(pendingFinal)}\n`);
+  finish();
 }
 
 function requestPreflightAbort(preserveSideRuns) {
@@ -951,6 +1029,8 @@ function finish(payload) {
   if (settled) return;
   settled = true;
   clearTimeout(timer);
+  if (finalHistoryTimer) clearTimeout(finalHistoryTimer);
+  if (finalHistoryBudgetTimer) clearTimeout(finalHistoryBudgetTimer);
   if (abortTimer) {
     clearTimeout(abortTimer);
     abortTimer = null;

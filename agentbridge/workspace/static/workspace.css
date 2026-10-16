@@ -420,6 +420,8 @@ code {
 
 .chat-history-control {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: center;
   min-height: 32px;
   padding: 2px 0 10px;

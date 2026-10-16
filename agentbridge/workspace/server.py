@@ -9,6 +9,7 @@ import json
 import mimetypes
 from pathlib import Path
 import re
+import sqlite3
 import ssl
 import threading
 import time
@@ -17,6 +18,8 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from agentbridge.auth.server import validate_auth_server_config
 from agentbridge.core.tasks import TaskNotFound
+from agentbridge.core.commit_notifications import current_version, wait_for_change
+from agentbridge.core.http_streams import CLIENT_DISCONNECT_ERRORS, peer_disconnected
 from agentbridge.core.tls_http import ThreadedTLSHTTPServer
 from agentbridge.workspace.application import (
     WorkspaceApplication,
@@ -36,12 +39,11 @@ CSRF_COOKIE = "agentbridge_workspace_csrf"
 ENROLLMENT_COOKIE = "agentbridge_workspace_enrollment"
 STATIC_ROOT = Path(__file__).with_name("static")
 ASSET_VERSION_PLACEHOLDER = "__WORKSPACE_ASSET_VERSION__"
-_CLIENT_DISCONNECT_ERRORS = (
-    TimeoutError,
-    BrokenPipeError,
-    ConnectionResetError,
-    ssl.SSLEOFError,
-)
+_CLIENT_DISCONNECT_ERRORS = CLIENT_DISCONNECT_ERRORS
+WORKSPACE_STREAM_LIFETIME_SECONDS = 300.0
+WORKSPACE_STREAM_HEARTBEAT_SECONDS = 10.0
+WORKSPACE_STREAM_RECHECK_SECONDS = 2.0
+WORKSPACE_STREAM_PEER_CHECK_SECONDS = 0.2
 
 
 def _workspace_asset_version() -> str:
@@ -111,10 +113,15 @@ def _bounded_user_stream(method):
     def wrapped(self, account, *args, **kwargs):
         subject = account['user_subject']
         if not self.server.acquire_stream(subject):
-            self._json(429, {'error': {'code': 'STREAM_LIMIT_REACHED'}})
+            try:
+                self._json(429, {'error': {'code': 'STREAM_LIMIT_REACHED'}})
+            except _CLIENT_DISCONNECT_ERRORS:
+                pass
             return
         try:
             return method(self, account, *args, **kwargs)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return None
         finally:
             self.server.release_stream(subject)
     return wrapped
@@ -318,6 +325,28 @@ def create_workspace_http_server(
                             )
                         },
                     )
+                    return
+                if route.path == "/api/current":
+                    self._json(200, application.current(account,
+                        active_limit=_query_int(query, "active_limit", 20),
+                        recent_limit=_query_int(query, "recent_limit", 8),
+                        message_limit=_query_int(query, "message_limit", 80)))
+                    return
+                if route.path == "/api/tasks/history":
+                    self._json(200, application.task_history(account,
+                        before_updated_at=_query_value(query, "before_updated_at"),
+                        before_task_id=_query_value(query, "before_task_id"),
+                        limit=_query_int(query, "limit", 32)))
+                    return
+                if route.path == "/api/tasks/projections":
+                    ids_value = _query_value(query, "ids")
+                    if not ids_value or len(ids_value) > 1200:
+                        raise ValueError("bounded task ids are required")
+                    version_value = _query_value(query, "versions")
+                    if version_value is not None and len(version_value) > 700:
+                        raise ValueError("bounded versions are required")
+                    versions = [int(value) for value in version_value.split(",")] if version_value is not None else None
+                    self._json(200, application.task_projections(account, ids_value.split(","), versions=versions))
                     return
                 if route.path == "/api/artifacts/history":
                     self._json(
@@ -697,66 +726,46 @@ def create_workspace_http_server(
             return account
 
         @_bounded_user_stream
-        def _event_stream(
-            self,
-            account: dict,
-            *,
-            after_event_id: str | None,
-        ) -> None:
-            self.close_connection = True
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self._security_headers()
-            self.end_headers()
+        def _event_stream(self, account: dict, *, after_event_id: str | None) -> None:
             cursor = after_event_id or application.event_cursor(account)
-            deadline = time.monotonic() + 25
-            try:
-                if not after_event_id:
-                    self.wfile.write(
-                        (
-                            f"id: {cursor}\n"
-                            "event: cursor\n"
-                            'data: {"ready":true}\n\n'
-                        ).encode("utf-8")
-                    )
-                    self.wfile.flush()
-                while time.monotonic() < deadline:
-                    events = application.list_events(
-                        account,
-                        after_event_id=cursor,
-                        limit=100,
-                    )
-                    for event in events:
-                        cursor = event["event_id"]
-                        payload = json.dumps(
-                            event,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                        self.wfile.write(
-                            (
-                                f"id: {cursor}\n"
-                                "event: task\n"
-                                f"data: {payload}\n\n"
-                            ).encode("utf-8")
-                        )
-                    if events:
-                        self.wfile.flush()
-                    time.sleep(1)
-                self.wfile.write(b": keepalive\n\n")
-                self.wfile.flush()
-            except _CLIENT_DISCONNECT_ERRORS:
-                return
+            # Reject an invalid or foreign cursor before writing SSE headers.
+            application.list_events(account, after_event_id=cursor, limit=1)
+            self._durable_stream(account, cursor=cursor, timeline=False, announce=not after_event_id)
 
         @_bounded_user_stream
-        def _timeline_stream(
-            self,
-            account: dict,
-            *,
-            after_sequence: int | None,
-        ) -> None:
+        def _timeline_stream(self, account: dict, *, after_sequence: int | None) -> None:
+            cursor = max(int(after_sequence), 0) if after_sequence is not None else application.timeline_cursor(account)
+            self._durable_stream(account, cursor=cursor, timeline=True, announce=after_sequence is None)
+
+        def _stream_session_matches(self, original: dict, session_token: str | None) -> bool:
+            current = application.session(session_token, touch=False)
+            if current is None or any(current.get(key) != original.get(key) for key in
+                    ("account_id", "user_subject", "endpoint_id", "endpoint_key", "openclaw_session_key")):
+                return False
+            endpoint_id = current.get("endpoint_id")
+            if endpoint_id:
+                try:
+                    endpoint = application.service.tasks.get_endpoint(endpoint_id, user_subject=current["user_subject"])
+                except (KeyError, RuntimeError):
+                    return False
+                if (endpoint["state"] != "active" or endpoint["endpoint_key"] != current.get("endpoint_key")
+                        or endpoint["agent_host"] != "openclaw" or endpoint["client_type"] != "web"
+                        or endpoint["account_id"] != current.get("account_id")
+                        or endpoint["external_subject"] != current.get("account_id")
+                        or endpoint["conversation_ref"] != current.get("openclaw_session_key")):
+                    return False
+                return True
+            return False
+
+        def _durable_stream(self, account: dict, *, cursor, timeline: bool, announce: bool) -> None:
+            session_token = self._cookie(SESSION_COOKIE)
+            if not self._stream_session_matches(account, session_token):
+                self._json(401, {"error": {"code": "AUTHENTICATION_REQUIRED"}})
+                self.close_connection = True
+                return
+            if peer_disconnected(self.connection):
+                self.close_connection = True
+                return
             self.close_connection = True
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -764,48 +773,66 @@ def create_workspace_http_server(
             self.send_header("Connection", "close")
             self._security_headers()
             self.end_headers()
-            cursor = (
-                max(int(after_sequence), 0)
-                if after_sequence is not None
-                else application.timeline_cursor(account)
-            )
-            deadline = time.monotonic() + 25
+            namespace = application.service.tasks.db_path
+            subject = account["user_subject"]
+            deadline = time.monotonic() + WORKSPACE_STREAM_LIFETIME_SECONDS
+            next_recheck = 0.0
+            next_heartbeat = time.monotonic() + WORKSPACE_STREAM_HEARTBEAT_SECONDS
+            wake_version = current_version(namespace, user_subject=subject)
+
+            def emit(event, payload, *, event_id=None):
+                wire = (f"id: {event_id}\n" if event_id is not None else "") + f"event: {event}\n"
+                wire += "data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+                self.wfile.write(wire.encode("utf-8"))
+
             try:
-                if after_sequence is None:
-                    self.wfile.write(
-                        (
-                            f"id: {cursor}\n"
-                            "event: cursor\n"
-                            'data: {"ready":true}\n\n'
-                        ).encode("utf-8")
-                    )
+                if announce:
+                    if not self._stream_session_matches(account, session_token):
+                        return
+                    emit("cursor", {"ready": True}, event_id=cursor)
                     self.wfile.flush()
                 while time.monotonic() < deadline:
-                    entries = application.list_timeline(
-                        account,
-                        after_sequence=cursor,
-                        limit=100,
-                    )
-                    for entry in entries:
-                        cursor = int(entry["sequence"])
-                        payload = json.dumps(
-                            entry,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                        self.wfile.write(
-                            (
-                                f"id: {cursor}\n"
-                                "event: timeline\n"
-                                f"data: {payload}\n\n"
-                            ).encode("utf-8")
-                        )
-                    if entries:
+                    if peer_disconnected(self.connection):
+                        return
+                    now = time.monotonic()
+                    latest_wake = current_version(namespace, user_subject=subject)
+                    if now >= next_recheck or latest_wake != wake_version:
+                        # Capture the hint before querying the ledger. A commit
+                        # during that read is either included or wakes the next
+                        # read; no SQLite connection survives the wait below.
+                        wake_version = latest_wake
+                        if not self._stream_session_matches(account, session_token):
+                            return
+                        entries = (application.list_timeline(account, after_sequence=cursor, limit=100)
+                                   if timeline else application.list_events(account, after_event_id=cursor, limit=100))
+                        if entries and not self._stream_session_matches(account, session_token):
+                            return
+                        for entry in entries:
+                            cursor = int(entry["sequence"]) if timeline else entry["event_id"]
+                            emit("timeline" if timeline else "task", entry, event_id=cursor)
+                        if entries:
+                            self.wfile.flush()
+                        next_recheck = time.monotonic() + (0.0 if len(entries) == 100 else WORKSPACE_STREAM_RECHECK_SECONDS)
+                        if len(entries) == 100:
+                            continue
+                    now = time.monotonic()
+                    if now >= next_heartbeat:
+                        if not self._stream_session_matches(account, session_token):
+                            return
+                        self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
-                    time.sleep(1)
-                self.wfile.write(b": keepalive\n\n")
-                self.wfile.flush()
+                        next_heartbeat = time.monotonic() + WORKSPACE_STREAM_HEARTBEAT_SECONDS
+                    wait = min(WORKSPACE_STREAM_PEER_CHECK_SECONDS, next_recheck - now,
+                               next_heartbeat - now, deadline - now)
+                    wait_for_change(namespace, user_subject=subject, after_version=wake_version, timeout=max(0.0, wait))
+                if self._stream_session_matches(account, session_token) and not peer_disconnected(self.connection):
+                    emit("reconnect", {"planned": True}, event_id=cursor)
+                    self.wfile.flush()
             except _CLIENT_DISCONNECT_ERRORS:
+                return
+            except (KeyError, PermissionError, ValueError, RuntimeError, sqlite3.Error):
+                # Headers have already been sent: never append a second HTTP
+                # response or expose internal messages to a live event stream.
                 return
 
         @_bounded_user_stream

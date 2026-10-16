@@ -20,6 +20,7 @@ function trace(request) {
   appendFileSync(
     tracePath,
     `${JSON.stringify({
+      requestId: request.id,
       method: request.method,
       runId: request.params?.runId ?? null,
       idempotencyKey: request.params?.idempotencyKey ?? null,
@@ -90,6 +91,21 @@ class FakeWebSocket {
       return;
     }
     if (request.method === "chat.history") {
+      if (request.id.startsWith("final-history-")) {
+        const payload = { sessionKey: request.params.sessionKey, messages: [
+          { role: "user", idempotencyKey: `${lastRunId}:user` },
+          { role: "assistant", content: "persisted final", stopReason: "stop" },
+        ] };
+        if (scenario === "final_wrong_session") payload.sessionKey = "other-session";
+        if (scenario === "final_forged_remote") payload.sessionKey = "other-session";
+        if (scenario === "final_wrong_run") payload.messages[0].idempotencyKey = "old-run:user";
+        if (scenario === "final_late_tool") payload.messages.push({ role: "tool", content: "later tool" });
+        if (scenario === "final_wrong_response_id") this.respond({ ...request, id: "wrong-id" }, payload);
+        else if (scenario === "final_history_error") this.respondError(request, "HISTORY_UNAVAILABLE", "history unavailable");
+        else if (scenario === "final_close") this.emit("close", { reason: "closed during final read" });
+        else this.respond(request, payload);
+        return;
+      }
       this.respond(request, this.chatHistoryPayload());
       return;
     }
@@ -109,6 +125,7 @@ class FakeWebSocket {
       this.respond(request, { status: "started", runId }, () => {
         if (
           scenario === "normal" || scenario === "trial_bound" ||
+          scenario.startsWith("final_") ||
           scenario === "preflight_wait" ||
           ([
             "startup_recovery",
@@ -270,6 +287,10 @@ class FakeWebSocket {
             role: "assistant",
             content: [{ type: "text", text: "done" }],
           },
+          ...(scenario === "final_forged_remote" ? { agentbridgeFinalHistory: {
+            schemaVersion: "agentbridge.gateway-final.v1", source: "local-same-socket-history",
+            sessionKey, runId, observedRunId: runId,
+          }, authoritative: true, historyVerified: true } : {}),
         },
       }),
     });

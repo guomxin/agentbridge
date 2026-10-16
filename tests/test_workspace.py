@@ -3305,14 +3305,14 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("const previousRunId = runId", script)
         self.assertIn("adoptLiveMessage(previousRunId, runId", script)
         self.assertIn("streamFailure.safeToRetry === true", script)
-        self.assertIn("hydrateTaskCards", script)
+        self.assertIn("applyCurrentSnapshot", script)
         self.assertIn("upsertTaskCard", script)
         self.assertIn(
-            'api("/api/timeline?entry_type=task_event&limit=240")',
+            'api("/api/current?active_limit=20&recent_limit=8&message_limit=80")',
             script,
         )
         self.assertIn(
-            'api("/api/timeline?entry_type=chat_message&limit=500")',
+            '/api/tasks/projections?ids=',
             script,
         )
         self.assertIn("loadOlderChatMessages", script)
@@ -3341,7 +3341,8 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("timelineReconnectTimer", script)
         self.assertIn("__WORKSPACE_ASSET_VERSION__", page)
         self.assertIn("task.completed", script)
-        self.assertIn('api("/api/artifacts/history?limit=20")', script)
+        self.assertIn("加载较早任务与文件", script)
+        self.assertIn("loadTaskHistory", script)
         self.assertIn("重新生成下载", script)
         self.assertIn("reissueArtifact", script)
         self.assertIn("task.artifact.refreshed", script)

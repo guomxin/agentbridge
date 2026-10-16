@@ -7,7 +7,7 @@ import ipaddress
 from pathlib import Path
 import re
 import ssl
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from agentbridge.auth.action_card import TrustedActionApplication
 from agentbridge.auth.card import MAX_AUTH_BODY_BYTES, AuthCardResponse, TrustedAuthApplication
@@ -19,6 +19,7 @@ from agentbridge.auth.document_download import TrustedDocumentDownloadApplicatio
 from agentbridge.auth.timeline_attachment import TrustedTimelineAttachmentApplication
 from agentbridge.core.network_security import validate_insecure_private_http_endpoint
 from agentbridge.core.tls_http import ThreadedTLSHTTPServer
+from agentbridge.core.http_streams import peer_disconnected, CLIENT_DISCONNECT_ERRORS
 
 
 @dataclass(frozen=True)
@@ -148,16 +149,40 @@ def create_auth_http_server(
                         self._send(flow_application._json(403, {"state": "unavailable", "terminal": True,
                             "title": "请求来源无效", "message": "请从原任务重新打开可信办理页。"}))
                         return
+                    # This endpoint owns one completed GET and closes it after
+                    # its response; peer probing never consumes a later request.
+                    self.close_connection = True
+                    if (self.headers.get("Transfer-Encoding")
+                            or len(self.headers.get_all("Content-Length", [])) > 1
+                            or self.headers.get("Content-Length", "0") != "0"):
+                        self._send(flow_application._json(400, {"state": "unavailable", "terminal": True,
+                            "title": "状态请求无效", "message": "请刷新可信办理页面。"}))
+                        return
+                    try:
+                        query = parse_qs(urlparse(self.path).query, keep_blank_values=True, max_num_fields=8)
+                        valid_query = all(len(query.get(key, [])) <= 1 for key in ("after", "wait"))
+                    except ValueError:
+                        query, valid_query = {}, False
                     response = flow_application.status(
                         kind, resource_id, presentation_id=presentation_id,
                         token=self.headers.get("X-AgentBridge-Flow-Token") or "", csrf_cookie=csrf_cookie,
+                        after=query.get("after", [""])[0], wait=query.get("wait", [0])[0] if valid_query else -1,
+                        cancelled=lambda: peer_disconnected(self.connection),
+                        request_allowed=lambda: self._origin_allowed()
+                            and (self.headers.get("Sec-Fetch-Site") or "").lower() in {"", "same-origin"},
                     )
+                    if response is None:
+                        return
+                    response.headers["Connection"] = "close"
                 else:
                     response = flow_application.get_card(
                         kind, resource_id, presentation_id=presentation_id,
                         secure_cookie=config.secure_cookie, csrf_cookie=csrf_cookie,
                     )
-                self._send(response)
+                try:
+                    self._send(response)
+                except CLIENT_DISCONNECT_ERRORS:
+                    self.close_connection = True
                 return
             interactive_target = _interactive_browser_target(self.path)
             if interactive_target is not None and interactive_application is not None:
