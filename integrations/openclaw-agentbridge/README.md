@@ -236,7 +236,7 @@ MCP 请求尚未获得响应时，插件只对以下工具执行两次短时传�
 
 宿主耗时通过现有身份认证的 `agentbridge_host_runtime_snapshot` 异步合批记录：
 
-- OpenClaw `2026.7.1` 的 `model_call_started/ended` 提供每次供应方调用耗时和可用的 TTFB；
+- OpenClaw `2026.7.1` 的 `model_call_started/ended` 在执行器实际发出事件时记录供应方调用耗时和可用的 TTFB；未发出时记为不可用，不能记作零次或伪造 TTFT。隔离实测的 Codex 执行器会发出工具及回合事件，但未发出这两个模型事件。
   没有首 token 钩子，TTFB 不等同于 TTFT。`llm_output` 只提取存在的用量，不把缺失写成零。
 - 提示构建、整个工具调用、MCP 完整请求和每次传输分别计时，嵌套阶段不能相加当作总耗时。
   自己测量的 duration 使用单调时钟；宿主原生模型 duration 明确标为墙钟。
@@ -281,6 +281,16 @@ task/command/session/endpoint 标识，不接 capability 或业务参数；任�
 计划恢复；中央原任务绑定、权限、材料和授权校验不受影响。OpenClaw 2026.7.1 的已核对 hooks
 不能动态删改同 run 后续模型工具 schema；本实现不声称做到动态 schema 裁剪。目录缓存可用
 `skillCatalogCache=false` 独立回退。生产主 agent 不因隔离模型对照切换 scope 或模型。
+
+2026.7.1 的延迟工具工厂可能由另一注册实例执行，并且不提供 `runId`。插件在同一宿主
+owner 内共享精确的 tool-call/session/run 关联，以及 Skill 和样例约束；关联同时核对 MCP
+地址、捕获的凭据摘要、身份绑定和 endpoint，客户端及权限画像仍各自读取实时服务。
+加载 Skill 必须有该工具调用的可信回合关联，不借用会话最近的入站或 Workspace dispatch。
+调用冲突、换身份/凭据、已结束回合均失败关闭；无约束的旧协议原始读取仍可执行。
+活跃 Skill/样例限制不按时间静默删除，容量满拒绝新加载；`agent_end` 按精确 session/run
+清理，重置会话清理该会话，防止迟到回调复活已结束绑定。工具关联另有五分钟及一千项上限，
+丢失关联不会放开已存在的专用范围或样例限制。局部协调器停止可保留其他实例的共享关联，
+整 Gateway 停止清理协调状态；Skill/样例约束由精确回合或会话清理，进程退出释放 owner 内存。
 
 ## 十一、测试与打包
 

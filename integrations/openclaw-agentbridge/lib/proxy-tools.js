@@ -115,6 +115,7 @@ export function createAgentBridgeProxyTools({
   taskIdResolver = null,
   taskIdBinder = null,
   taskRunRefResolver = null,
+  taskRunContextResolver = null,
   taskScopeResolver = null,
   taskContinuationResolver = null,
   interactionGetGuard = null,
@@ -166,6 +167,7 @@ export function createAgentBridgeProxyTools({
         taskIdResolver,
         taskIdBinder,
         taskRunRefResolver,
+        taskRunContextResolver,
         taskScopeResolver,
         taskContinuationResolver,
         interactionGetGuard,
@@ -223,6 +225,7 @@ function createProxyTool({
   taskIdResolver,
   taskIdBinder,
   taskRunRefResolver,
+  taskRunContextResolver,
   taskScopeResolver,
   taskContinuationResolver,
   interactionGetGuard,
@@ -259,12 +262,19 @@ function createProxyTool({
       const trialBlocked = workspaceSkillTrialGuard(trial, descriptor.name, normalizedParams);
       if (trialBlocked) return jsonToolResult(trialBlocked);
       const skillRun = taskRunRefResolver?.(toolCallId, context.sessionKey, "agentbridge_skill_get");
-      const skillContext = { ...context, runId: (skillRun && skillRun !== toolCallId ? skillRun : null) || context.runId };
+      const exact = taskRunContextResolver?.(toolCallId, context.sessionKey, context.runId);
+      const skillContext = { ...context, runId: taskRunRefResolver
+        ? (skillRun || (descriptor.name !== "agentbridge_skill_get" && exact?.status === "missing" ? context.runId : null))
+        : context.runId };
+      if (exact?.status === "rejected") {
+        return jsonToolResult({ status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
+          message: "当前工具缺少精确的身份、会话和独立回合关联，不能复用其他调用的上下文。" } });
+      }
       const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
       if (sampleBlocked) return jsonToolResult(sampleBlocked);
       const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
       if (scopeBlocked) return jsonToolResult(scopeBlocked);
-      if (descriptor.name === "agentbridge_skill_get" && !skillRunKey(skillContext, identity)) {
+      if (descriptor.name === "agentbridge_skill_get" && !skillRunKey(skillContext, identity, identityRouter)) {
         return jsonToolResult({ status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED", message: "当前宿主缺少独立回合上下文，无法安全加载业务助手。" } });
       }
       if (isTaskEligibleTool(descriptor.name)) {

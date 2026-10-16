@@ -23,29 +23,74 @@ export function workspaceSkillTrialGuard(trial, toolName, params) {
 }
 
 // Bind only within the authenticated host run; never retain another user's settings.
-const bindings = new WeakMap();
-export function skillRunKey(context, identity) {
+const runStates = new WeakMap();
+const RUN_STATE_TTL_MS = 5 * 60_000;
+const MAX_RUN_STATES = 4096;
+function runState(router) {
+  let state = router.skillRunState || runStates.get(router);
+  if (!state) {
+    state = { bindings: new Map(), samples: new Map(), ended: new Map() };
+    runStates.set(router, state);
+  }
+  const cutoff = (router.skillRunNow?.() ?? Date.now()) - RUN_STATE_TTL_MS;
+  // Never age an active restriction into an unbound/allowed state. Active
+  // bindings and sample guards end only at exact run/session cleanup; capacity
+  // rejects new loads rather than evicting authority-bearing constraints.
+  for (const [key, at] of state.ended) if (at <= cutoff) state.ended.delete(key);
+  return state;
+}
+function closedRun(router, context) {
+  return Boolean(context.runId && context.sessionKey && runState(router).ended.has(
+    JSON.stringify([context.sessionKey, context.runId])));
+}
+function closedRunRejection() {
+  return { status: "rejected", error: { code: "SKILL_RUN_CONTEXT_CLOSED",
+    message: "该独立回合已结束，不能复用其工具上下文。请在新回合中执行。" } };
+}
+function unresolvedRestriction(router, context, identity, entries) {
+  if (context.runId || !context.sessionKey) return false;
+  const probe = skillRunKey({ ...context, runId: "unresolved-context" }, identity, router);
+  const namespace = probe && JSON.parse(probe)[0];
+  return [...entries.keys()].some(key => {
+    const [owner, session] = JSON.parse(key);
+    return session === context.sessionKey && (!namespace || owner === namespace);
+  });
+}
+export function skillRunKey(context, identity, router = null) {
   if (!context.runId || !context.sessionKey || !identity.binding?.key) return null;
-  return JSON.stringify([identity.binding.key, context.sessionKey, context.runId]);
+  let namespace = identity.binding.key;
+  if (router?.catalogCacheKeyForBinding) {
+    const credential = router.catalogCacheKeyForBinding(identity.binding);
+    const endpoint = router.endpointKeyForSession(context.sessionKey);
+    if (!credential || !endpoint) return null;
+    namespace = JSON.stringify([credential, endpoint]);
+  }
+  if (router && runState(router).ended.has(JSON.stringify([context.sessionKey, context.runId]))) return null;
+  return JSON.stringify([namespace, context.sessionKey, context.runId]);
 }
 export function skillBindingMeta(router, context, identity) {
-  const key = skillRunKey(context, identity);
-  const id = key && bindings.get(router)?.get(key);
+  const key = skillRunKey(context, identity, router);
+  const id = key && runState(router).bindings.get(key);
   return id ? { "agentbridge/skill": { bindingId: typeof id === "string" ? id : id.bindingId } } : {};
 }
 export function rememberSkillBinding(router, context, identity, payload) {
-  const key = skillRunKey(context, identity);
+  const key = skillRunKey(context, identity, router);
   if (!key || payload?.status !== "succeeded" || typeof payload.binding_id !== "string") return;
-  let entries = bindings.get(router);
-  if (!entries) { entries = new Map(); bindings.set(router, entries); }
+  const entries = runState(router).bindings;
   // Bound memory. An evicted active binding must fail closed rather than lose its guard.
-  if (!entries.has(key) && entries.size >= 4096) throw new Error("Skill run binding capacity exceeded");
-  entries.set(key, { bindingId: payload.binding_id, skillId: payload.skill_id, profile: payload.profile });
+  if (!entries.has(key) && entries.size >= MAX_RUN_STATES) throw new Error("Skill run binding capacity exceeded");
+  entries.set(key, { bindingId: payload.binding_id, skillId: payload.skill_id, profile: payload.profile,
+    at: router.skillRunNow?.() ?? Date.now() });
 }
 
 export function boundSkillToolGuard(router, context, identity, toolName, params) {
+  if (closedRun(router, context)) return closedRunRejection();
   if (router.config?.boundSkillToolGuard !== true) return null;
-  const binding = bindings.get(router)?.get(skillRunKey(context, identity));
+  const entries = runState(router).bindings;
+  if (unresolvedRestriction(router, context, identity, entries)) return {
+    status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
+      message: "当前会话存在受限业务回合，缺少精确回合关联，不能绕过原限制。" } };
+  const binding = entries.get(skillRunKey(context, identity, router));
   const scope = boundToolScope(binding);
   if (!scope) return null;
   const reject = () => ({ status: "rejected", error: { code: "SKILL_TOOL_SCOPE_REQUIRED",
@@ -113,27 +158,44 @@ export async function skillCatalog(identity, { router = null, now = () => Date.n
   finally { if (flights.get(key) === promise) flights.delete(key); }
 }
 
-const sampleRuns = new WeakMap();
 export function releaseSkillRun(router, context) {
   if (!context.runId || !context.sessionKey) return;
-  for (const entries of [bindings.get(router), sampleRuns.get(router)]) {
-    if (!entries) continue;
+  const state = runState(router);
+  state.ended.set(JSON.stringify([context.sessionKey, context.runId]), router.skillRunNow?.() ?? Date.now());
+  while (state.ended.size > MAX_RUN_STATES) state.ended.delete(state.ended.keys().next().value);
+  for (const entries of [state.bindings, state.samples]) {
     for (const key of entries.keys()) {
       const [, session, run] = JSON.parse(key);
       if (session === context.sessionKey && run === context.runId) entries.delete(key);
     }
   }
 }
+export function releaseSkillSession(router, sessionKey) {
+  const state = runState(router);
+  for (const entries of [state.bindings, state.samples]) {
+    for (const key of entries.keys()) {
+      const [, session, runId] = JSON.parse(key);
+      if (session === sessionKey) {
+        entries.delete(key);
+        state.ended.set(JSON.stringify([session, runId]), router.skillRunNow?.() ?? Date.now());
+      }
+    }
+  }
+  while (state.ended.size > MAX_RUN_STATES) state.ended.delete(state.ended.keys().next().value);
+}
 export function draftSampleGuard(router, context, identity, toolName, params) {
-  const key = skillRunKey(context, identity);
+  if (closedRun(router, context)) return closedRunRejection();
+  if (unresolvedRestriction(router, context, identity, runState(router).samples)) return {
+    status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
+      message: "当前会话存在仅样例回合，缺少精确回合关联，不能调用业务工具。" } };
+  const key = skillRunKey(context, identity, router);
   if (toolName === "agentbridge_skill_authoring" && params?.action === "test") {
     if (!key) return {status:"rejected",error:{code:"SKILL_RUN_CONTEXT_REQUIRED",message:"缺少独立回合，不能开始草稿样例。"}};
-    let runs=sampleRuns.get(router);
-    if (!runs) { runs=new Set(); sampleRuns.set(router,runs); }
-    if (runs.size >= 4096 && !runs.has(key)) return {status:"rejected",error:{code:"SKILL_SAMPLE_CAPACITY",message:"样例容量已满，请稍后重试。"}};
-    runs.add(key);
+    const runs=runState(router).samples;
+    if (runs.size >= MAX_RUN_STATES && !runs.has(key)) return {status:"rejected",error:{code:"SKILL_SAMPLE_CAPACITY",message:"样例容量已满，请稍后重试。"}};
+    runs.set(key, router.skillRunNow?.() ?? Date.now());
   }
-  if (key && sampleRuns.get(router)?.has(key) && !["agentbridge_skill_authoring","agentbridge_skill_catalog"].includes(toolName))
+  if (key && runState(router).samples.has(key) && !["agentbridge_skill_authoring","agentbridge_skill_catalog"].includes(toolName))
     return {status:"rejected",error:{code:"SKILL_SAMPLE_ONLY",message:"本轮为草稿合成样例，禁止调用业务工具。请另起一轮办理真实业务。"}};
   return null;
 }

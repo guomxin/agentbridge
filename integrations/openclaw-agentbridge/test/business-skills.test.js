@@ -86,7 +86,7 @@ test('completed run releases only its own skill and sample guards',async()=>{
   releaseSkillRun(router,one);
   assert.deepEqual(skillBindingMeta(router,one,identity),{});
   assert.equal(skillBindingMeta(router,two,identity)['agentbridge/skill'].bindingId,'b');
-  assert.equal(draftSampleGuard(router,one,identity,'database_execute',{}),null);
+  assert.equal(draftSampleGuard(router,one,identity,'database_execute',{}).error.code,'SKILL_RUN_CONTEXT_CLOSED');
 });
 
 test('large catalog uses a bounded shortlist with explicit discovery fallback',async()=>{

@@ -404,6 +404,7 @@ test("persists ambiguous task choices and blocks duplicate work after selection"
   const pending = tools.find(
     (tool) => tool.name === "oa_workflow_pending_list",
   );
+  bindToolCall(harness,{toolCallId:"tool-observe-only",sessionKey,runId:"run-observe-only"});
   const blocked = await pending.execute("tool-observe-only", { limit: 5 });
   assert.equal(
     blocked.details.structuredContent.error.code,
@@ -934,6 +935,7 @@ test("binds an explicit task follow-up to the existing task ID", async () => {
   const pending = tools.find(
     (tool) => tool.name === "oa_workflow_pending_list",
   );
+  bindToolCall(harness,{toolCallId:"tool-follow-up",sessionKey,runId:"run-follow-up"});
   const result = await pending.execute("tool-follow-up", { limit: 5 });
 
   assert.equal(businessCalls.length, 1);
@@ -1072,6 +1074,7 @@ test("keeps workflow revoke on a separate task across trusted-card stages", asyn
     const revoke = tools.find(
       (tool) => tool.name === "oa_workflow_revoke_prepare",
     );
+    bindToolCall(harness,{toolCallId:`tool-revoke-${index + 1}`,sessionKey,runId});
     const result = await revoke.execute(`tool-revoke-${index + 1}`, {
       affair_id: "affair-business-trip-1",
     });
@@ -1508,6 +1511,7 @@ test("shares workspace identity and endpoint bindings with the agent runtime ins
   const pendingTool = tools.find(
     (tool) => tool.name === "oa_workflow_pending_list",
   );
+  bindToolCall(gateway,{toolCallId:"workspace-pending",sessionKey,runId:"workspace-shared-run"});
   const result = await pendingTool.execute("workspace-pending", { limit: 5 });
 
   assert.equal(responses[0].ok, true);
@@ -3588,6 +3592,7 @@ test("suppresses same-run interaction_get but permits a later-run redisplay", as
   const sameRunGet = sameRunTools.find(
     (tool) => tool.name === "agentbridge_interaction_get",
   );
+  bindToolCall(harness,{toolCallId:"tool-get-same-run",sessionKey,runId:"run-card-created"});
   const guarded = await sameRunGet.execute(
     "tool-get-same-run",
     { interaction_id: pending.interactionId },
@@ -3605,6 +3610,7 @@ test("suppresses same-run interaction_get but permits a later-run redisplay", as
   const laterRunGet = laterRunTools.find(
     (tool) => tool.name === "agentbridge_interaction_get",
   );
+  bindToolCall(harness,{toolCallId:"tool-get-later-run",sessionKey,runId:"run-user-reports-missing-card"});
   await laterRunGet.execute(
     "tool-get-later-run",
     { interaction_id: pending.interactionId },
@@ -7865,15 +7871,18 @@ test("native CSV delivery survives missing middleware and strips bytes on succes
 });
 
 
-test("Skills use authenticated Workspace turns without per-tool hook context", async () => {
+test("Skills require an exact observed call even after an authenticated Workspace bind", async () => {
   const harness = fakeApi({ autoPoll: false });
   const coordinator = registerAgentBridgeInteractions(harness.api, { mcpClient: null });
   const sessionKey = "agent:main:agentbridge-workspace:direct:skill-user";
   const resolve = (id, key, name) => coordinator.taskRunRefForToolCall(id, key, name);
   assert.equal(resolve("load", sessionKey, "agentbridge_skill_get"), null);
   coordinator.bindWorkspaceTurn(sessionKey, "turn-one", "使用日志助手");
-  assert.equal(resolve("load", sessionKey, "agentbridge_skill_get"), "workspace:turn-one");
-  assert.equal(resolve("read", sessionKey, "agentbridge_skill_get"), "workspace:turn-one");
+  assert.equal(resolve("load", sessionKey, "agentbridge_skill_get"), null);
+  bindToolCall(harness,{toolCallId:"load",sessionKey,runId:"native-one"});
+  bindToolCall(harness,{toolCallId:"read",sessionKey,runId:"native-one"});
+  assert.equal(resolve("load", sessionKey, "agentbridge_skill_get"), "native-one");
+  assert.equal(resolve("read", sessionKey, "agentbridge_skill_get"), "native-one");
   assert.equal(resolve("read", "other-session", "agentbridge_skill_get"), null);
   const calls = [];
   const client = {
@@ -7890,6 +7899,7 @@ test("Skills use authenticated Workspace turns without per-tool hook context", a
   await makeTools("per-tool-2").find(t=>t.name==="agentbridge_skill_catalog").execute("read",{});
   assert.equal(calls[1].meta["agentbridge/skill"].bindingId,"skill-one");
   coordinator.bindWorkspaceTurn(sessionKey, "turn-two", "另一个任务");
+  bindToolCall(harness,{toolCallId:"new-turn",sessionKey,runId:"native-two"});
   await makeTools("per-tool-3").find(t=>t.name==="agentbridge_skill_catalog").execute("new-turn",{});
   assert.equal(calls[2].meta["agentbridge/skill"],undefined);
   bindToolCall(harness,{toolCallId:"foreign",sessionKey:"other-session",runId:"other-run"});
@@ -7930,4 +7940,60 @@ test('Workspace trial survives runtime recreation and blocks tools before test s
   first.bindWorkspaceTurn(sessionKey,'normal','你好');
   assert.equal(second.skillTrialForSession(sessionKey),null);
   assert.equal(two.hooks.before_tool_call({toolName:'exec',params:{}},{sessionKey}),undefined);
+});
+
+test('native hook and lazy tool factories share only exact owner/session/run associations', async () => {
+  const sharedState = createInteractionSharedState();
+  const config = { autoPoll: false, syncTimeline: false, boundSkillToolGuard: true,
+    mcpUrl: 'https://synthetic.invalid/mcp', identityBindings: [
+      {channel:'telegram',senderId:'1001',tokenEnv:'TOKEN'},
+      {channel:'telegram',senderId:'1002',tokenEnv:'TOKEN'},
+    ] };
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    const request = JSON.parse(options.body);
+    calls.push(request.params);
+    return new Response(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{structuredContent:{
+      status:'succeeded',binding_id:'exact-binding',skill_id:'oa-pending',profile:'single',items:[],
+    }}}),{status:200,headers:{'Content-Type':'application/json'}});
+  };
+  const first = fakeApi(config), lazy = fakeApi(config), rotated = fakeApi(config);
+  const owner = registerAgentBridgeInteractions(first.api,{sharedState,env:{TOKEN:'synthetic-one'},fetchImpl});
+  const peer = registerAgentBridgeInteractions(lazy.api,{sharedState,env:{TOKEN:'synthetic-one'},fetchImpl});
+  registerAgentBridgeInteractions(rotated.api,{sharedState,env:{TOKEN:'synthetic-two'},fetchImpl});
+  const sessionKey = 'agent:main:telegram:direct:1001', runId = 'native-exact-run';
+  const tool = (h,name,key=sessionKey,extra={}) => h.toolFactory({sessionKey:key,messageChannel:'telegram',...extra}).find(t=>t.name===name);
+  bindToolCall(first,{toolCallId:'load-exact',sessionKey,runId});
+  const loaded = await tool(lazy,'agentbridge_skill_get').execute('load-exact',{skill_id:'oa-pending',profile:'single'});
+  assert.equal(loaded.structuredContent.status,'succeeded');
+  assert.equal(calls.length,1);
+  bindToolCall(first,{toolCallId:'read-exact',sessionKey,runId});
+  await tool(first,'agentbridge_skill_catalog').execute('read-exact',{});
+  assert.equal(calls.at(-1)._meta['agentbridge/skill'].bindingId,'exact-binding');
+  assert.equal(first.hooks.before_tool_call({toolName:'exec',toolCallId:'builtin',runId,params:{}},{sessionKey,runId}).block,true);
+  // A newer inbound message cannot reassign old calls to its latest turn.
+  owner.recordUserMessage({content:'new independent request'},{sessionKey});
+  assert.equal(peer.taskRunRefForToolCall('read-exact',sessionKey,'agentbridge_skill_get'),runId);
+  const before = calls.length;
+  for (const [h,id,key,extra] of [[lazy,'unknown',sessionKey,{}],
+    [lazy,'load-exact','agent:main:telegram:direct:1002',{}],
+    [rotated,'load-exact',sessionKey,{}],
+    [lazy,'unknown',sessionKey,{runId}]]) {
+    const result = await tool(h,'agentbridge_skill_get',key,extra).execute(id,{skill_id:'oa-pending',profile:'single'});
+    assert.equal((result.structuredContent || JSON.parse(result.content[0].text)).error.code,'SKILL_RUN_CONTEXT_REQUIRED');
+  }
+  assert.equal(calls.length,before);
+  owner.stopAll({clearSharedState:false});
+  assert.equal(peer.taskRunRefForToolCall('read-exact',sessionKey,'agentbridge_skill_get'),runId);
+  first.hooks.agent_end({success:true,runId},{sessionKey,runId});
+  bindToolCall(first,{toolCallId:'late-exact',sessionKey,runId});
+  assert.equal(peer.taskRunRefForToolCall('late-exact',sessionKey,'agentbridge_skill_get'),null);
+  bindToolCall(first,{toolCallId:'load-next',sessionKey,runId:'native-next-run'});
+  await tool(lazy,'agentbridge_skill_get').execute('load-next',{skill_id:'oa-pending',profile:'single'});
+  assert.equal(calls.at(-1)._meta['agentbridge/skill'],undefined);
+  bindToolCall(first,{toolCallId:'conflict',sessionKey,runId:'one'});
+  bindToolCall(first,{toolCallId:'conflict',sessionKey,runId:'two'});
+  const conflict = await tool(lazy,'agentbridge_skill_get',sessionKey,{runId:'two'}).execute('conflict',{skill_id:'oa-pending',profile:'single'});
+  assert.equal((conflict.structuredContent || JSON.parse(conflict.content[0].text)).error.code,'SKILL_RUN_CONTEXT_REQUIRED');
+  peer.stopAll();
 });

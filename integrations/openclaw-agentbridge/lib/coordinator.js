@@ -88,6 +88,8 @@ export function createInteractionSharedState() {
     terminalTasks: new Map(),
     identitySessionBindings: new Map(),
     identitySessionEndpoints: new Map(),
+    toolBindings: new Map(),
+    endedToolRuns: new Map(),
   };
 }
 
@@ -104,6 +106,7 @@ export class InteractionCoordinator {
     fetchImpl = globalThis.fetch,
     saveMediaBufferImpl = saveOpenClawMediaBuffer,
     interactionPresenter = null,
+    toolIdentityResolver = null,
   }) {
     this.api = api;
     this.config = config;
@@ -115,6 +118,7 @@ export class InteractionCoordinator {
     this.fetchImpl = fetchImpl;
     this.saveMediaBufferImpl = saveMediaBufferImpl;
     this.interactionPresenter = interactionPresenter;
+    this.toolIdentityResolver = toolIdentityResolver;
     this.sharedStateId = sharedState.id || "isolated";
     this.records = sharedState.records;
     this.polls = new Map();
@@ -126,7 +130,8 @@ export class InteractionCoordinator {
     this.notificationActiveTasks = new Set();
     this.notificationWorkerCount = 0;
     this.notificationClaimReservations = 0;
-    this.toolBindings = new Map();
+    this.toolBindings = sharedState.toolBindings || (sharedState.toolBindings = new Map());
+    this.endedToolRuns = sharedState.endedToolRuns || (sharedState.endedToolRuns = new Map());
     this.sessionRoutes = sharedState.sessionRoutes;
     this.directDeliveries = sharedState.directDeliveries;
     this.loginContinuations =
@@ -318,9 +323,21 @@ export class InteractionCoordinator {
     if (!toolCallId) {
       return;
     }
+    this.pruneToolBindings();
+    const sessionKey = event.sessionKey || context.sessionKey || null;
+    const runId = event.runId || context.runId || null;
+    const scope = this.toolIdentityResolver?.(sessionKey) || null;
+    if (runId && this.endedToolRuns.has(JSON.stringify([sessionKey, runId]))) return;
+    const previous = this.toolBindings.get(toolCallId);
+    if (previous && (previous.conflict || previous.sessionKey !== sessionKey ||
+        (previous.runId && runId && previous.runId !== runId) || previous.identityScope !== scope)) {
+      this.toolBindings.set(toolCallId, { conflict: true, capturedAt: this.now() });
+      return;
+    }
     this.toolBindings.set(toolCallId, {
-      sessionKey: context.sessionKey || null,
-      runId: event.runId || context.runId || null,
+      sessionKey,
+      runId: runId || previous?.runId || null,
+      identityScope: scope,
       capturedAt: this.now(),
       readContinuation: normalizeReadContinuation(
         event.toolName,
@@ -332,16 +349,18 @@ export class InteractionCoordinator {
   }
 
   taskRunRefForToolCall(toolCallId, sessionKey, toolName = null) {
+    this.pruneToolBindings();
     this.prunePlanningRepairs();
     const normalized = normalizeToolCallId(toolCallId);
     const binding = normalized ? this.toolBindings.get(normalized) : null;
-    // Deferred native tools may execute without a before_tool_call binding.
-    // Workspace's server-validated turn (or the channel's inbound message)
-    // still supplies the shared user-turn identity; never use a tool-call ID.
     if (toolName === "agentbridge_skill_get") {
-      if (binding?.sessionKey && binding.sessionKey !== sessionKey) return null;
-      return this.recentUserMessages.get(sessionKey)?.taskRunRef || binding?.runId || null;
+      // Lazy native tool factories may belong to a different registry. Only
+      // this exact host-observed call can supply its run; a newer inbound
+      // message or redeemed Workspace dispatch is not evidence for old calls.
+      const exact = this.toolRunContextForCall(toolCallId, sessionKey);
+      return exact.status === "bound" ? exact.runId : null;
     }
+    if (binding?.conflict) return null;
     if (!binding || (binding.sessionKey && binding.sessionKey !== sessionKey)) {
       return normalized;
     }
@@ -360,6 +379,27 @@ export class InteractionCoordinator {
       return recent.taskRunRef;
     }
     return binding.runId || normalized;
+  }
+
+  toolRunContextForCall(toolCallId, sessionKey, expectedRunId = null) {
+    this.pruneToolBindings();
+    const binding = this.toolBindings.get(normalizeToolCallId(toolCallId));
+    if (expectedRunId && this.endedToolRuns.has(JSON.stringify([sessionKey, expectedRunId]))) return { status: "rejected" };
+    if (!binding) return { status: "missing" };
+    if (binding.conflict || binding.sessionKey !== sessionKey ||
+        (expectedRunId && binding.runId && expectedRunId !== binding.runId) ||
+        (this.toolIdentityResolver && (!binding.identityScope ||
+          binding.identityScope !== this.toolIdentityResolver(sessionKey)))) return { status: "rejected" };
+    return binding.runId ? { status: "bound", runId: binding.runId } : { status: "missing" };
+  }
+
+  releaseToolRun(sessionKey, runId) {
+    if (!sessionKey || !runId) return;
+    this.endedToolRuns.set(JSON.stringify([sessionKey, runId]), this.now());
+    for (const [key, binding] of this.toolBindings) {
+      if (binding.sessionKey === sessionKey && binding.runId === runId) this.toolBindings.delete(key);
+    }
+    this.pruneToolBindings();
   }
 
   taskScopeForBusinessCall(sessionKey, toolName) {
@@ -1057,6 +1097,7 @@ export class InteractionCoordinator {
     }
     for (const [toolCallId, binding] of this.toolBindings) {
       if (binding.sessionKey === sessionKey) {
+        if (binding.runId) this.endedToolRuns.set(JSON.stringify([sessionKey, binding.runId]), this.now());
         this.toolBindings.delete(toolCallId);
       }
     }
@@ -1077,7 +1118,7 @@ export class InteractionCoordinator {
     }
   }
 
-  stopAll() {
+  stopAll({ clearSharedState = true } = {}) {
     this.notificationController?.abort();
     this.notificationController = null;
     this.notificationPump = null;
@@ -1092,7 +1133,9 @@ export class InteractionCoordinator {
     }
     this.abortControllers.clear();
     this.polls.clear();
+    if (!clearSharedState) return;
     this.toolBindings.clear();
+    this.endedToolRuns.clear();
     this.loginContinuations.clear();
     this.recentUserMessages.clear();
     this.planningRepairs.clear();
@@ -2674,7 +2717,7 @@ export class InteractionCoordinator {
     }
     const binding = this.toolBindings.get(normalized) || null;
     this.toolBindings.delete(normalized);
-    return binding;
+    return binding?.conflict ? null : binding;
   }
 
   pruneToolBindings() {
@@ -2684,6 +2727,8 @@ export class InteractionCoordinator {
         this.toolBindings.delete(toolCallId);
       }
     }
+    for (const [key, at] of this.endedToolRuns) if (at <= cutoff) this.endedToolRuns.delete(key);
+    while (this.endedToolRuns.size > MAX_TOOL_BINDINGS) this.endedToolRuns.delete(this.endedToolRuns.keys().next().value);
     while (this.toolBindings.size > MAX_TOOL_BINDINGS) {
       const oldest = this.toolBindings.keys().next().value;
       if (!oldest) {

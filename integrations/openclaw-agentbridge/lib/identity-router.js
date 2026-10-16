@@ -19,6 +19,7 @@ export class AgentBridgeIdentityRouter {
     planningPolicies = new Map(),
     catalogVersions = new Map(),
     catalogCache = new Map(),
+    skillRunState = null,
   }) {
     this.config = config;
     this.endpoint = resolveMcpEndpoint(config, hostConfig);
@@ -34,6 +35,7 @@ export class AgentBridgeIdentityRouter {
     this.planningPolicies = planningPolicies;
     this.catalogVersions = catalogVersions;
     this.catalogCache = catalogCache;
+    this.skillRunState = skillRunState || { bindings: new Map(), samples: new Map(), ended: new Map() };
     this.sessionBindings = sessionBindings;
     this.sessionEndpoints = sessionEndpoints;
   }

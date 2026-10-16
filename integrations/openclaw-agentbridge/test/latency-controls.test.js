@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAgentBridgeProxyTools } from "../lib/proxy-tools.js";
-import { skillCatalog, rememberSkillBinding, boundSkillToolGuard } from "../lib/business-skills.js";
+import { skillCatalog, rememberSkillBinding, boundSkillToolGuard, draftSampleGuard,
+  releaseSkillRun, releaseSkillSession, skillBindingMeta } from "../lib/business-skills.js";
 import { AgentBridgeIdentityRouter } from "../lib/identity-router.js";
 import { resolvePluginConfig } from "../lib/config.js";
 import { createTaskCommandRunner } from "../lib/task-commands.js";
-import { InteractionCoordinator } from "../lib/coordinator.js";
+import { InteractionCoordinator, createInteractionSharedState } from "../lib/coordinator.js";
 import { interaction } from "./fixtures.js";
 
 const taskId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -206,4 +207,76 @@ test("prepared Workspace interaction starts its real original poll without a del
   assert.equal(coordinator.sessionRoutes.size, 0);
   releaseDecision(); await coordinator.waitForIdle();
   assert.equal(resumes, 1);
+});
+
+test('unconstrained legacy reads survive absent hooks but explicit conflict cannot use factory runId', async () => {
+  let calls=0;
+  const router={config:{},resolveToolContext:()=>({bound:true,binding,client:{async callToolResult(){calls++;return{structuredContent:{status:'succeeded'}};}}})};
+  const make=status=>createAgentBridgeProxyTools({context,identityRouter:router,serverName:'agentbridge',
+    taskRunRefResolver:()=>null,taskRunContextResolver:()=>({status})});
+  await make('missing').find(t=>t.name==='agentbridge_skill_catalog').execute('legacy-read',{});
+  assert.equal(calls,1);
+  for(const [status,name] of [['missing','agentbridge_skill_get'],['rejected','agentbridge_skill_get'],['rejected','agentbridge_skill_catalog']]){
+    const result=await make(status).find(t=>t.name===name).execute('unobserved-call',{skill_id:'oa-pending',profile:'single'});
+    assert.equal(JSON.parse(result.content[0].text).error.code,'SKILL_RUN_CONTEXT_REQUIRED');
+  }
+  assert.equal(calls,1);
+});
+
+test('active scope and sample constraints survive long turns and missing-call context',()=>{
+  let now=1000;
+  const router={config:{boundSkillToolGuard:true},skillRunNow:()=>now},identity={binding};
+  rememberSkillBinding(router,context,identity,{status:'succeeded',binding_id:'retained',skill_id:'oa-pending',profile:'single'});
+  const sample={...context,runId:'sample'};
+  draftSampleGuard(router,sample,identity,'agentbridge_skill_authoring',{action:'test'});
+  now+=60*60_000;
+  assert.equal(boundSkillToolGuard(router,context,identity,'exec',{}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+  assert.equal(draftSampleGuard(router,sample,identity,'oa_workflow_pending_list',{}).error.code,'SKILL_SAMPLE_ONLY');
+  const unknown={sessionKey:context.sessionKey};
+  assert.equal(boundSkillToolGuard(router,unknown,identity,'exec',{}).error.code,'SKILL_RUN_CONTEXT_REQUIRED');
+  assert.equal(draftSampleGuard(router,unknown,identity,'oa_workflow_pending_list',{}).error.code,'SKILL_RUN_CONTEXT_REQUIRED');
+  releaseSkillRun(router,context);
+  rememberSkillBinding(router,context,identity,{status:'succeeded',binding_id:'late',skill_id:'oa-pending',profile:'single'});
+  assert.deepEqual(skillBindingMeta(router,context,identity),{});
+  assert.equal(draftSampleGuard(router,context,identity,'oa_workflow_pending_list',{}).error.code,'SKILL_RUN_CONTEXT_CLOSED');
+  releaseSkillSession(router,context.sessionKey);
+  assert.equal(draftSampleGuard(router,sample,identity,'oa_workflow_pending_list',{}).error.code,'SKILL_RUN_CONTEXT_CLOSED');
+});
+
+test('capacity refuses new constraints while retaining existing scope and sample guards',()=>{
+  const router={config:{boundSkillToolGuard:true}},identity={binding};
+  for(let i=0;i<4096;i++){
+    const c={...context,runId:'capacity-'+i};
+    rememberSkillBinding(router,c,identity,{status:'succeeded',binding_id:'binding-'+i,skill_id:'oa-pending',profile:'single'});
+    assert.equal(draftSampleGuard(router,c,identity,'agentbridge_skill_authoring',{action:'test'}),null);
+  }
+  const overflow={...context,runId:'overflow'};
+  assert.throws(()=>rememberSkillBinding(router,overflow,identity,{status:'succeeded',binding_id:'extra'}),/capacity/);
+  assert.equal(draftSampleGuard(router,overflow,identity,'agentbridge_skill_authoring',{action:'test'}).error.code,'SKILL_SAMPLE_CAPACITY');
+  assert.equal(boundSkillToolGuard(router,{...context,runId:'capacity-0'},identity,'exec',{}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+  assert.equal(draftSampleGuard(router,{...context,runId:'capacity-0'},identity,'oa_workflow_pending_list',{}).error.code,'SKILL_SAMPLE_ONLY');
+});
+
+test('exact cross-registry call links are bounded, expire closed and survive local stop',()=>{
+  let now=1000,scope='owner-a';
+  const sharedState=createInteractionSharedState();
+  const make=()=>new InteractionCoordinator({api:{logger:{warn(){}}},config:{},sharedState,
+    now:()=>now,toolIdentityResolver:()=>scope});
+  const a=make(),b=make(),sessionKey=context.sessionKey;
+  a.bindToolCall({toolCallId:'exact',runId:'run-a'},{sessionKey});
+  a.bindToolCall({toolCallId:'exact'},{sessionKey});
+  assert.equal(b.taskRunRefForToolCall('exact',sessionKey,'agentbridge_skill_get'),'run-a');
+  scope='owner-b';
+  assert.equal(b.toolRunContextForCall('exact',sessionKey).status,'rejected');
+  scope='owner-a';a.stopAll({clearSharedState:false});
+  assert.equal(b.taskRunRefForToolCall('exact',sessionKey,'agentbridge_skill_get'),'run-a');
+  now+=300_001;
+  b.bindWorkspaceTurn(sessionKey,'new-dispatch','new request');
+  assert.equal(b.taskRunRefForToolCall('exact',sessionKey,'agentbridge_skill_get'),null);
+  for(let i=0;i<1001;i++)a.bindToolCall({toolCallId:'bounded-'+i,runId:'run-'+i},{sessionKey});
+  assert.equal(sharedState.toolBindings.size,1000);
+  assert.equal(b.taskRunRefForToolCall('bounded-0',sessionKey,'agentbridge_skill_get'),null);
+  b.releaseToolRun(sessionKey,'run-1000');
+  a.bindToolCall({toolCallId:'late',runId:'run-1000'},{sessionKey});
+  assert.equal(b.taskRunRefForToolCall('late',sessionKey,'agentbridge_skill_get'),null);
 });

@@ -1,5 +1,5 @@
 import { resolvePluginConfig } from "./config.js";
-import { businessSkillContext, releaseSkillRun, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
+import { businessSkillContext, releaseSkillRun, releaseSkillSession, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
 import { registerSkillCompletion } from "./skill-completion.js";
 import {
   createInteractionSharedState,
@@ -75,6 +75,9 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       planningPolicies: identityPlanningPolicies,
       catalogVersions: sharedState.catalogVersions || (sharedState.catalogVersions = new Map()),
       catalogCache: sharedState.catalogCache || (sharedState.catalogCache = new Map()),
+      skillRunState: sharedState.skillRunState || (sharedState.skillRunState = {
+        bindings: new Map(), samples: new Map(), ended: new Map(),
+      }),
     });
   const mcpClient = identityRouter.enabled
     ? null
@@ -97,6 +100,13 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       ? (sessionKey) => identityRouter.clientForSession(sessionKey)
       : null,
     sharedState,
+    toolIdentityResolver: identityRouter.enabled && typeof identityRouter.catalogCacheKeyForBinding === "function"
+      && typeof identityRouter.endpointKeyForSession === "function" ? sessionKey => {
+      const identity = identityRouter.resolveToolContext({ sessionKey });
+      const namespace = identity?.bound && identityRouter.catalogCacheKeyForBinding?.(identity.binding);
+      const endpoint = identity?.bound && identityRouter.endpointKeyForSession(sessionKey);
+      return namespace && endpoint ? JSON.stringify([namespace, endpoint]) : null;
+    } : null,
     sleep: dependencies.sleep,
     notificationSleep: dependencies.notificationSleep,
     now: dependencies.now,
@@ -160,6 +170,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
               sessionKey,
               toolName,
             ),
+          taskRunContextResolver: (toolCallId, sessionKey, expectedRunId) =>
+            coordinator.toolRunContextForCall(toolCallId, sessionKey, expectedRunId),
           taskContinuationResolver: (sessionKey) =>
             coordinator.taskContinuationForSession(sessionKey),
           interactionGetGuard: (request) =>
@@ -303,7 +315,9 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   api.on('agent_end', (event, context) => {
     performanceRecorder?.record("host.agent_end", { outcome: event.success ? "completed" : "error" },
       { ...context, runId: event.runId || context.runId });
-    return releaseSkillRun(identityRouter, context);
+    const runContext = { ...context, runId: event.runId || context.runId };
+    coordinator.releaseToolRun(runContext.sessionKey, runContext.runId);
+    return releaseSkillRun(identityRouter, runContext);
   });
 
   // Telegram and WeChat emit this hook after delivery succeeds.
@@ -436,6 +450,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     if (["reset", "deleted"].includes(event.reason)) {
       const sessionKey = context.sessionKey || event.sessionKey;
       coordinator.removeSession(sessionKey);
+      releaseSkillSession(identityRouter, sessionKey);
       identityRouter.removeSession(sessionKey);
       performanceRecorder?.forgetSession(sessionKey);
     }
