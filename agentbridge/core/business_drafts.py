@@ -259,7 +259,8 @@ class BusinessDraftService:
                 started_version = int(draft["version"]) + 1
                 connection.execute("UPDATE business_drafts SET state='previewing',version=?,preview_id=NULL,updated_at=? WHERE draft_id=?",
                                    (started_version, self.store.clock().isoformat(), draft["draft_id"]))
-            prepared = self._prepare(source, task_id, values)
+            with self._timing(source, task_id, "draft.preview"):
+                prepared = self._prepare(source, task_id, values)
             self._check_selection(prepared, selection)
             with store_transaction(self.store) as connection:
                 source, interaction, task_id, endpoint, current = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
@@ -462,7 +463,8 @@ class BusinessDraftService:
             raise BusinessDraftError("DRAFT_PREVIEW_BUSY", "业务状态正在核对，请稍后重试。", status=429)
         failure = None
         try:
-            prepared = self._prepare(source, task_id, values)
+            with self._timing(source, task_id, "draft.recheck"):
+                prepared = self._prepare(source, task_id, values)
             self._check_selection(prepared, selection)
             if any(old_plan["target"].get(key) != prepared["plan"]["target"].get(key) for key in profile.identity_fields):
                 raise BusinessDraftError("DRAFT_TARGET_CHANGED", "办理目标身份已变化，请从原任务重新准备。", status=409)
@@ -566,8 +568,11 @@ class BusinessDraftService:
 
     def _prepare(self, source, task_id, values):
         profile = profile_for_source(source)
+        trace = self._trace(source, task_id)
         def prepare(adapter, worker, session):
-            context = CapabilityContext(user_subject=source["user_subject"], request_id="draft-preview",
+            context = CapabilityContext(user_subject=source["user_subject"],
+                request_id=(trace or {}).get("request_id") or source["create_operation_id"],
+                trace_id=(trace or {}).get("trace_id"),
                 operation_id=source["create_operation_id"], spec=self.service.registry.get(source["capability_name"]), task_id=task_id)
             arguments = {**source["form_schema"].get("_agentbridge_resume_arguments", {}), **values}
             prepared = self.service._controlled_writes().prepare_preview(context=context, session=session,
@@ -577,6 +582,17 @@ class BusinessDraftService:
             prepared["plan"]["_business_draft"] = self._plan_marker(source, task_id)
             return prepared
         return self._read_downstream(source, prepare)
+
+    def _trace(self, source, task_id=None):
+        return (self.service.runtime_governance.trace_for_operation(source["create_operation_id"])
+                or (self.service.runtime_governance.trace_for_task(task_id, user_subject=source["user_subject"]) if task_id else None))
+
+    def _timing(self, source, task_id, stage):
+        trace = self._trace(source, task_id)
+        return self.service.runtime_governance.timing(trace_id=(trace or {}).get("trace_id"), stage=stage,
+            operation_id=source["create_operation_id"],
+            interaction_id=source.get("interaction_id"),
+            metadata={"sourceOperationId": source["create_operation_id"], "kind": "span"})
 
     @staticmethod
     def _plan_marker(source, task_id):
@@ -590,21 +606,26 @@ class BusinessDraftService:
         if runtime is None:
             raise BusinessDraftError("DRAFT_RUNTIME_UNAVAILABLE", "业务系统暂不可用。", status=503)
         adapter, worker_factory = runtime
-        with self.service._session_lock(source["session_id"]):
+        trace = self._trace(source)
+        trace_id = (trace or {}).get("trace_id")
+        timing_context = {"trace_id": trace_id, "operation_id": source["create_operation_id"]}
+        with self.service._session_lock(source["session_id"], **timing_context, purpose="draft"):
             session = self.service.sessions.get(source["session_id"])
             if session["state"] != "active":
                 raise BusinessDraftError("DRAFT_SESSION_REQUIRED", "请先恢复原任务的登录。", status=409)
             state = self.service.session_states.load(source["session_id"])
             if state is None:
                 raise BusinessDraftError("DRAFT_SESSION_REQUIRED", "请先恢复原任务的登录。", status=409)
-            with worker_factory(session, adapter) as worker:
+            with self.service.runtime_governance.timing(**timing_context, stage="draft.worker_lifecycle"), worker_factory(session, adapter) as worker:
                 worker.restore_session_state(state)
-                probe = getattr(adapter, "probe_business_draft_session", adapter.probe_session)(worker)
+                with self.service.runtime_governance.timing(**timing_context, stage="draft.identity_probe"):
+                    probe = getattr(adapter, "probe_business_draft_session", adapter.probe_session)(worker)
                 observed = str(probe.get("observed_principal_ref") or "").strip()
                 principals = {str(session.get(key) or "").strip() for key in ("expected_principal_ref", "downstream_principal_ref")} - {""}
                 if not observed or not principals or any(observed != principal for principal in principals):
                     raise BusinessDraftError("DRAFT_SESSION_CHANGED", "实际登录账号与原任务不一致，请重新登录并预检。", status=409)
-                result = read(adapter, worker, session)
+                with self.service.runtime_governance.timing(**timing_context, stage="draft.downstream"):
+                    result = read(adapter, worker, session)
                 self.service.session_states.save(source["session_id"], worker.capture_session_state())
                 return result
 

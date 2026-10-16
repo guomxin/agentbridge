@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 from time import perf_counter
 from typing import Any, Iterator, Mapping
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 
 SIDE_EFFECT_BOUNDARIES = (
@@ -65,8 +65,8 @@ class RuntimeGovernanceStore:
         self._initialize()
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.db_path, timeout=30)
+    def _connect(self, *, timeout: float = 30) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.db_path, timeout=timeout)
         connection.row_factory = sqlite3.Row
         try:
             yield connection
@@ -295,12 +295,13 @@ class RuntimeGovernanceStore:
         request_kind: str = "read",
         system_id: str | None = None,
         capability_name: str | None = None,
+        lock_timeout: float = 30,
     ) -> tuple[dict[str, Any], bool]:
         user_subject = _bounded_text(user_subject, 256, required=True)
         task_id = _bounded_text(task_id, 128)
         request_id = _bounded_text(request_id, 256)
         now = self._now()
-        with self._connect() as connection:
+        with self._connect(timeout=lock_timeout) as connection:
             existing = None
             if task_id:
                 existing = connection.execute(
@@ -312,20 +313,23 @@ class RuntimeGovernanceStore:
                     """,
                     (user_subject, task_id),
                 ).fetchone()
-            elif request_id:
+            if existing is None and request_id:
                 existing = connection.execute(
                     """
                     SELECT * FROM runtime_traces
                     WHERE user_subject = ? AND request_id = ?
+                      AND (? IS NULL OR task_id IS NULL OR task_id = ?)
                     ORDER BY started_at DESC LIMIT 1
                     """,
-                    (user_subject, request_id),
+                    (user_subject, request_id, task_id, task_id),
                 ).fetchone()
             if existing is not None:
                 connection.execute(
                     """
                     UPDATE runtime_traces
-                    SET origin_endpoint_id = COALESCE(?, origin_endpoint_id),
+                    SET request_id = COALESCE(request_id, ?),
+                        task_id = COALESCE(task_id, ?),
+                        origin_endpoint_id = COALESCE(?, origin_endpoint_id),
                         host_type = CASE WHEN ? = 'unknown' THEN host_type ELSE ? END,
                         host_instance_id = COALESCE(?, host_instance_id),
                         host_run_id = COALESCE(?, host_run_id),
@@ -335,6 +339,8 @@ class RuntimeGovernanceStore:
                     WHERE trace_id = ?
                     """,
                     (
+                        request_id,
+                        task_id,
                         _bounded_text(origin_endpoint_id, 128),
                         host_type,
                         _bounded_text(host_type, 80, required=True),
@@ -612,6 +618,88 @@ class RuntimeGovernanceStore:
                 status="succeeded",
                 duration_ms=round((perf_counter() - started) * 1000),
             )
+
+    def record_timing(
+        self,
+        *,
+        trace_id: str,
+        stage: str,
+        started_at: str,
+        duration_ms: int,
+        finished_at: str | None = None,
+        operation_id: str | None = None,
+        interaction_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        status: str = "succeeded",
+        error_code: str | None = None,
+        dedupe_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Record completed diagnostic time without changing execution state.
+
+        Instrumentation has a short lock budget and must never delay or reject a
+        business decision. Repeated transport events can share a dedupe key.
+        This deliberately does not advance a side-effect boundary or reopen a
+        terminal trace, unlike execution spans.
+        """
+        connection = None
+        try:
+            finished = finished_at or self._now()
+            _duration_ms(started_at, finished)  # Validate both wall-clock instants.
+            span_id = (str(uuid5(NAMESPACE_URL, f"agentbridge:timing:{trace_id}:{dedupe_key}"))
+                       if dedupe_key else str(uuid4()))
+            connection = sqlite3.connect(self.db_path, timeout=0.02)
+            connection.row_factory = sqlite3.Row
+            connection.execute("BEGIN IMMEDIATE")
+            trace = connection.execute("SELECT * FROM runtime_traces WHERE trace_id=?", (trace_id,)).fetchone()
+            if trace is None:
+                return None
+            attempt = 1
+            if operation_id:
+                attempt = connection.execute(
+                    "SELECT COALESCE(MAX(attempt),0)+1 FROM runtime_spans WHERE trace_id=? AND stage=? AND operation_id=?",
+                    (trace_id, stage, operation_id),
+                ).fetchone()[0]
+            safe_metadata = _safe_metadata(metadata)
+            safe_metadata.setdefault("clockSource", "central.wall")
+            safe_metadata.setdefault("durationClock", "central.monotonic")
+            connection.execute(
+                """INSERT OR IGNORE INTO runtime_spans (
+                    span_id,trace_id,stage,status,user_subject,task_id,operation_id,interaction_id,
+                    system_id,capability_name,attempt,side_effect_boundary,error_code,
+                    started_at,finished_at,duration_ms,metadata_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,'B0_NO_EFFECT',?,?,?,?,?)""",
+                (span_id, trace_id, _bounded_text(stage, 120, required=True),
+                 _bounded_text(status, 40, required=True), trace["user_subject"], trace["task_id"],
+                 _bounded_text(operation_id, 256), _bounded_text(interaction_id, 256),
+                 trace["system_id"], trace["capability_name"], attempt,
+                 _bounded_text(error_code, 120), started_at, finished, max(int(duration_ms), 0),
+                 _canonical_json(safe_metadata)),
+            )
+            row = connection.execute("SELECT * FROM runtime_spans WHERE span_id=?", (span_id,)).fetchone()
+            connection.commit()
+            return _span_from_row(row)
+        except Exception:
+            # Diagnostic persistence must not change the business outcome.
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @contextmanager
+    def timing(self, *, trace_id: str | None, stage: str, **kwargs: Any) -> Iterator[None]:
+        started_at, started = self._now(), perf_counter()
+        status, error_code = "succeeded", None
+        try:
+            yield
+        except Exception as exc:
+            status = "failed"
+            error_code = classify_runtime_error(exc)["code"]
+            raise
+        finally:
+            if trace_id:
+                self.record_timing(trace_id=trace_id, stage=stage, started_at=started_at,
+                    finished_at=self._now(), duration_ms=round((perf_counter() - started) * 1000),
+                    status=status, error_code=error_code, **kwargs)
 
     def record_stage_once(
         self,
@@ -1474,6 +1562,8 @@ class RuntimeGovernanceStore:
                 WHERE started_at >= ? AND started_at < ?
                   AND duration_ms IS NOT NULL
                   AND stage IN ('host.first_progress', 'mcp.request', 'capability.invoke')
+                  AND (stage != 'host.first_progress'
+                       OR json_extract(metadata_json, '$.durationClock') = 'central.wall')
                 ORDER BY stage, duration_ms
                 """,
                 (start_text, end_text),

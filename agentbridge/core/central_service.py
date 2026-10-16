@@ -10,9 +10,12 @@ from datetime import (
 from functools import wraps
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import re
 import threading
+from time import perf_counter
 from typing import (
     Callable,
     Iterator,
@@ -737,6 +740,7 @@ class CentralCapabilityService:
                 self._record_user_activity(
                     user_subject=user_subject,
                     system_id=system_id,
+                    trace_id=trace["trace_id"],
                 )
             engine.register_handler(
                 capability_name,
@@ -2115,7 +2119,82 @@ class CentralCapabilityService:
                 "snapshotId": result["snapshotId"],
             },
         )
+        if "timingEvents" in snapshot:
+            result["timingEvents"] = self._record_host_timing_events(user_subject, registration, snapshot["timingEvents"])
         return result
+
+    def _record_host_timing_events(self, user_subject, registration, events):
+        """Accept bounded diagnostic facts, never arbitrary host payloads."""
+        stages = {"host.prompt_build", "host.model_call", "host.model_started", "host.llm_input",
+            "host.llm_output", "host.tool_call", "host.mcp_request", "host.mcp_transport",
+            "host.agent_end", "host.reply_sending"}
+        identifiers = ("requestId", "dispatchId", "runId", "taskId", "toolCallId", "operationId", "callId")
+        labels = ("toolName", "provider", "model")
+        numbers = ("timeToFirstByteMs", "requestPayloadBytes", "responseStreamBytes", "inputTokens", "outputTokens",
+            "cacheReadTokens", "cacheWriteTokens", "attempt")
+        counts = {"recorded": 0, "ignored": 0}
+        if not isinstance(events, list):
+            return {"recorded": 0, "ignored": 1}
+        counts["ignored"] = max(0, len(events) - 32)
+        for event in events[:32]:
+            try:
+                if not isinstance(event, dict) or event.get("stage") not in stages or event.get("kind") not in {"event", "span"}:
+                    raise ValueError("invalid diagnostic stage")
+                event_id = event.get("eventId")
+                if not isinstance(event_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", event_id):
+                    raise ValueError("invalid diagnostic identifier")
+                observed = datetime.fromisoformat(str(event.get("observedAt") or ""))
+                if observed.tzinfo is None:
+                    raise ValueError("diagnostic clock must include timezone")
+                duration = event.get("durationMs", 0)
+                if (isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration)
+                        or not 0 <= duration <= 86_400_000 or (event["kind"] == "event" and duration != 0)):
+                    raise ValueError("invalid diagnostic duration")
+                duration_clock = event.get("durationClock", "host.monotonic")
+                if duration_clock not in {"host.monotonic", "host.wall"}:
+                    raise ValueError("invalid diagnostic duration clock")
+                metadata = {"kind": event["kind"], "clockSource": "host.wall",
+                    "durationClock": duration_clock if event["kind"] == "span" else "none"}
+                for name in identifiers + labels:
+                    value = event.get(name)
+                    if value is not None:
+                        limit = 256 if name in identifiers else 160
+                        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:/|@+-]{1," + str(limit) + "}", value):
+                            raise ValueError("invalid diagnostic label")
+                        metadata[name] = value
+                for name in numbers:
+                    value = event.get(name)
+                    if value is not None:
+                        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 10**12:
+                            raise ValueError("invalid diagnostic count")
+                        metadata[name] = value
+                outcome = event.get("outcome", "completed")
+                if outcome not in {"started", "completed", "error", "canceled"}:
+                    raise ValueError("invalid diagnostic outcome")
+                metadata["outcome"] = outcome
+                task_id = metadata.get("taskId")
+                if task_id:
+                    self.tasks.get_task(task_id, user_subject=user_subject)
+                operation_id = metadata.get("operationId")
+                if operation_id and self.operations.get(operation_id)["user_subject"] != user_subject:
+                    raise ValueError("diagnostic operation is not owned")
+                request_id = metadata.get("requestId") or metadata.get("dispatchId") or metadata.get("runId")
+                if not request_id and not task_id:
+                    raise ValueError("diagnostic correlation is required")
+                trace = (self.runtime_governance.trace_for_task(task_id, user_subject=user_subject) if task_id else None)
+                if trace is None:
+                    trace, _ = self.runtime_governance.ensure_trace(user_subject=user_subject, request_id=request_id,
+                        task_id=task_id, host_type=registration["agentHost"], host_instance_id=registration["hostInstanceId"],
+                        host_run_id=metadata.get("runId"), request_kind="interaction", lock_timeout=0.02)
+                record = self.runtime_governance.record_timing(trace_id=trace["trace_id"], stage=event["stage"],
+                    started_at=(observed - timedelta(milliseconds=duration)).isoformat(), finished_at=observed.isoformat(),
+                    duration_ms=round(duration), operation_id=operation_id, status={"error": "failed", "canceled": "cancelled"}.get(outcome, "succeeded"),
+                    metadata=metadata, dedupe_key="host:" + registration["hostInstanceId"] + ":" + event_id)
+                counts["recorded" if record else "ignored"] += 1
+            except Exception:
+                # A malformed or late diagnostic is never a business failure.
+                counts["ignored"] += 1
+        return counts
 
     def acquire_host_coordinator_lease(
         self,
@@ -2295,7 +2374,12 @@ class CentralCapabilityService:
                 self.runtime_governance.record_stage_once(
                     trace_id=trace["trace_id"],
                     stage=stage,
-                    metadata={"clientType": client_type, "role": role},
+                    started_at=(trace["started_at"] if role == "assistant" else entry["created_at"]),
+                    finished_at=entry["created_at"],
+                    metadata={"clientType": client_type, "role": role,
+                        "kind": "span" if role == "assistant" else "event",
+                        "origin": "trace.started_at" if role == "assistant" else "timeline.created_at",
+                        "clockSource": "central.wall", "durationClock": "central.wall"},
                 )
         reactivated_deliveries = 0
         if (
@@ -3667,6 +3751,7 @@ class CentralCapabilityService:
             boundary = "B4_COMMIT_ATTEMPTED"
         else:
             boundary = "B2_INTERACTION_CREATED"
+        started = perf_counter()
         span = self.runtime_governance.start_span(
             trace_id=trace_id,
             stage="adapter.request",
@@ -3684,6 +3769,7 @@ class CentralCapabilityService:
                 status="unknown" if failure["code"] == "RESULT_UNKNOWN" else "failed",
                 error_code=failure["code"],
                 side_effect_boundary=boundary,
+                duration_ms=round((perf_counter() - started) * 1000),
             )
             raise
         else:
@@ -3696,6 +3782,7 @@ class CentralCapabilityService:
                 span["span_id"],
                 status="succeeded",
                 side_effect_boundary=finished_boundary,
+                duration_ms=round((perf_counter() - started) * 1000),
             )
             return result
 
@@ -3727,6 +3814,9 @@ class CentralCapabilityService:
         with self._session_lock(
             session["session_id"],
             wait_seconds=1.0 if document_search else None,
+            trace_id=context.trace_id,
+            operation_id=context.operation_id,
+            purpose="adapter",
         ):
             session = self.sessions.get(session["session_id"])
             if session["state"] != "active":
@@ -4828,15 +4918,27 @@ class CentralCapabilityService:
         session_id: str,
         *,
         wait_seconds: float | None = None,
+        trace_id: str | None = None,
+        operation_id: str | None = None,
+        purpose: str = "session",
     ) -> Iterator[None]:
         with self._locks_guard:
             lock = self._session_locks.setdefault(session_id, threading.Lock())
+        started_at = datetime.now(timezone.utc).isoformat()
+        started = perf_counter()
         acquired = (
             lock.acquire()
             if wait_seconds is None
             else lock.acquire(timeout=max(0.0, wait_seconds))
         )
+        acquired_at = datetime.now(timezone.utc).isoformat()
+        wait_ms = round((perf_counter() - started) * 1000)
         if not acquired:
+            if trace_id:
+                self.runtime_governance.record_timing(trace_id=trace_id, stage="session.lock_wait",
+                    operation_id=operation_id, started_at=started_at, finished_at=acquired_at,
+                    duration_ms=wait_ms, status="failed", error_code="SESSION_BUSY",
+                    metadata={"purpose": purpose, "acquired": False})
             raise CapabilityRejected(
                 "SESSION_BUSY",
                 "Another OA operation is using this user session. Retry once after it "
@@ -4847,12 +4949,16 @@ class CentralCapabilityService:
             yield
         finally:
             lock.release()
+            if trace_id:
+                self.runtime_governance.record_timing(trace_id=trace_id, stage="session.lock_wait",
+                    operation_id=operation_id, started_at=started_at, finished_at=acquired_at,
+                    duration_ms=wait_ms, metadata={"purpose": purpose, "acquired": True})
 
-    def _record_user_activity(self, *, user_subject: str, system_id: str) -> None:
+    def _record_user_activity(self, *, user_subject: str, system_id: str, trace_id: str | None = None) -> None:
         session = self.sessions.find(user_subject=user_subject, system_id=system_id)
         if session is None or session["state"] != "active":
             return
-        with self._session_lock(session["session_id"]):
+        with self._session_lock(session["session_id"], trace_id=trace_id, purpose="activity"):
             current = self.sessions.get(session["session_id"])
             if current["state"] == "active":
                 self.sessions.touch_activity(current["session_id"])

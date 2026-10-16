@@ -1082,6 +1082,10 @@ def create_central_mcp_server(
                 operation_ids=[],
                 interaction_ids=[],
             )
+        # Correlation is supplied only by a validated registered host. It never
+        # changes the task, identity, coordinator lease or business arguments.
+        if has_formal_host_context and runtime_context.get("requestId"):
+            request_id = runtime_context["requestId"]
         try:
             response = await asyncio.to_thread(
                 service.invoke,
@@ -6482,6 +6486,8 @@ def _request_runtime_context(ctx: Context) -> dict[str, str | None]:
         host_context = meta.get(LEGACY_HOST_CONTEXT_META_KEY)
     task_context = meta.get(TASK_CONTEXT_META_KEY)
     host = host_context if isinstance(host_context, Mapping) else {}
+    timing = meta.get("io.agentbridge/timing")
+    timing = timing if isinstance(timing, Mapping) else {}
     try:
         task = normalize_host_call_context(
             task_context if isinstance(task_context, Mapping) else None
@@ -6496,11 +6502,13 @@ def _request_runtime_context(ctx: Context) -> dict[str, str | None]:
         return normalized[:maximum] if normalized else None
 
     return {
+        "requestId": text_value(timing.get("requestId"), 256),
         "hostType": text_value(host.get("agentHost"), 80) or "unknown",
         "hostInstanceId": text_value(host.get("hostInstanceId"), 160),
         "hostVersion": text_value(host.get("hostVersion"), 80),
         "hostRunId": (
-            text_value(task.get("hostRunId"), 256)
+            text_value(timing.get("runId"), 256)
+            or text_value(task.get("hostRunId"), 256)
             or text_value(task.get("toolCallId"), 256)
         ),
         "endpointId": text_value(task.get("endpointId"), 128),

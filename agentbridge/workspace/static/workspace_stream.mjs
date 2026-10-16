@@ -1,4 +1,5 @@
 import { cancellationError } from "./workspace_lifecycle.mjs";
+import { markWorkspaceTiming } from "./workspace_performance.mjs";
 
 export function createChatStream({ state, getScope, fetchChatStreamResponse, adoptLiveMessage, addLiveProgress, ensureLiveMessage, handleChatProgress, handleChatDelta, attachDispatchCancel, agentFailureMessage, renderRunFailure }) {
   async function consumeChatStream({ message, idempotencyKey, attachments = [], skillTrial, onAccepted, onCanceled }) {
@@ -64,6 +65,7 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
           const event = parseSseBlock(block);
           if (!event) continue;
           if (event.name === "accepted" && event.data.runId) {
+            markWorkspaceTiming("accepted", {requestId:idempotencyKey, runId:event.data.runId});
             const previousRunId = runId;
             runId = event.data.runId;
             registerActiveStream(activeStream, runId);
@@ -73,6 +75,8 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
             ensureLiveMessage(runId).actions.replaceChildren();
             onAccepted?.();
           } else if (event.name === "progress") {
+            if (event.data.kind === "tool" && !hadToolActivity)
+              markWorkspaceTiming("first_tool", {requestId:idempotencyKey, runId});
             if (event.data.kind === "tool") hadToolActivity = true;
             handleChatProgress(event.data);
             if (["queued", "waiting_host"].includes(event.data.phase)) {
@@ -85,7 +89,12 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
               ensureLiveMessage(runId).actions.replaceChildren();
             }
           } else if (event.name === "chat") {
+            if (event.data.text && !activeStream.firstTextMarked) {
+              activeStream.firstTextMarked = true;
+              markWorkspaceTiming("first_text", {requestId:idempotencyKey, runId});
+            }
             if (["final", "error", "aborted"].includes(event.data.state)) {
+              markWorkspaceTiming("host_terminal", {requestId:idempotencyKey, runId, status:event.data.state});
               activeStream.terminal = true;
               stopReading = true;
             }

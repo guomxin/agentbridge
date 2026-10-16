@@ -6,6 +6,7 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
   TERMINAL_TASK_STATES } from "./workspace_results.mjs";
 
 import { reconcileChildren } from "./workspace_dom.mjs";
+import { markWorkspaceTiming } from "./workspace_performance.mjs";
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
   submitTaskFeedback, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
@@ -314,6 +315,10 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const focused = document.activeElement;
     const focusWasInside = focused && card.contains(focused);
     view.version = Number(task.version);
+    card.dataset.renderedAt = String(Date.now());
+    card.dataset.renderedVersion = String(task.version);
+    card.dataset.sourceUpdatedAt = task.updated_at || "";
+    markWorkspaceTiming("card_rendered", {taskId:task.task_id, version:Number(task.version), status:task.status});
     const timelineMeta = state.taskCardMeta.get(cardKey) || state.taskCardMeta.get(`${task.task_id}:summary`) || {
       createdAt: task.created_at, sequence: 0,
     };

@@ -33,6 +33,20 @@ class BusinessDraftBoundaryTests(unittest.TestCase):
         saved = self.app.save(**self.args, expected_revision=1, values=self.values)
         return self.app.preview(**self.args, expected_revision=saved["revision"])
 
+    def test_preview_timings_share_source_trace_and_never_contain_private_values(self):
+        self.ready()
+        source = self.service.field_submissions.get(self.source["input_id"])
+        trace = self.service.runtime_governance.trace_for_operation(source["create_operation_id"])
+        self.assertIsNotNone(trace)
+        spans = self.service.runtime_governance.trace_detail(trace["trace_id"])["spans"]
+        timed = [item for item in spans if item["stage"].startswith("draft.")]
+        self.assertTrue({"draft.preview", "draft.identity_probe", "draft.downstream", "draft.worker_lifecycle"} <= {item["stage"] for item in timed})
+        self.assertTrue(all(item["duration_ms"] >= 0 and item["metadata"]["durationClock"] == "central.monotonic" for item in timed))
+        self.assertNotIn(self.values["content"], repr(timed))
+        self.assertNotIn(self.values["project"], repr(timed))
+        self.assertEqual(self.query("SELECT COUNT(*) FROM write_authorizations"), [(0,)])
+        self.assertEqual(self.fixture.transport.write_calls, 0)
+
     def approve(self, ready):
         return self.app.approve(**self.args, expected_revision=ready["revision"],
                                 preview_id=ready["preview"]["previewId"], request_key="boundary-approve-01")

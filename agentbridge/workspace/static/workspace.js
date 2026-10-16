@@ -8,6 +8,7 @@ import { createComposer } from "./workspace_forms.mjs";
 import { createSkillForms } from "./workspace_skills.mjs";
 import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
+import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
 
 const state = {
   account: null,
@@ -107,6 +108,7 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  clearWorkspaceTimings();
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
     "syncedMessages", "taskCards", "taskFeedback", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
     state[name].clear();
@@ -516,6 +518,7 @@ async function loadChat() {
     scope.assertCurrent();
     renderChatTimeline();
     container.scrollTop = container.scrollHeight;
+    markWorkspaceTiming("chat_loaded");
   } catch (error) {
     if (isCancellation(error)) return;
     if (container.childElementCount === 0) {
@@ -615,6 +618,7 @@ function setTimelineNode(node, { key, createdAt, order = 0 }) {
 }
 
 function ingestTimelineEntry(entry, render = true) {
+  markWorkspaceTiming("timeline_received", {taskId:entry?.task_id});
   const sequence = Number(entry?.sequence) || 0;
   state.timelineCursor = Math.max(state.timelineCursor, sequence);
   if (entry?.entry_type === "chat_message") {
@@ -757,6 +761,7 @@ async function executeChatMessage(
   const api = scopedApi(scope);
   dismissTerminalLiveMessages();
   const idempotencyKey = crypto.randomUUID();
+  markWorkspaceTiming("send", {requestId:idempotencyKey});
   const local = messageElement({
     role: "user",
     text: message,

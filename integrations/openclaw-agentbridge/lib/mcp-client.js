@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 import { resolveMcpServer } from "./config.js";
 import { transportRetryAllowed } from "./recovery-policy.js";
+import { recordCurrentTiming, timingMetadata } from "./performance.js";
 
 export class McpCallError extends Error {
   constructor(
@@ -65,13 +67,18 @@ export function createAgentBridgeMcpClient({
   });
 
   async function request(method, params, { signal, retry } = {}) {
+    const startedAt = performance.now();
+    let outcome = "completed";
     const policy = normalizeRetryPolicy(retry);
     let attempt = 0;
     let lastError = null;
+    let operationId;
+    try {
     while (true) {
       attempt += 1;
       try {
-        const result = await requestOnce(method, params, { signal });
+        const result = await requestOnce(method, params, { signal, attempt });
+        operationId = result?.structuredContent?.operationId || result?.operationId || result?.structuredContent?.operation?.operationId;
         if (attempt > 1) {
           await invokeObserver(policy?.onRecovered, {
             attempts: attempt,
@@ -102,9 +109,16 @@ export function createAgentBridgeMcpClient({
         await policy.sleep(delayMs, signal);
       }
     }
+    } catch (error) { outcome = "error"; throw error; }
+    finally {
+      if (params.name !== "agentbridge_host_runtime_snapshot") recordCurrentTiming("host.mcp_request", {
+        toolName: params.name, durationMs: performance.now() - startedAt,
+        outcome, attempt, operationId,
+      }, { taskId: params._meta?.["io.agentbridge/task"]?.taskId });
+    }
   }
 
-  async function requestOnce(method, params, { signal } = {}) {
+  async function requestOnce(method, params, { signal, attempt } = {}) {
     const timeoutSignal = AbortSignal.timeout(
       connection.timeoutSeconds * 1000,
     );
@@ -112,6 +126,12 @@ export function createAgentBridgeMcpClient({
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
     let response;
+    const startedAt = performance.now();
+    let timeToFirstByteMs;
+    let responseBytes;
+    let outcome = "completed";
+    const body = JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method, params });
+    try {
     try {
       response = await fetchImpl(connection.url, {
         method: "POST",
@@ -121,14 +141,10 @@ export function createAgentBridgeMcpClient({
           "Content-Type": "application/json",
           "MCP-Protocol-Version": "2025-06-18",
         },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: randomUUID(),
-          method,
-          params,
-        }),
+        body,
         signal: requestSignal,
       });
+      timeToFirstByteMs = performance.now() - startedAt;
     } catch (error) {
       if (requestSignal.aborted) {
         throw new McpCallError(
@@ -156,6 +172,7 @@ export function createAgentBridgeMcpClient({
     let rawResponse;
     try {
       rawResponse = await response.text();
+      responseBytes = Buffer.byteLength(rawResponse);
     } catch (error) {
       if (requestSignal.aborted) {
         throw new McpCallError(
@@ -182,6 +199,14 @@ export function createAgentBridgeMcpClient({
       );
     }
     return rpc.result;
+    } catch (error) { outcome = "error"; throw error; }
+    finally {
+      if (params.name !== "agentbridge_host_runtime_snapshot") recordCurrentTiming("host.mcp_transport", {
+        toolName: params.name, durationMs: performance.now() - startedAt,
+        timeToFirstByteMs, requestPayloadBytes: Buffer.byteLength(body),
+        responseStreamBytes: responseBytes, outcome, attempt,
+      }, { taskId: params._meta?.["io.agentbridge/task"]?.taskId });
+    }
   }
 }
 
@@ -256,8 +281,11 @@ function transportErrorCode(error) {
 
 function toolCallParams(name, arguments_, meta) {
   const params = { name, arguments: arguments_ };
-  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    params._meta = meta;
+  // Timers inherit AsyncLocalStorage. Do not make diagnostic transport create
+  // more diagnostic events or attach the last business request to health data.
+  const timingMeta = name === "agentbridge_host_runtime_snapshot" ? meta : timingMetadata(meta);
+  if (timingMeta && typeof timingMeta === "object" && !Array.isArray(timingMeta)) {
+    params._meta = timingMeta;
   }
   return params;
 }

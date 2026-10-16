@@ -122,6 +122,7 @@ export function createAgentBridgeProxyTools({
   skillTrialResolver = null,
   skillTrialResultHandler = null,
   trustedResultHandler = null,
+  performanceRecorder = null,
   logger = null,
 }) {
   const identity = identityRouter.resolveToolContext(context);
@@ -170,6 +171,7 @@ export function createAgentBridgeProxyTools({
         skillTrialResolver,
         skillTrialResultHandler,
         trustedResultHandler,
+        performanceRecorder,
         logger,
       }),
     ),
@@ -226,6 +228,7 @@ function createProxyTool({
   skillTrialResolver,
   skillTrialResultHandler,
   trustedResultHandler,
+  performanceRecorder,
   logger,
 }) {
   return {
@@ -234,7 +237,8 @@ function createProxyTool({
     description: descriptor.description || descriptor.name,
     parameters: descriptor.inputSchema || emptyObjectSchema(),
     ...(descriptor.annotations ? { annotations: descriptor.annotations } : {}),
-    execute: async (toolCallId, rawParams, signal) => {
+    execute: (toolCallId, rawParams, signal) => {
+      const execute = async () => {
       const identity = await resolveIdentity(signal);
       if (!identity.bound) {
         return jsonToolResult({
@@ -474,6 +478,10 @@ function createProxyTool({
             context,
           )
         : nativeResult;
+      };
+      return performanceRecorder
+        ? performanceRecorder.run({ ...context, toolCallId, toolName: descriptor.name }, execute, "host.tool_call")
+        : execute();
     },
   };
 }

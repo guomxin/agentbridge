@@ -3,6 +3,7 @@ import { hostContextMeta } from "./host-contract.js";
 export function createHostRuntimeReporter({
   identityRouter,
   coordinator,
+  performanceRecorder = null,
   logger = null,
   intervalMs = 60_000,
   initialDelayMs = 5_000,
@@ -14,14 +15,21 @@ export function createHostRuntimeReporter({
   let loop = null;
   let transportErrorCount = 0;
   let lastErrorCode = null;
+  let timingTimer = null;
+  let collecting = false;
 
-  async function collectOnce({ signal } = {}) {
+  async function collectOnce({ signal, timingsOnly = false } = {}) {
+    if (collecting) return [];
+    collecting = true;
+    try {
     const counts = coordinator?.hostRuntimeCounts?.() || {
       activeTaskCount: 0,
       waitingInteractionCount: 0,
     };
     const results = [];
     for (const { binding, client } of identityRouter?.configuredIdentities?.() || []) {
+      const timingEvents = performanceRecorder?.take(binding.key, 32) || [];
+      if (timingsOnly && timingEvents.length === 0) continue;
       const snapshot = {
         status: "healthy",
         observedAt: new Date(now()).toISOString(),
@@ -31,6 +39,7 @@ export function createHostRuntimeReporter({
         transportErrorCount,
         ...(lastErrorCode ? { lastErrorCode } : {}),
       };
+      if (timingEvents.length) snapshot.timingEvents = timingEvents;
       try {
         const response = await client.callTool(
           "agentbridge_host_runtime_snapshot",
@@ -58,6 +67,7 @@ export function createHostRuntimeReporter({
       }
     }
     return results;
+    } finally { collecting = false; }
   }
 
   function start() {
@@ -65,6 +75,8 @@ export function createHostRuntimeReporter({
       return false;
     }
     controller = new AbortController();
+    performanceRecorder?.onPending(scheduleTimings);
+    if (performanceRecorder?.status().queued) scheduleTimings();
     loop = run(controller.signal);
     loop.catch((error) => {
       if (!controller?.signal.aborted) {
@@ -85,8 +97,22 @@ export function createHostRuntimeReporter({
   }
 
   function stop() {
+    performanceRecorder?.onPending(null);
+    clearTimeout(timingTimer);
+    timingTimer = null;
     controller?.abort();
     controller = null;
+  }
+
+  function scheduleTimings() {
+    if (!controller || timingTimer) return;
+    timingTimer = setTimeout(async () => {
+      timingTimer = null;
+      if (!controller) return;
+      await collectOnce({ signal: controller.signal, timingsOnly: true });
+      if (performanceRecorder?.status().queued) scheduleTimings();
+    }, 1_000);
+    timingTimer.unref?.();
   }
 
   async function waitForIdle() {

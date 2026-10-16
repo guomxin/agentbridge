@@ -23,6 +23,7 @@ import {
 } from "./proxy-tools.js";
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
+import { createHostPerformance } from "./performance.js";
 
 export const PLUGIN_VERSION = "0.4.114";
 
@@ -80,6 +81,11 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
           hostConfig: api.config,
           serverName: config.mcpServerName,
         });
+  const performanceRecorder = identityRouter.enabled
+    ? sharedState.hostPerformance || (sharedState.hostPerformance = createHostPerformance({
+        identityRouter, sharedState, now: dependencies.now,
+      }))
+    : null;
   const coordinator = new InteractionCoordinator({
     api,
     config,
@@ -119,6 +125,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       createHostRuntimeReporter({
         identityRouter,
         coordinator,
+        performanceRecorder,
         logger: api.logger,
         sleep: dependencies.runtimeReporterSleep,
         now: dependencies.now,
@@ -158,6 +165,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
             coordinator.rememberSkillTrialResult(sessionKey, trial, params, payload),
           trustedResultHandler: (event, toolContext) =>
             captureNativeAgentBridgeResult(coordinator, event, toolContext),
+          performanceRecorder,
           logger: api.logger,
         }),
       { names: AGENTBRIDGE_PROXY_TOOL_NAMES },
@@ -235,17 +243,48 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     if (!identityRouter.enabled) {
       return undefined;
     }
-    return taskContinuityPromptContext({
+    return performanceRecorder.run(context, () => taskContinuityPromptContext({
       prompt: event.prompt,
       context,
       identityRouter,
       coordinator,
       logger: api.logger,
       syncTimeline: config.syncTimeline,
-    });
+    }), "host.prompt_build");
   });
 
-  api.on('agent_end', (_event, context) => releaseSkillRun(identityRouter, context));
+  // 2026.7.1 exposes per-provider-call diagnostics. TTFB is available; a first
+  // token hook is not. Never derive TTFT from llm_input/output or body content.
+  api.on("model_call_started", (event, context) => {
+    performanceRecorder?.record("host.model_started", {
+      callId: event.callId, provider: event.provider, model: event.model, outcome: "started",
+    }, { ...context, runId: event.runId || context.runId, sessionKey: event.sessionKey || context.sessionKey });
+  });
+  api.on("model_call_ended", (event, context) => {
+    performanceRecorder?.record("host.model_call", {
+      callId: event.callId, provider: event.provider, model: event.model,
+      durationMs: event.durationMs, durationClock: "host.wall", outcome: event.outcome,
+      timeToFirstByteMs: event.timeToFirstByteMs, requestPayloadBytes: event.requestPayloadBytes,
+      responseStreamBytes: event.responseStreamBytes,
+    }, { ...context, runId: event.runId || context.runId, sessionKey: event.sessionKey || context.sessionKey });
+  });
+  api.on("llm_input", (event, context) => {
+    performanceRecorder?.record("host.llm_input", { provider: event.provider, model: event.model },
+      { ...context, runId: event.runId || context.runId });
+  });
+  api.on("llm_output", (event, context) => {
+    performanceRecorder?.record("host.llm_output", {
+      provider: event.provider, model: event.model,
+      inputTokens: event.usage?.input, outputTokens: event.usage?.output,
+      cacheReadTokens: event.usage?.cacheRead, cacheWriteTokens: event.usage?.cacheWrite,
+    }, { ...context, runId: event.runId || context.runId });
+  });
+
+  api.on('agent_end', (event, context) => {
+    performanceRecorder?.record("host.agent_end", { outcome: event.success ? "completed" : "error" },
+      { ...context, runId: event.runId || context.runId });
+    return releaseSkillRun(identityRouter, context);
+  });
 
   // Telegram and WeChat emit this hook after delivery succeeds.
   // Resolve the destination route, never attribute a cross-chat send to its caller.
@@ -289,6 +328,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         to: context.conversationId || event.to,
         accountId: context.accountId,
       });
+    performanceRecorder?.record("host.reply_sending", {}, { ...context, sessionKey });
     const channel =
       coordinator.deliveryChannelForSession(sessionKey) ||
       routeChannel ||
@@ -329,6 +369,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         to: context.conversationId,
         accountId: context.accountId,
       });
+    performanceRecorder?.record("host.reply_sending", {}, { ...context, sessionKey });
     if (coordinator.isDirectDeliveryActive(sessionKey)) {
       return undefined;
     }
@@ -376,6 +417,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       const sessionKey = context.sessionKey || event.sessionKey;
       coordinator.removeSession(sessionKey);
       identityRouter.removeSession(sessionKey);
+      performanceRecorder?.forgetSession(sessionKey);
     }
   });
 
@@ -464,6 +506,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
           ...options,
           identityRouter,
           coordinator,
+          performanceRecorder,
           logger: api.logger,
         }),
       { scope: "operator.write" },
@@ -1105,6 +1148,7 @@ async function bindWorkspaceGatewaySession({
   respond,
   identityRouter,
   coordinator,
+  performanceRecorder,
   logger,
 }) {
   const sessionKey = safeText(params?.sessionKey, 1024);
@@ -1147,6 +1191,7 @@ async function bindWorkspaceGatewaySession({
       ) {
         if (turnRef) {
           coordinator.bindWorkspaceTurn(sessionKey, turnRef, message, result.binding?.skillTrial || null);
+          performanceRecorder?.bindTurn(sessionKey, turnRef);
         }
         respond(true, {
           status: "bound",

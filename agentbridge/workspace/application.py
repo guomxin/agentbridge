@@ -25,6 +25,7 @@ from agentbridge.core.timeline_attachments import (
 )
 from agentbridge.workspace.gateway import GatewayRequestError, OpenClawGatewayClient
 from agentbridge.workspace.stores import normalize_skill_trial
+from agentbridge.workspace.performance import WorkspacePerformance
 
 
 _LOG = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class WorkspaceApplication:
         self.service = service
         self.store = service.workspace
         self.gateway = gateway
+        self.performance = WorkspacePerformance(service.runtime_governance)
         self._dispatch_instance_id = f"workspace-{uuid4()}"
         self._dispatch_stop = threading.Event()
         self._dispatch_workers_lock = threading.Lock()
@@ -696,6 +698,7 @@ class WorkspaceApplication:
                     self._dispatch_workers.pop(account_id, None)
 
     def _process_host_dispatch(self, dispatch: dict) -> None:
+        self.performance.record(dispatch, "workspace.dispatch.claimed")
         if dispatch["state"] == "accepted":
             self._observe_accepted_dispatch(dispatch)
             return
@@ -711,7 +714,10 @@ class WorkspaceApplication:
             return
 
         account = self.store.get_account(dispatch["account_id"])
+        readiness_started = time.perf_counter()
         ready = self._host_readiness()
+        self.performance.record(dispatch, "workspace.gateway.readiness", started=readiness_started,
+                                status="succeeded" if ready["available"] else "failed")
         if not ready["available"]:
             if ready["recoverable"]:
                 self._defer_dispatch(dispatch, ready["code"])
@@ -782,6 +788,7 @@ class WorkspaceApplication:
                         recovered_from_run_id=_safe_text(item.get("recoveredFromRunId"), 256) or None,
                     )
                     accepted = True
+                    self.performance.record(dispatch, "workspace.host.accepted")
                     recovery_attempts = dispatch["retry_count"] + max(
                         dispatch["attempt_count"] - 1,
                         0,
@@ -795,6 +802,8 @@ class WorkspaceApplication:
                         )
                     continue
                 if item_type == "progress":
+                    if item.get("kind") == "tool":
+                        self.performance.record(dispatch, "workspace.host.first_tool")
                     self.store.append_host_dispatch_stream_event(
                         dispatch["dispatch_id"],
                         claim_token=dispatch["claim_token"],
@@ -806,6 +815,8 @@ class WorkspaceApplication:
                 if item_type != "chat":
                     continue
                 state = item.get("state")
+                if item.get("text"):
+                    self.performance.record(dispatch, "workspace.host.first_text")
                 if state not in {"final", "error", "aborted"}:
                     self.store.append_host_dispatch_stream_event(
                         dispatch["dispatch_id"],
@@ -1024,6 +1035,8 @@ class WorkspaceApplication:
             },
         )
 
+        self.performance.record(dispatch, "workspace.host.terminal", status="unknown", terminal=True)
+
     def _observe_accepted_dispatch(self, dispatch: dict) -> None:
         account = self.store.get_account(dispatch["account_id"])
         run_id = dispatch["accepted_run_id"] or dispatch["idempotency_key"]
@@ -1158,6 +1171,8 @@ class WorkspaceApplication:
             ),
             event={**item, "runId": run_id, "text": text},
         )
+        self.performance.record(dispatch, "workspace.host.terminal",
+                                status="succeeded" if terminal_state == "completed" else "failed", terminal=True)
 
     def _fail_dispatch_before_accept(
         self,
@@ -1186,6 +1201,8 @@ class WorkspaceApplication:
             },
         )
 
+        self.performance.record(dispatch, "workspace.host.terminal", status="failed", terminal=True)
+
     def _finish_expired_dispatch(
         self,
         dispatch: dict,
@@ -1210,6 +1227,8 @@ class WorkspaceApplication:
                 "safeToRetry": True,
             },
         )
+
+        self.performance.record(dispatch, "workspace.host.terminal", status="failed", terminal=True)
 
     def _finish_dispatch_internal_error(
         self,

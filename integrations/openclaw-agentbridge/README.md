@@ -234,6 +234,18 @@ MCP 请求尚未获得响应时，插件只对以下工具执行两次短时传�
 `oa_session_status` 只检查会话，不创建认证卡。`SESSION_CHECK_UNAVAILABLE` 表示保留会话并稍后
 重试，不能要求用户重新输入密码。要测试登录卡，应明确请求登录，使模型调用 `oa_session_login`。
 
+宿主耗时通过现有身份认证的 `agentbridge_host_runtime_snapshot` 异步合批记录：
+
+- OpenClaw `2026.7.1` 的 `model_call_started/ended` 提供每次供应方调用耗时和可用的 TTFB；
+  没有首 token 钩子，TTFB 不等同于 TTFT。`llm_output` 只提取存在的用量，不把缺失写成零。
+- 提示构建、整个工具调用、MCP 完整请求和每次传输分别计时，嵌套阶段不能相加当作总耗时。
+  自己测量的 duration 使用单调时钟；宿主原生模型 duration 明确标为墙钟。
+- `io.agentbridge/timing` 仅携带可信 request/run/task/tool-call 关联。Workspace 的 `turnRef`
+  是 request 标识，不能当作持久 dispatch UUID；同一 run 绑定原始 request，不被新回合覆盖。
+- 事件只接受有界标识、计数、状态及固定阶段，不读取提示、参数、回复正文、密钥或卡片 URL。
+  每身份队列最多 256 个，单批最多 32 个，每秒至多安排一次合批；队列满或上报失败只丢诊断，
+  不阻塞业务、重试提交或改变授权、材料、租约和核验状态。
+
 ## 十一、测试与打包
 
 ```sh
