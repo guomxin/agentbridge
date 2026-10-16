@@ -197,9 +197,97 @@ class PlanWriteBoundaryTests(unittest.TestCase):
     def test_task_cancel_does_not_revoke_approved_atomic_authorization(self):
         self.start_atomic()
         self.authorize()
+        before = self.service.tasks.get_task(self.task_id, user_subject="user-a")
+        self.assertEqual(before["status"], "active")  # Real post-decision observation has already run.
         result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=self.task_id)
         self.assertEqual(result["error"]["code"], "TASK_ACTION_ALREADY_STARTED")
         self.assertEqual(self.service.write_authorizations.get(self.auth_id)["state"], "approved")
+        self.assertIsNone(self.service.write_authorizations.get(self.auth_id)["commit_operation_id"])
+        self.assertEqual(self.service.tasks.get_task(self.task_id, user_subject="user-a"), before)
+        self.assertIsNone(self.write.created_payload)
+
+    def test_task_cancel_recognizes_observed_submitted_fields_without_retiring_them(self):
+        self.start_atomic()
+        self.fields()
+        self.service.get_interaction(user_subject="user-a", interaction_id=self.waiting["interaction"]["interactionId"])
+        before = self.service.tasks.get_task(self.task_id, user_subject="user-a")
+        self.assertEqual(before["status"], "active")
+        result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=self.task_id)
+        self.assertEqual(result["error"]["code"], "TASK_ACTION_ALREADY_STARTED")
+        submission = self.service.field_submissions.get(self.waiting["nextAction"]["inputSubmissionId"])
+        self.assertEqual(submission["state"], "submitted")
+        self.assertIsNone(submission["consume_operation_id"])
+        self.assertEqual(self.service.tasks.get_task(self.task_id, user_subject="user-a"), before)
+        self.assertIsNone(self.write.created_payload)
+
+    def test_cancel_classification_keeps_other_task_statuses_non_cancelable(self):
+        self.start_atomic()
+        self.authorize()
+        for status in ("running", "outcome_unknown", "succeeded", "failed"):
+            with self.subTest(status=status):
+                with self.service.tasks._connect() as connection:
+                    connection.execute("UPDATE agent_tasks SET status=? WHERE task_id=?", (status, self.task_id))
+                result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=self.task_id)
+                self.assertEqual(result["error"]["code"], "TASK_NOT_CANCELABLE")
+                self.assertEqual(self.service.write_authorizations.get(self.auth_id)["state"], "approved")
+                self.assertIsNone(self.service.write_authorizations.get(self.auth_id)["commit_operation_id"])
+        self.assertIsNone(self.write.created_payload)
+
+    def test_cancel_classification_does_not_admit_active_pending_or_missing_cards(self):
+        self.start_atomic()
+        submission_id = self.waiting["nextAction"]["inputSubmissionId"]
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='active' WHERE task_id=?", (self.task_id,))
+        for interaction_id in (self.waiting["interaction"]["interactionId"], None):
+            with self.subTest(interaction_id_present=interaction_id is not None):
+                with self.service.tasks._connect() as connection:
+                    connection.execute("UPDATE agent_tasks SET current_interaction_id=? WHERE task_id=?", (interaction_id, self.task_id))
+                result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=self.task_id)
+                self.assertEqual(result["error"]["code"], "TASK_NOT_CANCELABLE")
+                self.assertEqual(self.service.field_submissions.get(submission_id)["state"], "pending")
+        self.assertIsNone(self.write.created_payload)
+
+    def test_cancel_classification_rejects_wrong_task_link_and_foreign_interaction(self):
+        self.start_atomic()
+        self.authorize()
+        other_task = self.new_task("unlinked-active-task")
+        interaction_id = self.authorization["interaction"]["interactionId"]
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='active',current_interaction_id=? WHERE task_id=?",
+                               (interaction_id, other_task))
+        result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=other_task)
+        self.assertEqual(result["error"]["code"], "TASK_NOT_CANCELABLE")
+        foreign = self.service.interactions.register(interaction_type="execution_authorization", user_subject="user-b",
+            system_id="taihua", session_id="foreign-session", resource_id="foreign-authorization",
+            title="合成外部交互", message="合成不匹配关联", display={}, resume_spec={"kind": "capability"},
+            created_at=datetime.now(timezone.utc).isoformat(), expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat())
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET current_interaction_id=? WHERE task_id=?", (foreign["interaction_id"], other_task))
+            connection.execute("INSERT INTO task_interactions VALUES (?,?,?,?,?,?)",
+                (other_task, foreign["interaction_id"], "user-a", foreign["created_at"], "completed", foreign["created_at"]))
+        result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=other_task)
+        self.assertEqual(result["error"]["code"], "TASK_NOT_CANCELABLE")
+        with self.assertRaises(TaskNotFound):
+            self.service.cancel_unsubmitted_task(user_subject="user-b", task_id=self.task_id)
+        self.assertEqual(self.service.write_authorizations.get(self.auth_id)["state"], "approved")
+        self.assertIsNone(self.service.write_authorizations.get(self.auth_id)["commit_operation_id"])
+        self.assertIsNone(self.write.created_payload)
+
+    def test_cancel_classification_preserves_an_already_consumed_authorization(self):
+        self.start_atomic()
+        self.authorize()
+        authorization = self.service.write_authorizations.get(self.auth_id)
+        self.service.write_authorizations.consume(self.auth_id,
+            **{key: authorization[key] for key in ("user_subject", "system_id", "session_id", "capability_name", "capability_version")},
+            commit_operation_id="synthetic-existing-commit")
+        before = self.service.tasks.get_task(self.task_id, user_subject="user-a")
+        self.assertEqual(before["status"], "active")
+        result = self.service.cancel_unsubmitted_task(user_subject="user-a", task_id=self.task_id)
+        self.assertEqual(result["error"]["code"], "TASK_ACTION_ALREADY_STARTED")
+        current = self.service.write_authorizations.get(self.auth_id)
+        self.assertEqual(current["state"], "consumed")
+        self.assertEqual(current["commit_operation_id"], "synthetic-existing-commit")
+        self.assertEqual(self.service.tasks.get_task(self.task_id, user_subject="user-a"), before)
         self.assertIsNone(self.write.created_payload)
 
     def test_composed_executor_uses_current_guards_in_the_authorization_transaction(self):

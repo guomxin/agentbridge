@@ -623,6 +623,11 @@ class CentralCapabilityService:
             return {"status": "succeeded", "task": task_response(task), "businessWriteOccurred": False}
         interaction_id = task.get("current_interaction_id")
         if task["status"] != "waiting_user" or not interaction_id:
+            if task["status"] == "active" and interaction_id and self._submitted_atomic_task_action(
+                task_id=task_id, user_subject=user_subject, interaction_id=interaction_id,
+            ):
+                return {"status": "rejected", "error": {"code": "TASK_ACTION_ALREADY_STARTED",
+                        "message": "卡片已提交或授权，不能再当作未提交任务取消；请先核对最新结果。"}}
             return {"status": "rejected", "error": {"code": "TASK_NOT_CANCELABLE",
                     "message": "只能取消尚未提交的填写或授权任务；已完成、执行中及结果未知的业务不能通过此入口撤销。"}}
         interaction = self.interactions.get(interaction_id, user_subject=user_subject)
@@ -669,6 +674,45 @@ class CentralCapabilityService:
             if task["status"] != "superseded" or task.get("current_interaction_id") != interaction_id:
                 raise
         return {"status": "succeeded", "task": task_response(task), "businessWriteOccurred": False}
+
+    def _submitted_atomic_task_action(self, *, task_id: str, user_subject: str, interaction_id: str) -> bool:
+        """Classify a rejection without expiring, observing or retiring a card.
+
+        A committed decision can already have moved its task back to active.
+        The original resource, rather than a stale waiting projection, explains
+        why that action can no longer be canceled as unsubmitted.
+        """
+        with self.tasks._connect() as connection:
+            connection.execute("BEGIN")
+            record = connection.execute(
+                "SELECT i.interaction_type,i.resource_id,i.system_id,i.session_id,i.resume_json "
+                "FROM agent_tasks t JOIN task_interactions l ON l.task_id=t.task_id "
+                "AND l.interaction_id=t.current_interaction_id JOIN interactions i ON i.interaction_id=l.interaction_id "
+                "WHERE t.task_id=? AND t.user_subject=? AND t.status='active' AND i.interaction_id=? "
+                "AND l.user_subject=? AND i.user_subject=?",
+                (task_id, user_subject, interaction_id, user_subject, user_subject),
+            ).fetchone()
+            if not record:
+                return False
+            try:
+                resume = json.loads(record["resume_json"])
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(resume, dict) or (resume.get("taskId") is not None and resume.get("taskId") != task_id):
+                return False
+            contracts = {
+                "business_input": ("field_submissions", "submission_id", {"submitted", "consumed"}),
+                "execution_authorization": ("write_authorizations", "authorization_id", {"approved", "consumed"}),
+            }
+            contract = contracts.get(record["interaction_type"])
+            if contract is None:
+                return False
+            table, primary_key, started_states = contract
+            resource = connection.execute(
+                f"SELECT state FROM {table} WHERE {primary_key}=? AND user_subject=? AND system_id=? AND session_id=?",
+                (record["resource_id"], user_subject, record["system_id"], record["session_id"]),
+            ).fetchone()
+            return resource is not None and resource["state"] in started_states
 
     def cancel_task_plan(
         self,
