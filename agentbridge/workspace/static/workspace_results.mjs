@@ -277,6 +277,7 @@ export function interactionActionLabel(type, display) {
       "oa.flight_application.approval": ["approval", "核对乘机申请"],
       "oa.standard_collaboration.approval": ["approval", "核对协同事项"],
       "oa.attendance_confirmation": ["approval", "核对月度考勤"],
+      "oa.quarterly_performance.acknowledgement": ["approval", "核对季度绩效"],
       "oa.weekly_report.acknowledgement": ["approval", "核对周报"],
     };
     const known = Object.hasOwn(labels, view?.profileId) ? labels[view.profileId] : null;

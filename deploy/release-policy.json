@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "fd3566fb7f4d"
+    "69905102061c"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Targeted navigation-race and read-only projection recovery fixes on top of all five latency batches. Preserve invocation reuse, readiness polling, draft scheduling, notification wakeups, authority and final verification. No schema or business data semantics changes; no database migration or business write replay. Host plugin remains 0.4.115."
+  "reason": "Add the dedicated read-only quarterly-performance inform-node contract, independent permission, trusted review and acknowledgement workflow. Preserve navigation fixes and all five latency batches. No database schema migration. Existing grants are unchanged; real acknowledgement is not executed during acceptance. Host plugin 0.4.116."
 }

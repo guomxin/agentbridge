@@ -29,7 +29,7 @@
               "oa.business_trip.approval", "oa.labor_contract_renewal.approval",
               "oa.intellectual_property_declaration.approval", "oa.overtime.approval", "oa.leave.approval",
               "oa.resignation.approval", "oa.work_handover.approval", "oa.flight_application.approval",
-              "oa.standard_collaboration.approval", "oa.attendance_confirmation", "oa.weekly_report.acknowledgement"
+              "oa.standard_collaboration.approval", "oa.attendance_confirmation", "oa.weekly_report.acknowledgement", "oa.quarterly_performance.acknowledgement"
             ]},
             "profileVersion": {"const": "1"},
             "viewKind": {"enum": ["work_log", "meeting_room", "approval", "form"]},

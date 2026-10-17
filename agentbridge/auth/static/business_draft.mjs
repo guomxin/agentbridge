@@ -286,6 +286,7 @@ export const REVIEW_DESIGNS = {
   flight_application: {title: "乘机申请与航段", family: "journey", keys: ["申请人", "部门", "申请日期"]},
   attendance_confirmation: {title: "月度考勤核对", family: "attendance", keys: ["员工与月份", "出勤统计", "OA 当前确认结论"]},
   weekly_report: {title: "周报阅读", family: "document", keys: ["周报名称", "年度", "本周说明"]},
+  quarterly_performance: {title: "季度绩效知会材料", family: "personnel", keys: ["考评人", "部门名称", "复核截止日期", "A等级占比", "B等级占比"]},
   standard_collaboration: {title: "协同事项材料", family: "document", keys: []},
 };
 

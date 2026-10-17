@@ -73,6 +73,8 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                 "oa.missed_punch.save_draft",
                 "oa.overtime.approval.prepare",
                 "oa.overtime.approve",
+                "oa.quarterly_performance.acknowledge",
+                "oa.quarterly_performance.acknowledgement.prepare",
                 "oa.resignation.approval.prepare",
                 "oa.resignation.approve",
                 "oa.standard_collaboration.approval.prepare",

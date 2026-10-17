@@ -22,7 +22,7 @@ from agentbridge.core.store_transactions import store_transaction
 
 SKILL_ID = "oa-pending"
 # A published/customized instruction bundle requires an explicit route review.
-REVIEWED_SKILL_HASH = "f94f81262ef30b8e39b7fd07435304712acf4cb25e8bd044b77628737db58fdd"
+REVIEWED_SKILL_HASH = "fdcaaf706f902c9765e5dad7f2e478084fbeda4f7998c9a3f22eb6c5fcdd13a8"
 SOURCE_TTL_SECONDS = 600
 COMMAND_KIND = "oa_pending_prepare"
 _MUTABLE_COMMAND_FIELDS = {"state", "operationId", "error"}
@@ -31,7 +31,7 @@ _LABELS = {
     "business_trip": "出差审批", "labor_contract_renewal": "合同续签",
     "intellectual_property_declaration": "知识产权申报", "overtime": "加班审批", "leave": "请假审批",
     "resignation": "离职审批", "work_handover": "工作交接", "flight_application": "乘机申请",
-    "attendance_confirmation": "考勤确认", "weekly_report": "周报阅办", "standard_collaboration": "协同审批",
+    "attendance_confirmation": "考勤确认", "weekly_report": "周报阅办", "quarterly_performance": "季度绩效阅办", "standard_collaboration": "协同审批",
 }
 
 

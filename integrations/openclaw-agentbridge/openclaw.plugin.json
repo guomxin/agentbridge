@@ -23,6 +23,7 @@
       "oa_flight_application_approval_prepare",
       "oa_attendance_confirmation_prepare",
       "oa_weekly_report_acknowledgement_prepare",
+      "oa_quarterly_performance_acknowledgement_prepare",
       "oa_standard_collaboration_approval_prepare",
       "agentbridge_server_profile",
       "agentbridge_task_plan_catalog",

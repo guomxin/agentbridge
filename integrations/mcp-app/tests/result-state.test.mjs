@@ -7,7 +7,7 @@ import { interactionActionLabel as workspaceLabel } from "../../../agentbridge/w
 test("all registered business entry labels match Workspace and never borrow a final action label", () => {
   const schema = JSON.parse(readFileSync(new URL('../../../schemas/agent-host/v1/interaction-presentation.schema.json',import.meta.url)));
   const profiles = schema.properties.display.properties.businessView.properties.profileId.enum;
-  assert.equal(profiles.length,25);
+  assert.equal(profiles.length,26);
   for (const profileId of profiles) {
     let recognized=0;
     for (const viewKind of ['work_log','meeting_room','approval','form','future']) {

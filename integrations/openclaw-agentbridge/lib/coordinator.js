@@ -3314,6 +3314,7 @@ function safeSucceededMessage(response) {
       flight_application: "OA 乘坐飞机申请单",
       attendance_confirmation: "OA \u6708\u5ea6\u8003\u52e4\u786e\u8ba4\u5355",
       weekly_report: "OA \u5468\u62a5\u53d1\u9001\u6d41\u7a0b",
+      quarterly_performance: "OA 部门季度绩效汇总",
       standard_collaboration: "OA \u666e\u901a\u534f\u540c\u4e8b\u9879",
     };
     const subject = subjects[result.workflow_profile] || "OA \u5f85\u529e\u4e8b\u9879";

@@ -5,7 +5,8 @@ const OA_PENDING_PREPARES = [
   "oa_business_trip_approval_prepare", "oa_labor_contract_renewal_approval_prepare",
   "oa_intellectual_property_declaration_approval_prepare", "oa_overtime_approval_prepare", "oa_leave_approval_prepare",
   "oa_resignation_approval_prepare", "oa_work_handover_approval_prepare", "oa_flight_application_approval_prepare",
-  "oa_attendance_confirmation_prepare", "oa_weekly_report_acknowledgement_prepare", "oa_standard_collaboration_approval_prepare",
+  "oa_attendance_confirmation_prepare", "oa_weekly_report_acknowledgement_prepare",
+  "oa_quarterly_performance_acknowledgement_prepare", "oa_standard_collaboration_approval_prepare",
 ];
 const OA_PENDING_READS = ["oa_workflow_pending_list", "oa_workflow_detail_get", "oa_workflow_opinions_list",
   "oa_session_status", "oa_session_login", "agentbridge_interaction_get", "agentbridge_task_get", "agentbridge_task_cancel",

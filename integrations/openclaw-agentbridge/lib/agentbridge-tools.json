@@ -2384,6 +2384,141 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Bind one exact pending quarterly-performance inform item. This is acknowledgement, not approval; pass any review opinion already supplied by the user.",
+      "inputSchema": {
+        "properties": {
+          "affair_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Affair Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "input_submission_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Submission Id"
+          },
+          "opinion": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Opinion"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "title": "prepare_pending_actionArguments",
+        "type": "object"
+      },
+      "name": "oa_quarterly_performance_acknowledgement_prepare",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "prepare_pending_actionDictOutput",
+        "type": "object"
+      },
+      "title": "Prepare OA Quarterly-Performance Acknowledgement"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Consume one approved authorization, acknowledge the exact quarterly-performance inform item, and verify pending disappearance.",
+      "inputSchema": {
+        "properties": {
+          "authorization_id": {
+            "maxLength": 128,
+            "minLength": 32,
+            "title": "Authorization Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "title": "commit_pending_actionArguments",
+        "type": "object"
+      },
+      "name": "oa_quarterly_performance_acknowledge",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "commit_pending_actionDictOutput",
+        "type": "object"
+      },
+      "title": "Acknowledge Authorized OA Quarterly Performance"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Bind one exact ordinary collaboration affair outside registered HR, expense, procurement, seal, efficiency-data, and weekly-report profiles.",
       "inputSchema": {
         "properties": {
@@ -5631,6 +5766,7 @@
                     "flight_application",
                     "attendance_confirmation",
                     "weekly_report",
+                    "quarterly_performance",
                     "standard_collaboration"
                   ],
                   "type": "string"

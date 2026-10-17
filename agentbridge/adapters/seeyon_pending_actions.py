@@ -19,6 +19,10 @@ from agentbridge.adapters.seeyon_business_trip import (
 from agentbridge.adapters.seeyon_flight_application import (
     flight_application_business_snapshot, flight_application_summary_fields,
 )
+from agentbridge.adapters.seeyon_quarterly_performance import (
+    TEMPLATE_ID as QUARTERLY_TEMPLATE_ID, FORM_APP_ID as QUARTERLY_FORM_APP_ID,
+    quarterly_performance_business_snapshot, quarterly_performance_summary_fields,
+)
 from agentbridge.adapters.seeyon_work_handover import (
     work_handover_business_snapshot, work_handover_summary_fields,
 )
@@ -64,6 +68,8 @@ WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = (
     "oa.weekly_report.acknowledgement.prepare"
 )
 WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY = "oa.weekly_report.acknowledge"
+QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = "oa.quarterly_performance.acknowledgement.prepare"
+QUARTERLY_PERFORMANCE_ACKNOWLEDGE_CAPABILITY = "oa.quarterly_performance.acknowledge"
 STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY = (
     "oa.standard_collaboration.approval.prepare"
 )
@@ -191,6 +197,10 @@ WEEKLY_REPORT_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA = _opinion_card(
     title="填写周报阅办意见",
     effect="阅办一条周报发送流程",
     submit_label="提交阅办意见",
+)
+QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA = _opinion_card(
+    schema_version="agentbridge.oa_quarterly_performance_acknowledgement_fields.v1",
+    title="填写季度绩效阅办意见", effect="阅办一条部门季度绩效知会，不调整评级", submit_label="提交阅办意见",
 )
 STANDARD_COLLABORATION_APPROVAL_FIELD_CARD_SCHEMA = _opinion_card(
     schema_version="agentbridge.oa_standard_collaboration_approval_fields.v1",
@@ -549,6 +559,23 @@ _PROFILES = {
         "summary_effect": "阅办后该周报事项将离开待办列表",
         "authorize_label": "授权阅办周报",
     },
+    "quarterly_performance": {
+        "prepare_capability": QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
+        "commit_capability": QUARTERLY_PERFORMANCE_ACKNOWLEDGE_CAPABILITY,
+        "contract_version": "seeyon-quarterly-performance-acknowledgement-v1",
+        "plan_schema": "agentbridge.oa_quarterly_performance_acknowledgement_plan.v1",
+        "result_schema": "agentbridge.oa_quarterly_performance_acknowledgement_result.v1",
+        "business_intent": "acknowledge_quarterly_performance",
+        "title_rule": {"kind": "optional_auto_prefix", "value": "【绩效】部门季度绩效考核汇总-"},
+        "required_fields": {"等级名称", "姓名"}, "allowed_fields": None,
+        "template_id": QUARTERLY_TEMPLATE_ID, "form_app_id": QUARTERLY_FORM_APP_ID,
+        "node_policies": {"inform"}, "node_policy_names": {"知会"},
+        "action_kind": "acknowledgement", "attitude_code": "",
+        "action_display": "阅办季度绩效知会", "summary_title": "阅办部门季度绩效汇总",
+        "summary_effect": "记录本人的季度绩效阅办知会，不调整任何评级；该事项将离开待办列表",
+        "authorize_label": "授权阅办季度绩效",
+        "business_snapshot_policy": "quarterly_performance_v1",
+    },
     "standard_collaboration": {
         "prepare_capability": STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": STANDARD_COLLABORATION_APPROVE_CAPABILITY,
@@ -587,6 +614,7 @@ _SPECIALIZED_TITLE_MARKERS = (
     "效能数据",
     "周报发送流程",
     "【HR】",
+    "【绩效】",
     "【报销】",
     "【采购】",
     "【用印】",
@@ -849,6 +877,15 @@ def confirm_attendance(
         profile_key="attendance_confirmation",
         enter_commit_boundary=enter_commit_boundary,
     )
+
+
+def prepare_quarterly_performance_acknowledgement(adapter, worker, arguments: dict) -> dict:
+    return _prepare_pending_action(adapter, worker, arguments, "quarterly_performance")
+
+
+def acknowledge_quarterly_performance(adapter, worker, plan: dict, *, enter_commit_boundary, timeout_seconds=60) -> dict:
+    return _commit_pending_action(adapter, worker, plan, profile_key="quarterly_performance",
+                                  enter_commit_boundary=enter_commit_boundary, timeout_seconds=timeout_seconds)
 
 
 def prepare_standard_collaboration_approval(adapter, worker, arguments: dict) -> dict:
@@ -1174,6 +1211,16 @@ def _validate_target(
     elif profile.get("business_snapshot_policy") == "business_trip_approval_v1":
         signals = dict(signals)
         signals["business_snapshot"] = _business_trip_business_snapshot(page)
+    elif profile.get("business_snapshot_policy") == "quarterly_performance_v1":
+        if node_policy != "inform" or node_policy_name != "知会" or attitudes:
+            raise PendingActionContractMismatch("The quarterly-performance inform node identity is inconsistent.")
+        if str(identity.get("body_type") or "").upper() not in {"20", "FORM"} or not str(identity.get("form_record_id") or ""):
+            raise PendingActionContractMismatch("The quarterly-performance form record identity is unavailable.")
+        try:
+            signals = dict(signals)
+            signals["business_snapshot"] = quarterly_performance_business_snapshot(page)
+        except ValueError as exc:
+            raise PendingActionContractMismatch(str(exc)) from exc
     elif profile.get("business_snapshot_policy") == "work_handover_v1":
         if node_policy not in profile["node_policies"] or node_policy_name not in profile["node_policy_names"]:
             raise PendingActionContractMismatch("The OA work-handover approval node identity is inconsistent.")
@@ -1919,6 +1966,8 @@ def _summary(
         ):
             if snapshot.get(name):
                 fields.append({"label": label, "value": snapshot[name]})
+    elif profile_key == "quarterly_performance":
+        fields.extend(quarterly_performance_summary_fields(target["business_snapshot"]))
     elif profile_key == "work_handover":
         fields.extend(work_handover_summary_fields(target["business_snapshot"]))
     elif profile_key == "flight_application":

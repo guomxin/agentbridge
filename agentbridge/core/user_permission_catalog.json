@@ -471,6 +471,22 @@
       "resource": "绑定下游账号实际可见范围"
     },
     {
+      "id": "oa.quarterly_performance.acknowledge",
+      "label": "季度绩效阅办",
+      "capabilities": [
+        "oa.quarterly_performance.acknowledge",
+        "oa.quarterly_performance.acknowledgement.prepare"
+      ],
+      "tools": [
+        "oa_quarterly_performance_acknowledgement_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    {
       "id": "oa.standard_collaboration.approve",
       "label": "普通协同审批",
       "capabilities": [
@@ -1010,10 +1026,10 @@
     "maintenance_records": "smartlight.maintenance.read"
   },
   "counts": {
-    "permissions": 54,
-    "registered_capabilities": 110,
-    "public_tools": 103,
-    "private_tools": 39
+    "permissions": 55,
+    "registered_capabilities": 112,
+    "public_tools": 104,
+    "private_tools": 40
   },
   "private_tool_policies": {
     "agentbridge_host_artifact_delivery_report": "platform.original_authority",

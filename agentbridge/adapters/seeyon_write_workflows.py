@@ -87,8 +87,10 @@ from agentbridge.adapters.seeyon_pending_actions import (
     STANDARD_COLLABORATION_APPROVAL_FIELD_CARD_SCHEMA,
     TRAVEL_EXPENSE_APPROVAL_FIELD_CARD_SCHEMA,
     WEEKLY_REPORT_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA,
+    QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA,
     WORK_HANDOVER_APPROVAL_FIELD_CARD_SCHEMA,
     acknowledge_weekly_report,
+    acknowledge_quarterly_performance,
     approve_business_trip_request,
     approve_efficiency_data,
     approve_flight_application,
@@ -114,6 +116,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     prepare_standard_collaboration_approval,
     prepare_travel_expense_approval,
     prepare_weekly_report_acknowledgement,
+    prepare_quarterly_performance_acknowledgement,
     prepare_work_handover_approval,
 )
 from agentbridge.adapters.seeyon_pending_batch import (
@@ -235,6 +238,13 @@ _PENDING_ACTION_BINDINGS = {
         commit_function=acknowledge_weekly_report,
         field_message="The weekly-report opinion must be entered in the trusted field card.",
         authorization_message="The weekly-report acknowledgement requires trusted confirmation.",
+    ),
+    'quarterly_performance': _PendingActionBinding(
+        field_schema=QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA,
+        prepare_function=prepare_quarterly_performance_acknowledgement,
+        commit_function=acknowledge_quarterly_performance,
+        field_message="The quarterly-performance opinion must be entered in the trusted field card.",
+        authorization_message="The quarterly-performance acknowledgement requires trusted confirmation.",
     ),
     'standard_collaboration': _PendingActionBinding(
         field_schema=STANDARD_COLLABORATION_APPROVAL_FIELD_CARD_SCHEMA,

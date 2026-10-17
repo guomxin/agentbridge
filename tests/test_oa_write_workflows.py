@@ -31,6 +31,36 @@ PENDING_REVISION = json.loads(
 for _spec in CONTRACT["capabilities"]:
     _spec.update(PENDING_REVISION.get(_spec["name"], {}))
 
+# Explicit extension; retain the signed migration bytes and existing contract checks.
+QUARTERLY = json.loads((Path(__file__).parent / "fixtures/oa_quarterly_performance_contract.json").read_text())
+QP = "oa.quarterly_performance.acknowledgement.prepare"
+QC = "oa.quarterly_performance.acknowledge"
+for key, anchor, values in (
+    ("registry_order", "oa.standard_collaboration.approval.prepare", [QP, QC]),
+    ("catalog_order", "oa.standard_collaboration.approval.prepare", [QP]),
+    ("scope_order", "oa.standard_collaboration.approval.prepare", [QP, QC]),
+):
+    index = CONTRACT[key].index(anchor)
+    CONTRACT[key][index:index] = values
+for key, anchor, values in (
+    ("commits", "oa.standard_collaboration.approve", [[QC, QP]]),
+    ("scopes", "oa.standard_collaboration.approval.prepare", [[QP, ["oa:write:approval"]], [QC, ["oa:write:approval"]]]),
+):
+    index = next(i for i, item in enumerate(CONTRACT[key]) if item[0] == anchor)
+    CONTRACT[key][index:index] = values
+index = next(i for i, spec in enumerate(CONTRACT["capabilities"]) if spec["name"] == "oa.standard_collaboration.approval.prepare")
+CONTRACT["capabilities"][index:index] = QUARTERLY["capabilities"]
+for spec in CONTRACT["capabilities"]:
+    if spec["name"] == "oa.workflow.pending.batch.prepare":
+        enum = spec["input_schema"]["properties"]["workflow_types"]["items"]["enum"]
+        enum.insert(enum.index("standard_collaboration"), "quarterly_performance")
+index = next(i for i, item in enumerate(CONTRACT["definitions"]) if item[0] == "oa.standard_collaboration.approval.prepare")
+CONTRACT["definitions"].insert(index, [QP, QUARTERLY["definition"]])
+CONTRACT["function_names"].extend(["prepare_quarterly_performance_acknowledgement", "acknowledge_quarterly_performance"])
+CONTRACT["permissions"][QC] = QUARTERLY["permission"]
+CONTRACT["capability_permissions"].update({QP: QC, QC: QC})
+CONTRACT["planning"].update(QUARTERLY["planning"])
+
 DEFINITIONS = deepcopy(dict(CONTRACT["definitions"]))
 # The immutable migration fixture predates initial missed-punch material review.
 # The only declaration delta is a read-only preflight inherited by both aliases.
@@ -90,11 +120,11 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
     assert hashlib.sha256(CONTRACT_BYTES).hexdigest() == (
         "5815e56c49564f20a8b67a0acb588a84c0937b6a8a958f53d7725ccd69606d3e"
     )
-    assert len(SPECS) == 48
-    assert len(DEFINITIONS) == 25
-    assert len(CONTRACT["commits"]) == 23
-    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 13
-    assert len(PREFLIGHT_PREPARES) == 14
+    assert len(SPECS) == 50
+    assert len(DEFINITIONS) == 26
+    assert len(CONTRACT["commits"]) == 24
+    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 14
+    assert len(PREFLIGHT_PREPARES) == 15
 
 
 def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
@@ -177,14 +207,14 @@ def test_new_declarations_project_the_frozen_pair_or_alias_contract(prepare_name
 
 def test_unified_declarations_cover_exactly_twenty_pairs_and_two_prepare_aliases():
     assert list(OA_WRITE_DECLARATIONS) == NEW_PREPARES
-    assert len(PAIR_PREPARES) == 20
+    assert len(PAIR_PREPARES) == 21
     specs = oa_write_capability_specs_by_name()
     expected_names = {
         name for prepare in NEW_PREPARES
         for name in (prepare, DEFINITIONS[prepare]["commit_capability"])
     }
     assert set(specs) == expected_names
-    assert len(specs) == 42
+    assert len(specs) == 44
     for name, spec in specs.items():
         assert spec.to_dict() == SPECS[name]
         _change_schema(spec)
@@ -375,7 +405,7 @@ def test_prepare_alias_constructor_preserves_arguments_and_lazy_dynamic_builder(
 
 def test_pending_verification_revision_is_limited_to_fourteen_versioned_pairs():
     assert len(PENDING_REVISION) == 28
-    expected_prepares = set(PREFLIGHT_PREPARES) | {CANONICAL_PREPARE}
+    expected_prepares = (set(PREFLIGHT_PREPARES) - {QP}) | {CANONICAL_PREPARE}
     expected_commits = {DEFINITIONS[name]["commit_capability"] for name in expected_prepares}
     assert set(PENDING_REVISION) == expected_prepares | expected_commits
     for name, change in PENDING_REVISION.items():

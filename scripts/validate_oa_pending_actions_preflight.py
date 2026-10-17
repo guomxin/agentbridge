@@ -21,6 +21,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     prepare_standard_collaboration_approval,
     prepare_travel_expense_approval,
     prepare_weekly_report_acknowledgement,
+    prepare_quarterly_performance_acknowledgement,
 )
 from agentbridge.browser.central import CentralBrowserWorker
 from agentbridge.core.config import ConfigStore
@@ -44,6 +45,7 @@ _PREPARE_FUNCTIONS = {
     "missed_punch_approval": prepare_missed_punch_approval,
     "travel_expense": prepare_travel_expense_approval,
     "weekly_report": prepare_weekly_report_acknowledgement,
+    "quarterly_performance": prepare_quarterly_performance_acknowledgement,
     "standard_collaboration": prepare_standard_collaboration_approval,
 }
 

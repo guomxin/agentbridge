@@ -68,6 +68,9 @@ def review_materials(profile, detail, business_snapshot=None):
         from agentbridge.adapters.seeyon_work_handover import FIELD_LABELS, WORK_FIELDS, FINANCE_FIELDS
         sections.extend([_table("handover-work", "工作交接明细", snapshot, FIELD_LABELS, WORK_FIELDS),
                          _table("handover-finance", "财务交接明细", snapshot, FIELD_LABELS, FINANCE_FIELDS)])
+    if profile == "quarterly_performance" and snapshot:
+        from agentbridge.adapters.seeyon_quarterly_performance import FIELD_LABELS, ROW_FIELDS
+        sections.append(_table("performance-employees", "季度绩效人员明细（只读）", snapshot, FIELD_LABELS, ROW_FIELDS))
     if profile == "flight_application" and snapshot:
         from agentbridge.adapters.seeyon_flight_application import FIELD_LABELS, LEG_FIELDS
         sections.append(_table("flight-legs", "航段明细", snapshot, FIELD_LABELS, LEG_FIELDS))

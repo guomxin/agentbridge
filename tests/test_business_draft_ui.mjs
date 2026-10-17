@@ -524,8 +524,8 @@ test('weekly report and handover layouts retain full source material and distinc
   assert.deepEqual(descendants(target).filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId), ['a', 'b']);
 });
 
-test('all fourteen named materials expose their existing key facts without editable decisions', () => {
-  assert.equal(Object.keys(REVIEW_DESIGNS).length, 14);
+test('all fifteen named materials expose their existing key facts without editable decisions', () => {
+  assert.equal(Object.keys(REVIEW_DESIGNS).length, 15);
   for (const [kind, design] of Object.entries(REVIEW_DESIGNS)) {
     const document = createDocument(), target = document.createElement('div');
     target.querySelectorAll = () => [];

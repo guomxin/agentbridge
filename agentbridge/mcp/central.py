@@ -93,7 +93,9 @@ from agentbridge.adapters.seeyon_pending_actions import (
     TRAVEL_EXPENSE_APPROVAL_PREPARE_CAPABILITY,
     TRAVEL_EXPENSE_APPROVE_CAPABILITY,
     WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
+    QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
     WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY,
+    QUARTERLY_PERFORMANCE_ACKNOWLEDGE_CAPABILITY,
 )
 from agentbridge.adapters.seeyon_workflow_revoke import (
     WORKFLOW_REVOKE_CAPABILITY,
@@ -265,6 +267,7 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "oa_weekly_report_acknowledgement_prepare": frozenset(
         {"oa:write:approval"}
     ),
+    "oa_quarterly_performance_acknowledgement_prepare": frozenset({"oa:write:approval"}),
     "oa_standard_collaboration_approval_prepare": frozenset(
         {"oa:write:approval"}
     ),
@@ -1422,6 +1425,22 @@ def create_central_mcp_server(
                 "inform item, and verify pending disappearance."
             ),
             "commit_capability": WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY,
+        },
+        {
+            "prepare_tool_name": "oa_quarterly_performance_acknowledgement_prepare",
+            "prepare_title": "Prepare OA Quarterly-Performance Acknowledgement",
+            "prepare_description": (
+                "Bind one exact pending quarterly-performance inform item. This is acknowledgement, "
+                "not approval; pass any review opinion already supplied by the user."
+            ),
+            "prepare_capability": QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
+            "commit_tool_name": "oa_quarterly_performance_acknowledge",
+            "commit_title": "Acknowledge Authorized OA Quarterly Performance",
+            "commit_description": (
+                "Consume one approved authorization, acknowledge the exact quarterly-performance "
+                "inform item, and verify pending disappearance."
+            ),
+            "commit_capability": QUARTERLY_PERFORMANCE_ACKNOWLEDGE_CAPABILITY,
         },
         {
             "prepare_tool_name": "oa_standard_collaboration_approval_prepare",
@@ -2848,7 +2867,7 @@ def create_central_mcp_server(
             "missed_punch", "efficiency_data", "travel_expense", "business_trip",
             "labor_contract_renewal", "intellectual_property_declaration", "overtime",
             "leave", "resignation", "work_handover", "flight_application", "attendance_confirmation",
-            "weekly_report", "standard_collaboration",
+            "weekly_report", "quarterly_performance", "standard_collaboration",
         ]] | None = None,
         keyword: Annotated[str | None, Field(max_length=200)] = None,
         max_items: Annotated[int, Field(ge=1, le=100)] = 20,

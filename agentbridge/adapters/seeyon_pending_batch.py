@@ -16,7 +16,7 @@ PENDING_BATCH_TYPES = (
     "labor_contract_renewal",
     "intellectual_property_declaration", "overtime", "leave", "resignation", "work_handover",
     "flight_application",
-    "attendance_confirmation", "weekly_report", "standard_collaboration",
+    "attendance_confirmation", "weekly_report", "quarterly_performance", "standard_collaboration",
 )
 PENDING_BATCH_INPUT_SCHEMA = {
     "type": "object",
