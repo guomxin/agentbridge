@@ -47,13 +47,42 @@ test('account reset discards in-flight rows even if transport ignores abort and 
   await h.settle(1,{items:[item('new')]});assert.deepEqual(h.applied,['new']);
 });
 
-test('failed read is not replayed; newer queued event can still refresh and excess IDs stay bounded', async () => {
-  const h=harness({capacity:2});h.queue.enqueue('a');h.queue.enqueue('b');h.queue.enqueue('c');
+test('with retry disabled, newer queued event can still refresh and excess IDs stay bounded', async () => {
+  const h=harness({capacity:2,maxRetries:0});h.queue.enqueue('a');h.queue.enqueue('b');h.queue.enqueue('c');
   assert.equal(h.overflow,1);await h.tick();h.queue.enqueue('a');
   h.calls[0].reject(new Error('offline'));await new Promise(resolve=>setImmediate(resolve));
   assert.equal(h.errors.length,1);await h.tick();assert.deepEqual(h.calls[1].ids,['a']);
   await h.settle(1,{items:[item('foreign'),{...item('a'),detail:{task:{task_id:'different'}}}]});
   assert.deepEqual(h.applied,[]);await h.tick();assert.equal(h.calls.length,2);
+});
+
+test('transient projection failure recovers without another timeline event', async () => {
+  const h=harness();h.queue.enqueue('a');await h.tick();
+  h.calls[0].reject(new Error('offline'));await new Promise(resolve=>setImmediate(resolve));
+  await h.tick();assert.deepEqual(h.calls[1].ids,['a']);
+  await h.settle(1,{items:[item('a')]});
+  assert.deepEqual(h.applied,['a']);assert.equal(h.errors.length,0);
+  await h.tick();assert.equal(h.calls.length,2);
+});
+
+test('projection retries are bounded and account reset cancels pending retries', async () => {
+  const h=harness();h.queue.enqueue('a');
+  for(let i=0;i<3;i++) {
+    await h.tick();h.calls[i].reject(new Error('offline'));
+    await new Promise(resolve=>setImmediate(resolve));
+  }
+  await h.tick();assert.equal(h.calls.length,3);assert.equal(h.errors.length,1);
+  h.queue.enqueue('a');await h.tick();h.calls[3].reject(new Error('offline'));
+  await new Promise(resolve=>setImmediate(resolve));h.queue.reset();
+  await h.tick();assert.equal(h.calls.length,4);
+});
+
+test('a newer event supersedes an in-flight retry and stale unavailable cannot retire it', async () => {
+  const h=harness();h.queue.enqueue('a');await h.tick();
+  h.calls[0].reject(new Error('offline'));await new Promise(resolve=>setImmediate(resolve));
+  await h.tick();h.queue.enqueue('a');
+  await h.settle(1,{unavailableTaskIds:['a']});assert.deepEqual(h.retired,[]);
+  await h.tick();await h.settle(2,{items:[item('a')]});assert.deepEqual(h.applied,['a']);
 });
 
 test('initial zero cursor is established without adopting a newer projection or chat row sequence', () => {

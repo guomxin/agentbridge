@@ -6,6 +6,7 @@ import unicodedata
 from urllib.parse import urlencode, urljoin
 
 from agentbridge.adapters.base import AdapterLoginRequired
+from agentbridge.browser.navigation import is_navigation_race
 
 
 DOCUMENT_CERTIFICATE_SEARCH_CAPABILITY = "oa.document.certificate.search"
@@ -506,14 +507,10 @@ def _open_certificate_category(
     deadline = time.monotonic() + 60
     page = worker.goto(base_url, timeout_seconds=60)
     pages = lambda: page.context.pages
-    _wait_for_ui(page, lambda: _find_exact_visible_text(pages(), _ALL_APPS_LABEL),
+    _wait_for_ui(page, lambda: _click_exact_visible_text(pages(), _ALL_APPS_LABEL),
                  "OA All Apps entry was not found", deadline=deadline)
-    if not _click_exact_visible_text(pages(), _ALL_APPS_LABEL):
-        raise SeeyonDocumentContractMismatch("OA All Apps entry changed")
-    _wait_for_ui(page, lambda: _find_app_search(pages()),
+    _wait_for_ui(page, lambda: _search_all_apps(pages(), _DOCUMENT_CENTER_LABEL),
                  "OA app search field was not found", deadline=deadline)
-    if not _search_all_apps(pages(), _DOCUMENT_CENTER_LABEL):
-        raise SeeyonDocumentContractMismatch("OA app search field changed")
     for label in (
         _DOCUMENT_CENTER_LABEL,
         _UNIT_DOCUMENTS_LABEL,
@@ -521,17 +518,18 @@ def _open_certificate_category(
         _GROUP_CERTIFICATES_LABEL,
         category_label,
     ):
-        _wait_for_ui(page, lambda: _find_exact_visible_text(pages(), label),
+        _wait_for_ui(page, lambda: _click_exact_visible_text(pages(), label),
                      f"OA document center entry is unavailable: {label}", deadline=deadline)
-        if not _click_exact_visible_text(pages(), label):
-            raise SeeyonDocumentContractMismatch(f"OA document center entry changed: {label}")
-    frame = _wait_for_ui(page, lambda: _find_document_frame(pages()),
+    _wait_for_ui(page, lambda: _find_document_frame(pages()),
                          "OA certificate folder search controls were not found", deadline=deadline)
     # The observed UI contract has no per-query response/generation identifier.
     # Retain the existing result settle path until that completion signal is known;
     # identical or empty results must not be treated as a failed refresh.
     page.wait_for_timeout(_RESULT_SETTLE_MS)
-    return frame
+    # Navigation can replace the frame during result settling. Never hand the
+    # caller a pre-settle handle (search and download share this path).
+    return _wait_for_ui(page, lambda: _find_document_frame(pages()),
+                        "OA certificate folder changed during navigation", deadline=deadline)
 
 
 def _search_current_folder(worker, *, frame, query: str) -> list[dict]:
@@ -581,14 +579,17 @@ def _search_current_folder(worker, *, frame, query: str) -> list[dict]:
 
 
 def _wait_for_ui(page, observe, message, *, timeout_seconds=20, deadline=None):
+    """Retry read-only menu navigation within one budget, never business writes."""
     deadline = min(deadline, time.monotonic() + timeout_seconds) if deadline is not None else time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if _has_login_form(page.context.pages):
-            raise AdapterLoginRequired("the central OA session is not logged in or has expired")
         try:
+            if _has_login_form(page.context.pages):
+                raise AdapterLoginRequired("the central OA session is not logged in or has expired")
             result = observe()
-        except Exception:
-            result = None  # Frame navigation may temporarily invalidate a locator.
+        except Exception as exc:
+            if not is_navigation_race(exc):
+                raise
+            result = None
         if result:
             return result
         page.wait_for_timeout(_READINESS_POLL_MS)

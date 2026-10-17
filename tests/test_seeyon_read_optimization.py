@@ -143,6 +143,23 @@ class DetailPage:
 
 
 class SeeyonDetailReadinessTests(unittest.TestCase):
+    def test_title_navigation_race_resets_stability_and_recovers(self):
+        page = DetailPage(Clock())
+        def title():
+            if .15 <= page.clock.now < .225:
+                raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
+            return "Target"
+        page.title = title
+        self.assertEqual(self.snapshot(page)["title"], "Target")
+        self.assertGreaterEqual(page.clock.now, .525)
+
+    def test_closed_page_title_is_not_retried(self):
+        page = DetailPage(Clock())
+        page.title = lambda: (_ for _ in ()).throw(RuntimeError("Target page has been closed"))
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            self.snapshot(page)
+        self.assertEqual(page.waits, [])
+
     def snapshot(self, page, *, timeout=1):
         with patch("agentbridge.browser.central.time.monotonic", side_effect=page.clock.monotonic):
             return _wait_for_detail_snapshot(
@@ -249,12 +266,16 @@ class CertificateMenuReadinessTests(unittest.TestCase):
             return object() if page.clock.now >= state["available_after"] else None
 
         def click(pages, label):
+            if not available():
+                return False
             self.assertGreaterEqual(page.clock.now, state["available_after"])
             clicked.append(label)
             state["available_after"] = page.clock.now + .15
             return True
 
         def search(*_):
+            if not available():
+                return False
             self.assertGreaterEqual(page.clock.now, state["available_after"])
             state["available_after"] = page.clock.now + .15
             return True
@@ -287,13 +308,58 @@ class CertificateMenuReadinessTests(unittest.TestCase):
             worker = SimpleNamespace(goto=navigate)
             with (patch.object(documents, "_has_login_form", return_value=expired),
                   patch.object(documents, "_find_exact_visible_text", return_value=None),
-                  patch.object(documents, "_click_exact_visible_text") as click,
+                  patch.object(documents, "_click_exact_visible_text", return_value=False) as click,
                   patch.object(documents.time, "monotonic", side_effect=page.clock.monotonic)):
                 error = documents.AdapterLoginRequired if expired else documents.SeeyonDocumentContractMismatch
                 with self.assertRaises(error):
                     documents._open_certificate_category(worker, base_url=BASE_URL, category_label="category")
             self.assertLess(page.clock.now, 60.08)
-            click.assert_not_called()
+            if expired:
+                click.assert_not_called()
+
+    def test_detached_login_frame_retries_but_expiry_and_nontransient_errors_do_not(self):
+        for error in (RuntimeError("Locator.count: Frame was detached"),
+                      RuntimeError("Target page, context or browser has been closed"),
+                      ValueError("invalid selector")):
+            with self.subTest(error=str(error)):
+                page = DetailPage(Clock())
+                with (patch.object(documents, "_has_login_form", side_effect=[error, False]),
+                      patch.object(documents.time, "monotonic", side_effect=page.clock.monotonic)):
+                    if "detached" in str(error):
+                        self.assertEqual(documents._wait_for_ui(page, lambda: "ready", "missing"), "ready")
+                        self.assertEqual(page.waits, [75])
+                    else:
+                        with self.assertRaises(type(error)):
+                            documents._wait_for_ui(page, lambda: "ready", "missing")
+                        self.assertEqual(page.waits, [])
+
+    def test_persistent_navigation_failure_is_bounded(self):
+        page = DetailPage(Clock())
+        with (patch.object(documents, "_has_login_form", side_effect=RuntimeError("Frame was detached")),
+              patch.object(documents.time, "monotonic", side_effect=page.clock.monotonic)):
+            with self.assertRaises(documents.SeeyonDocumentContractMismatch):
+                documents._wait_for_ui(page, lambda: True, "missing", timeout_seconds=.2)
+        self.assertLess(page.clock.now, .28)
+
+    def test_menu_detachment_and_frame_replacement_during_settle(self):
+        page = DetailPage(Clock())
+        worker = SimpleNamespace(goto=lambda *a, **kw: page)
+        old, new = object(), object()
+        calls = []
+        def click(pages, label):
+            calls.append(label)
+            if len(calls) == 1:
+                raise RuntimeError("Locator.count: Frame was detached")
+            return True
+        with (patch.object(documents, "_has_login_form", return_value=False),
+              patch.object(documents, "_click_exact_visible_text", side_effect=click),
+              patch.object(documents, "_search_all_apps", return_value=True),
+              patch.object(documents, "_find_document_frame", side_effect=[old, new]),
+              patch.object(documents.time, "monotonic", side_effect=page.clock.monotonic)):
+            self.assertIs(documents._open_certificate_category(worker, base_url=BASE_URL,
+                                                               category_label="category"), new)
+        self.assertEqual(calls[:2], [documents._ALL_APPS_LABEL] * 2)
+        self.assertEqual(page.waits, [75, 900])
 
     def test_identical_and_empty_query_results_keep_existing_result_path(self):
         for rows in ([], [{"resource_id": "id", "source_id": "source", "filename": "same.pdf"}]):

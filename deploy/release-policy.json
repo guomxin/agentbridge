@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1acae4c34a71"
+    "fd3566fb7f4d"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Apply five latency batches: privacy-safe stage timing, transactional decision wake with durable fallback, exact selected-result preparation, per-invocation adapter reuse and material readiness, and current-first Workspace with authenticated status waits and same-run final history. Preserve original authorization, material freshness, business verification, and unknown no-replay. No schema migration: all four production schema-only reconstructions and second initialization retain exact fingerprints and 277/4/6/3 objects. Existing 0.4.114 compatibility remains; add reviewed 0.4.115 host compatibility. No historical business operation replay or data rollback."
+  "reason": "Targeted navigation-race and read-only projection recovery fixes on top of all five latency batches. Preserve invocation reuse, readiness polling, draft scheduling, notification wakeups, authority and final verification. No schema or business data semantics changes; no database migration or business write replay. Host plugin remains 0.4.115."
 }

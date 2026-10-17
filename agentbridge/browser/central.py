@@ -11,6 +11,8 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+from agentbridge.browser.navigation import is_navigation_race
+
 
 class CentralProfileInUseError(RuntimeError):
     pass
@@ -723,7 +725,16 @@ def _wait_for_detail_snapshot(
     deadline = time.monotonic() + timeout_seconds
     previous_digest, stable_since = None, None
     while time.monotonic() < deadline:
-        snapshot = {"url": page.url, "title": page.title(), "html": "", "frames": []}
+        try:
+            snapshot = {"url": page.url, "title": page.title(), "html": "", "frames": []}
+        except Exception as exc:
+            # Title reads execute in the main document too, and can race a
+            # navigation just like frame.evaluate/content below.
+            if not is_navigation_race(exc):
+                raise
+            previous_digest, stable_since = None, None
+            page.wait_for_timeout(75)
+            continue
         states, complete = [], True
         main_frame = getattr(page, "main_frame", page)
         frames = [main_frame] + [frame for frame in list(page.frames)

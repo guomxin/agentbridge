@@ -42,17 +42,19 @@ export function applyCurrentSnapshot(state, snapshot, { ingest, upsert, retire }
 
 // Coalesce read-only refreshes without letting an older response revive a card.
 export function createProjectionQueue({ fetchBatch, apply, retire, render, onError = () => {},
-  onOverflow = () => {}, timers = globalThis, delay = 80, batchSize = 32, capacity = 256 }) {
+  onOverflow = () => {}, timers = globalThis, delay = 80, batchSize = 32, capacity = 256,
+  maxRetries = 2, retryDelay = 500 }) {
   let epoch = 0, serial = 0, timer = null, running = false;
-  const pending = new Map(), latest = new Map();
-  function arm() {
+  const pending = new Map(), latest = new Map(), retries = new Map();
+  function arm(wait = delay) {
     if (timer !== null || running || !pending.size) return;
-    timer = timers.setTimeout(() => { timer = null; void flush(); }, delay);
+    timer = timers.setTimeout(() => { timer = null; void flush(); }, wait);
   }
   function enqueue(id) {
     if (!id) return;
     if (!pending.has(id) && !latest.has(id) && latest.size >= capacity) { onOverflow(); return; }
     const ticket = ++serial;
+    retries.delete(id);
     pending.set(id, ticket); latest.set(id, ticket); arm();
   }
   async function flush() {
@@ -60,6 +62,7 @@ export function createProjectionQueue({ fetchBatch, apply, retire, render, onErr
     const ownEpoch = epoch, batch = new Map([...pending].slice(0, batchSize));
     for (const id of batch.keys()) pending.delete(id);
     running = true;
+    let nextDelay = delay;
     try {
       const result = await fetchBatch([...batch.keys()]);
       if (ownEpoch !== epoch) return;
@@ -70,18 +73,32 @@ export function createProjectionQueue({ fetchBatch, apply, retire, render, onErr
       for (const id of result.unavailableTaskIds || []) if (fresh(id)) retire(id);
       render();
     } catch (error) {
-      if (ownEpoch === epoch) onError(error);
+      if (ownEpoch === epoch) {
+        let exhausted = false;
+        for (const [id, ticket] of batch) {
+          if (latest.get(id) !== ticket) continue;
+          const attempt = retries.get(id) || 0;
+          if (attempt < maxRetries) {
+            retries.set(id, attempt + 1);
+            pending.set(id, ticket);
+            nextDelay = retryDelay;
+          } else exhausted = true;
+        }
+        if (exhausted) onError(error);
+      }
     } finally {
       if (ownEpoch === epoch) {
-        for (const [id, ticket] of batch) if (latest.get(id) === ticket) latest.delete(id);
-        running = false; arm();
+        for (const [id, ticket] of batch) if (latest.get(id) === ticket && !pending.has(id)) {
+          latest.delete(id); retries.delete(id);
+        }
+        running = false; arm(nextDelay);
       }
     }
   }
   function reset() {
     epoch += 1;
     if (timer !== null) timers.clearTimeout(timer);
-    timer = null; running = false; pending.clear(); latest.clear();
+    timer = null; running = false; pending.clear(); latest.clear(); retries.clear();
   }
   return { enqueue, reset };
 }
