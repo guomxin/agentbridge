@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { interactionResumeAllowed, resumeClaimAllowed } from "./recovery-policy.js";
 import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
+import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
 import {
   appendPresentationLinks,
@@ -516,11 +517,11 @@ export class InteractionCoordinator {
     const peer = /^agent:[^:]+:telegram:(?:direct|dm):([^:]+)$/iu.exec(sessionKey || "")?.[1];
     if (!peer || peer !== identity.binding.senderId || peer.startsWith("-")) return null;
     const route = normalizeResultViewRoute(this.sessionRoutes.get(sessionKey), peer);
-    if (!route || (identity.binding.accountId != null && identity.binding.accountId !== route.accountId)) return null;
+    if (!route || (identity.binding.accountId != null && !sameTelegramAccount(identity.binding.accountId, route.accountId))) return null;
     const delivery = context.deliveryContext;
     const requestAccount = safeRoutePart(context.agentAccountId || delivery?.accountId);
     const requestChannel = safeRoutePart(context.messageChannel || delivery?.channel);
-    if ((requestAccount && requestAccount !== route.accountId) || (requestChannel && requestChannel !== "telegram") ||
+    if ((requestAccount && !sameTelegramAccount(requestAccount, route.accountId)) || (requestChannel && requestChannel !== "telegram") ||
         (context.requesterSenderId && String(context.requesterSenderId) !== peer) ||
         (delivery?.to && String(delivery.to).replace(/^telegram:/u, "") !== peer) ||
         ![null, undefined, ""].includes(delivery?.threadId)) return null;
@@ -541,7 +542,7 @@ export class InteractionCoordinator {
         if (!this.resultViewIssuanceCurrent(issuance) || !sourceTaskId || !endpointId ||
             endpoint?.endpointId !== endpointId || endpoint?.agentHost !== "openclaw" || endpoint?.state !== "active" ||
             endpoint?.clientType !== "telegram" || endpoint?.externalSubject !== peer ||
-            endpoint?.conversationRef !== sessionKey || (endpoint?.accountId ?? null) !== route.accountId ||
+            endpoint?.conversationRef !== sessionKey || !sameTelegramAccount(endpoint?.accountId, route.accountId) ||
             JSON.stringify(normalizeResultViewRoute(endpoint.route, peer)) !== JSON.stringify(route) ||
             (snapshot.sourceTaskId && (snapshot.sourceTaskId !== sourceTaskId || snapshot.endpointId !== endpointId))) return false;
         snapshot.sourceTaskId = sourceTaskId;
@@ -951,14 +952,14 @@ export class InteractionCoordinator {
       typeof this.interactionPresenter !== "function" ||
       !isPrivateSessionKey(sessionKey) ||
       !interactions.some(
-        (interaction) => interaction.type === "execution_authorization",
+        (interaction) => ["business_input", "execution_authorization"].includes(interaction.type),
       )
     ) {
       return null;
     }
     return Promise.all(
       interactions.map(async (interaction) => {
-        if (interaction.type !== "execution_authorization") {
+        if (!["business_input", "execution_authorization"].includes(interaction.type)) {
           return interaction;
         }
         try {
@@ -1588,7 +1589,8 @@ export class InteractionCoordinator {
     if (!commandKey || !taskId || notification?.event?.eventType !== "task.prepare.requested" ||
         binding?.channel !== "telegram" || endpoint?.clientType !== "telegram" ||
         endpoint?.externalSubject !== binding.senderId ||
-        (binding.accountId !== null && endpoint?.accountId !== binding.accountId) ||
+        (binding.accountId !== null && !sameTelegramAccount(endpoint?.accountId, binding.accountId)) ||
+        !sameTelegramAccount(endpoint?.route?.accountId, endpoint?.accountId) ||
         endpoint?.endpointId !== notification.task.originEndpointId ||
         sessionKey !== notification.task.activeConversationRef ||
         peer !== endpoint.externalSubject || peer?.startsWith("-") ||
@@ -2918,8 +2920,8 @@ function normalizeResultViewRoute(value, senderId) {
       typeof senderId !== "string" || !senderId || senderId.startsWith("-") ||
       typeof value.to !== "string" || value.to.replace(/^telegram:/u, "") !== senderId ||
       ![null, undefined, ""].includes(value.threadId) ||
-      !(value.accountId == null || (typeof value.accountId === "string" && value.accountId.length > 0 && value.accountId.length <= 512))) return null;
-  return Object.freeze({ channel: "telegram", to: senderId, accountId: value.accountId ?? null, threadId: null });
+      !(value.accountId == null || (typeof value.accountId === "string" && value.accountId.length <= 512))) return null;
+  return Object.freeze({ channel: "telegram", to: senderId, accountId: canonicalTelegramAccount(value.accountId), threadId: null });
 }
 
 function resultViewLifecycleToken(tokens, sessionKey) {

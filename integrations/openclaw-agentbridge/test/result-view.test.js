@@ -44,13 +44,13 @@ test("selection expiry changes the entry to progress without extending the sourc
 
 function proxyHarness({ session = sessionKey, channel = "telegram", failed = false, originEndpointId = endpointId,
   issueFailure = false, viewOverride = null, beforeIssueReturn = null, routeOverride = null,
-  contextFactory = true, afterFactory = null, endpointOverride = null } = {}) {
+  contextFactory = true, afterFactory = null, endpointOverride = null, ownerAccount = "account-a" } = {}) {
   const calls = [], captured = [];
   let namespace = "credential-user-a";
-  const binding = { key: "telegram:*:user-a", channel, senderId: "user-a", accountId: "account-a" };
-  const route = { channel: "telegram", to: "user-a", accountId: "account-a", threadId: null, ...routeOverride };
+  const binding = { key: "telegram:*:user-a", channel, senderId: "user-a", accountId: ownerAccount };
+  const route = { channel: "telegram", to: "user-a", accountId: ownerAccount, threadId: null, ...routeOverride };
   const originalEndpoint = { endpointId, agentHost: "openclaw", state: "active", clientType: "telegram",
-    externalSubject: "user-a", accountId: "account-a", conversationRef: sessionKey, route: { ...route }, ...endpointOverride };
+    externalSubject: "user-a", accountId: ownerAccount, conversationRef: sessionKey, route: { ...route }, ...endpointOverride };
   const client = { async callTool(name, args, options) {
     calls.push({ name, args, options });
     if (name === "agentbridge_host_task_ensure") return { task: { taskId: sourceTaskId, originEndpointId }, endpoint: originalEndpoint, coordinatorLease: {
@@ -94,6 +94,18 @@ test("the real proxy issues a host-only surface after task finalization and keep
   assert.equal(h.captured[0].trustedResultView.view.presentation.url, url);
   assert.equal(JSON.stringify(result).includes(url), false);
   assert.equal(AGENTBRIDGE_AGENT_FACING_TOOL_NAMES.includes("agentbridge_result_view"), false);
+  assert.deepEqual(h.calls[0].args.capabilities, ["direct_status", "trusted_interaction", "continuous_flow_v1"]);
+});
+
+test("trusted Telegram result issuance accepts default aliases without treating distinct custom accounts as aliases", async () => {
+  for (const [accountId, routeAccount] of [[null, "default"], ["default", null], ["", "default"], [null, ""]]) {
+    const h = proxyHarness({ ownerAccount: "default", routeOverride: { accountId: routeAccount }, endpointOverride: { accountId } });
+    await h.run();
+    assert.equal(h.calls.filter(item => item.name === "agentbridge_result_view").length, 1, JSON.stringify({ accountId, routeAccount }));
+  }
+  const h = proxyHarness({ ownerAccount: "primary", routeOverride: { accountId: " primary " } });
+  await h.run();
+  assert.equal(h.calls.some(item => item.name === "agentbridge_result_view"), false);
 });
 
 test("unbound origins, non-Telegram sessions and failed queries never request a result surface", async () => {

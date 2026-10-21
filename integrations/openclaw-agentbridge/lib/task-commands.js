@@ -1,5 +1,6 @@
 import { processToolResult } from "./interaction.js";
 import { hostContextMeta, TASK_CONTEXT_META_KEY } from "./host-contract.js";
+import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
 // Only a command key and its original routing identity cross this boundary.
 // Capability, target, business arguments and Skill binding stay in Central.
@@ -45,7 +46,7 @@ export function createTaskCommandRunner({ identityRouter, coordinator, performan
       const endpoint = command.endpoint;
       if (!owner?.binding || owner.binding.channel !== "telegram" || owner.binding.key !== command.endpointKey ||
           owner.binding.senderId !== endpoint.externalSubject ||
-          (owner.binding.accountId !== null && owner.binding.accountId !== endpoint.accountId) ||
+          (owner.binding.accountId !== null && !sameTelegramAccount(owner.binding.accountId, endpoint.accountId)) ||
           (identity?.bound && identity.binding.key !== owner.binding.key) ||
           !identityRouter.restoreSessionBinding?.({ sessionKey: command.sessionKey, bindingKey: owner.binding.key })) {
         throw Object.assign(new Error("Telegram command owner does not match the exact endpoint"), { code: "TASK_COMMAND_BINDING_REQUIRED" });
@@ -123,10 +124,11 @@ function normalizeCommand(value) {
       Object.keys(route).some(key => !["channel", "to", "accountId", "threadId"].includes(key)) ||
       route.channel !== "telegram" || typeof route.to !== "string" || route.to.replace(/^telegram:/u, "") !== endpoint.externalSubject ||
       ![null, undefined, ""].includes(route.threadId) ||
-      !(route.accountId == null || route.accountId === endpoint.accountId)) return null;
+      !sameTelegramAccount(route.accountId, endpoint.accountId)) return null;
+  const accountId = canonicalTelegramAccount(endpoint.accountId);
   return { ...result, endpoint: { endpointId: endpoint.endpointId, clientType: endpoint.clientType,
-    externalSubject: endpoint.externalSubject, accountId: endpoint.accountId, conversationRef: endpoint.conversationRef,
-    route: { channel: "telegram", to: route.to, accountId: route.accountId || null, threadId: null } } };
+    externalSubject: endpoint.externalSubject, accountId, conversationRef: endpoint.conversationRef,
+    route: { channel: "telegram", to: route.to, accountId, threadId: null } } };
 }
 
 function safeCode(error) { return String(error?.code || "TASK_COMMAND_UNCONFIRMED").replace(/[^A-Za-z0-9_]/gu, "_").slice(0, 100); }

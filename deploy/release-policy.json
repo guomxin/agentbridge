@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "a6adbd43b95e"
+    "62fc735c2a17"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Fix Telegram result-selection links invalidated by normal timeline synchronization. Canonicalize only verified equivalent default-account, recipient-prefix and empty-thread representations while retaining exact identity, token, endpoint, conversation, non-default-account and unknown-route bindings. Preserve all governed prepare, authorization, material and business verification contracts; no old-ticket bypass, schema migration or automatic business writes. Host plugin remains 0.4.117."
+  "reason": "Align Telegram host command recovery with the verified Central default-account route semantics. Preserve strict owner, sender, non-default account, endpoint, token, session, L3 lease, original material and business verification checks. Recover only original durable pending commands through normal runtime snapshots without replaying business operations or extending source validity. No schema migration; host plugin0.4.118."
 }

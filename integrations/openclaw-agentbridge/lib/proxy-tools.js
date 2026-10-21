@@ -751,7 +751,8 @@ async function resolveTaskId({
               "workspace.task.read",
               "workspace.interaction.open",
             ]
-          : ["direct_status", "trusted_interaction"],
+          : ["direct_status", "trusted_interaction",
+              ...(binding.channel === "telegram" ? ["continuous_flow_v1"] : [])],
         task_scope: workspaceSession
           ? independentReadCall || independentTaskEntry ||
             taskScopeResolver?.(sessionKey, descriptor.name) === "independent"

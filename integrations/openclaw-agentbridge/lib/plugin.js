@@ -25,8 +25,9 @@ import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
 import { createHostPerformance } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
+import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.117";
+export const PLUGIN_VERSION = "0.4.118";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;
@@ -1316,7 +1317,12 @@ async function recoverHostTasks({ coordinator, identityRouter, logger }) {
         endpoint?.clientType === binding.channel &&
         endpoint?.externalSubject === binding.senderId &&
         (binding.accountId === null ||
-          endpoint?.accountId === binding.accountId);
+          (binding.channel === "telegram" ? sameTelegramAccount(endpoint?.accountId, binding.accountId)
+            : endpoint?.accountId === binding.accountId)) &&
+        (binding.channel !== "telegram" || (
+          /^agent:[^:]+:telegram:(?:direct|dm):([^:]+)$/iu.exec(sessionKey || "")?.[1] === binding.senderId &&
+          route?.channel === "telegram" && String(route?.to || "").replace(/^telegram:/u, "") === binding.senderId &&
+          [null, undefined, ""].includes(route?.threadId) && sameTelegramAccount(route?.accountId, endpoint?.accountId)));
       if (
         !taskId ||
         !interaction ||
@@ -1344,7 +1350,7 @@ async function recoverHostTasks({ coordinator, identityRouter, logger }) {
         sessionKey,
         channel: route.channel || binding.channel,
         to: route.to || binding.senderId,
-        accountId: route.accountId || binding.accountId,
+        accountId: binding.channel === "telegram" ? canonicalTelegramAccount(endpoint.accountId) : route.accountId || binding.accountId,
         threadId: route.threadId,
       });
       if (
