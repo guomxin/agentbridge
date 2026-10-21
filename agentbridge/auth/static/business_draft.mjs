@@ -466,7 +466,7 @@ export function renderEvidence(document, target, review, kind = "") {
         excerpt.textContent = String(material.text).slice(0, 240) + "…（展开下方查看完整材料）";
         section.append(excerpt);
       }
-      const text = document.createElement(material.reading ? "div" : "pre"); text.className = "material-text"; text.tabIndex = 0;
+      const text = document.createElement(material.reading ? "div" : "pre"); text.className = "material-body"; text.tabIndex = 0;
       appendReading(document, text, material.text, material.reading); detail.append(text);
     } else {
       const columns = (Array.isArray(material.columns) ? material.columns : []).filter(column => typeof column?.key === "string");

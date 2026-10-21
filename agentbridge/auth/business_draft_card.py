@@ -284,7 +284,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   .room-option strong {{display:block;font-size:14px}} .room-option small {{display:block;color:var(--muted);font-size:12px;margin-top:5px}}
   .draft-material-change {{margin:0 0 18px;border:1px solid #c99f53;border-radius:6px;padding:16px;background:#fff6df;color:#664a19;font-size:14px;line-height:1.6}}
   .draft-material-change strong {{display:block;margin-bottom:4px}} .draft-evidence {{margin-top:20px}}
-  .material-text {{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7;margin:14px 0 0;max-height:480px;overflow:auto}}
+  .material-body {{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7;margin:14px 0 0;max-height:480px;overflow:auto}}
   .material-primary-grid {{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}}
   .material-table {{overflow-x:auto;margin-top:14px}} .material-table table {{border-collapse:collapse;width:100%;font-size:13px}}
   .material-table th,.material-table td {{padding:10px;text-align:left;vertical-align:top;border:1px solid var(--line);white-space:pre-wrap;min-width:100px}}
