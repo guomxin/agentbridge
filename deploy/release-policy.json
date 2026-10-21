@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "69905102061c"
+    "7f48c544aa6e"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Add the dedicated read-only quarterly-performance inform-node contract, independent permission, trusted review and acknowledgement workflow. Preserve navigation fixes and all five latency batches. No database schema migration. Existing grants are unchanged; real acknowledgement is not executed during acceptance. Host plugin 0.4.116."
+  "reason": "Complete Telegram business cards and endpoint-bound single/batch result selection through the original governed preparation, lease, material checks and verification. Add mobile lifecycle recovery without replaying uncertain POSTs. Keep all prior action and permission contracts. No schema migration or automatic real business writes. Host plugin 0.4.117."
 }

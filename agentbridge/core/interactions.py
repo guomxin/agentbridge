@@ -285,11 +285,21 @@ def build_interaction_envelope(record: dict, resource: dict) -> dict:
     # Never accept reserved business hints from arbitrary display/schema text.
     # These optional labels describe an entry, not authorization or completion.
     display.pop("businessView", None)
+    display.pop("actionView", None)
+    display.pop("batch", None)
+    from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+    capability = resource.get("capability_name")
+    definition = _TRUSTED_WRITE_DEFINITIONS.get(capability)
+    commit = definition["commit_capability"] if definition else capability
+    if commit in {item["commit_capability"] for item in _TRUSTED_WRITE_DEFINITIONS.values()}:
+        display["actionView"] = {"schemaVersion": "agentbridge.action-view.v1", "capabilityId": commit}
     if interaction_type == "business_input":
         from agentbridge.core.business_draft_profiles import profile_for_source
         from agentbridge.core.business_drafts import BusinessDraftError
         try:
-            display["businessView"] = profile_for_source(resource).presentation()
+            profile = profile_for_source(resource)
+            display["businessView"] = profile.presentation()
+            display["actionView"] = {"schemaVersion": "agentbridge.action-view.v1", "capabilityId": profile.commit}
         except (BusinessDraftError, TypeError, AttributeError):
             pass  # Old/unknown contracts keep their original generic entry.
     state, ready, resume_completed = _project_state(

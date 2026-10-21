@@ -26,7 +26,7 @@ import { TimelinePublisher } from "./timeline.js";
 import { createHostPerformance } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 
-export const PLUGIN_VERSION = "0.4.116";
+export const PLUGIN_VERSION = "0.4.117";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;
@@ -185,6 +185,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
             coordinator.rememberSkillTrialResult(sessionKey, trial, params, payload),
           trustedResultHandler: (event, toolContext) =>
             captureNativeAgentBridgeResult(coordinator, event, toolContext),
+          trustedResultContextFactory: request => coordinator.createTrustedResultContext(request),
           performanceRecorder,
           logger: api.logger,
         }),
@@ -427,7 +428,11 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       );
     }
     const interactions = coordinator.takeForDelivery({ sessionKey });
-    const presentation = presentationForRecords(interactions, channel);
+    const interactionPresentation = presentationForRecords(interactions, channel);
+    const resultPresentation = coordinator.takeResultViewPresentation(sessionKey, channel);
+    const presentation = interactionPresentation && resultPresentation
+      ? mergePresentations(resultPresentation, interactionPresentation)
+      : interactionPresentation || resultPresentation;
     if (!presentation) {
       return undefined;
     }

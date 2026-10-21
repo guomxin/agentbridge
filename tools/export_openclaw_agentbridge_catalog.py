@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 from agentbridge.core.mcp_identities import McpIdentityTokenStore
 from agentbridge.core.planning_policy import planning_capability_for_tool, planning_descriptor
 from agentbridge.mcp.central import (
+    HOST_COORDINATION_TOOL_NAMES,
     create_central_mcp_server,
     validate_central_mcp_server_config,
 )
@@ -67,6 +68,7 @@ def build_catalog() -> dict:
                 tool
                 for tool in response.json()["result"]["tools"]
                 if not str(tool.get("name") or "").startswith("agentbridge_host_")
+                and tool.get("name") not in HOST_COORDINATION_TOOL_NAMES
             ]
 
     return {

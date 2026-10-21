@@ -6,6 +6,7 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { interactionResumeAllowed, resumeClaimAllowed } from "./recovery-policy.js";
+import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
 
 import {
   appendPresentationLinks,
@@ -74,6 +75,10 @@ export function createInteractionSharedState() {
       globalThis.crypto?.randomUUID?.() ||
       `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     records: new Map(),
+    resultViews: new Map(),
+    resultViewIssuances: new WeakMap(),
+    resultViewSessionTokens: new Map(),
+    resultViewHooklessTokens: new Map(),
     sessionRoutes: new Map(),
     directDeliveries: new Map(),
     loginContinuations: new Map(),
@@ -121,6 +126,10 @@ export class InteractionCoordinator {
     this.toolIdentityResolver = toolIdentityResolver;
     this.sharedStateId = sharedState.id || "isolated";
     this.records = sharedState.records;
+    this.resultViews = sharedState.resultViews || (sharedState.resultViews = new Map());
+    this.resultViewIssuances = sharedState.resultViewIssuances || (sharedState.resultViewIssuances = new WeakMap());
+    this.resultViewSessionTokens = sharedState.resultViewSessionTokens || (sharedState.resultViewSessionTokens = new Map());
+    this.resultViewHooklessTokens = sharedState.resultViewHooklessTokens || (sharedState.resultViewHooklessTokens = new Map());
     this.polls = new Map();
     this.abortControllers = new Map();
     this.notificationController = null;
@@ -395,6 +404,7 @@ export class InteractionCoordinator {
 
   releaseToolRun(sessionKey, runId) {
     if (!sessionKey || !runId) return;
+    this.resultViewHooklessTokens.delete(sessionKey);
     this.endedToolRuns.set(JSON.stringify([sessionKey, runId]), this.now());
     for (const [key, binding] of this.toolBindings) {
       if (binding.sessionKey === sessionKey && binding.runId === runId) this.toolBindings.delete(key);
@@ -473,6 +483,7 @@ export class InteractionCoordinator {
   }
 
   async captureNativeToolResult(event, context) {
+    await this.captureTrustedResultView(event, context);
     const processed = processToolResult(event.result, this.config.allowedCardOrigins);
     if (!processed.sanitized) {
       const payload = trustedAgentBridgeStructuredContent(event.result, this.config.mcpServerName);
@@ -497,6 +508,117 @@ export class InteractionCoordinator {
       processed.interactions;
     this.captureInteractions(interactions, binding, context, taskIdFromToolResult(event.result));
     return processed.result;
+  }
+
+  createTrustedResultContext({ identityRouter, identity, context, toolCallId, toolName }) {
+    if (toolName !== "oa_workflow_pending_list" || !identity?.bound || identity.binding?.channel !== "telegram") return null;
+    const sessionKey = context.sessionKey;
+    const peer = /^agent:[^:]+:telegram:(?:direct|dm):([^:]+)$/iu.exec(sessionKey || "")?.[1];
+    if (!peer || peer !== identity.binding.senderId || peer.startsWith("-")) return null;
+    const route = normalizeResultViewRoute(this.sessionRoutes.get(sessionKey), peer);
+    if (!route || (identity.binding.accountId != null && identity.binding.accountId !== route.accountId)) return null;
+    const delivery = context.deliveryContext;
+    const requestAccount = safeRoutePart(context.agentAccountId || delivery?.accountId);
+    const requestChannel = safeRoutePart(context.messageChannel || delivery?.channel);
+    if ((requestAccount && requestAccount !== route.accountId) || (requestChannel && requestChannel !== "telegram") ||
+        (context.requesterSenderId && String(context.requesterSenderId) !== peer) ||
+        (delivery?.to && String(delivery.to).replace(/^telegram:/u, "") !== peer) ||
+        ![null, undefined, ""].includes(delivery?.threadId)) return null;
+    const namespace = identityRouter.catalogCacheKeyForBinding?.(identity.binding);
+    const endpointKey = identityRouter.endpointKeyForSession?.(sessionKey);
+    if (!namespace || !endpointKey || !normalizeToolCallId(toolCallId)) return null;
+    const binding = this.toolBindings.get(normalizeToolCallId(toolCallId));
+    const snapshot = { sessionKey, toolCallId: normalizeToolCallId(toolCallId),
+      runId: binding?.runId || context.runId || null, identityRouter, binding: identity.binding,
+      client: identity.client, identityScope: JSON.stringify([namespace, endpointKey]), route,
+      hadBinding: Boolean(binding), sessionToken: resultViewLifecycleToken(this.resultViewSessionTokens, sessionKey),
+      hooklessToken: binding ? null : resultViewLifecycleToken(this.resultViewHooklessTokens, sessionKey),
+      sourceTaskId: null, endpointId: null };
+    const issuance = Object.freeze({
+      route,
+      isCurrent: () => this.resultViewIssuanceCurrent(issuance),
+      bindEndpoint: ({ sourceTaskId, endpointId, endpoint }) => {
+        if (!this.resultViewIssuanceCurrent(issuance) || !sourceTaskId || !endpointId ||
+            endpoint?.endpointId !== endpointId || endpoint?.agentHost !== "openclaw" || endpoint?.state !== "active" ||
+            endpoint?.clientType !== "telegram" || endpoint?.externalSubject !== peer ||
+            endpoint?.conversationRef !== sessionKey || (endpoint?.accountId ?? null) !== route.accountId ||
+            JSON.stringify(normalizeResultViewRoute(endpoint.route, peer)) !== JSON.stringify(route) ||
+            (snapshot.sourceTaskId && (snapshot.sourceTaskId !== sourceTaskId || snapshot.endpointId !== endpointId))) return false;
+        snapshot.sourceTaskId = sourceTaskId;
+        snapshot.endpointId = endpointId;
+        return true;
+      },
+    });
+    this.resultViewIssuances.set(issuance, snapshot);
+    if (!this.resultViewIssuanceCurrent(issuance)) {
+      this.resultViewIssuances.delete(issuance);
+      return null;
+    }
+    return issuance;
+  }
+
+  resultViewIssuanceCurrent(issuance) {
+    try {
+    const snapshot = this.resultViewIssuances.get(issuance);
+    if (!snapshot) return false;
+    const { identityRouter, sessionKey, binding, client, identityScope, toolCallId, runId, route } = snapshot;
+    const call = this.toolBindings.get(toolCallId);
+    if (this.resultViewSessionTokens.get(sessionKey) !== snapshot.sessionToken ||
+        (!snapshot.hadBinding && this.resultViewHooklessTokens.get(sessionKey) !== snapshot.hooklessToken) ||
+        (snapshot.hadBinding && !call) ||
+        (runId && this.endedToolRuns.has(JSON.stringify([sessionKey, runId]))) ||
+        (call && (call.conflict || call.sessionKey !== sessionKey || call.identityScope !== identityScope ||
+          (call.runId && runId && call.runId !== runId))) ||
+        this.toolIdentityResolver?.(sessionKey) !== identityScope ||
+        JSON.stringify(normalizeResultViewRoute(this.sessionRoutes.get(sessionKey), binding.senderId)) !== JSON.stringify(route)) return false;
+    const current = identityRouter.resolvePinnedSession?.({ sessionKey, channel: "telegram", accountId: route.accountId });
+    return current?.bound === true && current.binding?.key === binding.key && current.client === client &&
+      identityRouter.clientForBinding?.(binding) === client &&
+      JSON.stringify([identityRouter.catalogCacheKeyForBinding?.(binding), identityRouter.endpointKeyForSession?.(sessionKey)]) === identityScope;
+    } catch { return false; }
+  }
+
+  async captureTrustedResultView(event, context) {
+    const trusted = event.trustedResultView;
+    if (!trusted || event.toolName !== "oa_workflow_pending_list" ||
+        event.result?.details?.mcpServer !== this.config.mcpServerName ||
+        event.result?.details?.mcpTool !== "oa_workflow_pending_list" ||
+        event.result?.details?.agentbridgeTaskId !== trusted.sourceTaskId) return;
+    const issuance = this.resultViewIssuances.get(trusted.issuance);
+    if (!issuance || !this.resultViewIssuanceCurrent(trusted.issuance) ||
+        issuance.sessionKey !== context.sessionKey || issuance.toolCallId !== normalizeToolCallId(event.toolCallId) ||
+        issuance.sourceTaskId !== trusted.sourceTaskId || issuance.endpointId !== trusted.endpointId) return;
+    const { sessionKey, route, identityScope: identity } = issuance;
+    const view = normalizeTrustedResultView(trusted.view, { sourceTaskId: trusted.sourceTaskId,
+      endpointId: trusted.endpointId, allowedOrigins: this.config.allowedCardOrigins, now: this.now() });
+    if (!view) return;
+    this.prune();
+    const key = JSON.stringify([sessionKey, view.sourceTaskId, view.endpointId]);
+    if (this.resultViews.has(key)) return;
+    const record = { sessionKey, identity, route: JSON.stringify(route), view, issuance: trusted.issuance, delivered: false };
+    this.resultViews.set(key, record);
+    const presentation = resultViewPresentation([view], route.channel, this.now());
+    try {
+      if (await this.sendRoutePayload(sessionKey, route, { text: "OA 待办已查询，可从下方进入选择与办理。", presentation }, presentation,
+        () => this.resultViewIssuanceCurrent(trusted.issuance))) {
+        record.delivered = true;
+      }
+    } catch (error) {
+      this.api.logger.warn(`AgentBridge private result card delivery unavailable (${safeErrorCode(error)})`);
+    }
+  }
+
+  takeResultViewPresentation(sessionKey, channel) {
+    this.prune();
+    if (channel !== "telegram" || !isPrivateSessionKey(sessionKey)) return null;
+    const identity = this.toolIdentityResolver?.(sessionKey);
+    const route = normalizeResultViewRoute(this.sessionRoutes.get(sessionKey), /^agent:[^:]+:telegram:(?:direct|dm):([^:]+)$/iu.exec(sessionKey)?.[1]);
+    if (!identity || !route) return null;
+    const records = [...this.resultViews.values()].filter(record => record.sessionKey === sessionKey &&
+      !record.delivered && record.identity === identity && record.route === JSON.stringify(route) && this.resultViewIssuanceCurrent(record.issuance));
+    const presentation = resultViewPresentation(records.map(record => record.view), channel, this.now());
+    if (presentation) for (const record of records) record.delivered = true;
+    return presentation;
   }
 
   captureToolResult(event, context) {
@@ -1088,6 +1210,11 @@ export class InteractionCoordinator {
   }
 
   removeSession(sessionKey) {
+    this.resultViewSessionTokens.delete(sessionKey);
+    this.resultViewHooklessTokens.delete(sessionKey);
+    for (const [key, record] of this.resultViews) {
+      if (record.sessionKey === sessionKey) this.resultViews.delete(key);
+    }
     for (const [interactionId, record] of this.records) {
       if (record.sessionKey === sessionKey) {
         this.abortControllers.get(interactionId)?.abort();
@@ -1147,6 +1274,9 @@ export class InteractionCoordinator {
     this.directDeliveries.clear();
     this.documentDeliveries.clear();
     this.documentDeliveryReceipts.clear();
+    this.resultViews.clear();
+    this.resultViewSessionTokens.clear();
+    this.resultViewHooklessTokens.clear();
   }
 
   startNotificationPump(identityRouter, { intervalMs = 2000 } = {}) {
@@ -1332,12 +1462,15 @@ export class InteractionCoordinator {
       let delivered = false;
       const sessionKey = endpoint?.conversationRef;
       const route = endpoint?.route;
-      const recovered = await this.restoreInteractionFromNotification(
+      const commandHint = notification?.deliveryMode === "prepared_command";
+      const recovered = commandHint ? null : await this.restoreInteractionFromNotification(
         notification,
         client,
         { identityRouter, binding, endpoint },
       );
-      if (recovered === false) {
+      if (commandHint) {
+        delivered = await this.recoverPreparedCommandHint(binding, endpoint, notification, signal);
+      } else if (recovered === false) {
         this.api.logger.warn("AgentBridge interaction notification retained for recovery retry");
       } else if (
         notification?.deliveryMode === "origin_handled" ||
@@ -1445,6 +1578,30 @@ export class InteractionCoordinator {
           );
         }
       }
+  }
+
+  async recoverPreparedCommandHint(binding, endpoint, notification, signal) {
+    const commandKey = safeRoutePart(notification?.event?.payload?.commandKey);
+    const taskId = safeRoutePart(notification?.task?.taskId);
+    const sessionKey = endpoint?.conversationRef;
+    const peer = /^agent:[^:]+:telegram:(?:direct|dm):([^:]+)$/iu.exec(sessionKey || "")?.[1];
+    if (!commandKey || !taskId || notification?.event?.eventType !== "task.prepare.requested" ||
+        binding?.channel !== "telegram" || endpoint?.clientType !== "telegram" ||
+        endpoint?.externalSubject !== binding.senderId ||
+        (binding.accountId !== null && endpoint?.accountId !== binding.accountId) ||
+        endpoint?.endpointId !== notification.task.originEndpointId ||
+        sessionKey !== notification.task.activeConversationRef ||
+        peer !== endpoint.externalSubject || peer?.startsWith("-") ||
+        endpoint.route?.channel !== "telegram" ||
+        String(endpoint.route?.to || "").replace(/^telegram:/u, "") !== peer ||
+        ![null, undefined, ""].includes(endpoint.route?.threadId) ||
+        !this.hostRuntimeReporter?.collectOnce) return false;
+    const snapshots = await this.hostRuntimeReporter.collectOnce({ signal });
+    const snapshot = snapshots.find(item => item.bindingKey === binding.key && item.response?.status === "succeeded");
+    if (!snapshot) return false; // A concurrent collection or failure leaves the durable hint unacknowledged.
+    const pending = (snapshot.response.pendingCommands || []).find(item => item.taskId === taskId && item.commandKey === commandKey);
+    if (!pending) return true; // The live snapshot no longer permits or needs this preparation.
+    return snapshot.commandRecoveries?.some(item => item.taskId === taskId && item.commandKey === commandKey && item.accepted) === true;
   }
 
   async restoreInteractionFromNotification(notification, client, { identityRouter, binding, endpoint }) {
@@ -2469,8 +2626,17 @@ export class InteractionCoordinator {
       return true;
     }
     const text = safeStatusMessage(status, errorCode, response);
+    // Only authoritative outcome text is reused. Interaction completion alone
+    // must never become a green business-success card or a new action button.
+    const batchState = response?.batch?.state || response?.result?.batch?.state;
+    const unknown = status === "unknown" || errorCode === "RESULT_UNKNOWN" || batchState === "outcome_unknown";
+    const presentation = route.channel === "telegram" ? {
+      title: unknown ? "业务结果待核实" : "办理状态更新",
+      tone: unknown ? "warning" : ["failed", "resume_failed", "poll_failed"].includes(status) ? "danger" : "info",
+      blocks: [{ type: "context", text: "以原任务的业务核验结果为准；此消息不会再次提交。" }],
+    } : null;
     try {
-      if (!(await this.sendRoutePayload(sessionKey, route, { text }))) {
+      if (!(await this.sendRoutePayload(sessionKey, route, { text, ...(presentation ? { presentation } : {}) }, presentation))) {
         this.api.logger.warn(
           `AgentBridge direct status delivery unavailable for channel ${route.channel}`,
         );
@@ -2488,16 +2654,18 @@ export class InteractionCoordinator {
     }
   }
 
-  async sendRoutePayload(sessionKey, route, initialPayload, presentation = null) {
+  async sendRoutePayload(sessionKey, route, initialPayload, presentation = null, beforeSend = null) {
     const depth = this.directDeliveries.get(sessionKey) || 0;
     this.directDeliveries.set(sessionKey, depth + 1);
     try {
+      if (beforeSend && !beforeSend()) return false;
       const adapter = await this.api.runtime.channel.outbound.loadAdapter(
         route.channel,
       );
       if (!adapter?.sendPayload && !adapter?.sendText) {
         return false;
       }
+      if (beforeSend && !beforeSend()) return false;
       const text =
         typeof initialPayload.text === "string" ? initialPayload.text : "";
       const baseContext = {
@@ -2520,6 +2688,7 @@ export class InteractionCoordinator {
       if (!payload) {
         return false;
       }
+      if (beforeSend && !beforeSend()) return false;
       if (!adapter.sendPayload) {
         await adapter.sendText({
           ...baseContext,
@@ -2600,6 +2769,11 @@ export class InteractionCoordinator {
     this.pruneToolBindings();
     this.prunePreparedDocumentReceipts();
     this.prunePlanningRepairs();
+    for (const [key, record] of this.resultViews) {
+      if (Date.parse(record.view.expiresAt) <= this.now() ||
+          !this.resultViewIssuanceCurrent(record.issuance)) this.resultViews.delete(key);
+    }
+    while (this.resultViews.size > MAX_INTERACTIONS) this.resultViews.delete(this.resultViews.keys().next().value);
     const continuationCutoff = this.now() - LOGIN_CONTINUATION_TTL_MS;
     for (const [sessionKey, continuation] of this.loginContinuations) {
       if (continuation.capturedAt <= continuationCutoff) {
@@ -2737,6 +2911,25 @@ export class InteractionCoordinator {
       this.toolBindings.delete(oldest);
     }
   }
+}
+
+function normalizeResultViewRoute(value, senderId) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.channel !== "telegram" ||
+      typeof senderId !== "string" || !senderId || senderId.startsWith("-") ||
+      typeof value.to !== "string" || value.to.replace(/^telegram:/u, "") !== senderId ||
+      ![null, undefined, ""].includes(value.threadId) ||
+      !(value.accountId == null || (typeof value.accountId === "string" && value.accountId.length > 0 && value.accountId.length <= 512))) return null;
+  return Object.freeze({ channel: "telegram", to: senderId, accountId: value.accountId ?? null, threadId: null });
+}
+
+function resultViewLifecycleToken(tokens, sessionKey) {
+  if (!tokens.has(sessionKey)) {
+    // Clearing a full map invalidates older optional cards; a new object can
+    // never revive a snapshot whose original session/run has been removed.
+    if (tokens.size >= MAX_TOOL_BINDINGS) tokens.clear();
+    tokens.set(sessionKey, Object.freeze({}));
+  }
+  return tokens.get(sessionKey);
 }
 
 function normalizeSmartlightAlarmListArguments(params, message) {
@@ -3377,7 +3570,7 @@ function safeStatusMessage(status, errorCode, response = null) {
     case "succeeded":
       return safeSucceededMessage(response);
     case "already_resumed":
-      return "AgentBridge 已完成本次安全操作，无需重复处理。";
+      return "AgentBridge 已续跑本次安全交互，无需再次确认；业务结果请以原任务核验状态为准。";
     case "declined":
       return "你已拒绝本次 AgentBridge 安全操作，系统未继续执行。";
     case "expired":

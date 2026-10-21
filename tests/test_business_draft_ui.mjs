@@ -361,7 +361,7 @@ test('material overview keeps key reason excerpt while expanded groups retain ev
   assert.equal(result.groups.find(([name]) => name === '补充材料')[1][0].value, '<script>纯文本</script>');
 });
 
-function mountHarness(state) {
+function mountHarness(state, {fetch} = {}) {
   const document = createDocument(), create = document.createElement;
   document.createElement = tag => { const node = create(tag); node.querySelectorAll = selector =>
     descendants(node).filter(item => selector === 'details[open]' && item.tag === 'details' && item.open); return node; };
@@ -369,16 +369,25 @@ function mountHarness(state) {
   const root = document.createElement('main');
   for (const id of ['draft-form', 'draft-status', 'draft-error', 'draft-submit', 'draft-retry', 'draft-conflict',
     'draft-use-server', 'draft-keep-local', 'draft-review', 'draft-evidence', 'draft-material-change',
-    'review-fields', 'review-effect', 'room-options', 'room-status', 'room-selected', ...Object.keys(state.values),
+    'review-fields', 'review-effect', 'review-project', 'review-project-code', 'review-duplicate', 'review-content',
+    'room-options', 'room-status', 'room-selected', ...Object.keys(state.values),
     ...Object.keys(state.values).flatMap(name => [`error-${name}`, `conflict-local-${name}`, `conflict-server-${name}`, `conflict-row-${name}`])]) {
-    const node = document.createElement('div'); node.id = id; node.value = state.values[id] || '';
+    const node = document.createElement('div'); node.id = id; node.name = id; node.value = state.values[id] || '';
     node.validity = {valid: true}; node.checkValidity = () => true; nodes.set(id, node); root.append(node);
   }
-  const responses = [];
-  const window = {fetch: async () => ({ok: true, json: async () => responses.shift() || state}),
-    location: {origin: 'https://trusted.example', hash: '', replace() {}}, setTimeout() {}, clearTimeout() {}, addEventListener() {}};
+  const responses = [], requests = [], timers = new Map(), events = new Map(), navigations = [];
+  let timerId = 0;
+  const window = {fetch: (url, options) => {
+      requests.push({url, options});
+      return fetch ? fetch(url, options) : Promise.resolve({ok: true, json: async () => responses.shift() || state});
+    },
+    location: {origin: 'https://trusted.example', hash: '', replace: url => navigations.push(url)},
+    setTimeout(callback, delay) { const id = ++timerId; timers.set(id, {callback, delay}); return id; },
+    clearTimeout: id => timers.delete(id), addEventListener: (name, callback) => events.set(name, callback)};
   const controller = mountBusinessDraft({state, fieldNames: Object.keys(state.values), csrfToken: 't', apiUrl: '/draft'}, document, window);
-  return {controller, document, nodes, responses};
+  return {controller, document, nodes, responses, requests, timers, navigations,
+    hide: () => events.get('pagehide')(), restore: () => events.get('pageshow')({persisted: true}),
+    edit(name, value) { nodes.get(name).value = value; nodes.get('draft-form').events.input({target: nodes.get(name)}); }};
 }
 
 test('candidate cards keep focused radio DOM across polling and disable stale candidates without replacement', async () => {
@@ -562,4 +571,142 @@ test('weekly overview does not repeat the same content shown in its primary side
   const grid=descendants(target).find(node=>node.className==='material-primary-grid');
   assert.equal(grid.children.length,2);
   assert.ok(grid.children.every(node=>node.open));
+});
+
+test('a hidden draft ignores late preview receipts and cannot start another request', async () => {
+  const pending = deferred();
+  const h = harness(() => pending.promise);
+  const preview = h.controller.preview();
+  const rendered = h.rendered.length;
+  h.controller.suspend();
+  pending.resolve({...reviewed(initial()), state: 'approved', allowedActions: [],
+    receipt: {flowUrl: '/flow/authorize/' + 'a'.repeat(43)}});
+  await preview;
+  await h.controller.save(); await h.controller.approve();
+  assert.equal(h.rendered.length, rendered);
+  assert.equal(h.receipts.length, 0);
+  assert.deepEqual(h.calls.map(call => call.action), ['preview']);
+});
+
+test('back-forward restoration preserves unsent input and focus, reads first, and restarts one poll', async () => {
+  let backend = reviewed(initial());
+  const h = mountHarness(backend, {fetch: async (url, options) => {
+    const action = url.split('/').at(-1), body = options.body && JSON.parse(options.body);
+    if (action === 'values') backend = {...backend, revision: 1, version: 2, values: body.values,
+      allowedActions: ['save', 'preview'], preview: null};
+    if (action === 'preview') backend = reviewed(backend);
+    return {ok: true, json: async () => backend};
+  }});
+  await flush();
+  h.nodes.get('content').focus(); h.edit('content', '尚未触发防抖的本页文字');
+  h.hide();
+  assert.equal(h.timers.size, 0);
+  assert.equal(h.requests.length, 0);
+  h.restore(); await flush();
+  assert.deepEqual(h.requests.map(call => call.url.split('/').at(-1)), ['state', 'values', 'preview']);
+  assert.equal(h.requests[0].options.method, 'GET');
+  assert.equal(JSON.parse(h.requests[1].options.body).values.content, '尚未触发防抖的本页文字');
+  assert.equal(h.nodes.get('content').value, '尚未触发防抖的本页文字');
+  assert.equal(h.document.activeElement, h.nodes.get('content'));
+  assert.equal(h.controller.state().canApprove, true);
+  assert.equal(h.timers.size, 1);
+  h.restore(); await flush();
+  assert.equal(h.timers.size, 1);
+  assert.ok(!h.requests.some(call => call.url.endsWith('/approve')));
+});
+
+test('a decision completed after hiding navigates only after a fresh restored read of its receipt', async () => {
+  const pending = deferred(), state = reviewed(initial());
+  let backend = state;
+  const h = mountHarness(state, {fetch: (url) => url.endsWith('/approve') ? pending.promise :
+    Promise.resolve({ok: true, json: async () => backend})});
+  const approval = h.controller.approve();
+  h.hide();
+  backend = {...state, version: 2, state: 'finalized', allowedActions: [],
+    receipt: {flowUrl: '/flow/authorize/' + 'a'.repeat(43)}};
+  pending.resolve({ok: true, json: async () => backend});
+  await approval;
+  assert.deepEqual(h.navigations, []);
+  assert.equal(h.requests.length, 1);
+  h.restore(); await flush();
+  assert.deepEqual(h.requests.map(call => call.options.method), ['POST', 'GET']);
+  assert.deepEqual(h.navigations, ['https://trusted.example/flow/authorize/' + 'a'.repeat(43)]);
+  assert.equal(h.controller.state().locked, true);
+});
+
+test('uncertain decision restoration is read only and an explicit retry preserves the original decision key', async () => {
+  const pending = deferred(), state = reviewed(initial());
+  let attempts = 0;
+  const h = harness((action, payload) => {
+    if (action === 'state') return Promise.resolve(state);
+    if (action === 'approve' && ++attempts === 1) return pending.promise;
+    return Promise.resolve({...state, version: 2, state: 'finalized', allowedActions: [],
+      receipt: {requestKey: payload.requestKey}});
+  }, state);
+  const approval = h.controller.approve();
+  h.controller.suspend(); pending.reject(new TypeError('closed WebView'));
+  await approval;
+  await h.controller.restore();
+  assert.deepEqual(h.calls.map(call => call.action), ['approve', 'state']);
+  assert.equal(h.controller.state().uncertain, true);
+  assert.equal(h.controller.state().canApprove, false);
+  assert.equal(h.controller.state().canRetry, true);
+  await h.controller.retry();
+  const decisions = h.calls.filter(call => call.action === 'approve');
+  assert.equal(decisions.length, 2);
+  assert.deepEqual(decisions[0].payload, decisions[1].payload);
+  assert.equal(h.receipts.length, 1);
+});
+
+test('restored state rejects a changed revision before another save and keeps the local input for explicit comparison', async () => {
+  const pending = deferred(), state = reviewed(initial());
+  const changed = {...state, version: 2, revision: 1, values: {...values, content: '已落盘版本'}};
+  const h = harness(action => action === 'values' ? pending.promise : Promise.resolve(changed), state);
+  h.change({content: '本页尚未确认的文本'});
+  const saving = h.controller.save();
+  h.controller.suspend();
+  await h.controller.restore();
+  pending.resolve(changed); await saving;
+  assert.equal(h.local().content, '本页尚未确认的文本');
+  assert.equal(h.controller.state().conflict.revision, 1);
+  assert.equal(h.controller.state().canApprove, false);
+  assert.deepEqual(h.calls.map(call => call.action), ['values', 'state']);
+});
+
+test('restoration with lost permissions cannot follow a stale receipt or save local input', async () => {
+  const pending = deferred(), state = reviewed(initial());
+  const h = harness(action => action === 'approve' ? pending.promise :
+    Promise.reject(Object.assign(new Error('当前权限已失效'), {status: 403})), state);
+  const approval = h.controller.approve();
+  h.controller.suspend();
+  pending.resolve({...state, version: 2, state: 'finalized', allowedActions: [], receipt: {requestKey: 'request-1'}});
+  await approval; await h.controller.restore();
+  assert.deepEqual(h.calls.map(call => call.action), ['approve', 'state']);
+  assert.equal(h.receipts.length, 0);
+  assert.equal(h.controller.state().canApprove, false);
+  assert.equal(h.controller.state().canEdit, false);
+});
+
+test('offline restoration keeps local editing available but cannot save or approve until a fresh read succeeds', async () => {
+  const state = reviewed(initial()); let online = false, backend = state;
+  const h = harness(async (action, payload) => {
+    if (!online) throw new TypeError('offline');
+    if (action === 'values') backend = {...backend, revision: 1, version: 2, values: payload.values,
+      preview: null, allowedActions: ['save', 'preview']};
+    if (action === 'preview') backend = reviewed(backend);
+    return backend;
+  }, state);
+  h.change({content: '离线期间保留本地文字'}); h.controller.suspend();
+  await h.controller.restore();
+  assert.equal(h.controller.state().canEdit, true);
+  assert.equal(h.controller.state().canApprove, false);
+  assert.equal(h.controller.state().canRetry, true);
+  assert.deepEqual(h.calls.map(call => call.action), ['state']);
+  h.change({content: '离线期间继续编辑的文字'});
+  await h.controller.save();
+  assert.deepEqual(h.calls.map(call => call.action), ['state']);
+  online = true; await h.controller.retry();
+  assert.deepEqual(h.calls.map(call => call.action), ['state', 'state', 'values', 'preview']);
+  assert.equal(h.local().content, '离线期间继续编辑的文字');
+  assert.equal(h.controller.state().canApprove, true);
 });

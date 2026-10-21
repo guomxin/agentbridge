@@ -57,9 +57,13 @@ export function createHostRuntimeReporter({
             response?.error?.code || "HOST_RUNTIME_SIGNAL_REJECTED";
           throw error;
         }
-        results.push({ bindingKey: binding.key, response });
         identityRouter.rememberCatalogVersions?.(binding, response);
-        taskCommandRunner?.recover(response.pendingCommands, { binding, client });
+        const recoveries = taskCommandRunner?.recover(response.pendingCommands, { binding, client });
+        results.push({ bindingKey: binding.key, response,
+          ...(recoveries ? { commandRecoveries: recoveries.map((item, index) => ({
+            taskId: response.pendingCommands[index]?.taskId, commandKey: response.pendingCommands[index]?.commandKey,
+            accepted: item.accepted === true, ...(item.reason ? { reason: item.reason } : {}),
+          })) } : {}) });
         if (/^(?:sha256:)?[a-f0-9]{64}$/u.test(response.permissionVersion || "")
             && identityRouter.permissionVersionForBinding?.(binding) !== response.permissionVersion) {
           await identityRouter.refreshIdentityProfiles?.({

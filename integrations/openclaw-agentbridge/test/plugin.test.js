@@ -5763,6 +5763,22 @@ test("delivers an already captured field card instead of waking login continuati
   assert.equal(harness.heartbeats.length, 0);
 });
 
+test("Telegram status replacement is descriptive, never green by interaction completion and has no new action", async () => {
+  const harness = fakeApi({ autoPoll: false });
+  const sessionKey = "agent:main:telegram:direct:7052061588";
+  const coordinator = registerAgentBridgeInteractions(harness.api, { mcpClient: null });
+  bindDeliveryRoute(harness, { sessionKey, to: "7052061588" });
+  for (const [status, errorCode] of [["completed", null], ["unknown", "RESULT_UNKNOWN"], ["failed", "OA_BUSINESS_RULE_REJECTED"]]) {
+    await coordinator.deliverStatusDirect(sessionKey, status, errorCode);
+    const payload = harness.sentPayloads.at(-1).payload;
+    assert.ok(payload.presentation);
+    assert.notEqual(payload.presentation.tone, "success");
+    assert.ok(payload.presentation.blocks.every(block => !block.buttons));
+    assert.equal(JSON.stringify(payload.presentation).includes("http"), false);
+    if (status === "unknown") assert.equal(payload.presentation.title, "业务结果待核实");
+  }
+});
+
 test("direct host status delivery cannot consume an undelivered field card", async () => {
   const harness = fakeApi({
     autoPoll: false,

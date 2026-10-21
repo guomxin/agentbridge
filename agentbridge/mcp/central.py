@@ -356,6 +356,7 @@ HOST_PRESENTATION_TOOL_NAMES = (
 )
 
 HOST_COORDINATION_TOOL_NAMES = (
+    "agentbridge_result_view",
     "agentbridge_host_coordinator_lease_acquire",
     "agentbridge_host_coordinator_lease_get",
     "agentbridge_host_coordinator_lease_release",
@@ -5605,6 +5606,30 @@ def create_central_mcp_server(
             host_instance_id=host_context["hostInstanceId"],
             host_version=host_context["hostVersion"],
         )
+
+    @mcp.tool(
+        name="agentbridge_result_view",
+        title="Issue an Endpoint-Owned Result Selection View",
+        description=("Host-private Telegram pending-result selection entry. Requires exact L3 task and endpoint "
+            "metadata; issuing a view never prepares, authorizes, or commits a business action."),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
+        structured_output=True,
+    )
+    async def agentbridge_result_view(
+        ctx: Context,
+        operation: Literal["issue"],
+        task_id: Annotated[str, Field(min_length=16, max_length=128)],
+    ) -> dict[str, Any]:
+        identity = _request_identity(identity_store)
+        runtime_context = _request_runtime_context(ctx)
+        endpoint_id = runtime_context.get("endpointId")
+        if _request_task_id(ctx) != task_id or not endpoint_id:
+            raise HostContractError("result view requires the exact trusted task and endpoint metadata")
+        await _require_registered_host_call(ctx, service=service, identity=identity,
+            agent_host="openclaw", minimum_level="L3", task_id=task_id)
+        from agentbridge.core.telegram_result_views import ResultViewService
+        return await asyncio.to_thread(ResultViewService(service).issue, identity["user_subject"], task_id, endpoint_id,
+            {**runtime_context, "tokenId": identity["token_id"]})
 
     @mcp.tool(
         name="agentbridge_host_task_prepare",

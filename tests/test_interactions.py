@@ -118,6 +118,27 @@ class InteractionStoreTests(unittest.TestCase):
                         mutate(unknown)
                         self.assertNotIn("businessView", build_interaction_envelope(record, unknown)["display"])
 
+    def test_action_hints_cover_registered_commits_and_drop_untrusted_reserved_values(self):
+        from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+        with TemporaryDirectory() as tmp:
+            record = self._register(InteractionStore(Path(tmp) / "agentbridge.db"))
+            record["display"].update(actionView={"schemaVersion": "agentbridge.action-view.v1", "capabilityId": "forged.commit"},
+                batch={"schemaVersion": "agentbridge.batch-view.v1", "currentIndex": 99, "totalCount": 99})
+            commits = {row["commit_capability"] for row in _TRUSTED_WRITE_DEFINITIONS.values()}
+            for capability in [*_TRUSTED_WRITE_DEFINITIONS, *sorted(commits)]:
+                with self.subTest(capability=capability):
+                    resource = {"state": "pending", "card_url": "https://cards.example.test/input/source",
+                        "capability_name": capability, "values": {"secret": "private field"}}
+                    envelope = build_interaction_envelope(record, resource)
+                    expected = _TRUSTED_WRITE_DEFINITIONS.get(capability, {}).get("commit_capability", capability)
+                    self.assertEqual(envelope["display"]["actionView"], {
+                        "schemaVersion": "agentbridge.action-view.v1", "capabilityId": expected})
+                    self.assertNotIn("batch", envelope["display"])
+                    self.assertNotIn("private field", str(envelope))
+            resource["capability_name"] = "unregistered.prepare"
+            self.assertNotIn("actionView", build_interaction_envelope(record, resource)["display"])
+            self.assertEqual(record["display"]["actionView"]["capabilityId"], "forged.commit")
+
     @staticmethod
     def _register(store, *, session_id="session-a"):
         return store.register(

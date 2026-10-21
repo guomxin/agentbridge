@@ -41,7 +41,21 @@ export function createTaskCommandRunner({ identityRouter, coordinator, performan
 
   async function execute({ command, owner }) {
     let identity = identityRouter.resolvePinnedSession({ sessionKey: command.sessionKey });
-    if (!identity?.bound) identity = await identityRouter.resolveWorkspaceSession(command.sessionKey, { signal: controller.signal });
+    if (command.endpoint) {
+      const endpoint = command.endpoint;
+      if (!owner?.binding || owner.binding.channel !== "telegram" || owner.binding.key !== command.endpointKey ||
+          owner.binding.senderId !== endpoint.externalSubject ||
+          (owner.binding.accountId !== null && owner.binding.accountId !== endpoint.accountId) ||
+          (identity?.bound && identity.binding.key !== owner.binding.key) ||
+          !identityRouter.restoreSessionBinding?.({ sessionKey: command.sessionKey, bindingKey: owner.binding.key })) {
+        throw Object.assign(new Error("Telegram command owner does not match the exact endpoint"), { code: "TASK_COMMAND_BINDING_REQUIRED" });
+      }
+      identity = identityRouter.resolvePinnedSession({ sessionKey: command.sessionKey });
+      coordinator.bindDeliveryRoute?.({ sessionKey: command.sessionKey, channel: "telegram",
+        to: endpoint.route.to, accountId: endpoint.route.accountId || endpoint.accountId, threadId: null });
+    } else if (!identity?.bound) {
+      identity = await identityRouter.resolveWorkspaceSession(command.sessionKey, { signal: controller.signal });
+    }
     if (!identity?.bound || (owner && identity.binding?.key !== owner.binding?.key)
         || identityRouter.endpointKeyForSession(command.sessionKey) !== command.endpointKey) {
       throw Object.assign(new Error("Command routing identity is not bound"), { code: "TASK_COMMAND_BINDING_REQUIRED" });
@@ -90,12 +104,29 @@ export function createTaskCommandRunner({ identityRouter, coordinator, performan
 
 function normalizeCommand(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (Object.keys(value).some(key => !["taskId", "commandKey", "sessionKey", "endpointKey"].includes(key))) return null;
+  if (Object.keys(value).some(key => !["taskId", "commandKey", "sessionKey", "endpointKey", "endpoint"].includes(key))) return null;
   for (const field of ["taskId", "commandKey", "sessionKey", "endpointKey"]) {
     if (typeof value[field] !== "string" || !value[field] || value[field].length > (field === "sessionKey" ? 1024 : 768)) return null;
   }
-  if (!/^agent:[^:]+:agentbridge-workspace:direct:/iu.test(value.sessionKey)) return null;
-  return { taskId: value.taskId, commandKey: value.commandKey, sessionKey: value.sessionKey, endpointKey: value.endpointKey };
+  const result = { taskId: value.taskId, commandKey: value.commandKey, sessionKey: value.sessionKey, endpointKey: value.endpointKey };
+  if (/^agent:[^:]+:agentbridge-workspace:direct:/iu.test(value.sessionKey)) return value.endpoint ? null : result;
+  const match = /^agent:[^:]+:telegram:(?:direct|dm):([^:]+)$/iu.exec(value.sessionKey);
+  const endpoint = value.endpoint;
+  if (!match || !endpoint || typeof endpoint !== "object" || Array.isArray(endpoint) ||
+      Object.keys(endpoint).some(key => !["endpointId", "clientType", "externalSubject", "accountId", "conversationRef", "route"].includes(key)) ||
+      typeof endpoint.endpointId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(endpoint.endpointId) ||
+      endpoint.clientType !== "telegram" || endpoint.conversationRef !== value.sessionKey ||
+      endpoint.externalSubject !== match[1] || match[1].startsWith("-") ||
+      !(endpoint.accountId === null || (typeof endpoint.accountId === "string" && endpoint.accountId.length <= 512))) return null;
+  const route = endpoint.route;
+  if (!route || typeof route !== "object" || Array.isArray(route) ||
+      Object.keys(route).some(key => !["channel", "to", "accountId", "threadId"].includes(key)) ||
+      route.channel !== "telegram" || typeof route.to !== "string" || route.to.replace(/^telegram:/u, "") !== endpoint.externalSubject ||
+      ![null, undefined, ""].includes(route.threadId) ||
+      !(route.accountId == null || route.accountId === endpoint.accountId)) return null;
+  return { ...result, endpoint: { endpointId: endpoint.endpointId, clientType: endpoint.clientType,
+    externalSubject: endpoint.externalSubject, accountId: endpoint.accountId, conversationRef: endpoint.conversationRef,
+    route: { channel: "telegram", to: route.to, accountId: route.accountId || null, threadId: null } } };
 }
 
 function safeCode(error) { return String(error?.code || "TASK_COMMAND_UNCONFIRMED").replace(/[^A-Za-z0-9_]/gu, "_").slice(0, 100); }

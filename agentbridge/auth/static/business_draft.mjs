@@ -61,6 +61,8 @@ export function createDraftController({initial, request, readValues, writeValues
   let optionsLoading = false;
   let optionsAttempt = -1;
   let reviewChanged = hasReviewChanged(initial);
+  let active = true, lifecycle = 0, restoring = false;
+  const live = epoch => active && lifecycle === epoch;
 
   const allowed = action => !permanentlyLocked && current.allowedActions.includes(action);
   const optionsFresh = () => viewKind !== "meeting_room" || Boolean(current.options &&
@@ -72,15 +74,15 @@ export function createDraftController({initial, request, readValues, writeValues
     const review = current.preview?.summary || current.ui?.review;
     return review?.truncated !== true && (!review?.completeness || review.completeness.status === "complete");
   };
-  const ready = () => saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
+  const ready = () => active && !restoring && saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
     materialReady() && allowed("approve") && current.preview?.revision === current.revision &&
     Date.parse(current.preview.expiresAt) > now();
   const view = () => ({current, dirty: saved !== edit, saving, previewing, optionsLoading,
     optionsFresh: optionsFresh(), materialReady: materialReady(), reviewChanged, conflict, message,
     fieldErrors, locked: permanentlyLocked || deciding, uncertain: deciding && !permanentlyLocked,
-    canApprove: ready(), canEdit: allowed("save") && !deciding,
+    canApprove: ready(), canEdit: active && allowed("save") && !deciding,
     canRetry: !conflict && !permanentlyLocked && Boolean(message) && !saving && !previewing && !optionsLoading});
-  function emit() { render(view()); }
+  function emit() { if (active) render(view()); }
   function accept(next) {
     if (!next || !Number.isInteger(next.version) || !Number.isInteger(next.revision) ||
         !Array.isArray(next.allowedActions)) throw new Error("invalid draft response");
@@ -107,8 +109,9 @@ export function createDraftController({initial, request, readValues, writeValues
     if (error.status === 403 || error.status === 410) permanentlyLocked = true;
   }
   async function preview(force = false) {
-    if (previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
+    if (!active || restoring || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
         (!force && (previewAttempt === edit || ready()))) return;
+    const epoch = lifecycle;
     const revision = current.revision;
     const snapshot = edit;
     previewAttempt = snapshot;
@@ -118,21 +121,25 @@ export function createDraftController({initial, request, readValues, writeValues
     emit();
     try {
       const result = await request("preview", {expectedRevision: revision});
+      if (!live(epoch)) return;
       // Receipt/locking is authoritative even when this preview itself became obsolete.
       if (isLocked(result)) accept(result);
       else if (snapshot === edit && revision === current.revision) accept(result);
     } catch (error) {
-      if (snapshot === edit && revision === current.revision) fail(error);
+      if (live(epoch) && snapshot === edit && revision === current.revision) fail(error);
     } finally {
       previewing = false;
-      emit();
-      if (snapshot !== edit && saved === edit && !conflict) void preview();
+      if (live(epoch)) {
+        emit();
+        if (snapshot !== edit && saved === edit && !conflict) void preview();
+      }
     }
   }
   async function loadOptions(force = false) {
-    if (viewKind !== "meeting_room" || optionsLoading || previewing || saving || conflict || deciding ||
+    if (!active || restoring || viewKind !== "meeting_room" || optionsLoading || previewing || saving || conflict || deciding ||
         !allowed("options") || saved !== edit || !optionsValid() ||
         (!force && (optionsFresh() || optionsAttempt === current.revision))) return;
+    const epoch = lifecycle;
     const revision = current.revision;
     const snapshot = edit;
     optionsAttempt = revision;
@@ -141,22 +148,27 @@ export function createDraftController({initial, request, readValues, writeValues
     emit();
     try {
       const result = await request("options", {expectedRevision: revision});
+      if (!live(epoch)) return;
       if (isLocked(result)) accept(result);
       else if (snapshot === edit && revision === current.revision) accept(result);
     } catch (error) {
-      if (snapshot === edit && revision === current.revision) fail(error);
+      if (live(epoch) && snapshot === edit && revision === current.revision) fail(error);
     } finally {
       optionsLoading = false;
-      emit();
-      if (snapshot !== edit && saved === edit && !conflict) void prepare();
+      if (live(epoch)) {
+        emit();
+        if (snapshot !== edit && saved === edit && !conflict) void prepare();
+      }
     }
   }
   async function prepare(force = false) {
+    const epoch = lifecycle;
     await loadOptions(force);
-    await preview(force);
+    if (live(epoch)) await preview(force);
   }
   async function save() {
-    if (saving || conflict || deciding || !allowed("save")) return;
+    if (!active || restoring || saving || conflict || deciding || !allowed("save")) return;
+    const epoch = lifecycle;
     if (saved === edit) { await prepare(); return; }
     saving = true;
     message = "";
@@ -164,40 +176,57 @@ export function createDraftController({initial, request, readValues, writeValues
     emit();
     let succeeded = false;
     try {
-      while (saved !== edit && !conflict && !permanentlyLocked) {
+      while (live(epoch) && saved !== edit && !conflict && !permanentlyLocked) {
         const snapshot = edit;
         const values = Object.fromEntries(fieldNames.map(name => [name, String(readValues()[name] ?? "")]));
         const result = await request("values", {expectedRevision: current.revision, values});
+        if (!live(epoch)) return;
         if (accept(result)) saved = snapshot;
         if (permanentlyLocked) break;
       }
       succeeded = true;
-    } catch (error) { fail(error); }
-    finally { saving = false; emit(); }
-    if (succeeded) await prepare();
+    } catch (error) { if (live(epoch)) fail(error); }
+    finally { saving = false; if (live(epoch)) emit(); }
+    if (live(epoch) && succeeded) await prepare();
   }
-  async function poll() {
-    if (saving || permanentlyLocked) return;
+  async function poll({restore = false} = {}) {
+    if (!active) return;
+    if (!restore && restoring) { emit(); return; }
+    if (!restore && (saving || permanentlyLocked)) return;
+    const epoch = lifecycle;
     const previousPreview = current.preview;
     try {
       const result = await request("state");
-      if (saving || result.version < current.version) return;
+      if (!live(epoch) || (!restore && saving) || result.version < current.version) return;
       const changed = result.revision !== current.revision;
       if (accept(result) && changed && !permanentlyLocked) {
         conflict = current;
         message = "另一页面更新了草稿。本页输入已保留，请核对差异后继续。";
       }
+      if (restore && deciding && !current.receipt) {
+        message = "正在查询原回执；如需恢复本次确认，将使用原请求，不会新建提交。";
+      }
     } catch (error) {
+      if (!live(epoch)) return;
       if (error.status === 403 || error.status === 410) fail(error);
       else if (deciding) message = "正在确认本次提交的状态，已填写内容不会重发。";
+      else if (restore) {
+        // A restoration must establish the current permission and revision
+        // before a local edit can be saved or a decision can be made.
+        message = "暂时无法核对最新草稿，本页输入已保留，请重新检查后继续。";
+        return false;
+      }
     }
+    if (!live(epoch)) return;
     emit();
     const expired = current.preview ? Date.parse(current.preview.expiresAt) <= now() :
       Boolean(previousPreview && ["editable", "editing"].includes(current.state));
     if (!message && !conflict && (expired || viewKind === "meeting_room" && !optionsFresh())) await prepare(true);
+    return true;
   }
   async function approve(retry = false) {
-    if (permanentlyLocked || (deciding && !retry) || (!decision && !ready())) return;
+    if (!active || restoring || permanentlyLocked || (deciding && !retry) || (!decision && !ready())) return;
+    const epoch = lifecycle;
     if (!decision) decision = {expectedRevision: current.revision,
       previewId: current.preview.previewId, requestKey: makeKey()};
     deciding = true;
@@ -205,9 +234,11 @@ export function createDraftController({initial, request, readValues, writeValues
     emit();
     try {
       const result = await request("approve", decision);
+      if (!live(epoch)) return;
       accept(result);
       if (!result.receipt) throw new Error("批准回执暂未返回，正在查询本次提交状态。 ");
     } catch (error) {
+      if (!live(epoch)) return;
       if (error.status >= 400 && error.status < 500) {
         deciding = false;
         decision = null;
@@ -226,19 +257,40 @@ export function createDraftController({initial, request, readValues, writeValues
         await poll();
       }
     }
+    if (live(epoch)) emit();
+  }
+  async function restorePage() {
+    active = true;
+    const epoch = ++lifecycle;
+    restoring = true;
+    emit();
+    const fresh = await poll({restore: true});
+    if (!live(epoch)) return;
+    restoring = fresh !== true;
+    // Unsent edits remain in the same DOM. A known revision is required
+    // before autosaving; an uncertain decision is only read, never replayed.
+    if (fresh === true && !conflict && !permanentlyLocked && !deciding) {
+      previewAttempt = -1;
+      optionsAttempt = -1;
+      await save();
+    }
     emit();
   }
   return {
     state: view,
     edit() {
-      if (!allowed("save") || deciding) return;
+      if (!active || !allowed("save") || deciding) return;
       edit += 1;
       message = "";
       fieldErrors = {};
       emit();
     },
     save, preview, loadOptions, poll, approve,
+    suspend() { active = false; lifecycle++; },
+    restore: restorePage,
     async retry() {
+      if (!active) return;
+      if (restoring) { await restorePage(); return; }
       if (decision) await approve(true);
       else {
         previewAttempt = -1; optionsAttempt = -1;
@@ -246,7 +298,7 @@ export function createDraftController({initial, request, readValues, writeValues
       }
     },
     async adoptServer() {
-      if (!conflict || permanentlyLocked || deciding) return;
+      if (!active || restoring || !conflict || permanentlyLocked || deciding) return;
       writeValues(current.values);
       saved = ++edit;
       conflict = null;
@@ -257,7 +309,7 @@ export function createDraftController({initial, request, readValues, writeValues
       await prepare();
     },
     async keepLocal() {
-      if (!conflict || permanentlyLocked || deciding) return;
+      if (!active || restoring || !conflict || permanentlyLocked || deciding) return;
       conflict = null;
       edit += 1;
       message = "";
@@ -430,7 +482,8 @@ export function mountBusinessDraft(config, document, window) {
   const roomNodes = new Map();
   const roomLabels = new Map();
   let lastOptions = config.state.options;
-  let saveTimer;
+  let saveTimer, pollTimer;
+  let stopped = false, pageEpoch = 0;
   function edited(name) {
     touched.add(name); controller.edit();
     window.clearTimeout(saveTimer);
@@ -500,6 +553,7 @@ export function mountBusinessDraft(config, document, window) {
       return result;
     },
     onReceipt(receipt) {
+      if (stopped) return false;
       const next = safeFlowUrl(receipt.flowUrl, window.location.origin);
       if (!next) return false;
       next.hash = window.location.hash;
@@ -567,14 +621,26 @@ export function mountBusinessDraft(config, document, window) {
   window.addEventListener("beforeunload", event => {
     if (controller.state().dirty && !controller.state().locked) { event.preventDefault(); event.returnValue = ""; }
   });
-  let stopped = false;
-  window.addEventListener("pagehide", () => { stopped = true; window.clearTimeout(saveTimer); });
+  window.addEventListener("pagehide", () => {
+    stopped = true; pageEpoch++;
+    window.clearTimeout(saveTimer); window.clearTimeout(pollTimer);
+    controller.suspend();
+  });
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted || !stopped) return;
+    stopped = false;
+    const epoch = ++pageEpoch;
+    void controller.restore().finally(() => {
+      if (!stopped && pageEpoch === epoch) pollTimer = window.setTimeout(poll, 2500);
+    });
+  });
   async function poll() {
     if (stopped) return;
+    const epoch = pageEpoch;
     await controller.poll();
-    if (!stopped) window.setTimeout(poll, 2500);
+    if (!stopped && pageEpoch === epoch) pollTimer = window.setTimeout(poll, 2500);
   }
   controller.start();
-  window.setTimeout(poll, 2500);
+  pollTimer = window.setTimeout(poll, 2500);
   return controller;
 }

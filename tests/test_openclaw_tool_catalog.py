@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from agentbridge.mcp.central import AGENT_FACING_TOOL_SCOPE_REQUIREMENTS
+from agentbridge.mcp.central import AGENT_FACING_TOOL_SCOPE_REQUIREMENTS, HOST_COORDINATION_TOOL_NAMES
 from tools.export_openclaw_agentbridge_catalog import build_catalog
 
 
@@ -29,6 +29,7 @@ class OpenClawToolCatalogTests(unittest.TestCase):
                 for tool in committed["tools"]
             )
         )
+        self.assertTrue(set(HOST_COORDINATION_TOOL_NAMES).isdisjoint(tool['name'] for tool in committed['tools']))
         expected_agent_tools = {
             tool["name"]
             for tool in committed["tools"]

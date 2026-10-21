@@ -238,80 +238,150 @@ def _binding(service, subject, task_id, command, connection):
     return binding
 
 
+def _telegram_endpoint(connection, subject, endpoint_id):
+    """Validate a live private Telegram route; never manufacture a web account."""
+    row = connection.execute("SELECT * FROM client_endpoints WHERE endpoint_id=? AND user_subject=?", (endpoint_id, subject)).fetchone()
+    if row is None:
+        _fail("ACTION_ENDPOINT_INVALID", "Telegram 会话绑定已失效。")
+    endpoint = dict(row)
+    route = json.loads(endpoint["route_json"])
+    conversation = endpoint["conversation_ref"]
+    match = re.fullmatch(r"agent:[^:]+:telegram:(?:direct|dm):([^:]+)", conversation, re.IGNORECASE)
+    sender = endpoint["external_subject"]
+    route_account = route.get("accountId") if isinstance(route, dict) else None
+    endpoint_account = endpoint["account_id"]
+    accounts_valid = all(value is None or isinstance(value, str) for value in (route_account, endpoint_account))
+    canonical_route_account = (route_account or "").strip() or "default" if accounts_valid else None
+    canonical_endpoint_account = (endpoint_account or "").strip() or "default" if accounts_valid else None
+    if (endpoint["state"] != "active" or endpoint["agent_host"] != "openclaw"
+            or endpoint["client_type"].lower() != "telegram" or not match or match[1] != sender
+            or not isinstance(route, dict) or route.get("channel") != "telegram"
+            or not accounts_valid or canonical_route_account != canonical_endpoint_account
+            or str(route.get("to") or "").removeprefix("telegram:") != sender
+            or sender.startswith("-") or route.get("threadId") not in (None, "")):
+        _fail("ACTION_ENDPOINT_INVALID", "办理入口仅限原 Telegram 私聊会话。")
+    token = connection.execute("SELECT user_subject,state,expires_at FROM mcp_identity_tokens WHERE token_id=?", (endpoint["token_id"],)).fetchone()
+    if token is None or token["user_subject"] != subject or token["state"] != "active" or _date(token["expires_at"]) <= _now():
+        _fail("ACTION_ENDPOINT_INVALID", "Telegram 身份已失效，请重新连接。")
+    endpoint["_binding_hash"] = _hash({key: endpoint[key] for key in (
+        "endpoint_id", "user_subject", "token_id", "agent_host", "endpoint_key", "client_type",
+        "external_subject", "account_id", "conversation_ref", "route_json")})
+    return endpoint
+
+
 def queue_preparation(service, account, source_task_id, body):
     """Atomically persist an intent, task and Skill binding; perform no invoke."""
     _body(body)
     subject = account.get("user_subject")
     with store_transaction(service.tasks) as connection:
         workspace = _account(connection, account)
-        request_identity = {"sourceTaskId": source_task_id, "operationId": body["operationId"], "targetKeys": body["targetKeys"]}
-        request_hash = _hash({"accountId": workspace["account_id"], "requestKey": body["requestKey"]})
-        identity_hash = _hash(request_identity)
-        previous_request = connection.execute(
-            "SELECT payload_json FROM task_events WHERE user_subject=? "
-            "AND event_type IN ('task.prepare.requested','task.prepare.request_alias') "
-            "AND json_extract(payload_json,'$.requestKeyHash')=? LIMIT 1", (subject, request_hash),
-        ).fetchone()
-        if previous_request and json.loads(previous_request[0]).get("requestIdentityHash") != identity_hash:
+        return _queue_preparation(service, subject, source_task_id, body, dict(workspace), connection)
+
+
+def queue_endpoint_preparation(service, subject, endpoint_id, source_task_id, body, *, binding_hash, view_hash, source_hash):
+    """Queue only an exact ticket-bound Telegram endpoint with live permissions."""
+    _body(body)
+    with store_transaction(service.tasks) as connection:
+        endpoint = _telegram_endpoint(connection, subject, endpoint_id)
+        if endpoint["_binding_hash"] != binding_hash:
+            _fail("ACTION_ENDPOINT_INVALID", "Telegram 会话已变化，请从聊天重新打开。")
+        _, pending = _source(connection, subject, source_task_id, body["operationId"], fresh=False)
+        if _hash(pending) != source_hash:
+            _fail("ACTION_SOURCE_CHANGED", "原查询内容已变化，请重新查询。")
+        binding = {"endpoint_id": endpoint_id, "endpoint_key": endpoint["endpoint_key"],
+            "openclaw_session_key": endpoint["conversation_ref"], "_request_scope": endpoint_id,
+            "_telegram": True, "_binding_hash": binding_hash}
+        result = _queue_preparation(service, subject, source_task_id, body, binding, connection)
+        previous = connection.execute("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
+            "AND event_type='task.result_view.prepared' AND causation_ref=?", (result["taskId"], subject, view_hash)).fetchone()
+        if previous is None:
+            service.tasks._append_event(connection, task_id=result["taskId"], user_subject=subject,
+                event_type="task.result_view.prepared", payload={"viewTokenHash": view_hash, "sourceTaskId": source_task_id},
+                causation_ref=view_hash, created_at=_now().isoformat())
+        return result
+
+
+def _queue_preparation(service, subject, source_task_id, body, workspace, connection):
+    request_identity = {"sourceTaskId": source_task_id, "operationId": body["operationId"], "targetKeys": body["targetKeys"]}
+    scope = workspace.get("_request_scope") or workspace["account_id"]
+    request_hash = _hash({("endpointId" if workspace.get("_telegram") else "accountId"): scope, "requestKey": body["requestKey"]})
+    identity_hash = _hash(request_identity)
+    previous_request = connection.execute(
+        "SELECT payload_json FROM task_events WHERE user_subject=? "
+        "AND event_type IN ('task.prepare.requested','task.prepare.request_alias') "
+        "AND json_extract(payload_json,'$.requestKeyHash')=? LIMIT 1", (subject, request_hash),
+    ).fetchone()
+    if previous_request and json.loads(previous_request[0]).get("requestIdentityHash") != identity_hash:
+        _fail("ACTION_REQUEST_CONFLICT", "此请求已绑定另一组待办，请重新选择。")
+    # Two surfaces selecting the same ordered source targets converge even
+    # when each generated a different browser request key.
+    host_key = f"{'telegram-prepare' if workspace.get('_telegram') else 'workspace-prepare'}:{scope}:{identity_hash}"
+    existing = connection.execute(
+        "SELECT task_id FROM agent_tasks WHERE user_subject=? AND agent_host='openclaw' AND host_task_key=?", (subject, host_key),
+    ).fetchone()
+    if existing:
+        row = _owned_task(connection, subject, existing[0])
+        old = json.loads(row["summary_json"]).get("command") or {}
+        _, command = _load_command(connection, subject, existing[0], old.get("commandKey"))
+        if command.get("requestIdentity") != request_identity or row["origin_endpoint_id"] != workspace["endpoint_id"]:
             _fail("ACTION_REQUEST_CONFLICT", "此请求已绑定另一组待办，请重新选择。")
-        # Two surfaces selecting the same ordered source targets converge even
-        # when each generated a different browser request key.
-        host_key = f"workspace-prepare:{workspace['account_id']}:{identity_hash}"
-        existing = connection.execute(
-            "SELECT task_id FROM agent_tasks WHERE user_subject=? AND agent_host='openclaw' AND host_task_key=?", (subject, host_key),
-        ).fetchone()
-        if existing:
-            row = _owned_task(connection, subject, existing[0])
-            old = json.loads(row["summary_json"]).get("command") or {}
-            _, command = _load_command(connection, subject, existing[0], old.get("commandKey"))
-            if command.get("requestIdentity") != request_identity or row["origin_endpoint_id"] != workspace["endpoint_id"]:
-                _fail("ACTION_REQUEST_CONFLICT", "此请求已绑定另一组待办，请重新选择。")
-            _binding(service, subject, existing[0], command, connection)
-            _require_grants(service, subject, command["selectedItems"])
-            if not previous_request:
-                service.tasks._append_event(connection, task_id=existing[0], user_subject=subject,
-                    event_type="task.prepare.request_alias", payload={"requestKeyHash": request_hash,
-                        "requestIdentityHash": identity_hash}, causation_ref=request_hash, created_at=_now().isoformat())
-            return {"taskId": existing[0], "commandKey": command["commandKey"], "status": "existing"}
-        pending_count = connection.execute(
-            "SELECT COUNT(*) FROM agent_tasks WHERE user_subject=? AND origin_endpoint_id=? "
-            "AND agent_host='openclaw' AND status IN ('active','running','waiting_user') "
-            "AND json_extract(summary_json,'$.command.kind')=? AND json_extract(summary_json,'$.command.state')='pending'",
-            (subject, workspace["endpoint_id"], COMMAND_KIND),
-        ).fetchone()[0]
-        if pending_count >= 32:
-            _fail("ACTION_PREPARATION_BUSY", "本Workspace已有32个待准备请求，请稍候恢复本次准备。")
-        operation, pending = _source(connection, subject, source_task_id, body["operationId"])
-        by_key = {_target_key(body["operationId"], row): row["affair_id"] for row in pending["items"]}
-        if any(key not in by_key for key in body["targetKeys"]):
-            _fail("ACTION_TARGET_UNAVAILABLE", "所选事项不属于这次待办查询，请重新选择。")
-        affair_ids = [by_key[key] for key in body["targetKeys"]]
-        selected = _select(service, pending, affair_ids)
-        _require_grants(service, subject, selected)
-        profile = "single" if len(selected) == 1 else "batch"
-        item = _reviewed_current_skill(service, subject, profile, connection)
-        binding_id = service.skills.bind(subject, SKILL_ID, profile, expected_version=item["manifest"]["version"], connection=connection)
-        binding = service.skills.binding(subject, binding_id, connection)
-        bundle = skill_bundle(binding)
-        capability = selected[0]["display_summary"]["prepare_capability"] if profile == "single" else PENDING_BATCH_PREPARE_CAPABILITY
-        arguments = {"affair_id": affair_ids[0]} if profile == "single" else {"affair_ids": affair_ids, "max_items": len(affair_ids)}
-        command = {"kind": COMMAND_KIND, "commandKey": str(uuid4()), "requestIdentity": request_identity,
-            "sourceTaskId": source_task_id, "operationIdSource": operation["operation_id"], "sourceHash": _hash(pending),
-            "selectedItems": selected, "affairIds": affair_ids, "capabilityName": capability,
-            "capabilityVersion": service.registry.get(capability).version, "arguments": arguments,
-            "skillBindingId": binding_id, "skillHash": item["content_hash"], "loadedResources": bundle["loaded_resources"],
-            "instructionsHash": _hash(bundle["content"]), "requestedAt": _now().isoformat(), "state": "pending"}
-        command["intentHash"] = _hash(_intent(command))
-        task, _ = service.tasks.ensure_task(user_subject=subject, agent_host="openclaw", host_task_key=host_key,
-            origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],
-            title=(f"核对并办理{len(selected)}项OA待办" if profile == "batch" else "核对并办理OA待办"),
-            summary={"command": command}, connection=connection)
-        service.skills.attach(subject, task["task_id"], binding_id, connection=connection)
-        service.tasks._append_event(connection, task_id=task["task_id"], user_subject=subject,
-            event_type="task.prepare.requested", payload={"commandKey": command["commandKey"], "intentHash": command["intentHash"],
-                "selectedCount": len(selected), "requestKeyHash": request_hash, "requestIdentityHash": identity_hash},
-            causation_ref=command["commandKey"], created_at=command["requestedAt"])
-        return {"taskId": task["task_id"], "commandKey": command["commandKey"], "status": "queued"}
+        _binding(service, subject, existing[0], command, connection)
+        _require_grants(service, subject, command["selectedItems"])
+        if not previous_request:
+            service.tasks._append_event(connection, task_id=existing[0], user_subject=subject,
+                event_type="task.prepare.request_alias", payload={"requestKeyHash": request_hash,
+                    "requestIdentityHash": identity_hash}, causation_ref=request_hash, created_at=_now().isoformat())
+        return {"taskId": existing[0], "commandKey": command["commandKey"], "status": "existing"}
+    pending_count = connection.execute(
+        "SELECT COUNT(*) FROM agent_tasks WHERE user_subject=? AND origin_endpoint_id=? "
+        "AND agent_host='openclaw' AND status IN ('active','running','waiting_user') "
+        "AND json_extract(summary_json,'$.command.kind')=? AND json_extract(summary_json,'$.command.state')='pending'",
+        (subject, workspace["endpoint_id"], COMMAND_KIND),
+    ).fetchone()[0]
+    if pending_count >= 32:
+        _fail("ACTION_PREPARATION_BUSY", "当前会话已有32个待准备请求，请稍候恢复本次准备。")
+    operation, pending = _source(connection, subject, source_task_id, body["operationId"])
+    by_key = {_target_key(body["operationId"], row): row["affair_id"] for row in pending["items"]}
+    if any(key not in by_key for key in body["targetKeys"]):
+        _fail("ACTION_TARGET_UNAVAILABLE", "所选事项不属于这次待办查询，请重新选择。")
+    affair_ids = [by_key[key] for key in body["targetKeys"]]
+    selected = _select(service, pending, affair_ids)
+    _require_grants(service, subject, selected)
+    profile = "single" if len(selected) == 1 else "batch"
+    item = _reviewed_current_skill(service, subject, profile, connection)
+    binding_id = service.skills.bind(subject, SKILL_ID, profile, expected_version=item["manifest"]["version"], connection=connection)
+    binding = service.skills.binding(subject, binding_id, connection)
+    bundle = skill_bundle(binding)
+    capability = selected[0]["display_summary"]["prepare_capability"] if profile == "single" else PENDING_BATCH_PREPARE_CAPABILITY
+    arguments = {"affair_id": affair_ids[0]} if profile == "single" else {"affair_ids": affair_ids, "max_items": len(affair_ids)}
+    command = {"kind": COMMAND_KIND, "commandKey": str(uuid4()), "requestIdentity": request_identity,
+        "sourceTaskId": source_task_id, "operationIdSource": operation["operation_id"], "sourceHash": _hash(pending),
+        "selectedItems": selected, "affairIds": affair_ids, "capabilityName": capability,
+        "capabilityVersion": service.registry.get(capability).version, "arguments": arguments,
+        "skillBindingId": binding_id, "skillHash": item["content_hash"], "loadedResources": bundle["loaded_resources"],
+        "instructionsHash": _hash(bundle["content"]), "requestedAt": _now().isoformat(), "state": "pending"}
+    if workspace.get("_telegram"):
+        command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"])
+    command["intentHash"] = _hash(_intent(command))
+    task, _ = service.tasks.ensure_task(user_subject=subject, agent_host="openclaw", host_task_key=host_key,
+        origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],
+        title=(f"核对并办理{len(selected)}项OA待办" if profile == "batch" else "核对并办理OA待办"),
+        summary={"command": command}, connection=connection)
+    service.skills.attach(subject, task["task_id"], binding_id, connection=connection)
+    if workspace.get("_telegram"):
+        subscription = connection.execute("SELECT subscription_id,event_filters_json FROM task_subscriptions "
+            "WHERE task_id=? AND endpoint_id=? AND user_subject=? AND state='active'",
+            (task["task_id"], workspace["endpoint_id"], subject)).fetchone()
+        if subscription:
+            filters = json.loads(subscription["event_filters_json"])
+            if "task.prepare.requested" not in filters and "*" not in filters:
+                connection.execute("UPDATE task_subscriptions SET event_filters_json=? WHERE subscription_id=?",
+                    (_json([*filters, "task.prepare.requested"]), subscription["subscription_id"]))
+    service.tasks._append_event(connection, task_id=task["task_id"], user_subject=subject,
+        event_type="task.prepare.requested", payload={"commandKey": command["commandKey"], "intentHash": command["intentHash"],
+            "selectedCount": len(selected), "requestKeyHash": request_hash, "requestIdentityHash": identity_hash},
+        causation_ref=command["commandKey"], created_at=command["requestedAt"])
+    return {"taskId": task["task_id"], "commandKey": command["commandKey"], "status": "queued"}
 
 
 def _record_result(service, subject, task_id, command_key, response):
@@ -363,6 +433,10 @@ def execute_preparation(service, subject, task_id, command_key, *, runtime_conte
             task, command = _load_command(connection, subject, task_id, command_key)
             if context.get("endpointId") != task["origin_endpoint_id"]:
                 _fail("ACTION_ENDPOINT_INVALID", "办理请求必须由原Workspace会话协调。")
+            if command.get("originKind") == "telegram":
+                endpoint = _telegram_endpoint(connection, subject, task["origin_endpoint_id"])
+                if endpoint["_binding_hash"] != command.get("endpointBindingHash") or endpoint["conversation_ref"] != task["active_conversation_ref"]:
+                    _fail("ACTION_ENDPOINT_INVALID", "办理请求必须由原 Telegram 私聊会话协调。")
         _record_queue_wait(service, subject, task_id, command, context, _now())
         try:
             with service.tasks._connect() as connection:
@@ -420,13 +494,32 @@ def pending_preparations(service, subject, limit=16):
             "AND json_extract(t.summary_json,'$.command.kind')=? AND json_extract(t.summary_json,'$.command.state')='pending' "
             "ORDER BY t.created_at,t.rowid LIMIT ?", (subject, COMMAND_KIND, limit),
         ).fetchall()
+        telegram_rows = connection.execute(
+            "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "
+            "JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject "
+            "AND e.conversation_ref=t.active_conversation_ref AND e.agent_host='openclaw' "
+            "AND e.client_type='telegram' AND e.state='active' WHERE t.user_subject=? AND t.agent_host='openclaw' "
+            "AND t.status IN ('active','running','waiting_user') "
+            "AND json_extract(t.summary_json,'$.command.kind')=? AND json_extract(t.summary_json,'$.command.state')='pending' "
+            "AND json_extract(t.summary_json,'$.command.originKind')='telegram' ORDER BY t.created_at,t.rowid LIMIT ?",
+            (subject, COMMAND_KIND, limit)).fetchall()
+        rows = sorted([*rows, *telegram_rows], key=lambda row: (row["created_at"], row["task_id"]))[:limit]
         result = []
         for row in rows:
             key = (json.loads(row["summary_json"]).get("command") or {}).get("commandKey")
             try:
                 _, command = _load_command(connection, subject, row["task_id"], key)
+                if command.get("originKind") == "telegram":
+                    endpoint = _telegram_endpoint(connection, subject, row["origin_endpoint_id"])
+                    if endpoint["_binding_hash"] != command.get("endpointBindingHash"):
+                        continue
             except ActionableResultError:
                 continue
-            result.append({"taskId": row["task_id"], "commandKey": command["commandKey"],
-                "sessionKey": row["active_conversation_ref"], "endpointKey": row["prepare_endpoint_key"]})
+            item = {"taskId": row["task_id"], "commandKey": command["commandKey"],
+                "sessionKey": row["active_conversation_ref"], "endpointKey": row["prepare_endpoint_key"]}
+            if command.get("originKind") == "telegram":
+                item["endpoint"] = {"endpointId": endpoint["endpoint_id"], "clientType": endpoint["client_type"],
+                    "externalSubject": endpoint["external_subject"], "accountId": endpoint["account_id"],
+                    "conversationRef": endpoint["conversation_ref"], "route": json.loads(endpoint["route_json"])}
+            result.append(item)
         return result

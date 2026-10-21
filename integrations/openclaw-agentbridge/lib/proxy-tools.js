@@ -12,6 +12,7 @@ import {
 } from "./host-contract.js";
 
 import { transportRecoveryStrategy } from "./recovery-policy.js";
+import { channelFromPrivateSessionKey } from "./interaction.js";
 
 export { HOST_CONTEXT_META_KEY, TASK_CONTEXT_META_KEY, hostContextMeta };
 
@@ -125,6 +126,7 @@ export function createAgentBridgeProxyTools({
   skillTrialResolver = null,
   skillTrialResultHandler = null,
   trustedResultHandler = null,
+  trustedResultContextFactory = null,
   performanceRecorder = null,
   logger = null,
 }) {
@@ -177,6 +179,7 @@ export function createAgentBridgeProxyTools({
         skillTrialResolver,
         skillTrialResultHandler,
         trustedResultHandler,
+        trustedResultContextFactory,
         performanceRecorder,
         logger,
       }),
@@ -235,6 +238,7 @@ function createProxyTool({
   skillTrialResolver,
   skillTrialResultHandler,
   trustedResultHandler,
+  trustedResultContextFactory,
   performanceRecorder,
   logger,
 }) {
@@ -257,6 +261,13 @@ function createProxyTool({
               "This AgentBridge client identity is not provisioned.",
           },
         });
+      }
+      let resultViewIssuance = null;
+      if (descriptor.name === "oa_workflow_pending_list" && trustedResultHandler && trustedResultContextFactory) {
+        try {
+          resultViewIssuance = trustedResultContextFactory({ identityRouter, identity, context,
+            toolCallId, toolName: descriptor.name });
+        } catch { /* Missing trusted delivery context suppresses only the optional result card. */ }
       }
       const normalizedParams = normalizeParams(rawParams);
       const trial = skillTrialResolver?.(context.sessionKey);
@@ -357,6 +368,7 @@ function createProxyTool({
         taskRunRefResolver,
         taskScopeResolver,
         logger,
+        resultViewIssuance,
       });
       if (resolution?.planningControl) {
         return {
@@ -471,6 +483,29 @@ function createProxyTool({
           });
         }
       }
+      // This separate host-only request never enters the business tool result
+      // or the model tool catalogue. Central validates the completed query,
+      // original endpoint and immutable source before issuing an opaque URL.
+      let trustedResultView = null;
+      if (trustedResultHandler && descriptor.name === "oa_workflow_pending_list" && taskId &&
+          resolution?.originEndpointId && identity.binding?.channel === "telegram" &&
+          channelFromPrivateSessionKey(context.sessionKey) === "telegram" &&
+          result?.isError !== true && extractToolPayload(result)?.status === "succeeded" &&
+          resultViewIssuance?.bindEndpoint({ sourceTaskId: taskId,
+            endpointId: resolution.originEndpointId, endpoint: resolution.endpoint }) === true) {
+        try {
+          const response = await identity.client.callTool("agentbridge_result_view", { operation: "issue", task_id: taskId }, {
+            signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TASK_FINALIZATION_TIMEOUT_MS)]) : AbortSignal.timeout(TASK_FINALIZATION_TIMEOUT_MS),
+            meta: { ...hostContextMeta(), [TASK_CONTEXT_META_KEY]: { taskId, endpointId: resolution.originEndpointId } },
+          });
+          if (response?.status === "succeeded" && resultViewIssuance.isCurrent()) {
+            trustedResultView = { view: response.resultView, sourceTaskId: taskId,
+              endpointId: resolution.originEndpointId, issuance: resultViewIssuance };
+          }
+        } catch (error) {
+          logger?.warn?.(`AgentBridge result selection surface unavailable; original query preserved (${safeErrorCode(error)})`);
+        }
+      }
       const nativeResult = {
         ...result,
         details: {
@@ -490,7 +525,8 @@ function createProxyTool({
       // The embedded host forwards only content/details to result middleware.
       return trustedResultHandler
         ? await trustedResultHandler(
-            { toolCallId, toolName: descriptor.name, params: callParams, result: nativeResult },
+            { toolCallId, toolName: descriptor.name, params: callParams, result: nativeResult,
+              ...(trustedResultView ? { trustedResultView } : {}) },
             context,
           )
         : nativeResult;
@@ -635,6 +671,7 @@ async function resolveTaskId({
   taskRunRefResolver,
   taskScopeResolver,
   logger,
+  resultViewIssuance = null,
 }) {
   if (!isTaskEligibleTool(descriptor.name)) {
     return null;
@@ -697,11 +734,11 @@ async function resolveTaskId({
         title: boundedText(descriptor.title || descriptor.name, 240),
         account_id: workspaceSession
           ? workspaceSubject(endpointKey)
-          : binding.accountId,
+          : resultViewIssuance?.route.accountId ?? binding.accountId,
         label: workspaceSession ? "Agent Workspace" : binding.label,
         route: workspaceSession
           ? {}
-          : {
+          : resultViewIssuance?.route || {
               channel: binding.channel,
               to: boundedText(delivery.to, 768) || binding.senderId,
               accountId:
@@ -736,7 +773,8 @@ async function resolveTaskId({
     } else {
       if (!independentReadCall) taskIdBinder?.(sessionKey, descriptor.name, taskId);
     }
-    return { taskId, ...(reusableEnsureLease(response?.coordinatorLease, taskId)
+    return { taskId, originEndpointId: boundedText(response?.task?.originEndpointId, 128), endpoint: response?.endpoint,
+      ...(reusableEnsureLease(response?.coordinatorLease, taskId)
       ? { coordinatorLease: response.coordinatorLease } : {}) };
   } catch (error) {
     logger?.warn?.(

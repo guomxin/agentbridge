@@ -567,7 +567,9 @@ def _document(
     .status-copy {{ margin:16px auto 0; max-width:380px; color:var(--muted); line-height:1.7; font-size:14px; }}
     @media (max-width:620px) {{ .shell {{ align-items:flex-start; padding:20px 10px; }}
       .card {{ padding:24px 18px; box-shadow:none; }} h1 {{ font-size:21px; }}
-      .form-grid,.review dl {{ grid-template-columns:1fr; }} .field.wide {{ grid-column:auto; }} }}
+      .form-grid,.review dl {{ grid-template-columns:1fr; }} .field.wide {{ grid-column:auto; }}
+      input:not([type="radio"]):not([type="checkbox"]),select,textarea {{ font-size:16px; }}
+      .review-group summary {{ min-height:44px; padding-block:10px; }} }}
     {EMBEDDED_SAFE_AREA_CSS}
   </style>
 </head>

@@ -294,7 +294,7 @@ class CentralCapabilityService:
                 interaction_record=record, interaction=envelope, connection=connection)
 
     def prepare_host_task(self, *, user_subject, task_id, command_key, session_key, endpoint_key, registration, runtime_context=None):
-        """The registered coordinator may prepare only its exact Workspace task."""
+        """The coordinator may prepare only its exact source-bound private task."""
         from agentbridge.core.actionable_results import execute_preparation
         runtime_context = runtime_context or {}
         lease_version = runtime_context.get("coordinatorLeaseVersion")
@@ -303,13 +303,23 @@ class CentralCapabilityService:
         self.validate_host_call_context(user_subject=user_subject, registration=registration, task_id=task_id,
             endpoint_id=runtime_context.get("endpointId"), expected_lease_version=int(lease_version), require_coordinator_lease=True)
         task = self.tasks.get_task(task_id, user_subject=user_subject)
-        account = self.workspace.resolve_gateway_session(user_subject=user_subject, session_key=session_key)
         endpoint = self.tasks.get_endpoint(task["origin_endpoint_id"], user_subject=user_subject)
-        if (task["active_conversation_ref"] != session_key or endpoint["endpoint_key"] != endpoint_key
-                or endpoint["client_type"] != "web" or endpoint["state"] != "active"
-                or account["endpoint_id"] != endpoint["endpoint_id"] or account["endpoint_key"] != endpoint_key
-                or endpoint["conversation_ref"] != session_key or endpoint["agent_host"] != registration["agentHost"]):
-            raise TaskIntegrityError("prepare command does not match the task's Workspace session and endpoint")
+        if (task.get("summary", {}).get("command") or {}).get("originKind") == "telegram":
+            from agentbridge.core.actionable_results import _telegram_endpoint
+            with self.tasks._connect() as connection:
+                checked = _telegram_endpoint(connection, user_subject, endpoint["endpoint_id"])
+            command = task["summary"]["command"]
+            if (checked["_binding_hash"] != command.get("endpointBindingHash")
+                    or task["active_conversation_ref"] != session_key or endpoint["conversation_ref"] != session_key
+                    or endpoint["endpoint_key"] != endpoint_key or endpoint["agent_host"] != registration["agentHost"]):
+                raise TaskIntegrityError("prepare command does not match its original Telegram private endpoint")
+        else:
+            account = self.workspace.resolve_gateway_session(user_subject=user_subject, session_key=session_key)
+            if (task["active_conversation_ref"] != session_key or endpoint["endpoint_key"] != endpoint_key
+                    or endpoint["client_type"] != "web" or endpoint["state"] != "active"
+                    or account["endpoint_id"] != endpoint["endpoint_id"] or account["endpoint_key"] != endpoint_key
+                    or endpoint["conversation_ref"] != session_key or endpoint["agent_host"] != registration["agentHost"]):
+                raise TaskIntegrityError("prepare command does not match the task's Workspace session and endpoint")
         verified = {**runtime_context, "hostType": registration["agentHost"], "hostInstanceId": registration["hostInstanceId"],
             "endpointId": endpoint["endpoint_id"]}
         return execute_preparation(self, user_subject, task_id, command_key, runtime_context=verified)
@@ -1745,7 +1755,13 @@ class CentralCapabilityService:
                 "artifact": None,
                 "message": None,
             }
-            if task["origin_endpoint_id"] == endpoint["endpoint_id"]:
+            command = (task.get("summary") or {}).get("command") or {}
+            if (event.get("eventType") == "task.prepare.requested" and command.get("originKind") == "telegram"
+                    and task["origin_endpoint_id"] == endpoint["endpoint_id"]
+                    and command.get("commandKey") == (event.get("payload") or {}).get("commandKey")):
+                item["deliveryMode"] = "prepared_command"
+                item["event"] = {**event, "payload": {"commandKey": command["commandKey"]}}
+            elif task["origin_endpoint_id"] == endpoint["endpoint_id"]:
                 item["deliveryMode"] = "origin_handled"
             elif event.get("eventType") == "task.artifact.ready":
                 # Protected CSV URLs require a Workspace session. Companion
@@ -3615,7 +3631,14 @@ class CentralCapabilityService:
             raise InteractionIntegrityError(
                 "interaction binding does not match its trusted resource"
             )
-        return record, resource, build_interaction_envelope(record, resource)
+        envelope = build_interaction_envelope(record, resource)
+        task_id = self.tasks.task_id_for_interaction(interaction_id, user_subject=user_subject)
+        batch = self.tasks.get_batch_for_task(parent_task_id=task_id, user_subject=user_subject) if task_id else None
+        if batch:
+            envelope["display"]["batch"] = {"schemaVersion": "agentbridge.batch-view.v1",
+                "totalCount": int(batch["total_count"]), "currentIndex": int(batch["current_ordinal"]),
+                "succeededCount": int(batch["succeeded_count"]), "state": batch["state"]}
+        return record, resource, envelope
 
     def _present_interaction_for_endpoint(
         self,

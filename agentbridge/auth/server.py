@@ -14,6 +14,7 @@ from agentbridge.auth.card import MAX_AUTH_BODY_BYTES, AuthCardResponse, Trusted
 from agentbridge.auth.field_card import TrustedFieldApplication
 from agentbridge.auth.flow import TrustedFlowApplication, flow_target
 from agentbridge.auth.business_draft_card import business_draft_target
+from agentbridge.auth.result_view import TrustedResultViewApplication, result_view_target
 from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
 from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
 from agentbridge.auth.timeline_attachment import TrustedTimelineAttachmentApplication
@@ -98,11 +99,14 @@ def create_auth_http_server(
         TrustedTimelineAttachmentApplication | None
     ) = None,
     interactive_application: TrustedInteractiveBrowserApplication | None = None,
+    result_application: TrustedResultViewApplication | None = None,
 ) -> ThreadingHTTPServer:
     expected_scheme = urlparse(config.public_base_url).scheme.lower()
     allowed_hosts = {_hostname(config.public_base_url)}
     if _is_loopback_host(config.host):
         allowed_hosts.update({"127.0.0.1", "localhost", "::1"})
+    if result_application is None and flow_application is not None:
+        result_application = TrustedResultViewApplication(service=flow_application.reader.service)
 
     class AuthRequestHandler(BaseHTTPRequestHandler):
         server_version = "AgentBridgeAuth/0.1"
@@ -124,6 +128,31 @@ def create_auth_http_server(
                 self.send_response(204)
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
+                return
+            result = result_view_target(self.path)
+            if result is not None and result_application is not None:
+                view_token, action = result
+                if action == "page" and urlparse(self.path).query:
+                    self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "办理入口无效。"}}))
+                elif action == "page":
+                    self._send(result_application.get_card(view_token, secure_cookie=config.secure_cookie))
+                elif action != "state":
+                    self._send(result_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
+                elif (not self._origin_allowed()
+                        or (self.headers.get("Sec-Fetch-Site") or "").lower() not in {"", "same-origin"}):
+                    self._send(result_application.json(403, {"error": {"code": "INVALID_ORIGIN", "message": "请求来源无效。"}}))
+                else:
+                    try:
+                        query = parse_qs(urlparse(self.path).query, keep_blank_values=True, max_num_fields=2)
+                        if set(query) - {"task"} or len(query.get("task", [])) > 1:
+                            raise ValueError("invalid query")
+                    except ValueError:
+                        self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "状态请求无效。"}}))
+                        return
+                    self._send(result_application.state(view_token,
+                        token=self.headers.get("X-AgentBridge-Result-Token") or "",
+                        cookie=_result_cookie(self.headers.get("Cookie") or ""),
+                        task_id=query.get("task", [None])[0]))
                 return
             draft = business_draft_target(self.path)
             if draft is not None and flow_application is not None:
@@ -244,6 +273,13 @@ def create_auth_http_server(
                     tone="error",
                 ))
                 return
+            result = result_view_target(self.path)
+            if result is not None and (self.headers.get("Transfer-Encoding")
+                    or len(self.headers.get_all("Content-Length", [])) != 1
+                    or not re.fullmatch(r"[0-9]+", (self.headers.get("Content-Length") or "").strip())):
+                self.close_connection = True
+                self._send(application._message_response(status=400, title="请求格式无效", message="请求已被拒绝。", tone="error"))
+                return
             try:
                 content_length = int(self.headers.get("Content-Length") or "0")
             except ValueError:
@@ -258,6 +294,26 @@ def create_auth_http_server(
                 ))
                 return
             body = self.rfile.read(content_length)
+            if result is not None and result_application is not None:
+                view_token, action = result
+                if len(body) != content_length:
+                    self.close_connection = True
+                    self._send(result_application.json(400, {"error": {"code": "INVALID_LENGTH", "message": "请求内容不完整。"}}))
+                elif action != "prepare":
+                    self._send(result_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
+                elif urlparse(self.path).query:
+                    self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "办理请求无效。"}}))
+                elif (self.headers.get("Sec-Fetch-Site") or "").lower() not in {"", "same-origin"}:
+                    self._send(result_application.json(403, {"error": {"code": "INVALID_ORIGIN", "message": "请求来源无效。"}}))
+                else:
+                    try:
+                        self._send(result_application.prepare(view_token,
+                            token=self.headers.get("X-AgentBridge-Result-Token") or "",
+                            cookie=_result_cookie(self.headers.get("Cookie") or ""),
+                            content_type=self.headers.get("Content-Type") or "", body=body))
+                    finally:
+                        body = b""
+                return
             csrf_cookie = _csrf_cookie(self.headers.get("Cookie") or "")
             draft = business_draft_target(self.path)
             if draft is not None and flow_application is not None:
@@ -527,6 +583,16 @@ def _csrf_cookie(value: str) -> str:
     except Exception:
         return ""
     morsel = cookie.get("agentbridge_csrf")
+    return morsel.value if morsel is not None else ""
+
+
+def _result_cookie(value: str) -> str:
+    cookie = SimpleCookie()
+    try:
+        cookie.load(value)
+    except Exception:
+        return ""
+    morsel = cookie.get("agentbridge_result_csrf")
     return morsel.value if morsel is not None else ""
 
 

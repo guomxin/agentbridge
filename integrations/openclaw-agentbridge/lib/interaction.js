@@ -1,4 +1,5 @@
 import { normalizeHttpOrigin, isRecord } from "./config.js";
+import { batchViewForInteraction, businessViewForInteraction, interactionCanOpen, interactionEntryLabel } from "./interaction-business-view.js";
 
 export const INTERACTION_SCHEMA_VERSION = "agentbridge.interaction.v1";
 export const WITHHELD_URL = "[trusted AgentBridge card URL withheld by OpenClaw host]";
@@ -21,16 +22,11 @@ const INTERACTION_STATES = new Set([
   "failed",
   "superseded",
 ]);
-const BUTTON_LABELS = {
-  credential: "安全登录",
-  business_input: "填写信息",
-  execution_authorization: "核对并确认",
-};
 const EXTERNAL_BROWSER_LABEL = "浏览器打开";
 const STATE_LABELS = {
   pending: "等待操作",
   processing: "处理中",
-  completed: "已完成",
+  completed: "交互已完成，业务结果待核验",
   declined: "已拒绝",
   expired: "已过期",
   failed: "失败",
@@ -233,6 +229,9 @@ export function normalizeInteraction(value, allowedOrigins) {
       owner: "agentbridge",
       url: cardUrl,
       modelMustNotCollectValues: true,
+      ...(value.presentation.flowVersion === "agentbridge.trusted-flow.v1" &&
+          cardUrl && /^\/flow\/(?:input|authorize)\//.test(new URL(cardUrl).pathname)
+        ? { flowVersion: "agentbridge.trusted-flow.v1" } : {}),
     }),
     display: Object.freeze(display),
     expiresAt: safeString(value.expiresAt, 80) || null,
@@ -316,27 +315,35 @@ export function isInteractionExpired(interaction, now = Date.now()) {
 }
 
 export function buildPresentation(interactions, channel) {
-  const active = interactions.filter((item) => !isInteractionExpired(item));
-  if (active.length === 0) {
+  if (interactions.length === 0) {
     return null;
   }
   const blocks = [];
-  for (const [index, interaction] of active.entries()) {
+  for (const [index, original] of interactions.entries()) {
+    // Expiry removes actions, while retaining enough context to explain why an
+    // old card cannot be used. It says nothing about the business outcome.
+    const interaction = isInteractionExpired(original) && original.state === "pending"
+      ? { ...original, state: "expired" } : original;
     if (index > 0) {
       blocks.push({ type: "divider" });
+    }
+    if (interactions.length > 1) {
+      blocks.push({ type: "text", text: `${index + 1}. ${interaction.title}` });
     }
     if (interaction.message) {
       blocks.push({ type: "text", text: interaction.message });
     }
     blocks.push({ type: "context", text: contextText(interaction) });
-    if (["pending", "processing"].includes(interaction.state)) {
+    blocks.push({ type: "context", text: interactionGuidance(interaction) });
+    if (interactionCanOpen(interaction) && !isInteractionExpired(interaction)) {
       const url = interaction.presentation.url;
       const button = {
-        label: BUTTON_LABELS[interaction.type],
+        label: interactionEntryLabel(interaction),
         priority: 100,
         style: "primary",
       };
       const buttons = [button];
+      if (!url) continue;
       if (channel === "telegram" && url.startsWith("https://")) {
         button.webApp = { url };
         buttons.push({
@@ -352,8 +359,8 @@ export function buildPresentation(interactions, channel) {
     }
   }
   return {
-    title: active.length === 1 ? active[0].title : "AgentBridge 需要你的操作",
-    tone: presentationTone(active),
+    title: interactions.length === 1 ? interactions[0].title : `AgentBridge · ${interactions.length} 项交互`,
+    tone: presentationTone(interactions),
     blocks,
   };
 }
@@ -436,8 +443,55 @@ function contextText(interaction) {
   if (Number.isInteger(interaction.display.fieldCount)) {
     parts.push(`${interaction.display.fieldCount} 个字段`);
   }
-  parts.push(`状态：${STATE_LABELS[interaction.state] || interaction.state}`);
+  const batch = batchViewForInteraction(interaction);
+  if (batch) parts.push(`批次第 ${batch.currentIndex}/${batch.totalCount} 项，已核验完成 ${batch.succeededCount}/${batch.totalCount} 项`);
+  const completedLabels = {
+    credential: "登录已完成",
+    business_input: "办理内容已接收",
+    execution_authorization: "已授权，业务结果待核验",
+  };
+  parts.push(`状态：${interaction.state === "completed"
+    ? completedLabels[interaction.type] || STATE_LABELS.completed
+    : STATE_LABELS[interaction.state] || interaction.state}`);
   return parts.join(" · ");
+}
+
+function interactionGuidance(interaction) {
+  const batch = batchViewForInteraction(interaction);
+  if (interaction.display?.batch && !batch) return "批次状态暂不可确认，请返回原任务核对最新状态。";
+  if (batch && !["running", "waiting_user"].includes(batch.state)) {
+    return batch.state === "outcome_unknown"
+      ? "本批次已停止，当前项业务结果未知；请先核对原任务，不会自动重试或继续下一项。"
+      : batch.state === "succeeded"
+        ? "本批次各项已由业务系统核验完成，此入口不再办理。"
+        : "本批次已停止，后续事项未继续执行，请返回原任务核对原因。";
+  }
+  if (interaction.state === "completed") {
+    return interaction.type === "credential"
+      ? "登录完成后将继续原任务，请以原任务的业务核验结果为准。"
+      : "安全页面已接收本次处理；业务成功须以原任务的核验结果为准，请勿重复提交。";
+  }
+  if (interaction.state === "processing") {
+    return "安全页面正在处理，请等待原任务更新，勿重复提交。";
+  }
+  if (interaction.state === "expired") return "此入口已失效，请返回原任务核对状态并重新准备。";
+  if (interaction.state === "superseded") return "请使用原任务中的最新卡片，此入口不再办理。";
+  if (interaction.state === "declined") return "本次交互已取消，系统不会据此继续执行。";
+  if (interaction.state === "failed") return "请先核对原任务的失败原因和业务结果，勿直接重复提交。";
+  if (interaction.type === "credential") return "凭据仅在安全页面填写，登录后继续原任务。";
+  const view = businessViewForInteraction(interaction);
+  if (view) {
+    const guidance = view.viewKind === "approval"
+      ? "在办理页核对本项材料、填写意见并最终确认；打开页面不会提交本项处理。"
+      : "在同一办理页填写、预览并最终确认；打开页面不会提交业务。";
+    return batch ? `${guidance}本项核验成功后才进入下一项，每项单独确认。` : guidance;
+  }
+  if (interaction.type === "execution_authorization") {
+    return "请在安全页面核对目标、材料和执行范围后最终确认；授权后仍须核验业务结果。";
+  }
+  return interaction.presentation.flowVersion === "agentbridge.trusted-flow.v1"
+    ? "在办理页补充信息后继续核对与最终确认，等待原任务核验业务结果。"
+    : "请在安全页面补充信息，再按原任务提示核对并最终确认。";
 }
 
 function presentationTone(interactions) {
@@ -448,9 +502,7 @@ function presentationTone(interactions) {
   if (["pending", "processing"].some((state) => states.has(state))) {
     return "warning";
   }
-  if (states.has("completed")) {
-    return "success";
-  }
+  // An interaction completion is not an independently verified business success.
   return "neutral";
 }
 

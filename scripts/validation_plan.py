@@ -38,6 +38,7 @@ WORKSPACE_NODE = (
     "tests/test_admin_modules.mjs",
     "tests/test_business_draft_ui.mjs",
     "tests/test_trusted_flow_ui.mjs",
+    "tests/test_result_view_ui.mjs",
 )
 BROWSER_FIXTURES = ("tests/test_workspace_markdown.browser.js",)
 CHECKS = ["browser-runtime", "public-content", "current-facts", "python-full", "compileall",
