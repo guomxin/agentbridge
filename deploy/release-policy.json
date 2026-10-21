@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "c0977390eef5"
+    "ee1358e55bf8"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Project OA rich-text materials into inert, readable paragraphs, lists and tables on trusted field and business draft views, including existing drafts and batch items. Keep original evidence, schema and semantic hashes, material completeness, preview revision, authorization and business verification unchanged. No schema migration; host plugin remains0.4.118."
+  "reason": "Complete inert OA reading projection detection for all explicitly supported structural HTML block aliases. Keep source evidence and fingerprints, completeness, preview/decision/authorization hashes, expiry and business verification unchanged. No schema migration; host plugin remains0.4.118."
 }

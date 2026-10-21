@@ -74,6 +74,35 @@ def test_actual_shape_with_plain_page_prefix_and_rich_body_is_readable():
     assert reading["notices"]
 
 
+@pytest.mark.parametrize("tag", ["div", "section", "article", "header", "footer", "address", "center"])
+@pytest.mark.parametrize("prefix", ["", "OA 页面摘要\n"])
+def test_structural_block_fragments_trigger_reading_independently_of_paragraph_or_document_tags(tag, prefix):
+    # No p/table/list/document tag can activate the older detector here. These
+    # wrappers commonly carry the entire body supplied by an editor.
+    source = prefix + f'<{tag} class="source-layout">第一行<b>重点</b><br>末行</{tag}>'
+    text, reading = reading_content(source)
+    assert "第一行重点\n末行" in text
+    assert text.endswith("末行")
+    if prefix:
+        assert text.startswith(prefix.strip())
+    html = render_reading(reading)
+    assert "<strong>重点</strong><br>末行" in html
+    assert "source-layout" not in html
+    assert f"&lt;{tag}" not in html
+    assert reading["notices"] == []
+
+
+@pytest.mark.parametrize("source", [
+    "<span>普通字面示例</span>", "<em>普通字面示例</em>", "<b>普通字面示例</b>",
+    "<img src=\"https://private.test\" onerror=\"run()\">",
+])
+def test_inline_elements_or_images_alone_do_not_expand_html_detection(source):
+    text, reading = reading_content(source)
+    assert text == source
+    assert escape(source) in render_reading(reading)
+    assert reading["notices"] == []
+
+
 def test_active_elements_attributes_hidden_content_and_remote_links_never_survive():
     source = ('<html><body onload="PRIVATE_EVENT"><p style="background:url(https://private.test)">可见'
               '<a href="javascript:PRIVATE_LINK" id="draft-submit">链接说明</a></p>'

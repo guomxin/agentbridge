@@ -25,8 +25,13 @@ _ALIASES = {"b": "strong", "i": "em", "h1": "h2", "h3": "h2", "h4": "h2", "h5": 
             "div": "p", "section": "p", "article": "p", "header": "p", "footer": "p", "address": "p", "center": "p"}
 _BLOCK = frozenset({"p", "h2", "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "blockquote", "pre"})
 _DOCUMENT = re.compile(r"<!doctype\s+html\b|<(?:html|head|body)(?:\s|>)", re.I)
-_RICH_START = re.compile(r"<(p|h[1-6]|table|ul|ol|blockquote|pre)(?:\s[^<>]*|\s*)>", re.I)
-_RICH_END = re.compile(r"</(p|h[1-6]|table|ul|ol|blockquote|pre)\s*>", re.I)
+SOURCE_BLOCK_TAGS = frozenset({
+    "p", "h1", "h2", "h3", "h4", "h5", "h6", "table", "ul", "ol", "blockquote", "pre",
+    "div", "section", "article", "header", "footer", "address", "center",
+})
+_SOURCE_BLOCK_PATTERN = "|".join(re.escape(tag) for tag in sorted(SOURCE_BLOCK_TAGS))
+_RICH_START = re.compile(r"<(" + _SOURCE_BLOCK_PATTERN + r")(?:\s[^<>]*|\s*)>", re.I)
+_RICH_END = re.compile(r"</(" + _SOURCE_BLOCK_PATTERN + r")\s*>", re.I)
 _FALLBACK_NOTICE = "部分材料格式无法转换为阅读视图，已完整保留原始文字。"
 _IMAGE_NOTICE = "原材料包含图片；本页只显示图片说明，未读取图片内容。"
 
