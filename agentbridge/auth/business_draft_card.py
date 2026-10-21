@@ -9,6 +9,7 @@ import secrets
 
 from agentbridge.auth.card import AuthCardResponse, MAX_AUTH_BODY_BYTES
 from agentbridge.auth.field_card import _document, _render_control, _render_review, _security_headers
+from agentbridge.auth.reading_content import project_draft_state
 from agentbridge.adapters.taihua import TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA
 from agentbridge.adapters.seeyon_meeting_room_application import MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA
 from agentbridge.adapters.seeyon_pending_actions import LEAVE_APPROVAL_FIELD_CARD_SCHEMA
@@ -101,7 +102,7 @@ class BusinessDraftApplication:
         try:
             opened = self.backend.open(source_submission_id=source_submission_id,
                 presentation_id=presentation_id, csrf_cookie=csrf_cookie)
-            state, token = opened["state"], opened["csrfToken"]
+            state, token = project_draft_state(opened["state"]), opened["csrfToken"]
             path = _path(source_submission_id, presentation_id)
             nonce = secrets.token_urlsafe(18)
             headers = _security_headers(nonce)
@@ -174,7 +175,7 @@ class BusinessDraftApplication:
     def json(status: int, value: dict) -> AuthCardResponse:
         headers = _security_headers(secrets.token_urlsafe(18))
         headers["Content-Type"] = "application/json; charset=utf-8"
-        return AuthCardResponse(status, headers, json.dumps(value, ensure_ascii=False).encode())
+        return AuthCardResponse(status, headers, json.dumps(project_draft_state(value), ensure_ascii=False).encode())
 
     def _error(self, error: Exception) -> AuthCardResponse:
         # Only the backend's intentional user-facing error contract may expose text.

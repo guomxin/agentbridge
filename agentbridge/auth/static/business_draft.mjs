@@ -348,14 +348,14 @@ export function reviewSections(review, kind = "") {
   const keys = design ? new Set(["事项", "发起人", "日期", ...design.keys]) : KEY_REVIEW_LABELS;
   const addGroup = (name, item) => { if (!groups.has(name)) groups.set(name, []); groups.get(name).push(item); };
   const normalize = fields => (Array.isArray(fields) ? fields : []).filter(item => item && typeof item === "object")
-    .map(item => ({label: String(item.label ?? "").trim(), value: String(item.value ?? "").trim()}))
+    .map(item => ({...item, label: String(item.label ?? "").trim(), value: String(item.value ?? "").trim()}))
     .filter(item => item.label && item.value);
   for (const item of normalize(review?.fields)) {
     const group = /^(航段\d+|工作明细\d+|财务明细\d+)\s*·/.exec(item.label);
     const long = item.value.length > 180 || item.value.split("\n").length > 3;
     if (group) addGroup(group[1], item);
     else if (keys.has(item.label)) {
-      overview.push(long ? {...item, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
+      overview.push(long ? {...item, reading: undefined, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
       if (long) addGroup(item.label + " · 全文", item);
     } else addGroup(long ? item.label : "其他申请信息", item);
   }
@@ -366,12 +366,54 @@ export function reviewSections(review, kind = "") {
   return {overview, groups: [...groups].filter(([, fields]) => fields.length)};
 }
 
+const READING_TAGS = new Set(["p", "h2", "br", "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+  "strong", "em", "blockquote", "pre", "code", "span"]);
+
+// The server projects source HTML into a closed reading tree. Never parse HTML
+// here or copy source attributes: even an invalid projection stays inert text.
+export function appendReading(document, target, text, reading) {
+  if (!reading) { target.textContent = String(text ?? ""); return; }
+  let budget = 20000;
+  const valid = (item, depth = 0) => {
+    if (--budget < 0 || depth > 64) return false;
+    if (typeof item === "string") return true;
+    if (!item || !READING_TAGS.has(item.tag) || !Array.isArray(item.children)) return false;
+    if (["colspan", "rowspan"].some(key => item[key] !== undefined &&
+      (!["td", "th"].includes(item.tag) || !Number.isInteger(item[key]) || item[key] < 1 || item[key] > 100))) return false;
+    return item.children.every(child => valid(child, depth + 1));
+  };
+  if (reading.version !== 1 || !Array.isArray(reading.nodes) || !reading.nodes.every(item => valid(item)) ||
+      !Array.isArray(reading.notices) || !reading.notices.every(item => typeof item === "string")) {
+    target.textContent = String(text ?? "");
+    return;
+  }
+  const root = document.createElement("div"); root.className = "material-reading";
+  const append = (parent, item) => {
+    if (typeof item === "string") {
+      const span = document.createElement("span"); span.textContent = item; parent.append(span); return;
+    }
+    const element = document.createElement(item.tag);
+    for (const key of ["colspan", "rowspan"]) if (item[key] !== undefined) element.setAttribute(key, String(item[key]));
+    for (const child of item.children) append(element, child);
+    if (item.tag === "table") {
+      const scroll = document.createElement("div"); scroll.className = "reading-table";
+      scroll.tabIndex = 0; scroll.setAttribute("aria-label", "正文表格"); scroll.append(element); parent.append(scroll);
+    } else parent.append(element);
+  };
+  for (const item of reading.nodes) append(root, item);
+  for (const notice of reading.notices) {
+    const note = document.createElement("p"); note.className = "reading-notice";
+    note.textContent = notice; root.append(note);
+  }
+  target.append(root);
+}
+
 function appendReviewRows(document, target, fields, wrapped = true) {
   for (const item of fields) {
     const row = wrapped ? document.createElement("div") : target;
     if (wrapped) row.className = "review-row";
     const label = document.createElement("dt"), value = document.createElement("dd");
-    label.textContent = String(item.label ?? ""); value.textContent = String(item.value ?? "");
+    label.textContent = String(item.label ?? ""); appendReading(document, value, item.value, item.reading);
     row.append(label, value);
     if (wrapped) target.append(row);
   }
@@ -424,8 +466,8 @@ export function renderEvidence(document, target, review, kind = "") {
         excerpt.textContent = String(material.text).slice(0, 240) + "…（展开下方查看完整材料）";
         section.append(excerpt);
       }
-      const text = document.createElement("pre"); text.className = "material-text"; text.tabIndex = 0;
-      text.textContent = String(material.text ?? ""); detail.append(text);
+      const text = document.createElement(material.reading ? "div" : "pre"); text.className = "material-text"; text.tabIndex = 0;
+      appendReading(document, text, material.text, material.reading); detail.append(text);
     } else {
       const columns = (Array.isArray(material.columns) ? material.columns : []).filter(column => typeof column?.key === "string");
       const table = document.createElement("table"), head = document.createElement("thead"), body = document.createElement("tbody");
@@ -434,7 +476,10 @@ export function renderEvidence(document, target, review, kind = "") {
       head.append(header);
       for (const row of Array.isArray(material.rows) ? material.rows : []) {
         const line = document.createElement("tr"); line.dataset.rowId = String(row?.id || "");
-        for (const column of columns) { const cell = document.createElement("td"); cell.textContent = String(row?.cells?.[column.key] ?? ""); line.append(cell); }
+        for (const column of columns) {
+          const cell = document.createElement("td");
+          appendReading(document, cell, row?.cells?.[column.key], row?.readings?.[column.key]); line.append(cell);
+        }
         body.append(line);
       }
       table.append(head, body); const scroll = document.createElement("div"); scroll.className = "material-table";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {bindDraftField, createDraftController, mountBusinessDraft, renderEvidence, REVIEW_DESIGNS, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
+import {appendReading, bindDraftField, createDraftController, mountBusinessDraft, renderEvidence, REVIEW_DESIGNS, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
 import {createDocument, descendants} from "./workspace_dom_fixture.mjs";
 
 const values = {log_date: "2026-10-13", hours: "8", project: "P001", content: "本页日志"};
@@ -514,6 +514,74 @@ test('attendance evidence preserves the source decision as read-only and full ta
   assert.ok(!descendants(target).some(node => ['input', 'select', 'script', 'img', 'a'].includes(node.tag)));
   assert.equal(descendants(target).filter(node => node.tag === 'td').length, 1);
   assert.equal(descendants(target).find(node => node.dataset.reviewKind)?.dataset.reviewKind, 'attendance_confirmation');
+});
+
+const richReading = () => ({version: 1, notices: ['正文中有图片，图片内容未在本页读取。'], nodes: [
+  {tag: 'p', children: ['本周完成', {tag: 'strong', children: ['关键事项']}, {tag: 'br', children: []}, '下一行']},
+  {tag: 'ol', children: [{tag: 'li', children: ['第一项']}, {tag: 'li', children: ['第二项']}]},
+  {tag: 'table', children: [{tag: 'tbody', children: [{tag: 'tr', children: [
+    {tag: 'th', children: ['项目']}, {tag: 'td', colspan: 2, children: ['完整明细尾部']},
+  ]}]}]},
+]});
+
+test('all fifteen OA designs display projected paragraphs lists and tables without source HTML or active elements', () => {
+  for (const kind of Object.keys(REVIEW_DESIGNS)) {
+    const document = createDocument(), target = document.createElement('div'); target.querySelectorAll = () => [];
+    renderEvidence(document, target, {fields: [{label: '事项', value: '合成事项'}], sections: [
+      {id: 'body', title: '正文与页面材料', kind: 'text', text: '本周完成关键事项\n下一行\n第一项\n第二项\n完整明细尾部', reading: richReading()},
+    ], completeness: {status: 'complete'}}, kind);
+    const nodes = descendants(target);
+    assert.match(target.textContent, /本周完成关键事项下一行/);
+    assert.match(target.textContent, /第一项第二项/);
+    assert.match(target.textContent, /完整明细尾部/);
+    assert.match(target.textContent, /图片内容未在本页读取/);
+    assert.ok(nodes.some(node => node.tag === 'strong'));
+    assert.equal(nodes.filter(node => node.tag === 'li').length, 2);
+    assert.equal(nodes.find(node => node.tag === 'td').attributes.colspan, '2');
+    assert.ok(nodes.some(node => node.className === 'reading-table' && node.tabIndex === 0));
+    assert.ok(!nodes.some(node => ['script', 'img', 'iframe', 'a', 'form', 'input', 'button'].includes(node.tag)));
+  }
+});
+
+test('projected original fields and opinion cells keep their full readable structure on rerender', () => {
+  const document = createDocument(), target = document.createElement('div'); target.querySelectorAll = () => [];
+  const review = {fields: [{label: '事项', value: '完整说明'.repeat(100), reading: richReading()}], sections: [
+    {id: 'original-fields', kind: 'facts', fields: [{label: '富文本字段', value: '字段内容', reading: richReading()}]},
+    {id: 'existing-opinions', kind: 'table', columns: [{key: 'opinion', label: '意见'}],
+      rows: [{id: 'original-opinion', cells: {opinion: '可读意见'}, readings: {opinion: richReading()}}]},
+  ]};
+  for (const revision of ['原始材料', '更新后的材料']) {
+    renderEvidence(document, target, {...review, title: revision}, 'efficiency_data');
+    assert.match(target.textContent, /全文见下方/);
+    assert.equal(descendants(target).filter(node => node.className === 'material-reading').length, 3);
+    assert.equal(descendants(target).filter(node => node.tag === 'strong').length, 3);
+  }
+});
+
+test('reading projection cannot carry arbitrary tags attributes URLs or unsafe cell spans', () => {
+  for (const item of [{tag: 'script', children: ['do not execute']}, {tag: 'img', children: []},
+    {tag: 'td', colspan: 101, children: ['invalid span']}, {tag: 'p', rowspan: 1, children: []}]) {
+    const document = createDocument(), target = document.createElement('div');
+    appendReading(document, target, '<script>literal fallback</script>', {version: 1, nodes: [item], notices: []});
+    assert.equal(target.textContent, '<script>literal fallback</script>');
+    assert.equal(descendants(target).length, 1);
+  }
+  const document = createDocument(), target = document.createElement('div');
+  appendReading(document, target, '可读正文', {version: 1, nodes: [
+    {tag: 'p', children: ['可读正文'], style: 'display:none', onclick: 'alert(1)', href: 'https://example.invalid/', id: 'draft-submit'},
+  ], notices: []});
+  assert.equal(target.textContent, '可读正文');
+  const paragraph = descendants(target).find(node => node.tag === 'p');
+  assert.deepEqual(paragraph.attributes, {});
+});
+
+test('overly deep reading data falls back to complete inert text including the tail', () => {
+  const document = createDocument(), target = document.createElement('div');
+  let item = '正文'; for (let i = 0; i < 70; i++) item = {tag: 'span', children: [item]};
+  const text = '<p>完整原始内容</p>'.repeat(1000) + '不可丢失的尾部';
+  appendReading(document, target, text, {version: 1, nodes: [item], notices: []});
+  assert.equal(target.textContent, text);
+  assert.equal(descendants(target).length, 1);
 });
 
 test('weekly report and handover layouts retain full source material and distinct item rows', () => {

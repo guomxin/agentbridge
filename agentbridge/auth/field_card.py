@@ -11,6 +11,7 @@ from urllib.parse import parse_qs
 
 from agentbridge.auth.card import AuthCardResponse, MAX_AUTH_BODY_BYTES
 from agentbridge.auth.embedded import EMBEDDED_SAFE_AREA_CSS, render_embedded_web_app_bridge
+from agentbridge.auth.reading_content import project_review, render_reading
 from agentbridge.core.field_values import _field_definitions, _normalize_submission
 from agentbridge.core.field_submissions import (
     FieldSubmissionAccessDenied,
@@ -328,7 +329,8 @@ def _review_sections(fields: list) -> tuple[list[dict], dict[str, list[dict]]]:
         label = str(item.get("label") or "").strip()
         field_value = str(item["value"] if item.get("value") is not None else "").strip()
         if label and field_value:
-            clean.append({"label": label, "value": field_value})
+            clean.append({"label": label, "value": field_value,
+                          **({"reading": item["reading"]} if "reading" in item else {})})
     key_labels = {"事项", "申请人", "发起人", "姓名", "请假类型", "开始时间", "结束时间",
                   "请假天数", "请假小时", "本次操作", "应付金额合计", "员工与月份", "移交人", "交接日期",
                   "事由", "出差事由", "加班事由", "OA 当前确认结论", "日期", "发起日期"}
@@ -357,6 +359,7 @@ def _review_sections(fields: list) -> tuple[list[dict], dict[str, list[dict]]]:
 def _render_review(value: Any, *, element_id: str = "review-title") -> str:
     if not isinstance(value, dict):
         return ""
+    value = project_review(value)
     fields = value.get("fields")
     overview, groups = _review_sections(fields if isinstance(fields, list) else [])
     for group in value.get("groups", []) if isinstance(value.get("groups"), list) else []:
@@ -366,14 +369,53 @@ def _render_review(value: Any, *, element_id: str = "review-title") -> str:
         grouped_fields = first + [item for items in rest.values() for item in items]
         if grouped_fields:
             groups.setdefault(str(group.get("title") or "申请明细"), []).extend(grouped_fields)
-    if not overview and not groups:
-        return ""
     def rows(items):
+        def content(item):
+            reading = item.get("reading")
+            # Existing compact facts already preserve whitespace through dd's
+            # style. Avoid adding layout wrappers for unchanged plain values.
+            if (isinstance(reading, dict) and not reading.get("notices") and
+                    reading.get("nodes") == [{"tag": "pre", "children": [item["value"]]}]):
+                return escape(item["value"])
+            return render_reading(reading) or escape(item["value"])
         return "".join(f'<div class="review-row"><dt>{escape(item["label"])}</dt>'
-                       f'<dd>{escape(item["value"])}</dd></div>' for item in items)
+                       f'<dd>{content(item)}</dd></div>' for item in items)
     grouped = "".join(f'<details class="review-group"><summary>{escape(name)}'
                       f'<span> · {len(items)} 项</span></summary><dl>{rows(items)}</dl></details>'
                       for name, items in groups.items())
+    materials = []
+    for section in value.get("sections", []) if isinstance(value.get("sections"), list) else []:
+        if not isinstance(section, dict):
+            continue
+        body = ""
+        if section.get("kind") == "text":
+            body = render_reading(section.get("reading")) or escape(str(section.get("text") or ""))
+        elif section.get("kind") == "facts":
+            body = '<dl>' + rows([item for item in section.get("fields", [])
+                                  if isinstance(item, dict) and "label" in item and "value" in item]) + '</dl>'
+        elif section.get("kind") == "table":
+            columns = [column for column in section.get("columns", [])
+                       if isinstance(column, dict) and isinstance(column.get("key"), str)]
+            head = '<tr>' + ''.join(f'<th scope="col">{escape(str(column.get("label") or column["key"]))}</th>'
+                                    for column in columns) + '</tr>'
+            table_rows = []
+            for row in section.get("rows", []) if isinstance(section.get("rows"), list) else []:
+                if not isinstance(row, dict) or not isinstance(row.get("cells"), dict):
+                    continue
+                readings = row.get("readings") if isinstance(row.get("readings"), dict) else {}
+                table_rows.append('<tr>' + ''.join('<td>' + (render_reading(readings.get(column["key"])) or
+                    escape(str(row["cells"].get(column["key"]) or ""))) + '</td>' for column in columns) + '</tr>')
+            body = '<div class="reading-table" tabindex="0"><table><thead>' + head + '</thead><tbody>' + ''.join(table_rows) + '</tbody></table></div>'
+        if body:
+            materials.append('<details class="review-group"><summary>' + escape(str(section.get("title") or "原始材料")) +
+                             '</summary>' + body + '</details>')
+    attachments = value.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        materials.append('<section class="material-attachments"><h3>附件名称</h3><ul>' + ''.join(
+            '<li>' + escape(str(item.get("name") or "未命名附件")) + '</li>' for item in attachments if isinstance(item, dict)) +
+            '</ul><p>此处仅列出源页面中的附件名称，附件内容未在本页读取。</p></section>')
+    if not overview and not groups and not materials:
+        return ""
     title = escape(str(value.get("title") or "审批详情"))
     effect = str(value.get("effect") or "").strip()
     effect_html = (
@@ -383,7 +425,7 @@ def _render_review(value: Any, *, element_id: str = "review-title") -> str:
         f'<section class="review" aria-labelledby="{escape(element_id)}">'
         '<p class="review-kicker">审批依据</p>'
         f'<h2 id="{escape(element_id)}">{title}</h2>{effect_html}'
-        f'<dl class="review-key-facts">{rows(overview)}</dl>{grouped}</section>'
+        f'<dl class="review-key-facts">{rows(overview)}</dl>{grouped}{"".join(materials)}</section>'
     )
 
 
@@ -535,6 +577,14 @@ def _document(
     .review-group summary span {{ color:var(--muted); font-weight:400; }}
     .review-group dl {{ grid-template-columns:1fr; margin-top:6px; }}
     .review-group .review-row {{ border-top:0; }}
+    .material-reading {{white-space:normal;line-height:1.7;overflow-wrap:anywhere;min-width:0;margin-top:8px}}
+    .material-reading p {{margin:8px 0}} .material-reading ul,.material-reading ol {{padding-left:24px;margin:8px 0}}
+    .material-reading blockquote {{margin:10px 0;padding-left:12px;border-left:3px solid var(--line);color:var(--muted)}}
+    .material-reading pre {{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0;line-height:1.7}}
+    .reading-table {{overflow-x:auto;max-width:100%;margin:10px 0}}
+    .reading-table table {{border-collapse:collapse;width:100%;font-size:13px}}
+    .reading-table th,.reading-table td {{border:1px solid var(--line);padding:8px;vertical-align:top;text-align:left;min-width:80px;white-space:pre-wrap}}
+    .reading-table th {{background:#edf3ef}} .reading-notice {{color:var(--muted);font-size:12px;line-height:1.6;margin:8px 0}}
     .form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:17px 16px; }}
     .field {{ min-width:0; }} .field.wide {{ grid-column:1 / -1; }}
     label,legend {{ display:block; margin:0 0 7px; color:#35423d; font-size:13px; font-weight:700; }}

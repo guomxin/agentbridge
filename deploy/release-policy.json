@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "62fc735c2a17"
+    "c0977390eef5"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Align Telegram host command recovery with the verified Central default-account route semantics. Preserve strict owner, sender, non-default account, endpoint, token, session, L3 lease, original material and business verification checks. Recover only original durable pending commands through normal runtime snapshots without replaying business operations or extending source validity. No schema migration; host plugin0.4.118."
+  "reason": "Project OA rich-text materials into inert, readable paragraphs, lists and tables on trusted field and business draft views, including existing drafts and batch items. Keep original evidence, schema and semantic hashes, material completeness, preview revision, authorization and business verification unchanged. No schema migration; host plugin remains0.4.118."
 }
