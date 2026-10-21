@@ -69,6 +69,28 @@ class TelegramResultViewTests(unittest.TestCase):
         return actions.execute_preparation(self.service, OWNER, queued["taskId"], queued["commandKey"],
             runtime_context={"endpointId": self.endpoint["endpoint_id"], "hostType": "openclaw", "hostInstanceId": "synthetic-host"})
 
+    def append_telegram_timeline(self, *, account=None, route=None, **changes):
+        # The actual host timeline writer refreshes the endpoint as part of
+        # appending the message, after the query's result card was issued.
+        return self.service.append_host_timeline_message(**{
+            "user_subject": OWNER, "token_id": self.token["token_id"],
+            "agent_host": "openclaw", "endpoint_key": self.endpoint["endpoint_key"],
+            "client_type": "telegram", "external_subject": "1001", "account_id": account,
+            "conversation_ref": self.session, "message_key": uuid4().hex, "role": "assistant",
+            "text": "Synthetic query result card delivered", "task_id": self.source["task_id"],
+            "route": route if route is not None else {"channel": "telegram", "to": "1001"},
+            **changes,
+        })
+
+    def register_host(self):
+        root = Path(__file__).resolve().parents[1]
+        profile = deepcopy(json.loads((root / "schemas/agent-host/v1/test-vectors.json").read_text())["profiles"][0]["value"])
+        profile["hostInstanceId"] = "openclaw-gateway"
+        profile["implementation"] = {"name": "openclaw", "version": json.loads((root / "integrations/openclaw-agentbridge/package.json").read_text())["version"]}
+        self.service.host_contract.negotiate(user_subject=OWNER, token_id=self.token["token_id"], profile=profile)
+        return self.service.require_host_registration(user_subject=OWNER, agent_host="openclaw",
+            host_instance_id="openclaw-gateway", host_version=profile["implementation"]["version"], minimum_level="L3")
+
     def counts(self):
         with self.service.tasks._connect() as connection:
             return {table: connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
@@ -156,6 +178,7 @@ class TelegramResultViewTests(unittest.TestCase):
                 operation()
             self.assertEqual(error.exception.code, "ACTION_ENDPOINT_INVALID")
         self.assertEqual(before, self.counts())
+
         # Even a later consistent rebind to another bot account cannot inherit
         # a ticket issued for the original endpoint/account fingerprint.
         with self.service.tasks._connect() as connection:
@@ -164,6 +187,139 @@ class TelegramResultViewTests(unittest.TestCase):
         with self.assertRaises(actions.ActionableResultError):
             self.views.prepare(token, body)
         self.assertEqual(before, self.counts())
+
+    def test_real_timeline_route_aliases_keep_single_and_batch_host_prepare_and_status(self):
+        # Match the production ordering: host issues while the endpoint names
+        # the default account explicitly, then the assistant timeline refresh
+        # writes account=None and a telegram:-prefixed recipient.
+        registration = self.register_host()
+        ensured = self.service.ensure_host_task(user_subject=OWNER, token_id=self.token["token_id"],
+            agent_host="openclaw", host_task_key=uuid4().hex, endpoint_key=self.endpoint["endpoint_key"],
+            client_type="telegram", external_subject="1001", account_id="default", conversation_ref=self.session,
+            title="合成 Telegram 待办查询", route={"channel": "telegram", "to": "1001", "threadId": None},
+            host_instance_id=registration["hostInstanceId"], host_version=registration["hostVersion"])
+        query = self.service.invoke(user_subject=OWNER, capability_name="oa.workflow.pending.list", arguments={},
+            task_id=ensured["task"]["taskId"], idempotency_key=uuid4().hex)
+        self.assertEqual(query["status"], "succeeded", query)
+        self.service.finish_host_task(user_subject=OWNER, task_id=ensured["task"]["taskId"],
+            outcome="succeeded", reason="synthetic_query_completed")
+        self.source = {"task_id": ensured["task"]["taskId"], "operation_id": query["operationId"]}
+        token, _ = self.issue()
+        bodies = [self.body(token), self.body(token, ("weekly_report", "attendance_confirmation"))]
+        self.append_telegram_timeline(route={"channel": "telegram", "to": "telegram:1001"})
+        self.assertTrue(self.views.read(token)["selectionAvailable"])
+        queued = [self.views.prepare(token, body) for body in bodies]
+        self.assertEqual({item["taskId"] for item in actions.pending_preparations(self.service, OWNER)},
+            {item["taskId"] for item in queued})
+        self.append_telegram_timeline(account="default", route={
+            "channel": "telegram", "to": "1001", "accountId": "default", "threadId": None})
+        self.assertEqual({item["taskId"] for item in actions.pending_preparations(self.service, OWNER)},
+            {item["taskId"] for item in queued})
+        for item in queued:
+            lease = self.service.acquire_host_coordinator_lease(user_subject=OWNER,
+                task_id=item["taskId"], registration=registration)
+            with patch.object(self.service.workspace, "resolve_gateway_session", side_effect=AssertionError("Telegram is not Workspace")):
+                response = self.service.prepare_host_task(user_subject=OWNER, task_id=item["taskId"],
+                    command_key=item["commandKey"], session_key=self.session,
+                    endpoint_key=self.endpoint["endpoint_key"], registration=registration,
+                    runtime_context={"endpointId": self.endpoint["endpoint_id"], "coordinatorLeaseVersion": str(lease["version"])})
+            self.assertEqual(response["status"], "requires_user_action")
+            self.service.present_interaction(user_subject=OWNER, agent_host="openclaw",
+                endpoint_key=self.endpoint["endpoint_key"], interaction_id=response["interaction"]["interactionId"],
+                continuous_flow=True)
+        variants = (
+            (None, {"channel": "telegram", "to": "1001"}),
+            ("default", {"channel": "telegram", "to": "telegram:1001", "accountId": None, "threadId": ""}),
+            ("", {"channel": "telegram", "to": "1001", "accountId": "", "threadId": None}),
+            (None, {"channel": "telegram", "to": "telegram:1001", "accountId": "default"}),
+        )
+        for account, route in (*variants, *reversed(variants)):
+            with self.subTest(account=account, route=route):
+                self.append_telegram_timeline(account=account, route=route)
+                before = self.counts()
+                with patch.object(self.service, "invoke", side_effect=AssertionError("restoration cannot invoke")), \
+                     patch.object(self.service, "present_interaction", side_effect=AssertionError("status cannot issue")):
+                    page = self.views.read(token)
+                    self.assertEqual(len(page["preparations"]), 2)
+                    for body, item in zip(bodies, queued):
+                        self.assertEqual(self.views.prepare(token, body)["taskId"], item["taskId"])
+                        reused = self.execute(item)
+                        self.assertTrue(reused["reused"])
+                        self.assertEqual(reused["status"], "requires_user_action")
+                        status = self.views.status(token, item["taskId"])
+                        self.assertFalse(status["terminal"])
+                        self.assertIn("/flow/input/", status["interaction"]["presentation"]["url"])
+                        self.assertEqual(status["interaction"]["presentation"]["endpointId"], self.endpoint["endpoint_id"])
+                self.assertEqual(before, self.counts())
+        self.assertEqual(self.views.status(token, queued[1]["taskId"])["batch"]["totalCount"], 2)
+        self.assertEqual(self.counts()["business_draft_decisions"], 0)
+        self.assertEqual(len(self.fixture.oa.writes), 0)
+
+    def test_real_timeline_dangerous_route_or_identity_changes_stop_every_ticket_action(self):
+        token, _ = self.issue()
+        body = self.body(token)
+        queued = self.views.prepare(token, body)
+        rotated = self.store.issue(user_subject=OWNER, expected_principal_ref=OWNER, ttl_seconds=7200)
+        changes = (
+            {"account": "other", "route": {"channel": "telegram", "to": "1001", "accountId": "other"}},
+            {"external_subject": "2002", "conversation_ref": "agent:main:telegram:direct:2002",
+                "route": {"channel": "telegram", "to": "2002"}},
+            {"route": {"channel": "telegram", "to": "1001", "threadId": "77"}},
+            {"route": {"channel": "web", "to": "1001"}},
+            {"route": {"channel": "telegram", "to": "1001", "deliveryMode": "unexpected"}},
+            {"route": {"channel": "telegram", "to": "2002"}},
+            {"token_id": rotated["token_id"]},
+            {"client_type": "web"},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                self.append_telegram_timeline(**change)
+                before = self.counts()
+                with patch.object(self.service, "invoke", side_effect=AssertionError("changed binding cannot invoke")):
+                    for operation in (lambda: self.views.read(token), lambda: self.views.prepare(token, body),
+                            lambda: self.views.status(token, queued["taskId"]), lambda: self.execute(queued)):
+                        with self.assertRaises(actions.ActionableResultError) as error:
+                            operation()
+                        self.assertEqual(error.exception.code, "ACTION_ENDPOINT_INVALID")
+                    self.assertEqual(actions.pending_preparations(self.service, OWNER), [])
+                self.assertEqual(before, self.counts())
+                self.append_telegram_timeline()
+                self.assertTrue(self.views.read(token)["selectionAvailable"])
+                self.assertEqual(self.views.prepare(token, body)["taskId"], queued["taskId"])
+        self.store.revoke(self.token["token_id"])
+        before = self.counts()
+        with patch.object(self.service, "invoke", side_effect=AssertionError("revoked identity cannot invoke")):
+            for operation in (lambda: self.views.read(token), lambda: self.views.prepare(token, body),
+                    lambda: self.views.status(token, queued["taskId"]), lambda: self.execute(queued)):
+                with self.assertRaises(actions.ActionableResultError):
+                    operation()
+        self.assertEqual(before, self.counts())
+        self.assertEqual(len(self.fixture.oa.writes), 0)
+
+    def test_nondefault_account_and_unknown_route_keys_remain_strict_after_canonicalization(self):
+        self.append_telegram_timeline(account="primary", route={
+            "channel": "telegram", "to": "1001", "accountId": "primary", "deliveryMode": "original"})
+        token, _ = self.issue()
+        body = self.body(token)
+        queued = self.views.prepare(token, body)
+        variants = (
+            ("Primary", {"channel": "telegram", "to": "1001", "accountId": "Primary", "deliveryMode": "original"}),
+            ("other", {"channel": "telegram", "to": "1001", "accountId": "other", "deliveryMode": "original"}),
+            ("primary", {"channel": "telegram", "to": "1001", "accountId": " primary ", "deliveryMode": "original"}),
+            ("primary", {"channel": "telegram", "to": "1001", "accountId": "primary"}),
+            ("primary", {"channel": "telegram", "to": "1001", "accountId": "primary", "deliveryMode": "changed"}),
+        )
+        for account, route in variants:
+            with self.subTest(account=account, route=route):
+                self.append_telegram_timeline(account=account, route=route)
+                before = self.counts()
+                for operation in (lambda: self.views.read(token), lambda: self.views.prepare(token, body),
+                        lambda: self.views.status(token, queued["taskId"]), lambda: self.execute(queued)):
+                    with self.assertRaises(actions.ActionableResultError) as error:
+                        operation()
+                    self.assertEqual(error.exception.code, "ACTION_ENDPOINT_INVALID")
+                self.assertEqual(before, self.counts())
+        self.assertEqual(len(self.fixture.oa.writes), 0)
 
     def test_ticket_shape_expiry_and_incomplete_source_fail_closed(self):
         token, _ = self.issue()
@@ -393,13 +549,7 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
     def test_real_l3_lease_prepare_uses_exact_telegram_endpoint_without_web_account(self):
-        root = Path(__file__).resolve().parents[1]
-        profile = deepcopy(json.loads((root / "schemas/agent-host/v1/test-vectors.json").read_text())["profiles"][0]["value"])
-        profile["hostInstanceId"] = "openclaw-gateway"
-        profile["implementation"] = {"name": "openclaw", "version": json.loads((root / "integrations/openclaw-agentbridge/package.json").read_text())["version"]}
-        self.service.host_contract.negotiate(user_subject=OWNER, token_id=self.token["token_id"], profile=profile)
-        registration = self.service.require_host_registration(user_subject=OWNER, agent_host="openclaw",
-            host_instance_id="openclaw-gateway", host_version=profile["implementation"]["version"], minimum_level="L3")
+        registration = self.register_host()
         token, _ = self.issue()
         queued = self.views.prepare(token, self.body(token))
         lease = self.service.acquire_host_coordinator_lease(user_subject=OWNER, task_id=queued["taskId"], registration=registration)

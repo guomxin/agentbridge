@@ -263,9 +263,19 @@ def _telegram_endpoint(connection, subject, endpoint_id):
     token = connection.execute("SELECT user_subject,state,expires_at FROM mcp_identity_tokens WHERE token_id=?", (endpoint["token_id"],)).fetchone()
     if token is None or token["user_subject"] != subject or token["state"] != "active" or _date(token["expires_at"]) <= _now():
         _fail("ACTION_ENDPOINT_INVALID", "Telegram 身份已失效，请重新连接。")
-    endpoint["_binding_hash"] = _hash({key: endpoint[key] for key in (
+    # Timeline ingestion refreshes this same endpoint after the host issues a
+    # card. Bind the verified route meaning rather than its JSON spelling:
+    # default accounts, bare/prefixed sender and absent topic have equivalent
+    # host representations. Keep every other identity/route field strict.
+    canonical_route = {**route, "channel": "telegram", "to": sender, "threadId": None,
+        "accountId": "default" if canonical_route_account == "default" else route_account}
+    binding = {key: endpoint[key] for key in (
         "endpoint_id", "user_subject", "token_id", "agent_host", "endpoint_key", "client_type",
-        "external_subject", "account_id", "conversation_ref", "route_json")})
+        "external_subject", "account_id", "conversation_ref")}
+    binding.update(bindingVersion="telegram-private-route-v1", client_type="telegram",
+        account_id="default" if canonical_endpoint_account == "default" else endpoint_account,
+        route=canonical_route)
+    endpoint["_binding_hash"] = _hash(binding)
     return endpoint
 
 

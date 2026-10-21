@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "7f48c544aa6e"
+    "a6adbd43b95e"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Complete Telegram business cards and endpoint-bound single/batch result selection through the original governed preparation, lease, material checks and verification. Add mobile lifecycle recovery without replaying uncertain POSTs. Keep all prior action and permission contracts. No schema migration or automatic real business writes. Host plugin 0.4.117."
+  "reason": "Fix Telegram result-selection links invalidated by normal timeline synchronization. Canonicalize only verified equivalent default-account, recipient-prefix and empty-thread representations while retaining exact identity, token, endpoint, conversation, non-default-account and unknown-route bindings. Preserve all governed prepare, authorization, material and business verification contracts; no old-ticket bypass, schema migration or automatic business writes. Host plugin remains 0.4.117."
 }
