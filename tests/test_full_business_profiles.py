@@ -28,12 +28,12 @@ class FullBusinessProfileTests(unittest.TestCase):
         return values
 
     def test_complete_current_catalog_is_explicitly_partitioned(self):
-        self.assertEqual(len(_TRUSTED_WRITE_DEFINITIONS), 31)
-        self.assertEqual(len(_TRUSTED_WRITE_COMMITS), 29)
+        self.assertEqual(len(_TRUSTED_WRITE_DEFINITIONS), 32)
+        self.assertEqual(len(_TRUSTED_WRITE_COMMITS), 30)
         field_names = {name for name, definition in _TRUSTED_WRITE_DEFINITIONS.items()
                        if definition.get("field_schema") and name not in BATCH_PREPARES}
         self.assertEqual(set(BY_PREPARE), field_names)
-        self.assertEqual(len(PROFILES), 26)
+        self.assertEqual(len(PROFILES), 27)
         self.assertEqual({name for name, definition in _TRUSTED_WRITE_DEFINITIONS.items() if not definition.get("field_schema")}, {
             "smartlight.alarm.work_area.submit.prepare", "smartlight.alarm.work_area.revoke.prepare", "smartlight.alarm.dispose.prepare"})
         for prepare in field_names:
@@ -44,7 +44,7 @@ class FullBusinessProfileTests(unittest.TestCase):
                 self.assertTrue(profile.effect)
                 self.assertEqual(profile.version, "1")
 
-    def test_all_26_field_contracts_normalize_and_reject_required_omissions(self):
+    def test_all_27_field_contracts_normalize_and_reject_required_omissions(self):
         for profile in PROFILES:
             source = self.source(profile.prepare)
             raw = self.values(source["form_schema"])
@@ -77,9 +77,10 @@ class FullBusinessProfileTests(unittest.TestCase):
         with self.assertRaises(BusinessDraftError):
             BusinessDraftService._schema_values(source, {**raw, "end_time": raw["start_time"]})
 
-    def test_attendance_and_weekly_never_claim_approval_or_add_readonly_fields(self):
+    def test_confirmation_and_notifications_never_claim_approval_or_add_readonly_fields(self):
         for prepare, action, label in (("oa.attendance_confirmation.prepare", "confirmation", "确认并提交考勤单"),
-                                      ("oa.weekly_report.acknowledgement.prepare", "acknowledgement", "确认并阅办知会")):
+                                      ("oa.weekly_report.acknowledgement.prepare", "acknowledgement", "确认并阅办知会"),
+                                      ("oa.intellectual_property_reward.acknowledgement.prepare", "acknowledgement", "确认并阅办知会")):
             profile = BY_PREPARE[prepare]
             ui = profile.ui(self.source(prepare)["form_schema"])
             self.assertEqual(ui["actionKind"], action)
@@ -118,7 +119,7 @@ class FullBusinessProfileTests(unittest.TestCase):
 
     def test_batch_wrapper_profile_comes_from_exact_item_commit(self):
         profiles = [profile for profile in PROFILES if profile.view_kind == "approval"]
-        self.assertEqual(len(profiles), 15)
+        self.assertEqual(len(profiles), 16)
         for wrapper in BATCH_PREPARES:
             for profile in profiles:
                 definition = _TRUSTED_WRITE_DEFINITIONS[profile.prepare]

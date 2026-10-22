@@ -50,6 +50,8 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                 "oa.flight_application.approve",
                 "oa.intellectual_property_declaration.approval.prepare",
                 "oa.intellectual_property_declaration.approve",
+                "oa.intellectual_property_reward.acknowledge",
+                "oa.intellectual_property_reward.acknowledgement.prepare",
                 "oa.labor_contract_renewal.approval.prepare",
                 "oa.labor_contract_renewal.approve",
                 "oa.leave.approval.prepare",
@@ -129,6 +131,14 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             effects["oa.intellectual_property_declaration.approve"],
+            "controlled_write",
+        )
+        self.assertEqual(
+            effects["oa.intellectual_property_reward.acknowledgement.prepare"],
+            "controlled_write",
+        )
+        self.assertEqual(
+            effects["oa.intellectual_property_reward.acknowledge"],
             "controlled_write",
         )
         self.assertEqual(effects["oa.workflow.revoke.prepare"], "controlled_write")

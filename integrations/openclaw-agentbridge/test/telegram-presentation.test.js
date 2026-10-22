@@ -53,6 +53,7 @@ test("all native authorization paths keep the exact approved URL and business-sp
     ["smartlight.alarm.dispose", "核对 RTU 告警处置"],
     ["oa.attendance_confirmation.confirm", "核对月度考勤"],
     ["oa.quarterly_performance.acknowledge", "核对季度绩效"],
+    ["oa.intellectual_property_reward.acknowledge", "核对知识产权奖励并阅办"],
     ["oa.weekly_report.acknowledge", "核对周报"],
   ]) {
     const item = trusted({ type: "execution_authorization", display: { actionView: {

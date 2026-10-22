@@ -23,6 +23,10 @@ from agentbridge.adapters.seeyon_quarterly_performance import (
     TEMPLATE_ID as QUARTERLY_TEMPLATE_ID, FORM_APP_ID as QUARTERLY_FORM_APP_ID,
     quarterly_performance_business_snapshot, quarterly_performance_summary_fields,
 )
+from agentbridge.adapters.seeyon_intellectual_property_reward import (
+    TEMPLATE_ID as REWARD_TEMPLATE_ID, FORM_APP_ID as REWARD_FORM_APP_ID,
+    intellectual_property_reward_business_snapshot, intellectual_property_reward_summary_fields,
+)
 from agentbridge.adapters.seeyon_work_handover import (
     work_handover_business_snapshot, work_handover_summary_fields,
 )
@@ -70,6 +74,8 @@ WEEKLY_REPORT_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = (
 WEEKLY_REPORT_ACKNOWLEDGE_CAPABILITY = "oa.weekly_report.acknowledge"
 QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = "oa.quarterly_performance.acknowledgement.prepare"
 QUARTERLY_PERFORMANCE_ACKNOWLEDGE_CAPABILITY = "oa.quarterly_performance.acknowledge"
+INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = "oa.intellectual_property_reward.acknowledgement.prepare"
+INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGE_CAPABILITY = "oa.intellectual_property_reward.acknowledge"
 STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY = (
     "oa.standard_collaboration.approval.prepare"
 )
@@ -201,6 +207,12 @@ WEEKLY_REPORT_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA = _opinion_card(
 QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA = _opinion_card(
     schema_version="agentbridge.oa_quarterly_performance_acknowledgement_fields.v1",
     title="填写季度绩效阅办意见", effect="阅办一条部门季度绩效知会，不调整评级", submit_label="提交阅办意见",
+)
+INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA = _opinion_card(
+    schema_version="agentbridge.oa_intellectual_property_reward_acknowledgement_fields.v1",
+    title="填写知识产权奖励阅办意见",
+    effect="阅办一条知识产权奖励知会，不调整奖励金额或人员",
+    submit_label="提交阅办意见",
 )
 STANDARD_COLLABORATION_APPROVAL_FIELD_CARD_SCHEMA = _opinion_card(
     schema_version="agentbridge.oa_standard_collaboration_approval_fields.v1",
@@ -576,6 +588,24 @@ _PROFILES = {
         "authorize_label": "授权阅办季度绩效",
         "business_snapshot_policy": "quarterly_performance_v1",
     },
+    "intellectual_property_reward": {
+        "prepare_capability": INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
+        "commit_capability": INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGE_CAPABILITY,
+        "contract_version": "seeyon-intellectual-property-reward-acknowledgement-v1",
+        "plan_schema": "agentbridge.oa_intellectual_property_reward_acknowledgement_plan.v1",
+        "result_schema": "agentbridge.oa_intellectual_property_reward_acknowledgement_result.v1",
+        "business_intent": "acknowledge_intellectual_property_reward",
+        "title_rule": {"kind": "prefix", "value": "【知识产权】知识产权奖励审批单"},
+        "required_fields": {"姓名", "奖项名称", "奖励事由", "团队成员确认"},
+        "allowed_fields": None,
+        "template_id": REWARD_TEMPLATE_ID, "form_app_id": REWARD_FORM_APP_ID,
+        "node_policies": {"inform"}, "node_policy_names": {"知会"},
+        "action_kind": "acknowledgement", "attitude_code": "",
+        "action_display": "阅办知识产权奖励知会", "summary_title": "阅办知识产权奖励单",
+        "summary_effect": "记录本人的知识产权奖励阅办知会，不调整奖励金额或人员；该事项将离开待办列表",
+        "authorize_label": "授权阅办知识产权奖励",
+        "business_snapshot_policy": "intellectual_property_reward_v1",
+    },
     "standard_collaboration": {
         "prepare_capability": STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY,
         "commit_capability": STANDARD_COLLABORATION_APPROVE_CAPABILITY,
@@ -890,6 +920,15 @@ def acknowledge_quarterly_performance(adapter, worker, plan: dict, *, enter_comm
 
 def prepare_standard_collaboration_approval(adapter, worker, arguments: dict) -> dict:
     return _prepare_pending_action(adapter, worker, arguments, "standard_collaboration")
+
+
+def prepare_intellectual_property_reward_acknowledgement(adapter, worker, arguments: dict) -> dict:
+    return _prepare_pending_action(adapter, worker, arguments, "intellectual_property_reward")
+
+
+def acknowledge_intellectual_property_reward(adapter, worker, plan: dict, *, enter_commit_boundary, timeout_seconds=60) -> dict:
+    return _commit_pending_action(adapter, worker, plan, profile_key="intellectual_property_reward",
+                                  enter_commit_boundary=enter_commit_boundary, timeout_seconds=timeout_seconds)
 
 
 def approve_standard_collaboration(
@@ -1211,6 +1250,16 @@ def _validate_target(
     elif profile.get("business_snapshot_policy") == "business_trip_approval_v1":
         signals = dict(signals)
         signals["business_snapshot"] = _business_trip_business_snapshot(page)
+    elif profile.get("business_snapshot_policy") == "intellectual_property_reward_v1":
+        if node_policy != "inform" or node_policy_name != "知会" or attitudes:
+            raise PendingActionContractMismatch("The intellectual-property reward inform node identity is inconsistent.")
+        if str(identity.get("body_type") or "").upper() not in {"20", "FORM"} or not str(identity.get("form_record_id") or ""):
+            raise PendingActionContractMismatch("The intellectual-property reward form record identity is unavailable.")
+        try:
+            signals = dict(signals)
+            signals["business_snapshot"] = intellectual_property_reward_business_snapshot(page)
+        except ValueError as exc:
+            raise PendingActionContractMismatch(str(exc)) from exc
     elif profile.get("business_snapshot_policy") == "quarterly_performance_v1":
         if node_policy != "inform" or node_policy_name != "知会" or attitudes:
             raise PendingActionContractMismatch("The quarterly-performance inform node identity is inconsistent.")
@@ -1966,6 +2015,8 @@ def _summary(
         ):
             if snapshot.get(name):
                 fields.append({"label": label, "value": snapshot[name]})
+    elif profile_key == "intellectual_property_reward":
+        fields.extend(intellectual_property_reward_summary_fields(target["business_snapshot"]))
     elif profile_key == "quarterly_performance":
         fields.extend(quarterly_performance_summary_fields(target["business_snapshot"]))
     elif profile_key == "work_handover":

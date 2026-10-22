@@ -200,6 +200,42 @@ class ActionableResultsTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "BATCH_UNSUPPORTED_ITEMS")
         self.assertEqual(actions.pending_preparations(self.service, OWNER), [])
 
+    def test_reward_notification_selection_uses_its_own_prepare_and_permission(self):
+        self.mutate_source(lambda result: result["items"].append({
+            "affair_id": "synthetic-reward", "title": "【知识产权】知识产权奖励审批单(合成申请人)",
+        }))
+        group = self.groups()[0]
+        target = group["targets"][-1]
+        self.assertEqual(target["workflowType"], "intellectual_property_reward")
+        self.assertEqual(target["workflowLabel"], "知识产权奖励")
+        self.assertTrue(target["enabled"])
+        body = {"operationId": group["operationId"], "targetKeys": [target["targetKey"]], "requestKey": uuid4().hex}
+        queued = self.queue(body)
+        self.assertEqual(self.command(queued)["capabilityName"],
+                         "oa.intellectual_property_reward.acknowledgement.prepare")
+        self.assertEqual(self.command(queued)["affairIds"], ["synthetic-reward"])
+        grant_permissions(self.service.user_grants, OWNER,
+                          ["oa.workflow.read", "oa.intellectual_property_declaration.approve", "oa.standard_collaboration.approve"])
+        disabled = self.groups()[0]["targets"][-1]
+        self.assertFalse(disabled["enabled"])
+        self.assertIn("权限", disabled["disabledReason"])
+        with self.assertRaises(PermissionError):
+            self.queue({**body, "requestKey": uuid4().hex})
+        self.assertEqual(len(self.fixture.oa.writes), 0)
+
+    def test_unknown_intellectual_property_form_cannot_fall_back_to_generic_collaboration(self):
+        self.mutate_source(lambda result: result["items"].append({
+            "affair_id": "synthetic-unknown-ip", "title": "【知识产权】未注册奖励变更单(合成申请人)",
+        }))
+        group = self.groups()[0]
+        target = group["targets"][-1]
+        self.assertFalse(target["enabled"])
+        self.assertIsNone(target["workflowType"])
+        with self.assertRaises(actions.ActionableResultError) as caught:
+            self.queue({"operationId": group["operationId"], "targetKeys": [target["targetKey"]], "requestKey": uuid4().hex})
+        self.assertEqual(caught.exception.code, "BATCH_UNSUPPORTED_ITEMS")
+        self.assertEqual(actions.pending_preparations(self.service, OWNER), [])
+
     def test_incomplete_duplicate_and_missing_source_fail_closed(self):
         original = deepcopy(self.service.operations.get(self.source["operation_id"])["result"])
         for change in (lambda r: r.update(coverage={"status": "partial"}),

@@ -76,6 +76,8 @@ from agentbridge.adapters.seeyon_pending_actions import (
     EFFICIENCY_DATA_APPROVE_CAPABILITY,
     INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY,
     INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY,
+    INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
+    INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGE_CAPABILITY,
     LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY,
     LABOR_CONTRACT_RENEWAL_APPROVE_CAPABILITY,
     LEAVE_APPROVAL_PREPARE_CAPABILITY,
@@ -254,6 +256,9 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
         {"oa:write:approval"}
     ),
     "oa_intellectual_property_declaration_approval_prepare": frozenset(
+        {"oa:write:approval"}
+    ),
+    "oa_intellectual_property_reward_acknowledgement_prepare": frozenset(
         {"oa:write:approval"}
     ),
     "oa_overtime_approval_prepare": frozenset({"oa:write:approval"}),
@@ -1304,6 +1309,26 @@ def create_central_mcp_server(
             "commit_capability": (
                 INTELLECTUAL_PROPERTY_DECLARATION_APPROVE_CAPABILITY
             ),
+        },
+        {
+            "prepare_tool_name": "oa_intellectual_property_reward_acknowledgement_prepare",
+            "prepare_title": "Prepare OA Intellectual-Property Reward Acknowledgement",
+            "prepare_description": (
+                "Bind one exact pending intellectual-property reward inform item. "
+                "AgentBridge freezes the complete read-only reward materials and "
+                "verifies the exact form and inform node without changing amounts "
+                "or recipients; pass any opinion "
+                "already supplied by the user."
+            ),
+            "prepare_capability": INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_PREPARE_CAPABILITY,
+            "commit_tool_name": "oa_intellectual_property_reward_acknowledge",
+            "commit_title": "Acknowledge Authorized OA Intellectual-Property Reward",
+            "commit_description": (
+                "Consume one approved authorization, acknowledge the exact frozen "
+                "intellectual-property reward item, and verify its pending absence "
+                "and exact done identity."
+            ),
+            "commit_capability": INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGE_CAPABILITY,
         },
         {
             "prepare_tool_name": "oa_overtime_approval_prepare",
@@ -2851,7 +2876,7 @@ def create_central_mcp_server(
         meta=interaction_tool_meta(),
         description=(
             "处理多条或全部OA待办时调用一次本工具，不要仅调用单条prepare后口头承诺继续。"
-            "支持补签、效能、差旅费、出差申请、乘坐飞机申请、劳动合同、知识产权、加班、请假、离职、考勤、周报和普通协同。"
+            "支持补签、效能、差旅费、出差申请、乘坐飞机申请、劳动合同、知识产权申报、知识产权奖励、加班、请假、离职、考勤、周报、季度绩效和普通协同。"
             "用户说上面的/选中的事项时，传已读取清单中的精确affair_ids；不能扩大为所有待办。"
             "也可用workflow_types和标题keyword选择当前待办，两者同时提供取交集。"
             "冻结清单后逐项独立填写和授权，核验成功才自动推进；新待办不加入。"
@@ -2866,7 +2891,7 @@ def create_central_mcp_server(
         affair_ids: Annotated[list[str] | None, Field(min_length=1, max_length=100)] = None,
         workflow_types: list[Literal[
             "missed_punch", "efficiency_data", "travel_expense", "business_trip",
-            "labor_contract_renewal", "intellectual_property_declaration", "overtime",
+            "labor_contract_renewal", "intellectual_property_declaration", "intellectual_property_reward", "overtime",
             "leave", "resignation", "work_handover", "flight_application", "attendance_confirmation",
             "weekly_report", "quarterly_performance", "standard_collaboration",
         ]] | None = None,

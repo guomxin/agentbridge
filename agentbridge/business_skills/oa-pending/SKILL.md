@@ -16,3 +16,5 @@ description: 对已支持的 OA 待办核对处理依据，通过可信卡完成
 5. 取消使用真实 task_id 的 agentbridge_task_cancel；提交后不能靠取消任务撤回业务。结果未知不自动重试。
 
 6. 部门季度绩效汇总仅支持已核验的知会节点，使用 oa_quarterly_performance_acknowledgement_prepare。核对现有评级与调整理由，不替用户调整评级，不将阅办描述为审批通过；审批或可编辑节点不降级到普通协同入口。
+
+7. 知识产权申报与知识产权奖励是不同流程。奖励单仅支持已核验的只读知会节点，使用 oa_intellectual_property_reward_acknowledgement_prepare。核对完整奖励材料并阅办，不调整金额或人员，不将阅办描述为审批通过；审批、可编辑节点或字段契约不符时停止，不借用申报或普通协同入口。

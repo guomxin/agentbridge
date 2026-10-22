@@ -540,6 +540,10 @@ class HostContractStore:
                 "openclaw", "0.4.118", "L3",
                 "shared-contract-h01-h29-telegram-default-route-command-recovery-v1",
             ),
+            (
+                "openclaw", "0.4.119", "L3",
+                "shared-contract-h01-h29-intellectual-property-reward-inform-v1",
+            ),
         )
         for name, version, level, evidence in builtins:
             connection.execute(

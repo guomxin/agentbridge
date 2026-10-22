@@ -75,6 +75,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     EFFICIENCY_DATA_APPROVAL_FIELD_CARD_SCHEMA,
     FLIGHT_APPLICATION_APPROVAL_FIELD_CARD_SCHEMA,
     INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_FIELD_CARD_SCHEMA,
+    INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA,
     LABOR_CONTRACT_RENEWAL_APPROVAL_FIELD_CARD_SCHEMA,
     LEAVE_APPROVAL_FIELD_CARD_SCHEMA,
     OVERTIME_APPROVAL_FIELD_CARD_SCHEMA,
@@ -95,6 +96,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     approve_efficiency_data,
     approve_flight_application,
     approve_intellectual_property_declaration,
+    acknowledge_intellectual_property_reward,
     approve_labor_contract_renewal,
     approve_leave_request,
     approve_overtime,
@@ -109,6 +111,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     prepare_efficiency_data_approval,
     prepare_flight_application_approval,
     prepare_intellectual_property_declaration_approval,
+    prepare_intellectual_property_reward_acknowledgement,
     prepare_labor_contract_renewal_approval,
     prepare_leave_approval,
     prepare_overtime_approval,
@@ -188,6 +191,15 @@ _PENDING_ACTION_BINDINGS = {
         field_message="The intellectual-property declaration opinion must be entered "
                         "in the trusted field card.",
         authorization_message="The intellectual-property declaration approval requires trusted "
+                        "confirmation.",
+    ),
+    'intellectual_property_reward': _PendingActionBinding(
+        field_schema=INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA,
+        prepare_function=prepare_intellectual_property_reward_acknowledgement,
+        commit_function=acknowledge_intellectual_property_reward,
+        field_message="The intellectual-property reward opinion must be entered "
+                        "in the trusted field card.",
+        authorization_message="The intellectual-property reward acknowledgement requires trusted "
                         "confirmation.",
     ),
     'overtime': _PendingActionBinding(

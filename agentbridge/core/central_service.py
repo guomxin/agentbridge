@@ -5756,6 +5756,7 @@ _TASK_TITLE_LABELS = {
     "Prepare OA Travel-Expense Approval": "OA 差旅费审批",
     "Prepare OA Labor-Contract Renewal Approval": "OA 劳动合同续签审批",
     "Prepare OA Intellectual-Property Declaration Approval": "OA 知识产权申报审批",
+    "Prepare OA Intellectual-Property Reward Acknowledgement": "OA 知识产权奖励阅办",
     "Prepare OA Attendance Confirmation": "OA 月度考勤确认",
     "Prepare OA Weekly-Report Acknowledgement": "OA 周报阅办",
     "Prepare OA Standard-Collaboration Approval": "OA 普通事项审批",

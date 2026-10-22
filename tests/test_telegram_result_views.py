@@ -18,9 +18,9 @@ from agentbridge.core.host_contract import HostLeaseConflict
 from tests.authorization_fixtures import grant_permissions
 from tests.support.latency_acceptance import LatencyAcceptanceFixture, LatencyContract, OWNER
 from tests.test_seeyon_pending_actions import ALL_PENDING_PROFILES
-from tests.support.telegram_result_acceptance import add_quarterly_affair
+from tests.support.telegram_result_acceptance import add_quarterly_affair, add_reward_affair
 
-CURRENT_PROFILES = (*ALL_PENDING_PROFILES, "quarterly_performance")
+CURRENT_PROFILES = (*ALL_PENDING_PROFILES, "quarterly_performance", "intellectual_property_reward")
 
 
 class TelegramResultViewTests(unittest.TestCase):
@@ -43,6 +43,7 @@ class TelegramResultViewTests(unittest.TestCase):
         for profile in ALL_PENDING_PROFILES:
             self.fixture.oa.add_affair("synthetic-tg-" + profile, profile=profile)
         add_quarterly_affair(self.fixture)
+        add_reward_affair(self.fixture)
         self.source = self.query()
         self.views = ResultViewService(self.service)
 
@@ -406,7 +407,7 @@ class TelegramResultViewTests(unittest.TestCase):
 
     def test_mixed_ordered_targets_use_one_persistent_batch_and_live_endpoint_projection(self):
         token, _ = self.issue()
-        queued = self.views.prepare(token, self.body(token, ("weekly_report", "attendance_confirmation")))
+        queued = self.views.prepare(token, self.body(token, ("intellectual_property_reward", "attendance_confirmation")))
         response = self.execute(queued)
         self.assertEqual(response["status"], "requires_user_action")
         self.assertEqual(self.service.skills.for_task(OWNER, queued["taskId"])["profile"], "batch")
@@ -415,7 +416,7 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual(status["batch"]["currentIndex"], 1)
         current = self.service.get_interaction(user_subject=OWNER, interaction_id=response["interaction"]["interactionId"])
         self.assertEqual(current["interaction"]["display"]["batch"]["currentIndex"], 1)
-        self.assertEqual(current["interaction"]["display"]["actionView"]["capabilityId"], "oa.weekly_report.acknowledge")
+        self.assertEqual(current["interaction"]["display"]["actionView"]["capabilityId"], "oa.intellectual_property_reward.acknowledge")
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
     def add_query_operation(self):
@@ -566,7 +567,7 @@ class TelegramResultViewTests(unittest.TestCase):
                 self.service.prepare_host_task(**{**arguments, **change})
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
-    def test_all_15_types_prepare_without_decision_and_registered_action_labels_are_closed(self):
+    def test_all_16_types_prepare_without_decision_and_registered_action_labels_are_closed(self):
         token, _ = self.issue()
         for profile in CURRENT_PROFILES:
             with self.subTest(profile=profile):

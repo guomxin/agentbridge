@@ -2,12 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { interactionActionLabel, interactionStateLabel, operationStatus, terminalPresentation } from "../src/result-state.ts";
-import { interactionActionLabel as workspaceLabel } from "../../../agentbridge/workspace/static/workspace_results.mjs";
+import { interactionActionLabel as workspaceLabel, displayTaskTitle } from "../../../agentbridge/workspace/static/workspace_results.mjs";
 
 test("all registered business entry labels match Workspace and never borrow a final action label", () => {
   const schema = JSON.parse(readFileSync(new URL('../../../schemas/agent-host/v1/interaction-presentation.schema.json',import.meta.url)));
   const profiles = schema.properties.display.properties.businessView.properties.profileId.enum;
-  assert.equal(profiles.length,26);
+  assert.equal(profiles.length,27);
   for (const profileId of profiles) {
     let recognized=0;
     for (const viewKind of ['work_log','meeting_room','approval','form','future']) {
@@ -25,6 +25,18 @@ test("all registered business entry labels match Workspace and never borrow a fi
     assert.equal(interactionActionLabel('business_input',{businessView:{schemaVersion:'agentbridge.business-view.v1',profileVersion:'1',profileId}}),'填写信息');
   }
   assert.equal(interactionActionLabel('execution_authorization',null),'核对并确认');
+});
+
+test("intellectual-property rewards present acknowledgement with a closed business-specific entry", () => {
+  const businessView = {schemaVersion: "agentbridge.business-view.v1", profileVersion: "1",
+    profileId: "oa.intellectual_property_reward.acknowledgement", viewKind: "approval",
+    entryLabel: "确认并审批通过"};
+  for (const label of [interactionActionLabel, workspaceLabel]) {
+    assert.equal(label("business_input", {businessView}), "核对知识产权奖励并阅办");
+    assert.equal(label("business_input", {businessView: {...businessView,
+      profileId: "oa.intellectual_property_reward.approval"}}), "填写信息");
+  }
+  assert.equal(displayTaskTitle("Prepare OA Intellectual-Property Reward Acknowledgement"), "OA 知识产权奖励阅办");
 });
 
 test("absent, malformed and interaction-only results never claim business success", () => {

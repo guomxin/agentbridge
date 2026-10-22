@@ -1439,6 +1439,141 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Bind one exact pending intellectual-property reward inform item. AgentBridge freezes the complete read-only reward materials and verifies the exact form and inform node without changing amounts or recipients; pass any opinion already supplied by the user.",
+      "inputSchema": {
+        "properties": {
+          "affair_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Affair Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "input_submission_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Submission Id"
+          },
+          "opinion": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Opinion"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "title": "prepare_pending_actionArguments",
+        "type": "object"
+      },
+      "name": "oa_intellectual_property_reward_acknowledgement_prepare",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "prepare_pending_actionDictOutput",
+        "type": "object"
+      },
+      "title": "Prepare OA Intellectual-Property Reward Acknowledgement"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Consume one approved authorization, acknowledge the exact frozen intellectual-property reward item, and verify its pending absence and exact done identity.",
+      "inputSchema": {
+        "properties": {
+          "authorization_id": {
+            "maxLength": 128,
+            "minLength": 32,
+            "title": "Authorization Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "title": "commit_pending_actionArguments",
+        "type": "object"
+      },
+      "name": "oa_intellectual_property_reward_acknowledge",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "commit_pending_actionDictOutput",
+        "type": "object"
+      },
+      "title": "Acknowledge Authorized OA Intellectual-Property Reward"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Bind one exact pending overtime approval. AgentBridge freezes the applicant, requested and actual time ranges, reason, supervisor field, and duration; pass any opinion already supplied by the user.",
       "inputSchema": {
         "properties": {
@@ -5695,7 +5830,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "处理多条或全部OA待办时调用一次本工具，不要仅调用单条prepare后口头承诺继续。支持补签、效能、差旅费、出差申请、乘坐飞机申请、劳动合同、知识产权、加班、请假、离职、考勤、周报和普通协同。用户说上面的/选中的事项时，传已读取清单中的精确affair_ids；不能扩大为所有待办。也可用workflow_types和标题keyword选择当前待办，两者同时提供取交集。冻结清单后逐项独立填写和授权，核验成功才自动推进；新待办不加入。max_items是安全上限不是截取数量，超限、来源不完整或未支持类型都停止并解释。不要为同批事项再调用单条工具，不要求用户在条目之间说继续。",
+      "description": "处理多条或全部OA待办时调用一次本工具，不要仅调用单条prepare后口头承诺继续。支持补签、效能、差旅费、出差申请、乘坐飞机申请、劳动合同、知识产权申报、知识产权奖励、加班、请假、离职、考勤、周报、季度绩效和普通协同。用户说上面的/选中的事项时，传已读取清单中的精确affair_ids；不能扩大为所有待办。也可用workflow_types和标题keyword选择当前待办，两者同时提供取交集。冻结清单后逐项独立填写和授权，核验成功才自动推进；新待办不加入。max_items是安全上限不是截取数量，超限、来源不完整或未支持类型都停止并解释。不要为同批事项再调用单条工具，不要求用户在条目之间说继续。",
       "inputSchema": {
         "properties": {
           "affair_ids": {
@@ -5759,6 +5894,7 @@
                     "business_trip",
                     "labor_contract_renewal",
                     "intellectual_property_declaration",
+                    "intellectual_property_reward",
                     "overtime",
                     "leave",
                     "resignation",

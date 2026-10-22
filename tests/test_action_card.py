@@ -9,6 +9,41 @@ from agentbridge.core.write_authorizations import WriteAuthorizationStore
 
 
 class TrustedActionCardTests(unittest.TestCase):
+    def test_reward_acknowledgement_card_displays_each_frozen_allocation_and_exact_action(self):
+        from tests.test_seeyon_intellectual_property_reward import prepare, target
+
+        _fixture, _snapshot, worker, adapter = target.__wrapped__()
+        prepared = prepare(adapter, worker)
+        with TemporaryDirectory() as tmp:
+            store = WriteAuthorizationStore(Path(tmp) / "agentbridge.db")
+            authorization = store.create(
+                user_subject="user-a", system_id="oa", session_id="session-a",
+                capability_name="oa.intellectual_property_reward.acknowledge",
+                capability_version="0.2.0", prepare_operation_id="prepare-reward-1",
+                plan=prepared["plan"], summary=prepared["summary"],
+                card_base_url="http://127.0.0.1:8780",
+            )
+            app = TrustedActionApplication(authorization_store=store)
+            response = app.get_card(authorization["authorization_id"], secure_cookie=False)
+            html = response.body.decode("utf-8")
+
+            self.assertEqual(response.status, 200)
+            self.assertIn("阅办知识产权奖励单", html)
+            self.assertIn("奖励金额</dt><dd>1000.00", html)
+            for ordinal, name, amount in ((1, "合成人员甲", "600.00"), (2, "合成人员乙", "400.00")):
+                with self.subTest(recipient=ordinal):
+                    self.assertIn(f"奖励人 {ordinal}</dt><dd>{name}", html)
+                    self.assertIn(f"奖励金额 {ordinal}（元）</dt><dd>{amount}", html)
+            self.assertIn("本次操作</dt><dd>阅办知识产权奖励知会", html)
+            self.assertIn("处理意见</dt><dd>已阅", html)
+            self.assertIn("不调整奖励金额或人员", html)
+            self.assertIn('value="approve" class="primary">授权阅办知识产权奖励', html)
+            self.assertIn(authorization["plan_hash"], html)
+            self.assertNotIn("审批通过", html)
+            self.assertNotIn("workflow_approved", html)
+            self.assertNotIn("<textarea", html)
+            self.assertEqual(worker.page.commit_calls, [])
+
     def test_no_field_lighting_actions_show_precise_decision_and_original_alarm_target(self):
         from agentbridge.auth.action_card import _render_confirmation
         for capability, label in (

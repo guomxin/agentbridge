@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "ee1358e55bf8"
+    "5b694799d1e6"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Complete inert OA reading projection detection for all explicitly supported structural HTML block aliases. Keep source evidence and fingerprints, completeness, preview/decision/authorization hashes, expiry and business verification unchanged. No schema migration; host plugin remains0.4.118."
+  "reason": "Add the independently authorized read-only intellectual-property reward inform workflow, its complete allocation materials and single/batch trusted review entry points. Preserve pending/done verification, frozen material hashes and one-decision authorization semantics. No schema migration or automatic grant expansion; OpenClaw 0.4.119 retains compatibility with the deployed 0.4.118 host during rollout."
 }

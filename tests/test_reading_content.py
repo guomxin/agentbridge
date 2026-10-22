@@ -254,7 +254,7 @@ def test_initial_application_page_projects_only_display_review_and_preserves_bac
 
 
 @pytest.mark.parametrize("kind", ["missed_punch", "efficiency_data", "travel_expense", "business_trip",
-                                 "labor_contract_renewal", "intellectual_property_declaration", "overtime", "leave",
+                                 "labor_contract_renewal", "intellectual_property_declaration", "intellectual_property_reward", "overtime", "leave",
                                  "resignation", "work_handover", "flight_application", "attendance_confirmation",
                                  "weekly_report", "standard_collaboration", "quarterly_performance"])
 @pytest.mark.parametrize("batch", [None, {"ordinal": 1, "totalCount": 3}])

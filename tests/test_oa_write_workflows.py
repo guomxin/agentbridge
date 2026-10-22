@@ -16,7 +16,7 @@ from agentbridge.adapters.seeyon_write_workflows import (
 )
 from agentbridge.core import write_catalog
 from agentbridge.core.planning_policy import planning_descriptor
-from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS
+from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS, UserGrants
 from agentbridge.core.write_workflow import WritePrepareAliasDefinition, WriteWorkflowDefinition
 
 
@@ -60,6 +60,37 @@ CONTRACT["function_names"].extend(["prepare_quarterly_performance_acknowledgemen
 CONTRACT["permissions"][QC] = QUARTERLY["permission"]
 CONTRACT["capability_permissions"].update({QP: QC, QC: QC})
 CONTRACT["planning"].update(QUARTERLY["planning"])
+
+# Reward notification handling has an independent, explicitly reviewed contract.
+# Keep both prior fixtures intact so declaration approval cannot acquire it.
+REWARD = json.loads((Path(__file__).parent / "fixtures/oa_intellectual_property_reward_contract.json").read_text())
+RP = "oa.intellectual_property_reward.acknowledgement.prepare"
+RC = "oa.intellectual_property_reward.acknowledge"
+for key, anchor, values in (
+    ("registry_order", "oa.standard_collaboration.approval.prepare", [RP, RC]),
+    ("catalog_order", "oa.standard_collaboration.approval.prepare", [RP]),
+    ("scope_order", "oa.standard_collaboration.approval.prepare", [RP, RC]),
+):
+    index = CONTRACT[key].index(anchor)
+    CONTRACT[key][index:index] = values
+for key, anchor, values in (
+    ("commits", "oa.standard_collaboration.approve", [[RC, RP]]),
+    ("scopes", "oa.standard_collaboration.approval.prepare", [[RP, ["oa:write:approval"]], [RC, ["oa:write:approval"]]]),
+):
+    index = next(i for i, item in enumerate(CONTRACT[key]) if item[0] == anchor)
+    CONTRACT[key][index:index] = values
+index = next(i for i, spec in enumerate(CONTRACT["capabilities"]) if spec["name"] == "oa.standard_collaboration.approval.prepare")
+CONTRACT["capabilities"][index:index] = REWARD["capabilities"]
+for spec in CONTRACT["capabilities"]:
+    if spec["name"] == "oa.workflow.pending.batch.prepare":
+        enum = spec["input_schema"]["properties"]["workflow_types"]["items"]["enum"]
+        enum.insert(enum.index("overtime"), "intellectual_property_reward")
+index = next(i for i, item in enumerate(CONTRACT["definitions"]) if item[0] == "oa.standard_collaboration.approval.prepare")
+CONTRACT["definitions"].insert(index, [RP, REWARD["definition"]])
+CONTRACT["function_names"].extend(["prepare_intellectual_property_reward_acknowledgement", "acknowledge_intellectual_property_reward"])
+CONTRACT["permissions"][RC] = REWARD["permission"]
+CONTRACT["capability_permissions"].update({RP: RC, RC: RC})
+CONTRACT["planning"].update(REWARD["planning"])
 
 DEFINITIONS = deepcopy(dict(CONTRACT["definitions"]))
 # The immutable migration fixture predates initial missed-punch material review.
@@ -120,11 +151,11 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
     assert hashlib.sha256(CONTRACT_BYTES).hexdigest() == (
         "5815e56c49564f20a8b67a0acb588a84c0937b6a8a958f53d7725ccd69606d3e"
     )
-    assert len(SPECS) == 50
-    assert len(DEFINITIONS) == 26
-    assert len(CONTRACT["commits"]) == 24
-    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 14
-    assert len(PREFLIGHT_PREPARES) == 15
+    assert len(SPECS) == 52
+    assert len(DEFINITIONS) == 27
+    assert len(CONTRACT["commits"]) == 25
+    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 15
+    assert len(PREFLIGHT_PREPARES) == 16
 
 
 def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
@@ -173,6 +204,35 @@ def test_all_oa_scopes_permissions_and_planning_remain_unchanged():
         assert PERMISSIONS[permission] == expected
 
 
+def test_reward_acknowledgement_has_an_independent_permission_and_business_profile(tmp_path):
+    from agentbridge.core.business_draft_profiles import BY_PREPARE
+
+    grants = UserGrants(tmp_path / "grants.db")
+    grants.save("reader", ["oa.workflow.read", "oa.intellectual_property_declaration.approve",
+                           "oa.standard_collaboration.approve", "oa.quarterly_performance.acknowledge"],
+                expected_revision=0, actor="test", reason="Existing business grants only")
+    for capability in (RP, RC):
+        with pytest.raises(PermissionError):
+            grants.require_capability("reader", capability)
+    assert "oa_intellectual_property_reward_acknowledgement_prepare" not in grants.available_tools("reader")
+    grants.save("reader", ["oa.workflow.read", RC], expected_revision=1,
+                actor="test", reason="Explicit reward notification permission")
+    for capability in (RP, RC):
+        grants.require_capability("reader", capability)
+    assert "oa_intellectual_property_reward_acknowledgement_prepare" in grants.available_tools("reader")
+    with pytest.raises(PermissionError):
+        grants.require_capability("reader", "oa.intellectual_property_declaration.approve")
+    profile = BY_PREPARE[RP]
+    assert profile.profile_id == "oa.intellectual_property_reward.acknowledgement"
+    assert profile.commit == RC
+    assert profile.action_kind == "acknowledgement"
+    assert profile.review_kind == "intellectual_property_reward"
+    assert "阅办" in profile.title
+    assert "审批通过" not in profile.effect
+    assert write_catalog.capability_required_scopes(RP) == frozenset({"oa:write:approval"})
+    assert write_catalog.capability_required_scopes(RC) == frozenset({"oa:write:approval"})
+
+
 def test_original_leaf_aliases_and_extended_function_bridges_remain_late_bound():
     assert sorted(write_catalog.WRITE_FUNCTION_NAMES) == FUNCTION_NAMES
     modules = [import_module(f"agentbridge.adapters.{name}") for name in LEAF_MODULES]
@@ -205,16 +265,16 @@ def test_new_declarations_project_the_frozen_pair_or_alias_contract(prepare_name
     assert declaration.canonical_prepare_name == expected_canonical
 
 
-def test_unified_declarations_cover_exactly_twenty_pairs_and_two_prepare_aliases():
+def test_unified_declarations_cover_exactly_twenty_two_pairs_and_two_prepare_aliases():
     assert list(OA_WRITE_DECLARATIONS) == NEW_PREPARES
-    assert len(PAIR_PREPARES) == 21
+    assert len(PAIR_PREPARES) == 22
     specs = oa_write_capability_specs_by_name()
     expected_names = {
         name for prepare in NEW_PREPARES
         for name in (prepare, DEFINITIONS[prepare]["commit_capability"])
     }
     assert set(specs) == expected_names
-    assert len(specs) == 44
+    assert len(specs) == 46
     for name, spec in specs.items():
         assert spec.to_dict() == SPECS[name]
         _change_schema(spec)
@@ -405,7 +465,7 @@ def test_prepare_alias_constructor_preserves_arguments_and_lazy_dynamic_builder(
 
 def test_pending_verification_revision_is_limited_to_fourteen_versioned_pairs():
     assert len(PENDING_REVISION) == 28
-    expected_prepares = (set(PREFLIGHT_PREPARES) - {QP}) | {CANONICAL_PREPARE}
+    expected_prepares = (set(PREFLIGHT_PREPARES) - {QP, RP}) | {CANONICAL_PREPARE}
     expected_commits = {DEFINITIONS[name]["commit_capability"] for name in expected_prepares}
     assert set(PENDING_REVISION) == expected_prepares | expected_commits
     for name, change in PENDING_REVISION.items():

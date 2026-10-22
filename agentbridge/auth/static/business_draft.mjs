@@ -331,6 +331,7 @@ export const REVIEW_DESIGNS = {
   business_trip: {title: "出差行程", family: "journey", keys: ["申请人", "出差始发地", "出差目的地", "出差开始时间", "出差结束时间", "出差工具", "出差天数", "出差小时数", "出差事由"]},
   labor_contract_renewal: {title: "劳动合同续签材料", family: "personnel", keys: ["员工信息", "合同期限", "综合评价", "续签建议", "综合评价指导意见"]},
   intellectual_property_declaration: {title: "知识产权申报材料", family: "ownership", keys: ["申报名称", "知识产权类型", "申请人", "申请部门", "权属类型", "权属单位", "发明/设计人", "申请用途"]},
+  intellectual_property_reward: {title: "知识产权奖励知会材料", family: "ownership", keys: ["申请人", "工号", "所属部门", "申请日期", "奖项名称", "奖励金额", "奖励事由", "团队负责人", "团队负责人部门"]},
   overtime: {title: "加班申请", family: "time", keys: ["姓名", "申请开始时间", "实际开始时间", "加班事由"]},
   leave: {title: "请假申请", family: "time", keys: ["申请人", "请假类型", "开始时间", "结束时间", "请假天数", "请假小时", "事由"]},
   resignation: {title: "离职申请材料", family: "personnel", keys: ["员工", "所属部门", "岗位", "入职时间", "申请离职时间", "离职原因"]},
@@ -453,7 +454,7 @@ export function renderEvidence(document, target, review, kind = "") {
     if (!material || !["facts", "text", "table"].includes(material.kind)) continue;
     const detail = document.createElement("details"); detail.className = `review-group material-${material.kind}`;
     detail.dataset.group = `material:${String(material.id || material.title || "")}`;
-    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs"].includes(material.id) ||
+    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs", "reward-information", "reward-allocations"].includes(material.id) ||
       material.id === "body" && design?.family === "document" && (kind !== "weekly_report" || !weeklySections.length);
     detail.open = opened.has(detail.dataset.group) ? opened.get(detail.dataset.group) : primary;
     const summary = document.createElement("summary"); summary.textContent = String(material.title || "原始材料");

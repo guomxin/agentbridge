@@ -524,7 +524,7 @@ const richReading = () => ({version: 1, notices: ['正文中有图片，图片�
   ]}]}]},
 ]});
 
-test('all fifteen OA designs display projected paragraphs lists and tables without source HTML or active elements', () => {
+test('all OA designs display projected paragraphs lists and tables without source HTML or active elements', () => {
   for (const kind of Object.keys(REVIEW_DESIGNS)) {
     const document = createDocument(), target = document.createElement('div'); target.querySelectorAll = () => [];
     renderEvidence(document, target, {fields: [{label: '事项', value: '合成事项'}], sections: [
@@ -601,8 +601,8 @@ test('weekly report and handover layouts retain full source material and distinc
   assert.deepEqual(descendants(target).filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId), ['a', 'b']);
 });
 
-test('all fifteen named materials expose their existing key facts without editable decisions', () => {
-  assert.equal(Object.keys(REVIEW_DESIGNS).length, 15);
+test('all sixteen named materials expose their existing key facts without editable decisions', () => {
+  assert.equal(Object.keys(REVIEW_DESIGNS).length, 16);
   for (const [kind, design] of Object.entries(REVIEW_DESIGNS)) {
     const document = createDocument(), target = document.createElement('div');
     target.querySelectorAll = () => [];
@@ -613,6 +613,40 @@ test('all fifteen named materials expose their existing key facts without editab
     for (const label of design.keys) assert.ok(target.textContent.includes(`原始${label}`));
     assert.ok(!descendants(target).some(node => ['input', 'select', 'button'].includes(node.tag)));
   }
+});
+
+test('reward information and each named allocation open as read-only source materials', () => {
+  const document = createDocument(), target = document.createElement('div');
+  target.querySelectorAll = selector => selector === 'details' ? descendants(target).filter(node => node.tag === 'details') : [];
+  const review = {title: '知识产权奖励阅办', fields: [
+    {label: '奖项名称', value: '合成奖项'}, {label: '奖励金额', value: '2000.00'},
+  ], sections: [
+    {id: 'reward-information', kind: 'facts', title: '奖励信息', fields: [
+      {label: '所属业务负责人', value: '负责人甲'}, {label: '提示信息', value: '按原分配明细知会'},
+    ]},
+    {id: 'reward-allocations', kind: 'table', title: '奖励人员及金额明细', columns: [
+      {key: 'field0011_id', label: '奖励人姓名'}, {key: 'field0012_id', label: '奖励金额明细'},
+    ], rows: [
+      {id: 'record-a', cells: {field0011_id: '奖励人甲', field0012_id: '1200.00'}},
+      {id: 'record-b', cells: {field0011_id: '奖励人乙', field0012_id: '800.00'}},
+    ]},
+  ]};
+  renderEvidence(document, target, review, 'intellectual_property_reward');
+  let nodes = descendants(target);
+  for (const id of ['reward-information', 'reward-allocations']) {
+    assert.equal(nodes.find(node => node.dataset.group === `material:${id}`).open, true);
+  }
+  assert.deepEqual(nodes.filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => [
+    node.dataset.rowId, ...node.children.map(cell => cell.textContent),
+  ]), [['record-a', '奖励人甲', '1200.00'], ['record-b', '奖励人乙', '800.00']]);
+  assert.match(target.textContent, /负责人甲/);
+  assert.ok(!nodes.some(node => ['input', 'select', 'textarea', 'button', 'form'].includes(node.tag)));
+  nodes.find(node => node.dataset.group === 'material:reward-allocations').open = false;
+  renderEvidence(document, target, {...review, title: '更新后的知识产权奖励阅办'}, 'intellectual_property_reward');
+  nodes = descendants(target);
+  assert.equal(nodes.find(node => node.dataset.group === 'material:reward-allocations').open, false);
+  assert.match(target.textContent, /1200\.00/);
+  assert.match(target.textContent, /800\.00/);
 });
 
 test('primary weekly and itinerary sections open initially but preserve an explicit collapse across updates', () => {

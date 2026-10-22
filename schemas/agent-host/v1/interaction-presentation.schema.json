@@ -27,7 +27,7 @@
               "oa.missed_punch.save_draft", "smartlight.alarm.remark.update",
               "oa.missed_punch.approval", "oa.efficiency_data.approval", "oa.travel_expense.approval",
               "oa.business_trip.approval", "oa.labor_contract_renewal.approval",
-              "oa.intellectual_property_declaration.approval", "oa.overtime.approval", "oa.leave.approval",
+              "oa.intellectual_property_declaration.approval", "oa.intellectual_property_reward.acknowledgement", "oa.overtime.approval", "oa.leave.approval",
               "oa.resignation.approval", "oa.work_handover.approval", "oa.flight_application.approval",
               "oa.standard_collaboration.approval", "oa.attendance_confirmation", "oa.weekly_report.acknowledgement", "oa.quarterly_performance.acknowledgement"
             ]},

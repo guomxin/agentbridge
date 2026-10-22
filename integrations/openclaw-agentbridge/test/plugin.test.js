@@ -6144,7 +6144,10 @@ test("reports a verified labor-contract renewal approval after authorization res
   );
 });
 
-test("reports a verified intellectual-property declaration approval", async () => {
+for (const [profile, prepareTool, actionKind, expected] of [
+  ["intellectual_property_declaration", "oa_intellectual_property_declaration_approval_prepare", "approval", "OA 知识产权申报审批单已审批通过。"],
+  ["intellectual_property_reward", "oa_intellectual_property_reward_acknowledgement_prepare", "acknowledgement", "OA 知识产权奖励单已阅办。"],
+]) test(`reports a verified ${profile} ${actionKind}`, async () => {
   const harness = fakeApi({
     autoPoll: true,
     pollIntervalSeconds: 1,
@@ -6172,9 +6175,9 @@ test("reports a verified intellectual-property declaration approval", async () =
         status: "succeeded",
         result: {
           pending_action_processed: true,
-          action_kind: "approval",
-          workflow_profile: "intellectual_property_declaration",
-          workflow_approved: true,
+          action_kind: actionKind,
+          workflow_profile: profile,
+          ...(actionKind === "approval" ? {workflow_approved: true} : {workflow_acknowledged: true}),
           verification: { confirmed: true },
         },
       };
@@ -6196,7 +6199,7 @@ test("reports a verified intellectual-property declaration approval", async () =
   harness.middleware(
     {
       toolCallId: "tool-intellectual-property-authorization",
-      toolName: "oa_intellectual_property_declaration_approval_prepare",
+      toolName: prepareTool,
       result: toolResult(pending),
     },
     { runtime: "openclaw" },
@@ -6207,7 +6210,7 @@ test("reports a verified intellectual-property declaration approval", async () =
   assert.equal(harness.sentPayloads.length, 1);
   assert.equal(
     harness.sentPayloads[0].payload.text,
-    "OA \u77e5\u8bc6\u4ea7\u6743\u7533\u62a5\u5ba1\u6279\u5355\u5df2\u5ba1\u6279\u901a\u8fc7\u3002",
+    expected,
   );
 });
 

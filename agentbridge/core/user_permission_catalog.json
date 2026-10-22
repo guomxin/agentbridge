@@ -359,6 +359,22 @@
       "resource": "绑定下游账号实际可见范围"
     },
     {
+      "id": "oa.intellectual_property_reward.acknowledge",
+      "label": "知识产权奖励阅办",
+      "capabilities": [
+        "oa.intellectual_property_reward.acknowledgement.prepare",
+        "oa.intellectual_property_reward.acknowledge"
+      ],
+      "tools": [
+        "oa_intellectual_property_reward_acknowledgement_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    {
       "id": "oa.overtime.approve",
       "label": "加班审批",
       "capabilities": [

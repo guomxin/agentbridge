@@ -14,7 +14,7 @@ PENDING_BATCH_PREPARE_CAPABILITY = "oa.workflow.pending.batch.prepare"
 PENDING_BATCH_TYPES = (
     "missed_punch", "efficiency_data", "travel_expense", "business_trip",
     "labor_contract_renewal",
-    "intellectual_property_declaration", "overtime", "leave", "resignation", "work_handover",
+    "intellectual_property_declaration", "intellectual_property_reward", "overtime", "leave", "resignation", "work_handover",
     "flight_application",
     "attendance_confirmation", "weekly_report", "quarterly_performance", "standard_collaboration",
 )

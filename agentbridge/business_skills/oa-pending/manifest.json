@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "oa-pending",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "name": "OA 待办办理",
   "description": "对已支持的 OA 待办核对处理依据，通过可信卡完成单项或逐项办理，并核验处理结果。",
   "executionMode": "controlled_action",
@@ -26,6 +26,7 @@
         "oa.travel_expense.approve",
         "oa.labor_contract_renewal.approve",
         "oa.intellectual_property_declaration.approve",
+        "oa.intellectual_property_reward.acknowledge",
         "oa.overtime.approve",
         "oa.resignation.approve",
         "oa.quarterly_performance.acknowledge"
@@ -48,6 +49,7 @@
         "oa.travel_expense.approve",
         "oa.labor_contract_renewal.approve",
         "oa.intellectual_property_declaration.approve",
+        "oa.intellectual_property_reward.acknowledge",
         "oa.overtime.approve",
         "oa.resignation.approve",
         "oa.quarterly_performance.acknowledge"

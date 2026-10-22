@@ -1,0 +1,111 @@
+{
+  "capabilities": [
+    {
+      "name": "oa.intellectual_property_reward.acknowledgement.prepare",
+      "version": "0.2.0",
+      "description": "Collect a trusted opinion, validate one exact pending intellectual property reward item, and create separate acknowledgement confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "affair_id": {
+            "type": "string"
+          },
+          "opinion": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "input_submission_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "intellectual-property-reward-prepare-v1",
+      "system": "oa"
+    },
+    {
+      "name": "oa.intellectual_property_reward.acknowledge",
+      "version": "0.2.0",
+      "description": "Consume one trusted authorization, process the frozen intellectual property reward item, and verify complete pending absence and the exact done identity.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "authorization_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object"
+      },
+      "effect": "controlled_write",
+      "adapter": "seeyon-central",
+      "workflow": "intellectual-property-reward-commit-v1",
+      "system": "oa"
+    }
+  ],
+  "definition": {
+    "commit_capability": "oa.intellectual_property_reward.acknowledge",
+    "field_schema": {
+      "schema_version": "agentbridge.oa_intellectual_property_reward_acknowledgement_fields.v1",
+      "title": "填写知识产权奖励阅办意见",
+      "system": "致远 OA",
+      "effect": "阅办一条知识产权奖励知会，不调整奖励金额或人员",
+      "submit_label": "提交阅办意见",
+      "notice": "提交意见后还需在独立授权卡中核对精确事项；授权前不会处理待办。",
+      "fields": [
+        {
+          "name": "opinion",
+          "label": "处理意见",
+          "control": "textarea",
+          "required": true,
+          "max_length": 1000,
+          "rows": 4
+        }
+      ]
+    },
+    "context_fields": [
+      "affair_id"
+    ],
+    "prepare_function": "prepare_intellectual_property_reward_acknowledgement",
+    "commit_function": "acknowledge_intellectual_property_reward",
+    "contract_error": "agentbridge.adapters.seeyon_pending_actions.PendingActionContractMismatch",
+    "outcome_error": "agentbridge.adapters.seeyon_pending_actions.PendingActionOutcomeUnknown",
+    "field_message": "The intellectual-property reward opinion must be entered in the trusted field card.",
+    "authorization_message": "The intellectual-property reward acknowledgement requires trusted confirmation.",
+    "preflight_function": "preflight_pending_action",
+    "preflight_profile": "intellectual_property_reward"
+  },
+  "permission": {
+    "id": "oa.intellectual_property_reward.acknowledge",
+    "label": "知识产权奖励阅办",
+    "capabilities": [
+      "oa.intellectual_property_reward.acknowledgement.prepare",
+      "oa.intellectual_property_reward.acknowledge"
+    ],
+    "tools": [
+      "oa_intellectual_property_reward_acknowledgement_prepare"
+    ],
+    "legacy_scopes": [
+      "oa:write:approval"
+    ],
+    "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+    "resource": "绑定下游账号实际可见范围"
+  },
+  "planning": {
+    "oa.intellectual_property_reward.acknowledgement.prepare": null,
+    "oa.intellectual_property_reward.acknowledge": null
+  }
+}

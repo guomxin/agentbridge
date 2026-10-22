@@ -12,6 +12,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     prepare_business_trip_approval,
     prepare_efficiency_data_approval,
     prepare_intellectual_property_declaration_approval,
+    prepare_intellectual_property_reward_acknowledgement,
     prepare_labor_contract_renewal_approval,
     prepare_leave_approval,
     prepare_overtime_approval,
@@ -36,6 +37,7 @@ _PREPARE_FUNCTIONS = {
     "intellectual_property_declaration": (
         prepare_intellectual_property_declaration_approval
     ),
+    "intellectual_property_reward": prepare_intellectual_property_reward_acknowledgement,
     "labor_contract_renewal": prepare_labor_contract_renewal_approval,
     "leave": prepare_leave_approval,
     "overtime": prepare_overtime_approval,

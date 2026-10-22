@@ -99,6 +99,7 @@ def _registered_profiles():
         ("oa.attendance_confirmation.prepare", "oa.attendance_confirmation", "approval", "attendance_confirmation", "confirmation", "核对月度考勤并确认", "确认并提交考勤单", "核对月度考勤", "按单据已有的考勤结果提交本次确认及处理意见，不改变只读的异议选择。"),
         ("oa.weekly_report.acknowledgement.prepare", "oa.weekly_report.acknowledgement", "approval", "weekly_report", "acknowledgement", "核对周报并阅办", "确认并阅办知会", "核对周报", "记录当前用户对这一条周报的阅办知会。"),
         ("oa.quarterly_performance.acknowledgement.prepare", "oa.quarterly_performance.acknowledgement", "approval", "quarterly_performance", "acknowledgement", "核对季度绩效并阅办", "确认并阅办知会", "核对季度绩效", "记录当前用户对这一条季度绩效汇总的阅办知会，不调整任何评级。"),
+        ("oa.intellectual_property_reward.acknowledgement.prepare", "oa.intellectual_property_reward.acknowledgement", "approval", "intellectual_property_reward", "acknowledgement", "核对知识产权奖励并阅办", "确认并阅办知会", "核对知识产权奖励", "记录当前用户对这一条知识产权奖励单的阅办知会，不调整金额或人员。"),
     ))
     result = []
     for prepare, identity, view, review, action, title, label, entry, effect in contracts:
