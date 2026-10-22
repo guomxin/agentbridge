@@ -206,7 +206,7 @@ class TelegramResultViewTests(unittest.TestCase):
             outcome="succeeded", reason="synthetic_query_completed")
         self.source = {"task_id": ensured["task"]["taskId"], "operation_id": query["operationId"]}
         token, _ = self.issue()
-        bodies = [self.body(token), self.body(token, ("weekly_report", "attendance_confirmation"))]
+        bodies = [self.body(token, ("leave",)), self.body(token, ("weekly_report", "attendance_confirmation"))]
         self.append_telegram_timeline(route={"channel": "telegram", "to": "telegram:1001"})
         self.assertTrue(self.views.read(token)["selectionAvailable"])
         queued = [self.views.prepare(token, body) for body in bodies]

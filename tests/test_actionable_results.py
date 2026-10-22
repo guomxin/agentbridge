@@ -164,6 +164,86 @@ class ActionableResultsTests(unittest.TestCase):
         self.assertEqual(repeated["operationId"], response["operationId"])
         self.assertTrue(repeated["reused"])
 
+    def test_query_row_recovers_authoritative_child_progress_without_repreparing(self):
+        queued = self.queue()
+        target = self.groups()[0]["targets"][0]
+        self.assertEqual(target["preparation"], {"taskId": queued["taskId"], "state": "queued"})
+        self.assertFalse(target["enabled"])
+        self.execute(queued)
+        target = self.groups()[0]["targets"][0]
+        self.assertEqual(target["preparation"]["state"], "waiting_user")
+        before = {table: self.count(table) for table in ("operations", "write_authorizations", "business_draft_decisions")}
+        for state in ("succeeded", "failed", "expired", "canceled", "superseded", "outcome_unknown"):
+            with self.subTest(state=state), self.service.tasks._connect() as connection:
+                connection.execute("UPDATE agent_tasks SET status=? WHERE task_id=?", (state, queued["taskId"]))
+            detail = self.fixture.app.task_detail(self.account, self.source["task_id"])
+            projected = detail["actionableResults"][0]["targets"][0]
+            self.assertEqual(projected["preparation"], {"taskId": queued["taskId"], "state": state})
+            self.assertFalse(projected["enabled"])
+        self.assertEqual(before, {table: self.count(table) for table in before})
+
+    def test_preparation_progress_exposes_only_its_owned_source_for_refresh(self):
+        queued = self.queue()
+        detail = self.fixture.app.task_detail(self.account, queued["taskId"])
+        self.assertEqual(detail["actionableSourceTaskIds"], [self.source["task_id"]])
+        self.assertEqual(self.fixture.app.task_detail(self.account, self.source["task_id"])["actionableSourceTaskIds"], [])
+        with self.service.tasks._connect() as connection, self.assertRaises(actions.ActionableResultError):
+            actions.preparation_source_task_ids(connection, "other-user", queued["taskId"])
+
+    def test_overlapping_new_batch_cannot_reprepare_a_used_query_target(self):
+        body = self.body((0, 1))
+        self.queue(self.body((0,)))
+        before = self.count("agent_tasks")
+        with self.assertRaises(actions.ActionableResultError) as error:
+            self.queue(body)
+        self.assertEqual(error.exception.code, "ACTION_TARGET_ALREADY_PREPARED")
+        self.assertEqual(self.count("agent_tasks"), before)
+
+    def test_expired_prepared_query_keeps_readonly_progress_without_extending_action_window(self):
+        queued = self.queue()
+        future = actions._now() + timedelta(minutes=11)
+        with patch.object(actions, "_now", return_value=future):
+            group = self.groups()[0]
+            self.assertTrue(all(not item["enabled"] for item in group["targets"]))
+            self.assertEqual(group["targets"][0]["preparation"]["taskId"], queued["taskId"])
+            with self.assertRaises(actions.ActionableResultError) as error:
+                self.queue(self.body((1,)))
+        self.assertEqual(error.exception.code, "ACTION_SOURCE_EXPIRED")
+
+    def test_batch_rows_follow_their_own_item_outcomes(self):
+        queued = self.queue(self.body((0, 1)))
+        self.execute(queued)
+        with self.service.tasks._connect() as connection:
+            batch = connection.execute("SELECT batch_id FROM task_batches WHERE parent_task_id=?", (queued["taskId"],)).fetchone()
+            items = connection.execute("SELECT item_id FROM task_batch_items WHERE batch_id=? ORDER BY ordinal", (batch[0],)).fetchall()
+            connection.execute("UPDATE task_batch_items SET state='succeeded' WHERE item_id=?", (items[0][0],))
+            connection.execute("UPDATE task_batch_items SET state='outcome_unknown' WHERE item_id=?", (items[1][0],))
+            connection.execute("UPDATE agent_tasks SET status='outcome_unknown' WHERE task_id=?", (queued["taskId"],))
+        targets = self.groups()[0]["targets"]
+        self.assertEqual([item["preparation"]["state"] for item in targets[:2]], ["succeeded", "outcome_unknown"])
+        self.assertTrue(all(not item["enabled"] for item in targets[:2]))
+
+    def test_stopped_batch_does_not_show_unprocessed_items_as_preparing(self):
+        queued = self.queue(self.body((0, 1)))
+        self.execute(queued)
+        self.service.tasks.fail_current_batch_item(parent_task_id=queued["taskId"], user_subject=OWNER,
+            operation_id=None, expected_ordinal=1, item_state="outcome_unknown", error_code="SYNTHETIC_UNKNOWN")
+        targets = self.groups()[0]["targets"]
+        self.assertEqual([item["preparation"]["state"] for item in targets[:2]], ["outcome_unknown", "skipped"])
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_running_prepare_is_not_presented_as_an_authorized_submission(self):
+        queued = self.queue()
+        self.execute(queued)
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='running' WHERE task_id=?", (queued["taskId"],))
+        self.assertEqual(self.groups()[0]["targets"][0]["preparation"]["state"], "preparing")
+        with self.service.tasks._connect() as connection:
+            command = self.command(queued)
+            connection.execute("UPDATE operations SET capability_name=?,status='running' WHERE operation_id=(SELECT current_operation_id FROM agent_tasks WHERE task_id=?)",
+                (command["selectedItems"][0]["display_summary"]["commit_capability"], queued["taskId"]))
+        self.assertEqual(self.groups()[0]["targets"][0]["preparation"]["state"], "running")
+
     def test_mixed_selection_uses_one_real_durable_batch_and_original_order(self):
         queued = self.queue(self.body((1, 0)))
         command = self.command(queued)
@@ -246,6 +326,8 @@ class ActionableResultsTests(unittest.TestCase):
                     connection.execute("UPDATE operations SET result_json=? WHERE operation_id=?", (actions._json(original), self.source["operation_id"]))
                 self.mutate_source(change)
                 self.assertEqual(self.groups(), [])
+                with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)):
+                    self.assertEqual(self.groups(), [])
 
     def test_foreign_task_operation_and_target_are_rejected(self):
         body = self.body()
@@ -281,7 +363,7 @@ class ActionableResultsTests(unittest.TestCase):
         queued = self.queue(body)
         future = actions._now() + timedelta(seconds=601)
         with patch.object(actions, "_now", return_value=future), patch.object(self.service, "invoke", side_effect=AssertionError("expired")):
-            self.assertEqual(self.groups(), [])
+            self.assertTrue(all(not item["enabled"] for item in self.groups()[0]["targets"]))
             response = self.execute(queued)
         self.assertEqual(response["error"]["code"], "ACTION_SOURCE_EXPIRED")
         self.assertEqual(self.service.tasks.get_task(queued["taskId"], user_subject=OWNER)["status"], "failed")

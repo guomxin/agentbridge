@@ -878,6 +878,20 @@ class CentralCapabilityService:
             )
             raise
         operation = self.operations.get(response["operationId"])
+        if operation["status"] == "succeeded" and capability_name in _TRUSTED_WRITE_COMMITS:
+            # A local cleanup failure cannot turn an already verified write into
+            # unknown, failed, or permission to retry the downstream submission.
+            try:
+                from agentbridge.core.oa_pending_reconciliation import reconcile_completed_pending_intents
+                reconcile_completed_pending_intents(self, operation, task_id=task_id)
+            except Exception:
+                try:
+                    self.runtime_governance.record_stage_once(
+                        trace_id=trace["trace_id"], stage="oa.pending.reconciliation", status="failed",
+                        operation_id=operation["operation_id"], error_code="PENDING_INTENT_RECONCILIATION_FAILED",
+                    )
+                except Exception:
+                    pass
         grant_after = self.user_grants.get(user_subject)
         if grant_before != grant_after and spec.effect == "read":
             return {

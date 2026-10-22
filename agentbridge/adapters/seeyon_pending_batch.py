@@ -39,6 +39,34 @@ class PendingBatchSelectionError(ValueError):
         self.code = code
 
 
+_COLLABORATION_CATEGORIES = frozenset({"协同", "collaboration"})
+
+
+def _supports_pending_category(row: dict) -> bool:
+    # The section's category is a business type, not a title or node policy.
+    # Legacy sources may omit it; those still require the normal form/node
+    # preflight. Explicit, unrecognized types must never acquire a workflow.
+    category = row.get("category")
+    if category is None:
+        return True
+    if not isinstance(category, str):
+        return False
+    category = category.strip().casefold()
+    return not category or category in _COLLABORATION_CATEGORIES
+
+
+def _unsupported_item_label(row: dict) -> str:
+    label = str(row.get("title") or "无标题事项")[:120]
+    category = row.get("category")
+    if isinstance(category, str) and category.strip():
+        label += f"（事项类别：{category.strip()[:40]}）"
+    return label
+
+
+def _reject_unsupported(items: list[str]) -> None:
+    raise PendingBatchSelectionError("BATCH_UNSUPPORTED_ITEMS", f"范围内有 {len(items)} 条未支持事项，未启动任何审批：{'；'.join(items[:5])}。请排除这些事项后重试。")
+
+
 def select_pending_batch_items(pending: dict, arguments: dict, registry) -> list[dict]:
     maximum = arguments.get("max_items", 20)
     if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 100:
@@ -63,6 +91,13 @@ def select_pending_batch_items(pending: dict, arguments: dict, registry) -> list
         raise PendingBatchSelectionError("BATCH_SOURCE_INVALID", "待办列表存在重复事项，未创建批次。")
     if ids and set(ids) - set(source_ids):
         raise PendingBatchSelectionError("BATCH_TARGET_UNAVAILABLE", "指定事项已不在当前用户待办中；未替换为其他事项，请重新核对范围。")
+    if ids:
+        # Explicit targets stay in scope even when a type/keyword filter would
+        # otherwise hide their unsupported business category.
+        rejected = [_unsupported_item_label(row) for row in rows
+                    if str(row["affair_id"]) in ids and not _supports_pending_category(row)]
+        if rejected:
+            _reject_unsupported(rejected)
     keyword = str(arguments.get("keyword") or "").strip().casefold()
     selected, unsupported = [], []
     for row in rows:
@@ -82,8 +117,8 @@ def select_pending_batch_items(pending: dict, arguments: dict, registry) -> list
             if ids:
                 raise PendingBatchSelectionError("BATCH_SELECTION_MISMATCH", "指定事项与关键词筛选不一致，未创建批次。")
             continue
-        if profile is None:
-            unsupported.append(title[:120])
+        if not _supports_pending_category(row) or profile is None:
+            unsupported.append(_unsupported_item_label(row))
             continue
         display = {k: str(row.get(k) or "") for k in ("title", "sender", "date", "category")}
         display.update(profile)
@@ -92,7 +127,7 @@ def select_pending_batch_items(pending: dict, arguments: dict, registry) -> list
         fingerprint = hashlib.sha256(json.dumps({"affair_id": affair_id, **display}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         selected.append({"resource_ref": affair_id, "display_summary": display, "source_fingerprint": fingerprint})
     if unsupported:
-        raise PendingBatchSelectionError("BATCH_UNSUPPORTED_ITEMS", f"范围内有 {len(unsupported)} 条未支持事项，未启动任何审批：{'；'.join(unsupported[:5])}。请排除这些事项后重试。")
+        _reject_unsupported(unsupported)
     if len(selected) > maximum:
         raise PendingBatchSelectionError("BATCH_LIMIT_EXCEEDED", f"匹配 {len(selected)} 条，超过本批上限 {maximum} 条；未截断或开始审批，请明确缩小范围或调整上限（最多100）。")
     if ids:

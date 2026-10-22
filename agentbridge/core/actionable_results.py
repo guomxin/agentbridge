@@ -18,6 +18,7 @@ from agentbridge.adapters.seeyon_pending_batch import (
 from agentbridge.core.business_skills import SkillRejected, skill_bundle, validate_binding
 from agentbridge.core.operations import _operation_from_row
 from agentbridge.core.store_transactions import store_transaction
+from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
 
 
 SKILL_ID = "oa-pending"
@@ -135,6 +136,61 @@ def _target_key(operation_id, row):
     return _hash({"operationId": operation_id, "row": row})
 
 
+def _source_preparations(connection, subject, source_task_id, operation_id):
+    """Project owned, frozen preparation records; never infer a write result."""
+    rows = connection.execute(
+        "SELECT task_id FROM agent_tasks WHERE user_subject=? "
+        "AND json_extract(summary_json,'$.command.kind')=? "
+        "AND json_extract(summary_json,'$.command.sourceTaskId')=? "
+        "AND json_extract(summary_json,'$.command.operationIdSource')=? "
+        "ORDER BY created_at DESC,rowid DESC",
+        (subject, COMMAND_KIND, source_task_id, operation_id),
+    ).fetchall()
+    result = {}
+    for row in rows:
+        task = _owned_task(connection, subject, row["task_id"])
+        command = json.loads(task["summary_json"]).get("command") or {}
+        task, command = _load_command(connection, subject, task["task_id"], command.get("commandKey"))
+        keys = command["requestIdentity"]["targetKeys"]
+        affairs = command["affairIds"]
+        items = {item["resource_ref"]: item for item in connection.execute(
+            "SELECT i.resource_ref,i.state,i.ordinal,b.current_ordinal FROM task_batch_items i JOIN task_batches b ON b.batch_id=i.batch_id "
+            "WHERE b.parent_task_id=? AND b.user_subject=?", (task["task_id"], subject))}
+        state = task["status"]
+        if state in {"active", "running"}:
+            current = connection.execute(
+                "SELECT capability_name,status FROM operations WHERE operation_id=? AND user_subject=?",
+                (task["current_operation_id"], subject),
+            ).fetchone()
+            commits = {item["display_summary"]["commit_capability"] for item in command["selectedItems"]}
+            state = ("running" if current and current["capability_name"] in commits and current["status"] in {"pending", "running"} else
+                     "queued" if command.get("state") == "pending" and not current else "preparing")
+        for key, affair in zip(keys, affairs, strict=True):
+            item = items.get(affair)
+            item_state = item["state"] if item else state
+            if item and item_state in {"queued", "preparing", "waiting_user"}:
+                if state == "running" and item["ordinal"] == item["current_ordinal"]:
+                    item_state = "running"
+                elif task["status"] in TERMINAL_TASK_STATUSES:
+                    item_state = "skipped"
+            result.setdefault(key, {"taskId": task["task_id"], "state": item_state})
+    return result
+
+
+def preparation_source_task_ids(connection, subject, task_id):
+    """Expose only a validated owned source for refreshing an existing card."""
+    task = _owned_task(connection, subject, task_id)
+    command = json.loads(task["summary_json"]).get("command") or {}
+    if command.get("kind") != COMMAND_KIND:
+        return []
+    try:
+        _, command = _load_command(connection, subject, task_id, command.get("commandKey"))
+        _owned_task(connection, subject, command["sourceTaskId"])
+    except (ActionableResultError, KeyError):
+        return []
+    return [command["sourceTaskId"]] if command["sourceTaskId"] != task_id else []
+
+
 def list_actionable_results(service, subject, source_task_id):
     """Return UI-safe choices, retaining unsupported rows as disabled choices."""
     groups = []
@@ -153,18 +209,28 @@ def list_actionable_results(service, subject, source_task_id):
         except PermissionError:
             return []
         for entry in ids:
+            expired = False
             try:
                 operation, pending = _source(connection, subject, source_task_id, entry[0])
-            except ActionableResultError:
-                # Historical query cards remain readable after their action
-                # window, including incomplete legacy queries. No action is
-                # offered unless the complete source still validates.
+            except ActionableResultError as exc:
+                if exc.code != "ACTION_SOURCE_EXPIRED":
+                    continue
+                try:
+                    operation, pending = _source(connection, subject, source_task_id, entry[0], fresh=False)
+                except ActionableResultError:
+                    continue
+                expired = True
+            preparations = _source_preparations(connection, subject, source_task_id, entry[0])
+            # Retain historical progress only for queries that actually led to
+            # preparation. Expiry never creates another actionable window.
+            if expired and not preparations:
                 continue
             targets = []
             for row in pending["items"]:
                 target = {"targetKey": _target_key(entry[0], row),
                     **{key: str(row.get(key) or "")[:500] for key in ("title", "sender", "date", "category")},
-                    "workflowType": None, "workflowLabel": "暂未支持的待办", "enabled": False, "disabledReason": None}
+                    "workflowType": None, "workflowLabel": "暂未支持的待办", "enabled": False, "disabledReason": None,
+                    "preparation": preparations.get(_target_key(entry[0], row))}
                 try:
                     selected = _select(service, pending, [row["affair_id"]])
                     display = selected[0]["display_summary"]
@@ -174,6 +240,10 @@ def list_actionable_results(service, subject, source_task_id):
                     target["enabled"] = True
                 except (ActionableResultError, SkillRejected, PermissionError) as exc:
                     target["disabledReason"] = str(exc) if not isinstance(exc, PermissionError) else "当前没有办理此类待办的权限。"
+                if target["preparation"]:
+                    target["enabled"] = False
+                elif expired:
+                    target.update(enabled=False, disabledReason="待办查询已超过10分钟，请重新查询后办理。")
                 targets.append(target)
             finished = _date(operation["finished_at"])
             groups.append({"sourceTaskId": source_task_id, "operationId": entry[0], "title": "OA 待办",
@@ -356,6 +426,9 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
     if any(key not in by_key for key in body["targetKeys"]):
         _fail("ACTION_TARGET_UNAVAILABLE", "所选事项不属于这次待办查询，请重新选择。")
     affair_ids = [by_key[key] for key in body["targetKeys"]]
+    prepared = _source_preparations(connection, subject, source_task_id, body["operationId"])
+    if any(key in prepared for key in body["targetKeys"]):
+        _fail("ACTION_TARGET_ALREADY_PREPARED", "所选事项已有办理任务，请查看原任务；重新办理前请重新查询待办。")
     selected = _select(service, pending, affair_ids)
     _require_grants(service, subject, selected)
     profile = "single" if len(selected) == 1 else "batch"

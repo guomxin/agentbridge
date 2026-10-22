@@ -14,7 +14,11 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   const views = new WeakMap();
   const detailViews = new WeakMap();
   state.taskFeedback ||= new Map();
-  const actionable = createActionableResults({ document, state, prepareTargets });
+  const actionable = createActionableResults({ document, state, prepareTargets,
+    openPreparation: async taskId => {
+      if (await switchView("tasks") === false) return;
+      return loadTaskDetail(taskId);
+    } });
   let feedbackViewId = 0;
   const element = (tag, className = "") => {
     const node = document.createElement(tag);

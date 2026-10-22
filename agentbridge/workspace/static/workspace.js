@@ -9,7 +9,7 @@ import { createSkillForms } from "./workspace_skills.mjs";
 import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
-import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot } from "./workspace_projection.mjs";
+import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot, enqueueActionableSources } from "./workspace_projection.mjs";
 
 const state = {
   account: null,
@@ -107,6 +107,13 @@ const projectionQueue = createProjectionQueue({
   },
   apply: detail => {
     upsertTaskCard(detail, { render: false });
+    // Child progress changes the query row too. Only refresh an owned source
+    // already on screen; its projection has no dependency back to the child.
+    enqueueActionableSources(detail, {
+      isVisible: sourceId => [...state.taskCards.values()].some(card => card.dataset.taskId === sourceId),
+      invalidate: sourceId => projectionOrder.invalidate(sourceId),
+      enqueue: sourceId => projectionQueue.enqueue(sourceId),
+    });
     if (state.activeView === "tasks" && state.selectedTaskId === detail.task.task_id) loadTaskDetail(detail.task.task_id);
   },
   retire: retireTaskCard,

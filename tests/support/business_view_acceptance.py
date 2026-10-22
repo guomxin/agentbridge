@@ -132,7 +132,7 @@ class SyntheticOaTransport:
                         {"cellContentHTML": escape(source["title"]), "id": affair_id,
                          "linkURL": f"/seeyon/collaboration/collaboration.do?method=summary&affairId={affair_id}"},
                         {"cellContentHTML": source["sender"]}, {"cellContentHTML": source["date"]},
-                        {"cellContentHTML": "审批"},
+                        {"cellContentHTML": "协同"},
                     ]})
                 total = len(rows) + (1 if self.data["fault"] == "pending_partial" else 0)
                 payload = {"Name": "pendingSection", "Data": {"rows": rows, "dataCount": total, "pageNo": 1}}

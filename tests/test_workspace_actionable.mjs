@@ -19,7 +19,7 @@ test("single selection submits only server target keys and does not silently inc
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(calls,[["source",{operationId:"operation",targetKeys:["one"],requestKey:"request"}]]);
   assert.match(root.textContent,/已记录准备请求/);
-  assert.equal(descendants(root).filter(n=>n.tag==="button" && n.textContent==="核对办理")[0].disabled,true);
+  assert.equal(find(root,"button","查看进度").disabled,true);
 });
 test("refresh and another view preserve selection, focus and one shared in-flight request", async () => {
   const document=createDocument(), state={}, a=document.createElement("div"), b=document.createElement("div");
@@ -56,4 +56,129 @@ test("an unconfirmed request remains recoverable after expiry or availability ch
     find(root,"button","恢复本次准备").events.click();await new Promise(resolve=>setImmediate(resolve));
     assert.equal(calls.length,2);assert.deepEqual(calls[1],calls[0]);
   }
+});
+
+const preparedGroup = (state, taskId = "child-task") => ({...group(), targets: group().targets.map((target, index) =>
+  index === 0 ? {...target, enabled: false, preparation: {taskId, state}} : target)});
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const rows = root => descendants(root).filter(node => node.className === "actionable-result-row");
+
+test("a freshly loaded historical query restores completed business state and opens only the original result", () => {
+  const document = createDocument(), root = document.createElement("div"), opened = [], calls = [];
+  const ui = createActionableResults({document, state: {}, openPreparation: id => opened.push(id),
+    prepareTargets: (...args) => {calls.push(args);}});
+  ui.render(root, [preparedGroup("succeeded", "completed-reward")]);
+  assert.match(rows(root)[0].textContent, /已完成/);
+  assert.doesNotMatch(root.textContent, /已发起准备/);
+  assert.equal(find(rows(root)[0], "input").disabled, true);
+  const result = find(rows(root)[0], "button", "查看结果");
+  assert.equal(result.disabled, false);
+  result.events.click();
+  assert.deepEqual(opened, ["completed-reward"]);
+  assert.deepEqual(calls, []);
+  assert.equal(find(root, "button", "选择全部").disabled, true);
+});
+
+test("accepted preparation advances through server review and submission states across both views without losing focus", async () => {
+  const document = createDocument(), state = {}, a = document.createElement("div"), b = document.createElement("div");
+  const opened = [], calls = [];
+  const ui = createActionableResults({document, state, makeRequestKey: () => "one-request",
+    openPreparation: id => opened.push(id), prepareTargets: async (...args) => {
+      calls.push(args); return {taskId: "original-child"};
+    }});
+  ui.render(a, [group()]); ui.render(b, [group()]);
+  const row = rows(a)[0], button = find(row, "button");
+  button.focus(); button.events.click(); await flush();
+  assert.match(row.textContent, /已发起准备/);
+  assert.equal(find(row, "input").disabled, true);
+  for (const [status, expected, label] of [["preparing", "正在准备材料", "查看进度"],
+    ["waiting_user", "等待确认", "继续办理"], ["running", "提交中", "查看进度"],
+    ["succeeded", "已完成", "查看结果"]]) {
+    ui.render(a, [preparedGroup(status, "original-child")]);
+    assert.equal(rows(a)[0], row);
+    assert.equal(find(row, "button", label), button);
+    assert.equal(document.activeElement, button);
+    assert.match(rows(a)[0].textContent, new RegExp(expected));
+    assert.match(rows(b)[0].textContent, new RegExp(expected));
+    assert.doesNotMatch(a.textContent, /已发起准备/);
+    button.events.click();
+  }
+  assert.equal(calls.length, 1);
+  assert.deepEqual(opened, ["original-child", "original-child", "original-child", "original-child"]);
+});
+
+test("terminal or unknown child outcomes never reopen a preparation from an old query", () => {
+  const document = createDocument(), root = document.createElement("div"), opened = [], calls = [];
+  const ui = createActionableResults({document, state: {}, openPreparation: id => opened.push(id),
+    prepareTargets: (...args) => {calls.push(args);}});
+  for (const state of ["failed", "expired", "canceled", "outcome_unknown", "partially_succeeded", "superseded", "skipped"]) {
+    const value = preparedGroup(state);
+    // A stale broad enabled flag cannot turn an existing task into a new write.
+    value.targets[0].enabled = true;
+    ui.render(root, [value]);
+    const row = rows(root)[0];
+    assert.equal(find(row, "input").disabled, true, state);
+    assert.equal(find(root, "button", "选择全部").disabled, true, state);
+    const result = find(row, "button", "查看结果");
+    assert.equal(result.disabled, false, state);
+    if (state === "outcome_unknown") assert.match(row.textContent, /不要重复提交/);
+    if (["failed", "expired", "canceled", "skipped"].includes(state)) assert.match(row.textContent, /重新查询待办/);
+    result.events.click();
+  }
+  assert.equal(opened.length, 7);
+  assert.deepEqual(calls, []);
+});
+
+test("an expired selection source still offers the exact pending child and preserves each batch item outcome", () => {
+  const document = createDocument(), root = document.createElement("div"), opened = [];
+  const ui = createActionableResults({document, state: {}, openPreparation: id => opened.push(id)});
+  const value = group();
+  value.targets = value.targets.map((target, index) => ({...target, enabled: false,
+    disabledReason: "查询已过期，请重新查询待办。", ...(index < 2 ? {preparation: {
+      taskId: "batch-task", state: index === 0 ? "succeeded" : "waiting_user"}} : {})}));
+  ui.render(root, [value]);
+  const [done, waiting, unsupported] = rows(root);
+  assert.match(done.textContent, /已完成/);
+  assert.match(waiting.textContent, /等待确认/);
+  assert.match(unsupported.textContent, /查询已过期/);
+  assert.equal(find(done, "button", "查看结果").disabled, false);
+  assert.equal(find(waiting, "button", "继续办理").disabled, false);
+  assert.equal(find(unsupported, "button", "核对办理").disabled, true);
+  find(waiting, "button", "继续办理").events.click();
+  assert.deepEqual(opened, ["batch-task"]);
+});
+
+test("a late preparation acknowledgement cannot replace a newer authoritative child outcome or task", async () => {
+  const document = createDocument(), root = document.createElement("div"), opened = [];
+  let release;
+  const request = new Promise(resolve => {release = resolve;});
+  const ui = createActionableResults({document, state: {}, openPreparation: id => opened.push(id),
+    makeRequestKey: () => "one-request", prepareTargets: () => request});
+  ui.render(root, [group()]);
+  find(root, "button", "核对办理").events.click();
+  ui.render(root, [preparedGroup("succeeded", "authoritative-child")]);
+  release({taskId: "older-response-child"}); await flush();
+  const row = rows(root)[0];
+  assert.match(row.textContent, /已完成/);
+  assert.doesNotMatch(root.textContent, /已发起准备|已记录准备请求/);
+  find(row, "button", "查看结果").events.click();
+  assert.deepEqual(opened, ["authoritative-child"]);
+});
+
+test("unrecognized or malformed child state stays locked without borrowing an arbitrary action label", () => {
+  const document = createDocument(), root = document.createElement("div"), opened = [], calls = [];
+  const ui = createActionableResults({document, state: {}, openPreparation: id => opened.push(id),
+    prepareTargets: (...args) => calls.push(args)});
+  for (const preparation of [{taskId: "known-child", state: "future", label: "立即重新审批"},
+    {taskId: "known-child", state: "__proto__"}, [], "succeeded", {state: "succeeded"}]) {
+    const value = group(); value.targets[0].preparation = preparation;
+    ui.render(root, [value]);
+    const row = rows(root)[0];
+    assert.equal(find(row, "input").disabled, true);
+    assert.doesNotMatch(row.textContent, /立即重新审批/);
+    const button = find(row, "button");
+    if (!button.disabled) button.events.click();
+  }
+  assert.deepEqual(opened, ["known-child", "known-child"]);
+  assert.deepEqual(calls, []);
 });

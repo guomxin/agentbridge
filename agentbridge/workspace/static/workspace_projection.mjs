@@ -40,6 +40,17 @@ export function applyCurrentSnapshot(state, snapshot, { ingest, upsert, retire }
   return initial;
 }
 
+// A child can invalidate an already visible query, while a query never queues
+// its children. Queue ordering fences a source response already in flight.
+export function enqueueActionableSources(detail, { isVisible, invalidate, enqueue }) {
+  const sources = Array.isArray(detail?.actionableSourceTaskIds) ? detail.actionableSourceTaskIds : [];
+  for (const sourceId of new Set(sources)) {
+    if (typeof sourceId !== "string" || !sourceId || sourceId === detail.task?.task_id || !isVisible(sourceId)) continue;
+    invalidate(sourceId);
+    enqueue(sourceId);
+  }
+}
+
 // Coalesce read-only refreshes without letting an older response revive a card.
 export function createProjectionQueue({ fetchBatch, apply, retire, render, onError = () => {},
   onOverflow = () => {}, timers = globalThis, delay = 80, batchSize = 32, capacity = 256,

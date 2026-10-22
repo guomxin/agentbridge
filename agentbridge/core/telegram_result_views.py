@@ -49,7 +49,7 @@ class ResultViewService:
             if host_context and (host_context.get("endpointId") != endpoint_id
                     or host_context.get("tokenId") != endpoint["token_id"]):
                 actions._fail("ACTION_ENDPOINT_INVALID", "宿主身份与办理入口不一致。")
-            groups = actions.list_actionable_results(service, subject, task_id)
+            groups = self._groups(subject, task_id)
             if not groups or not any(item["enabled"] for group in groups for item in group["targets"]):
                 actions._fail("ACTION_SOURCE_UNAVAILABLE", "当前查询没有可直接办理的完整待办，请重新查询或通过对话继续。")
             if len(groups) > 16:
@@ -120,10 +120,16 @@ class ResultViewService:
             actions._reviewed_current_skill(service, subject, "single", connection)
         return {**payload, "tokenHash": token_hash, "subject": subject, "endpoint": endpoint}
 
+    def _groups(self, subject, task_id):
+        # Telegram already has a separate persistent prepared-task list. Keep
+        # its selection groups within their original per-source TTL.
+        return [group for group in actions.list_actionable_results(self.service, subject, task_id)
+                if actions._date(group["expiresAt"]) > actions._now()]
+
     def read(self, token):
         context = self._context(token)
         operation_ids = {source["operationId"] for source in context["sources"]}
-        groups = [group for group in actions.list_actionable_results(self.service, context["subject"], context["sourceTaskId"])
+        groups = [group for group in self._groups(context["subject"], context["sourceTaskId"])
             if group["operationId"] in operation_ids]
         with self.service.tasks._connect() as connection:
             ids = connection.execute("SELECT t.task_id FROM agent_tasks t JOIN task_events e ON e.task_id=t.task_id "
@@ -131,10 +137,11 @@ class ResultViewService:
                 "AND e.causation_ref=? ORDER BY t.created_at DESC,t.task_id DESC LIMIT 32",
                 (context["subject"], context["tokenHash"])).fetchall()
         preparations = [self._status(context, row[0]) for row in ids]
+        selection_available = any(target["enabled"] for group in groups for target in group["targets"])
         return {"schemaVersion": SCHEMA_VERSION, "title": "选择并办理 OA 待办",
             "sourceTaskId": context["sourceTaskId"], "groups": groups, "expiresAt": context["expiresAt"],
-            "sourceExpiresAt": context["sourceExpiresAt"], "selectionAvailable": bool(groups),
-            "message": "请选择事项，随后在业务界面核对材料并最终确认。" if groups else "原查询已超过可选择时间；已准备事项仍可从下方或原聊天业务卡片继续。",
+            "sourceExpiresAt": context["sourceExpiresAt"], "selectionAvailable": selection_available,
+            "message": "请选择事项，随后在业务界面核对材料并最终确认。" if selection_available else "当前没有可新选的事项；已准备事项仍可从下方或原聊天业务卡片继续。",
             "preparations": preparations}
 
     def prepare(self, token, body):

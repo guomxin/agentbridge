@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createProjectionQueue, applyCurrentSnapshot } from '../agentbridge/workspace/static/workspace_projection.mjs';
+import { createProjectionQueue, applyCurrentSnapshot, enqueueActionableSources } from '../agentbridge/workspace/static/workspace_projection.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => {resolve=a;reject=b;}); return {promise,resolve,reject}; };
 function harness(options = {}) {
@@ -83,6 +83,33 @@ test('a newer event supersedes an in-flight retry and stale unavailable cannot r
   await h.tick();h.queue.enqueue('a');
   await h.settle(1,{unavailableTaskIds:['a']});assert.deepEqual(h.retired,[]);
   await h.tick();await h.settle(2,{items:[item('a')]});assert.deepEqual(h.applied,['a']);
+});
+
+test('a child update refreshes its visible source once and fences the older source in the same response without looping', async () => {
+  const applied = [], invalidated = [];
+  const visible = new Set(['source', 'child']);
+  const h = harness({apply(detail) {
+    applied.push([detail.task.task_id, detail.task.version]);
+    enqueueActionableSources(detail, {isVisible: id => visible.has(id),
+      invalidate: id => invalidated.push(id), enqueue: id => h.queue.enqueue(id)});
+  }});
+  h.queue.enqueue('child'); h.queue.enqueue('source');
+  await h.tick();
+  await h.settle(0, {items: [
+    {taskId: 'child', detail: {task: {task_id: 'child', version: 3},
+      actionableSourceTaskIds: ['source', 'source', 'child', 'not-visible']}},
+    {taskId: 'source', detail: {task: {task_id: 'source', version: 1}}},
+  ]});
+  assert.deepEqual(applied, [['child', 3]], 'an old source projection cannot erase the new child outcome');
+  assert.deepEqual(invalidated, ['source']);
+  await h.tick();
+  assert.deepEqual(h.calls[1].ids, ['source']);
+  await h.settle(1, {items: [{taskId: 'source', detail: {task: {task_id: 'source', version: 1},
+    actionableSourceTaskIds: [], actionableResults: [{preparation: {state: 'succeeded'}}]}}]});
+  assert.deepEqual(applied, [['child', 3], ['source', 1]], 'child-only changes still refresh the unchanged query version');
+  await h.tick();
+  assert.equal(h.calls.length, 2, 'the source does not queue its children or itself');
+  assert.equal(h.errors.length, 0);
 });
 
 test('initial zero cursor is established without adopting a newer projection or chat row sequence', () => {

@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "5b694799d1e6"
+    "d4b6afb2474c"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Add the independently authorized read-only intellectual-property reward inform workflow, its complete allocation materials and single/batch trusted review entry points. Preserve pending/done verification, frozen material hashes and one-decision authorization semantics. No schema migration or automatic grant expansion; OpenClaw 0.4.119 retains compatibility with the deployed 0.4.118 host during rollout."
+  "reason": "Reject explicitly non-collaboration OA pending selections, project durable preparation and per-item outcomes into query rows, and supersede only unused same-target cards after authoritative completion. Preserve one-decision commits, unknown outcomes, task isolation and original source expiry. No schema migration, grant expansion, host protocol or plugin change; the deployed OpenClaw 0.4.119 remains compatible."
 }

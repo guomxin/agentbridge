@@ -297,9 +297,13 @@ class WorkspaceApplication:
             parent_task_id=task_id,
             user_subject=account["user_subject"],
         )
+        from agentbridge.core.actionable_results import preparation_source_task_ids
+        with self.service.tasks._connect() as connection:
+            actionable_sources = preparation_source_task_ids(connection, account["user_subject"], task_id)
         return {
             "task": _public_task(task),
             "actionableResults": self.actionable_results(account, task_id),
+            "actionableSourceTaskIds": actionable_sources,
             "skill": self.service.skills.task_presentation(account["user_subject"], task_id),
             "feedback": self.service.skill_authoring.workbench.task_feedback(account["user_subject"], task_id),
             "plan": task_plan_response(plan) if plan is not None else None,
