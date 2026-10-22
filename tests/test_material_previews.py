@@ -144,6 +144,50 @@ class MaterialAdapterReadTests(unittest.TestCase):
         self.assertEqual(self.calls[0][0], "GET")
         self.assertTrue(self.calls[0][1].startswith("https://oa.example.test/seeyon/fileUpload.do?"))
 
+    def test_rte_raster_mime_uses_actual_signature_for_observed_mislabeled_images(self):
+        jpeg = b"\xff\xd8\xff\xe0synthetic-jpeg"
+        for body, detected_type in ((PNG, "image/png"), (jpeg, "image/jpeg")):
+            for declared_type in ("image/png", "image/jpeg", "application/octet-stream"):
+                with self.subTest(detected=detected_type, declared=declared_type):
+                    self.response.update(body=body, content_type=declared_type)
+                    self.assertEqual(self.fetch(), {"body": body, "contentType": detected_type})
+
+    def test_rte_mime_compatibility_rejects_active_unknown_and_mixed_content(self):
+        cases = [
+            ("image/jpeg", b"<html>not an image</html>"),
+            ("image/png", b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"),
+            ("image/jpeg", b"unknown bytes"),
+            ("image/png", b"GIF89a"),
+            ("image/jpeg", b"%PDF-1.4\nsynthetic"),
+            ("text/html", PNG),
+            ("image/svg+xml", PNG),
+            ("application/pdf", PNG),
+            ("image/gif", PNG),
+            ("", PNG),
+        ]
+        for declared_type, body in cases:
+            with self.subTest(declared=declared_type, magic=body[:8]):
+                self.response.update(body=body, content_type=declared_type)
+                with self.assertRaises(MaterialPreviewError) as caught:
+                    self.fetch()
+                self.assertEqual(caught.exception.code, "MATERIAL_TYPE_MISMATCH")
+
+    def test_rte_mime_compatibility_does_not_expand_download_or_pdf_contracts(self):
+        cases = [
+            (PDF.replace("example.pdf", "example.png"), PNG, "image/jpeg"),
+            (PDF.replace("example.pdf", "example.jpg"), b"\xff\xd8\xff\xe0synthetic-jpeg", "image/png"),
+            (PDF, b"%PDF-1.4\nsynthetic", "image/jpeg"),
+            (PDF, PNG, "image/jpeg"),
+        ]
+        for route, body, declared_type in cases:
+            with self.subTest(route=route, declared=declared_type):
+                self.refs = material_references(attachments=[{"name": "材料", "href": route}], base_url=BASE)
+                self.assertEqual(self.refs[0]["public"]["state"], "available")
+                self.response.update(body=body, content_type=declared_type)
+                with self.assertRaises(MaterialPreviewError) as caught:
+                    self.fetch()
+                self.assertEqual(caught.exception.code, "MATERIAL_TYPE_MISMATCH")
+
     def test_current_item_gone_or_reference_changed_blocks_before_network(self):
         self.adapter._fetch_workflow_collection = lambda *_: {"items": []}
         with self.assertRaises(MaterialPreviewError): self.fetch()
@@ -324,6 +368,7 @@ class MaterialHttpFixtureTests(unittest.TestCase):
                         self.assertEqual([x["state"] for x in archive["items"]], ["available", "available", "unavailable"])
                     else:
                         self.assertTrue(body.startswith(b"%PDF-") if item["kind"] == "pdf" else body.startswith(b"\x89PNG"))
+                        self.assertEqual(headers["Content-Type"], "application/pdf" if item["kind"] == "pdf" else "image/png")
                 self.assertEqual(len(fixture.oa.data["material_read_calls"]), 3)
                 self.assertEqual(fixture.oa.writes, [])
                 saved = drafts.save(case["input_id"], csrf_token=opened["csrfToken"], csrf_cookie=opened["csrfToken"],

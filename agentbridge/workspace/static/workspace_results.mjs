@@ -96,6 +96,9 @@ export function taskCardStatusForInteraction(state, fallback) {
 
 export function taskCardStatusMessage(status, summary = null) {
   if (summary?.preparation?.state === "pending" && ["active", "running"].includes(status)) {
+    if (summary.preparation.kind === "oa_pending_query") {
+      return "正在查询最新 OA 待办，请稍候。";
+    }
     return `正在为已选的 ${summary.preparation.selectedCount || 1} 项待办准备办理界面，请稍候。`;
   }
   const batch = summary?.batch;

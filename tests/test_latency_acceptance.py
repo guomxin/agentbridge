@@ -76,7 +76,8 @@ def test_workspace_selection_requires_csrf_and_persists_only_preparation_intent(
     assert status == 202
     assert queued["status"] == "queued"
     assert "command" not in queued["detail"]["task"]["summary"]
-    assert queued["detail"]["task"]["summary"]["preparation"] == {"state": "pending", "selectedCount": 1}
+    assert queued["detail"]["task"]["summary"]["preparation"] == {
+        "kind": "oa_pending_prepare", "state": "pending", "selectedCount": 1}
     assert fixture.audit()["decisionCount"] == 0
     assert not fixture.oa.writes
     repeated_status, repeated, _ = runner.workspace.json("POST", path, body, csrf=True)

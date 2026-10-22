@@ -1737,6 +1737,8 @@ def _public_task(task: dict) -> dict:
     if isinstance(command, dict):
         summary["preparation"] = {"state": command.get("state"),
             "selectedCount": len(command.get("selectedItems") or [])}
+        if command.get("kind") in {"oa_pending_query", "oa_pending_prepare"}:
+            summary["preparation"]["kind"] = command["kind"]
     result["summary"] = summary
     return result
 

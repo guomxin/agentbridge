@@ -37,6 +37,42 @@ test("terminal business results take precedence over interaction state", () => {
   assert.notEqual(cardStatus("completed", undefined), "succeeded");
 });
 
+test("pending OA query describes a read while selected preparation keeps its item count", () => {
+  for (const status of ["active", "running"]) {
+    assert.equal(batchMessage(status, {preparation: {
+      kind: "oa_pending_query", state: "pending", selectedCount: 0,
+    }}), "正在查询最新 OA 待办，请稍候。");
+    for (const kind of ["oa_pending_prepare", undefined]) {
+      assert.match(batchMessage(status, {preparation: {kind, state: "pending", selectedCount: 3}}),
+        /已选的 3 项待办准备办理界面/);
+    }
+  }
+  for (const status of ["succeeded", "failed", "canceled", "expired", "waiting_user"]) {
+    assert.doesNotMatch(batchMessage(status, {preparation: {
+      kind: "oa_pending_query", state: "pending", selectedCount: 0,
+    }}), /正在查询|准备办理界面/);
+  }
+});
+
+test("public query kind identifies pending and empty completed query cards without raw commands or title matching", () => {
+  const document = createDocument();
+  const node = (tag = "div") => document.createElement(tag);
+  const state = {taskCards: new Map(), taskCardMeta: new Map()};
+  const cards = createTaskCards({document, state, $: () => node(),
+    setTimelineNode() {}, appendArtifactList() {}});
+  const result = {task: {task_id: "query", title: "自定义标题", status: "active", version: 1,
+    summary: {preparation: {kind: "oa_pending_query", state: "pending", selectedCount: 0}}},
+    events: [], actionableResults: []};
+  cards.upsertTaskCard(result, {render: false});
+  const card = [...state.taskCards.values()][0];
+  assert.equal(card.children[0].children[0].children[1].textContent, "OA 待办查询");
+  assert.equal(card.children[1].textContent, "正在查询最新 OA 待办，请稍候。");
+  cards.upsertTaskCard({...result, task: {...result.task, status: "succeeded", version: 2,
+    summary: {preparation: {kind: "oa_pending_query", state: "succeeded", selectedCount: 0}}}}, {render: false});
+  assert.equal(card.children[0].children[1].textContent, "已查询");
+  assert.equal(card.children[1].textContent, "查询已完成，请查看本次查询结果。");
+});
+
 test("stopped batch separates an unknown result from confirmed failures and unprocessed items", () => {
   const batch = {
     totalCount: 3, succeededCount: 2, failedCount: 1, skippedCount: 0,

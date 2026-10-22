@@ -345,7 +345,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     text(view.title, displayTaskTitle(task.title) || "业务办理");
     view.status.className = `application-card-status ${escapeClass(cardStatus)}`;
     const failure = taskPlanFailurePresentation(result.plan);
-    const oaQuery = task.title === "List Pending OA Workflows" || task.summary?.command?.kind === "oa_pending_query" ||
+    const oaQuery = task.title === "List Pending OA Workflows" || task.summary?.preparation?.kind === "oa_pending_query" ||
       Boolean(result.actionableResults?.length);
     card.dataset.oaQueryScope = oaQuery ? `${task.agent_host || ""}|${task.origin_endpoint_id || ""}|${task.active_conversation_ref || ""}` : "";
     const oldSources = result.actionableResults || [];

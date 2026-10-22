@@ -277,6 +277,11 @@ class QuickQueryTests(TestCase):
                 code, value, _ = client.json("POST", "/api/actions/oa-pending-query", {"requestKey": uuid4().hex}, csrf=True)
             self.assertEqual(code, 202, value)
             self.assertEqual(value["detail"]["task"]["title"], "查询 OA 待办")
+            summary = value["detail"]["task"]["summary"]
+            self.assertEqual(summary["preparation"], {
+                "kind": "oa_pending_query", "state": "pending", "selectedCount": 0})
+            self.assertNotIn("command", summary)
+            self.assertNotIn(value["commandKey"], json.dumps(summary))
             self.assertEqual(self.count("operations"), 0)
             self.assertEqual(self.execute(value)["status"], "succeeded")
         finally:

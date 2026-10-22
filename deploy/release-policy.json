@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "4ed18166683c"
+    "09cb96fd5d1e"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Improve application-card recovery, bounded waits, closed endpoint-owned OA read shortcuts, selection and form usability, authenticated material previews, and Telegram client integration. Preserve reviewed Skill, authorization, material-validation and business-verification boundaries. No schema migration; existing user grants unchanged by release."
+  "reason": "Correct read-only OA query progress and empty-query status projection; accept observed PNG/JPEG MIME mislabeling only on verified OA showRTE image reads, returning the detected image type. Preserve task, account, material, size, authorization and business verification checks. No schema migration or user grant changes."
 }

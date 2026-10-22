@@ -301,6 +301,13 @@ def fetch_current_material(adapter, worker, *, affair_id, expected):
             _fail("MATERIAL_TYPE_MISMATCH", "附件包实际格式与读取合同不一致，请在 OA 中查看。")
         return {"contentType": "application/json", "archive": _archive(body, expected["name"])}
     detected = _file_type(body)
-    if not detected or detected[0] != expected["kind"] or content_type not in {detected[1], "application/octet-stream"}:
+    # OA's observed showRTE endpoint can label a PNG response as JPEG. Keep
+    # this compatibility confined to that closed image route and known raster
+    # formats; the returned MIME always comes from the actual file signature.
+    rte_image_mime = (expected["kind"] == "image" and detected and detected[0] == "image"
+        and urlsplit(reference["route"]).path == "/seeyon/fileUpload.do"
+        and content_type in {"image/png", "image/jpeg"})
+    if (not detected or detected[0] != expected["kind"]
+            or (content_type not in {detected[1], "application/octet-stream"} and not rte_image_mime)):
         _fail("MATERIAL_TYPE_MISMATCH", "材料实际格式不支持安全预览，请在 OA 中查看。")
     return {"contentType": detected[1], "body": body}

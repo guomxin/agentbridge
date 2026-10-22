@@ -237,7 +237,9 @@ class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
             f'<a href="{escape(pdf_route, quote=True)}">合成两页说明.pdf</a>'
             f'<a href="{escape(zip_route, quote=True)}">合成附件包（PNG、PDF、表格）.zip</a></section>')
         fixture["preview_files"] = {}
-        for route, content_type, data in ((image_route, "image/png", png), (pdf_route, "application/pdf", pdf),
+        # Real OA showRTE marks PNG bytes as JPEG; preserve that observed header
+        # mismatch in browser acceptance while keeping the image bytes fixed.
+        for route, content_type, data in ((image_route, "image/jpeg", png), (pdf_route, "application/pdf", pdf),
                                            (zip_route, "application/zip", archive.getvalue())):
             parsed = urlparse(route)
             normalized = parsed.path + "?" + urlencode(sorted(parse_qsl(parsed.query)))
