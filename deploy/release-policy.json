@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "5ce38679e69c"
+    "4ba4590fdf0f"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Reconcile unused duplicate meeting reply cards after exact first-reply receipt verification. Preserve approval, batch and execution boundaries. No schema migration or permission changes."
+  "reason": "Add the verified business-settlement reimbursement approval contract, trusted review and governed preparation across clients. Preserve existing authorization and verification boundaries. No schema migration; existing user grants unchanged by release."
 }
