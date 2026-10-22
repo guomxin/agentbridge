@@ -1,5 +1,6 @@
 """Business write bindings and scope policy; no task or transaction mutation."""
 
+from agentbridge.adapters.seeyon_meeting_reply import MEETING_REPLY_WORKFLOW, prepare_meeting_reply, commit_meeting_reply, preflight_meeting_reply
 from agentbridge.adapters.seeyon_pending_batch import PENDING_BATCH_PREPARE_CAPABILITY
 from agentbridge.adapters.seeyon_write_workflows import OA_WRITE_DECLARATIONS
 
@@ -239,6 +240,7 @@ _TRUSTED_WRITE_DEFINITIONS = {
     MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
         MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY
     ].legacy_definition(),
+    "oa.meeting.reply.prepare": MEETING_REPLY_WORKFLOW.legacy_definition(),
     MEETING_PREPARE_CAPABILITY: MEETING_CREATE_WORKFLOW.legacy_definition(),
     MEETING_ROOM_APPLICATION_PREPARE_CAPABILITY: MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.legacy_definition(),
     MEETING_ROOM_APPLICATION_CANCEL_PREPARE_CAPABILITY: MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.legacy_definition(),
@@ -368,6 +370,7 @@ _CAPABILITY_SCOPES = {
     MISSED_PUNCH_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
         MISSED_PUNCH_APPROVE_CAPABILITY
     ],
+    **MEETING_REPLY_WORKFLOW.scope_bindings(),
     **MEETING_CREATE_WORKFLOW.scope_bindings(),
     **MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.scope_bindings(),
     **MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.scope_bindings(),

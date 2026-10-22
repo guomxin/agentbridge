@@ -135,6 +135,7 @@ from agentbridge.adapters.seeyon_home import (
     parse_pending_projection,
     parse_template_center_response,
 )
+from agentbridge.adapters.seeyon_meeting_reply import MEETING_REPLY_WORKFLOW
 from agentbridge.core.capability import CapabilityRegistry, CapabilitySpec
 from agentbridge.adapters.seeyon_write_workflows import oa_write_capability_specs_by_name
 
@@ -618,6 +619,7 @@ def build_central_capability_registry() -> CapabilityRegistry:
         write_specs[MISSED_PUNCH_APPROVAL_BATCH_PREPARE_CAPABILITY],
         write_specs[PENDING_BATCH_PREPARE_CAPABILITY],
         write_specs[MISSED_PUNCH_APPROVE_CAPABILITY],
+        *MEETING_REPLY_WORKFLOW.capability_specs(),
         *MEETING_CREATE_WORKFLOW.capability_specs(),
         *MEETING_ROOM_APPLICATION_CREATE_WORKFLOW.capability_specs(),
         *MEETING_ROOM_APPLICATION_CANCEL_WORKFLOW.capability_specs(),
@@ -1623,6 +1625,14 @@ class SeeyonCentralAdapter:
         return source_item, self._render_workflow_source_detail(worker, source_item)
 
     def _render_workflow_source_detail(self, worker, source_item: dict) -> dict:
+        if source_item.get("category") == "会议":
+            from agentbridge.adapters.seeyon_meeting_reply import meeting_target, _view, _snapshot, meeting_review
+            target = meeting_target(self, source_item)
+            target.update(_snapshot(_view(self, worker, target["meeting_id"]), target["meeting_id"], require_reply=False))
+            review = meeting_review(target)
+            return {"title": target["meeting"]["title"], "text": review["sections"][1]["text"],
+                    "fields": [{"name": x["label"], "value": x["value"]} for x in review["fields"]],
+                    "attachments": review["attachments"], "workflow": []}
         detail_url = str(source_item.get("href") or "")
         if not detail_url:
             raise SeeyonReadContractMismatch("The selected workflow does not expose a detail page.")

@@ -11,6 +11,7 @@ export function interactionActionLabel(type: string, display: unknown): string {
   const labels: Record<string, [string, string]> = {
     "taihua.work_log.create": ["work_log", "填写工作日志"],
     "oa.meeting_room.application.create": ["meeting_room", "选择会议室"],
+    "oa.meeting.reply": ["form", "核对会议邀请"],
     "oa.meeting.create": ["meeting_room", "安排会议"],
     "oa.meeting_room.application.cancel": ["form", "核对撤销申请"],
     "oa.workflow.revoke": ["form", "核对流程撤销"],

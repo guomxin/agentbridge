@@ -271,6 +271,7 @@ export function interactionActionLabel(type, display) {
       "oa.business_trip.approval": ["approval", "核对出差材料"],
       "oa.labor_contract_renewal.approval": ["approval", "核对合同续签"],
       "oa.intellectual_property_declaration.approval": ["approval", "核对知识产权材料"],
+      "oa.meeting.reply": ["form", "核对会议并回复"],
       "oa.intellectual_property_reward.acknowledgement": ["approval", "核对知识产权奖励并阅办"],
       "oa.overtime.approval": ["approval", "核对加班材料"],
       "oa.leave.approval": ["approval", "核对请假材料"],

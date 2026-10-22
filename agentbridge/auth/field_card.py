@@ -331,7 +331,7 @@ def _review_sections(fields: list) -> tuple[list[dict], dict[str, list[dict]]]:
         if label and field_value:
             clean.append({"label": label, "value": field_value,
                           **({"reading": item["reading"]} if "reading" in item else {})})
-    key_labels = {"事项", "申请人", "发起人", "姓名", "请假类型", "开始时间", "结束时间",
+    key_labels = {"会议主题", "地点", "回复人", "当前回执", "参会意向", "回复说明", "事项", "申请人", "发起人", "姓名", "请假类型", "开始时间", "结束时间",
                   "请假天数", "请假小时", "本次操作", "应付金额合计", "员工与月份", "移交人", "交接日期",
                   "事由", "出差事由", "加班事由", "OA 当前确认结论", "日期", "发起日期"}
     overview, groups = [], {}

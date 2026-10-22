@@ -1,6 +1,7 @@
 // These labels mirror the versioned Central profile contract. Never render
 // arbitrary entryLabel/submitLabel strings as host-owned action controls.
 const BUSINESS_VIEWS = new Map([
+  ["oa.meeting.reply", ["form", "核对会议邀请"]],
   ["taihua.work_log.create", ["work_log", "填写工作日志"]],
   ["oa.meeting_room.application.create", ["meeting_room", "选择会议室"]],
   ["oa.meeting.create", ["meeting_room", "安排会议"]],

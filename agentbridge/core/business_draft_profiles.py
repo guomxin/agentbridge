@@ -35,6 +35,8 @@ class BusinessDraftProfile:
     def identity_fields(self):
         if self.view_kind == "approval" or self.review_kind == "workflow_revoke":
             return ("affair_id", "summary_id", "process_id", "template_id", "form_app_id", "form_record_id", "profile")
+        if self.review_kind == "meeting_reply":
+            return ("affair_id", "meeting_id")
         if self.review_kind == "meeting_room_cancel":
             return ("application_id", "room_id")
         if self.review_kind == "alarm_remark":
@@ -66,6 +68,7 @@ class BusinessDraftProfile:
 # These names are deliberately closed. New write capabilities require an explicit
 # action, field and review contract instead of automatically acquiring a finalizer.
 _PROFILE_CONTRACTS = (
+    ("oa.meeting.reply.prepare", "oa.meeting.reply", "form", "meeting_reply", "reply", "核对会议并回复", "确认并回复会议", "核对会议邀请", "向会议发起人提交本人的参会回执。"),
     ("taihua.work_log.create.prepare", "taihua.work_log.create", "work_log", "work_log", "create", "填写并核对工作日志", "确认并提交日志", "填写工作日志", "向泰华日志系统新增这一条工作日志。"),
     ("oa.meeting_room.application.prepare", "oa.meeting_room.application.create", "meeting_room", "meeting_room_application", "create", "申请会议室", "确认并申请会议室", "选择会议室", "提交这一项会议室申请，不创建或发送会议。"),
     ("oa.meeting.create.prepare", "oa.meeting.create", "meeting_room", "meeting", "create", "创建并发送会议", "确认并创建发送会议", "安排会议", "创建并发送会议，参会范围为当前 OA 用户。"),
@@ -119,7 +122,7 @@ BY_ID = {profile.profile_id: profile for profile in PROFILES}
 def profile_for_definition(prepare_capability, definition):
     if prepare_capability in BATCH_PREPARES:
         return next((profile for profile in PROFILES if profile.commit == definition.get("commit_capability")
-                     and profile.view_kind == "approval"), None)
+                     and (profile.view_kind == "approval" or profile.review_kind == "meeting_reply")), None)
     return BY_PREPARE.get(prepare_capability)
 
 
@@ -129,7 +132,7 @@ def profile_for_source(source):
     schema = source.get("form_schema") or {}
     profile = (BY_ID.get((schema.get("_agentbridge_business_draft_profile") or {}).get("id"))
                if source.get("capability_name") in BATCH_PREPARES else BY_PREPARE.get(source.get("capability_name")))
-    if profile and source.get("capability_name") in BATCH_PREPARES and profile.view_kind != "approval":
+    if profile and source.get("capability_name") in BATCH_PREPARES and profile.view_kind != "approval" and profile.review_kind != "meeting_reply":
         profile = None
     if not profile or schema.get("_agentbridge_business_draft") != "v1":
         raise BusinessDraftError("DRAFT_UNSUPPORTED", "当前事项使用原可信办理流程。", status=404)

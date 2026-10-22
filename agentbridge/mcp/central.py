@@ -291,6 +291,7 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "oa_meeting_room_my_applications_list": frozenset({"oa:read"}),
     "oa_meeting_room_application_prepare": frozenset({"oa:write:meeting"}),
     "oa_meeting_room_application_cancel_prepare": frozenset({"oa:write:meeting"}),
+    "oa_meeting_reply_prepare": frozenset({"oa:write:meeting"}),
     "oa_meeting_create_prepare": frozenset({"oa:write:meeting"}),
     "taihua_work_log_my_list": frozenset({"taihua:read"}),
     "taihua_work_log_team_list": frozenset({"taihua:read"}),
@@ -3192,6 +3193,25 @@ def create_central_mcp_server(
             idempotency_key,
             {"oa:write:meeting"},
         )
+
+    @mcp.tool(
+        name="oa_meeting_reply_prepare", title="Prepare OA Meeting Reply",
+        meta=interaction_tool_meta(),
+        description="Review one meeting invitation from the current user's OA pending list. The trusted card collects attend, decline or tentative and optional feedback; only the user's explicit confirmation replies. Never use collaboration approval or meeting creation to reply.",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True),
+        structured_output=True,
+    )
+    async def oa_meeting_reply_prepare(
+        ctx: Context,
+        affair_id: Annotated[str, Field(min_length=1, max_length=256)],
+        input_submission_id: Annotated[str | None, Field(min_length=32, max_length=128)] = None,
+        idempotency_key: Annotated[str | None, Field(max_length=256)] = None,
+    ) -> dict[str, Any]:
+        arguments = {"affair_id": affair_id}
+        if input_submission_id is not None:
+            arguments["input_submission_id"] = input_submission_id
+        return await invoke(ctx, "oa.meeting.reply.prepare", arguments,
+                                    idempotency_key, {"oa:write:meeting"})
 
     @mcp.tool(
         name="oa_meeting_create_prepare",

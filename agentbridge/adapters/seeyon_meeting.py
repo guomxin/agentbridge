@@ -414,7 +414,7 @@ def _ajax(worker, adapter, manager_method: str, arguments: list[Any]) -> Any:
         headers={"content-type": "application/x-www-form-urlencoded; charset=UTF-8"},
         body=body,
     )
-    data = _response_json(response, context=manager_method)
+    data = _response_json(response, context=manager_method, allow_empty=manager_method == "reply")
     if isinstance(data, dict) and data.get("code") and data.get("message"):
         raise MeetingContractMismatch(str(data.get("message")))
     return data
@@ -480,7 +480,7 @@ def _content_save(worker, adapter, meeting_info: dict, subject: str) -> dict:
     }
 
 
-def _response_json(response: dict, *, context: str) -> Any:
+def _response_json(response: dict, *, context: str, allow_empty: bool = False) -> Any:
     status = int(response.get("status") or 0)
     final_url = str(response.get("url") or "")
     response_text = str(response.get("text") or "")
@@ -499,6 +499,8 @@ def _response_json(response: dict, *, context: str) -> Any:
     if status < 200 or status >= 300:
         raise MeetingContractMismatch(f"OA {context} returned HTTP {status}.")
     data = response.get("json")
+    if data is None and allow_empty and response_text.strip() in {"", "null"}:
+        return None
     if data is None:
         raise MeetingContractMismatch(f"OA {context} did not return JSON.")
     return data

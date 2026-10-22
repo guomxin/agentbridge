@@ -12,7 +12,7 @@ from agentbridge.adapters.seeyon_pending_actions import pending_action_profile_f
 
 PENDING_BATCH_PREPARE_CAPABILITY = "oa.workflow.pending.batch.prepare"
 PENDING_BATCH_TYPES = (
-    "missed_punch", "efficiency_data", "travel_expense", "business_trip",
+    "meeting_reply", "missed_punch", "efficiency_data", "travel_expense", "business_trip",
     "labor_contract_renewal",
     "intellectual_property_declaration", "intellectual_property_reward", "overtime", "leave", "resignation", "work_handover",
     "flight_application",
@@ -52,7 +52,7 @@ def _supports_pending_category(row: dict) -> bool:
     if not isinstance(category, str):
         return False
     category = category.strip().casefold()
-    return not category or category in _COLLABORATION_CATEGORIES
+    return not category or category in _COLLABORATION_CATEGORIES or category == "会议"
 
 
 def _unsupported_item_label(row: dict) -> str:
@@ -105,6 +105,8 @@ def select_pending_batch_items(pending: dict, arguments: dict, registry) -> list
         if ids and affair_id not in ids:
             continue
         profile = (
+            {"profile": "meeting_reply", "prepare_capability": "oa.meeting.reply.prepare",
+             "commit_capability": "oa.meeting.reply"} if str(row.get("category") or "").strip() == "会议" else
             {"profile": "missed_punch", "prepare_capability": MISSED_PUNCH_APPROVAL_PREPARE_CAPABILITY,
              "commit_capability": MISSED_PUNCH_APPROVE_CAPABILITY}
             if "补签申请单" in title else pending_action_profile_for_title(title)

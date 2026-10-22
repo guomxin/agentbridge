@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "d4b6afb2474c"
+    "0844820a0432"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Reject explicitly non-collaboration OA pending selections, project durable preparation and per-item outcomes into query rows, and supersede only unused same-target cards after authoritative completion. Preserve one-decision commits, unknown outcomes, task isolation and original source expiry. No schema migration, grant expansion, host protocol or plugin change; the deployed OpenClaw 0.4.119 remains compatible."
+  "reason": "Add independently governed current-user meeting invitation replies, dedicated detail reading, exact receipt verification, pending selection and permission. No schema migration. OpenClaw 0.4.120 adds preparation and presentation hints."
 }

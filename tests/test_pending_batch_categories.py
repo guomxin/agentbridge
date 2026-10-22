@@ -25,7 +25,7 @@ def registry():
 
 
 @pytest.mark.parametrize("category", [
-    "会议", "会议邀请", "Meeting", "公文", "公告", "未知类型", "审批", "表单", "协同/会议",
+    "会议邀请", "Meeting", "公文", "公告", "未知类型", "审批", "表单", "协同/会议",
     False, 0, [], {},
 ])
 def test_explicit_other_business_category_never_acquires_generic_collaboration(category, registry):
@@ -40,11 +40,10 @@ def test_explicit_other_business_category_never_acquires_generic_collaboration(c
     "【知识产权】知识产权奖励审批单", "【绩效】部门季度绩效考核汇总-合成部门",
 ])
 def test_meeting_cannot_impersonate_a_registered_title(title, registry):
-    with pytest.raises(PendingBatchSelectionError) as caught:
-        select_pending_batch_items(pending(row(title=title, category="会议")), {}, registry)
-    assert caught.value.code == "BATCH_UNSUPPORTED_ITEMS"
-    assert "会议" in str(caught.value)
-    registry.get.assert_not_called()
+    selected = select_pending_batch_items(pending(row(title=title, category="会议")), {}, registry)
+    assert selected[0]["display_summary"]["profile"] == "meeting_reply"
+    assert selected[0]["display_summary"]["commit_capability"] == "oa.meeting.reply"
+
 
 
 @pytest.mark.parametrize("category", ["协同", " 协同 ", "Collaboration", "COLLABORATION"])
@@ -78,8 +77,8 @@ def test_omitted_legacy_category_and_meeting_word_in_title_do_not_invent_a_busin
     {"affair_ids": ["meeting"], "keyword": "另一个范围"},
     {"affair_ids": ["valid", "meeting"], "workflow_types": ["weekly_report"]},
 ])
-def test_explicit_meeting_target_cannot_be_hidden_by_additional_filters(arguments, registry):
-    source = pending(row("valid"), row("meeting", category="会议"))
+def test_explicit_unsupported_target_cannot_be_hidden_by_additional_filters(arguments, registry):
+    source = pending(row("valid"), row("meeting", category="公文"))
     with pytest.raises(PendingBatchSelectionError) as caught:
         select_pending_batch_items(source, arguments, registry)
     assert caught.value.code == "BATCH_UNSUPPORTED_ITEMS"
@@ -88,21 +87,21 @@ def test_explicit_meeting_target_cannot_be_hidden_by_additional_filters(argument
 
 @pytest.mark.parametrize("arguments", [{}, {"workflow_types": ["standard_collaboration"]}, {"keyword": "合成"}])
 def test_in_scope_mixed_category_selection_stops_instead_of_processing_only_supported_subset(arguments, registry):
-    source = pending(row("valid"), row("meeting", category="会议"))
+    source = pending(row("valid"), row("meeting", category="公文"))
     with pytest.raises(PendingBatchSelectionError) as caught:
         select_pending_batch_items(source, arguments, registry)
     assert caught.value.code == "BATCH_UNSUPPORTED_ITEMS"
 
 
-def test_explicit_supported_subset_and_filters_may_exclude_unrequested_meetings(registry):
-    source = pending(row("valid", title="合成效能数据"), row("meeting", title="另一个范围", category="会议"))
+def test_explicit_supported_subset_and_filters_may_exclude_unrequested_categories(registry):
+    source = pending(row("valid", title="合成效能数据"), row("meeting", title="另一个范围", category="公文"))
     for arguments in ({"affair_ids": ["valid"]}, {"workflow_types": ["efficiency_data"]}, {"keyword": "效能数据"}):
         selected = select_pending_batch_items(source, arguments, registry)
         assert [item["resource_ref"] for item in selected] == ["valid"]
 
 
 @pytest.mark.parametrize("surface", ["workspace", "telegram"])
-def test_shared_query_choices_disable_meetings_and_reject_forged_selection_without_preparing(tmp_path, surface):
+def test_shared_query_choices_disable_unsupported_categories_and_reject_forged_selection_without_preparing(tmp_path, surface):
     from agentbridge.core import actionable_results as actions
     from agentbridge.core.mcp_identities import McpIdentityTokenStore
     from agentbridge.core.telegram_result_views import ResultViewService
@@ -133,7 +132,7 @@ def test_shared_query_choices_disable_meetings_and_reject_forged_selection_witho
             source = {"task_id": task["task_id"], "operation_id": result["operationId"]}
         operation = service.operations.get(source["operation_id"])
         projection = deepcopy(operation["result"])
-        next(item for item in projection["items"] if item["affair_id"] == "synthetic-meeting")["category"] = "会议"
+        next(item for item in projection["items"] if item["affair_id"] == "synthetic-meeting")["category"] = "公文"
         with service.tasks._connect() as connection:
             connection.execute("UPDATE operations SET result_json=? WHERE operation_id=?", (actions._json(projection), source["operation_id"]))
         if surface == "workspace":
@@ -146,10 +145,10 @@ def test_shared_query_choices_disable_meetings_and_reject_forged_selection_witho
             view_token = value["resultView"]["presentation"]["url"].rsplit("/", 1)[1]
             group = views.read(view_token)["groups"][0]
             queue = lambda body: views.prepare(view_token, body)
-        meeting = next(item for item in group["targets"] if item["category"] == "会议")
+        meeting = next(item for item in group["targets"] if item["category"] == "公文")
         assert meeting["enabled"] is False
         assert meeting["workflowType"] is None
-        assert "会议" in meeting["disabledReason"]
+        assert "公文" in meeting["disabledReason"]
         assert any(item["enabled"] for item in group["targets"])
         with service.tasks._connect() as connection:
             before = {table: connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]

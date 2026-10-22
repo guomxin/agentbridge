@@ -325,6 +325,7 @@ const KEY_REVIEW_LABELS = new Set(["事项", "申请人", "发起人", "姓名",
 
 // These layouts select existing evidence; they never calculate or invent business facts.
 export const REVIEW_DESIGNS = {
+  meeting_reply: {title: "会议邀请", family: "document", keys: ["会议主题", "开始时间", "结束时间", "地点", "发起人", "主持人", "记录人", "回复人", "当前回执", "参会意向", "回复说明"]},
   missed_punch: {title: "补签申请", family: "time", keys: ["申请人", "开始时间", "补签原因", "事由说明"]},
   efficiency_data: {title: "效能数据材料", family: "document", keys: []},
   travel_expense: {title: "差旅报销材料", family: "expense", keys: ["姓名", "应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项", "关联出差申请单"]},

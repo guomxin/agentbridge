@@ -165,6 +165,22 @@
       ]
     },
     {
+      "id": "oa.meeting.reply",
+      "label": "会议邀请回复",
+      "capabilities": [
+        "oa.meeting.reply.prepare",
+        "oa.meeting.reply"
+      ],
+      "tools": [
+        "oa_meeting_reply_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:meeting"
+      ],
+      "dependencies": "本人当前会议邀请与 OA 回复权限核验",
+      "resource": "绑定下游账号本人的会议回执"
+    },
+    {
       "id": "oa.meeting.create",
       "label": "创建会议",
       "capabilities": [

@@ -177,7 +177,7 @@ class BusinessDraftService:
         actual_prepare = (display.get("prepare_capability") if prepare_capability == "oa.workflow.pending.batch.prepare"
                           else "oa.missed_punch.approval.prepare")
         profile = BY_PREPARE.get(actual_prepare)
-        if not profile or profile.view_kind != "approval":
+        if not profile or (profile.view_kind != "approval" and profile.review_kind != "meeting_reply"):
             raise BusinessDraftError("DRAFT_BATCH_PROFILE_INVALID", "批次事项缺少支持的办理合同。", status=409)
         versions = {}
         for kind, capability in (("prepare", actual_prepare), ("commit", profile.commit)):

@@ -64,6 +64,7 @@
       "oa_meeting_room_my_applications_list",
       "oa_meeting_room_application_prepare",
       "oa_meeting_room_application_cancel_prepare",
+      "oa_meeting_reply_prepare",
       "oa_meeting_create_prepare",
       "yuque_public_books_list",
       "yuque_document_catalog",
