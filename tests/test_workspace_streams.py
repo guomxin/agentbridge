@@ -112,25 +112,68 @@ def test_live_session_revalidation_closes_idle_stream_and_releases_slot(tmp_path
     with patch("agentbridge.workspace.server.WORKSPACE_STREAM_HEARTBEAT_SECONDS", .1), \
          patch("agentbridge.workspace.server.WORKSPACE_STREAM_RECHECK_SECONDS", 10), \
          _server(tmp_path) as (app, account, session, server, connect):
-        _, response = connect("/api/timeline/stream")
-        assert _event(response)["event"] == "cursor"
-        if revoke == "logout":
-            app.logout(session["session_token"])
-        elif revoke == "endpoint":
-            with app.service.tasks._connect() as connection:
-                connection.execute("UPDATE client_endpoints SET state = 'disabled' WHERE endpoint_id = ?", (account["endpoint_id"],))
-        elif revoke == "binding_drift":
-            with app.service.tasks._connect() as connection:
-                connection.execute("UPDATE client_endpoints SET conversation_ref = 'changed' WHERE endpoint_id = ?", (account["endpoint_id"],))
-        elif revoke == "account_disabled":
-            with app.store._connect() as connection:
-                connection.execute("UPDATE workspace_accounts SET state = 'disabled' WHERE account_id = ?", (account["account_id"],))
-        else:
-            with app.store._connect() as connection:
-                connection.execute("UPDATE workspace_sessions SET expires_at = ?", ("2000-01-01T00:00:00+00:00",))
-        assert response.read() == b""
-        assert _wait_until(lambda: not server._stream_counts, timeout=1)
-        server.handle_error.assert_not_called()
+        from agentbridge.workspace.server import wait_for_change
+        heartbeat = b": keepalive\n\n"
+        heartbeats, writes_after_revocation = [], []
+        paused, resume, revoked = threading.Event(), threading.Event(), threading.Event()
+        durable_stream = server.RequestHandlerClass._durable_stream
+
+        def observe_stream(handler, *args, **kwargs):
+            write = handler.wfile.write
+
+            def observed_write(data):
+                result = write(data)
+                if revoked.is_set():
+                    writes_after_revocation.append(data)
+                if data == heartbeat:
+                    heartbeats.append(data)
+                return result
+
+            with patch.object(handler.wfile, "write", side_effect=observed_write):
+                return durable_stream(handler, *args, **kwargs)
+
+        def pause_after_buffered_heartbeats(*args, **kwargs):
+            if len(heartbeats) == 2 and not paused.is_set():
+                paused.set()
+                assert resume.wait(3), "test did not release the stream after revocation"
+                return
+            return wait_for_change(*args, **kwargs)
+
+        with patch.object(server.RequestHandlerClass, "_durable_stream", observe_stream), \
+             patch("agentbridge.workspace.server.wait_for_change", side_effect=pause_after_buffered_heartbeats):
+            try:
+                _, response = connect("/api/timeline/stream")
+                assert _event(response)["event"] == "cursor"
+                # Reproduce the CI schedule exactly: legal pre-revocation heartbeats
+                # remain unread while the stream is held at its next wait boundary.
+                assert paused.wait(3), "stream did not emit the two legal heartbeats"
+                if revoke == "logout":
+                    app.logout(session["session_token"])
+                elif revoke == "endpoint":
+                    with app.service.tasks._connect() as connection:
+                        connection.execute("UPDATE client_endpoints SET state = 'disabled' WHERE endpoint_id = ?", (account["endpoint_id"],))
+                elif revoke == "binding_drift":
+                    with app.service.tasks._connect() as connection:
+                        connection.execute("UPDATE client_endpoints SET conversation_ref = 'changed' WHERE endpoint_id = ?", (account["endpoint_id"],))
+                elif revoke == "account_disabled":
+                    with app.store._connect() as connection:
+                        connection.execute("UPDATE workspace_accounts SET state = 'disabled' WHERE account_id = ?", (account["account_id"],))
+                else:
+                    with app.store._connect() as connection:
+                        connection.execute("UPDATE workspace_sessions SET expires_at = ?", ("2000-01-01T00:00:00+00:00",))
+                revoked.set()
+                assert response.read(len(heartbeat) * 2) == heartbeat * 2
+                started = time.monotonic()
+                resume.set()
+                # Read one byte, not an unbounded body: a broken stream that keeps
+                # emitting heartbeats must fail immediately instead of hanging.
+                assert response.read(1) == b""
+                assert time.monotonic() - started < 1
+                assert _wait_until(lambda: not server._stream_counts, timeout=1)
+                assert writes_after_revocation == []
+                server.handle_error.assert_not_called()
+            finally:
+                resume.set()
 
 
 def test_stream_durable_commit_wakes_immediately_and_rollback_never_appears(tmp_path):
