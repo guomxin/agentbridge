@@ -117,8 +117,6 @@ class TrustedFlowTests(unittest.TestCase):
             card_base_url="http://127.0.0.1:8780",
         )
         envelope = self.service._execution_authorization_interaction(authorization)
-        if link:
-            self.link(envelope, task_id)
         current = self.service.field_submissions.get(source["submission_id"])
         if current["state"] == "submitted":
             self.service.field_submissions.consume(
@@ -126,6 +124,10 @@ class TrustedFlowTests(unittest.TestCase):
                 capability_name=self.prepare.name, capability_version=self.prepare.version,
                 consume_operation_id=operation["operation_id"],
             )
+        # Production prepare consumes the source before Central links the
+        # returned interaction and publishes its committed timeline hint.
+        if link:
+            self.link(envelope, task_id)
         return authorization, envelope
 
     def approve(self, authorization, presentation_id=None):
