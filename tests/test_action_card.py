@@ -9,6 +9,17 @@ from agentbridge.core.write_authorizations import WriteAuthorizationStore
 
 
 class TrustedActionCardTests(unittest.TestCase):
+    def assert_inline_bridge(self, response, *, completed=False):
+        html = response.body.decode("utf-8")
+        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}}});", html)
+        nonces = re.findall(r'<script\b[^>]*\bnonce="([^"]+)"', html)
+        self.assertTrue(nonces)
+        policy = response.headers["Content-Security-Policy"]
+        script_policy = next(part.strip() for part in policy.split(";") if part.strip().startswith("script-src "))
+        self.assertEqual(set(nonces), set(re.findall(r"'nonce-([^']+)'", script_policy)))
+        self.assertNotIn("'unsafe-inline'", script_policy)
+        self.assertNotRegex(html, r"<script\b[^>]*\bsrc\s*=")
+
     def test_reward_acknowledgement_card_displays_each_frozen_allocation_and_exact_action(self):
         from tests.test_seeyon_intellectual_property_reward import prepare, target
 
@@ -93,9 +104,7 @@ class TrustedActionCardTests(unittest.TestCase):
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
             self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
             self.assertIn("script-src 'nonce-", response.headers["Content-Security-Policy"])
-            self.assertIn('postEvent("web_app_ready")', html)
-            self.assertIn('postEvent("web_app_expand")', html)
-            self.assertIn("if (false && (platform || canPost || canNotify))", html)
+            self.assert_inline_bridge(response)
             self.assertNotIn("telegram.org", html)
 
     def test_meeting_card_discloses_immediate_create_and_send_effect(self):
@@ -189,10 +198,7 @@ class TrustedActionCardTests(unittest.TestCase):
             self.assertEqual(denied.status, 403)
             self.assertEqual(approved.status, 200)
             self.assertIn("操作已授权", approved.body.decode("utf-8"))
-            self.assertIn(
-                "if (true && (platform || canPost || canNotify))",
-                approved.body.decode("utf-8"),
-            )
+            self.assert_inline_bridge(approved, completed=True)
             self.assertEqual(store.get(authorization["authorization_id"])["state"], "approved")
             self.assertEqual(replay.status, 200)
             self.assertIn("已在其他可信端确认", replay.body.decode("utf-8"))
@@ -282,10 +288,7 @@ class TrustedActionCardTests(unittest.TestCase):
 
             self.assertEqual(response.status, 200)
             self.assertIn("操作已取消", response.body.decode("utf-8"))
-            self.assertIn(
-                "if (true && (platform || canPost || canNotify))",
-                response.body.decode("utf-8"),
-            )
+            self.assert_inline_bridge(response, completed=True)
             self.assertEqual(store.get(authorization["authorization_id"])["state"], "rejected")
             self.assertIn("Secure", page.headers["Set-Cookie"])
 

@@ -12,6 +12,17 @@ from agentbridge.core.field_submissions import FieldSubmissionStore
 
 
 class TrustedFieldCardTests(unittest.TestCase):
+    def assert_inline_bridge(self, response, *, completed=False):
+        html = response.body.decode("utf-8")
+        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}}});", html)
+        nonces = re.findall(r'<script\b[^>]*\bnonce="([^"]+)"', html)
+        self.assertTrue(nonces)
+        policy = response.headers["Content-Security-Policy"]
+        script_policy = next(part.strip() for part in policy.split(";") if part.strip().startswith("script-src "))
+        self.assertEqual(set(nonces), set(re.findall(r"'nonce-([^']+)'", script_policy)))
+        self.assertNotIn("'unsafe-inline'", script_policy)
+        self.assertNotRegex(html, r"<script\b[^>]*\bsrc\s*=")
+
     def test_card_renders_business_fields_and_strict_headers(self):
         with TemporaryDirectory() as tmp:
             store = FieldSubmissionStore(Path(tmp) / "agentbridge.db")
@@ -34,9 +45,7 @@ class TrustedFieldCardTests(unittest.TestCase):
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
             self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
             self.assertIn("script-src 'nonce-", response.headers["Content-Security-Policy"])
-            self.assertIn('postEvent("web_app_ready")', html)
-            self.assertIn('postEvent("web_app_expand")', html)
-            self.assertIn("if (false && (platform || canPost || canNotify))", html)
+            self.assert_inline_bridge(response)
             self.assertNotIn("telegram.org", html)
 
     def test_card_renders_read_only_approval_context_before_input(self):
@@ -171,7 +180,7 @@ class TrustedFieldCardTests(unittest.TestCase):
             accepted_body = accepted.body.decode("utf-8")
             self.assertIn("字段已提交", accepted_body)
             self.assertIn("请返回智能体继续", accepted_body)
-            self.assertIn("if (true && (platform || canPost || canNotify))", accepted_body)
+            self.assert_inline_bridge(accepted, completed=True)
             self.assertEqual(stored["values"]["start_time"], "2026-07-14 09:00")
             self.assertFalse(stored["values"]["has_direct_supervisor"])
             self.assertNotIn("trip_days", stored["values"])

@@ -9,6 +9,17 @@ from agentbridge.core.auth_challenges import AuthChallengeStore
 
 
 class TrustedAuthCardTests(unittest.TestCase):
+    def assert_inline_bridge(self, response, *, completed=False):
+        html = response.body.decode("utf-8")
+        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}}});", html)
+        nonces = re.findall(r'<script\b[^>]*\bnonce="([^"]+)"', html)
+        self.assertTrue(nonces)
+        policy = response.headers["Content-Security-Policy"]
+        script_policy = next(part.strip() for part in policy.split(";") if part.strip().startswith("script-src "))
+        self.assertEqual(set(nonces), set(re.findall(r"'nonce-([^']+)'", script_policy)))
+        self.assertNotIn("'unsafe-inline'", script_policy)
+        self.assertNotRegex(html, r"<script\b[^>]*\bsrc\s*=")
+
     def test_safe_failure_messages_distinguish_captcha_and_credentials(self):
         self.assertIn(
             "验证码",
@@ -38,9 +49,7 @@ class TrustedAuthCardTests(unittest.TestCase):
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
             self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
             self.assertIn("script-src 'nonce-", response.headers["Content-Security-Policy"])
-            self.assertIn('postEvent("web_app_ready")', html)
-            self.assertIn('postEvent("web_app_expand")', html)
-            self.assertIn("if (false && (platform || canPost || canNotify))", html)
+            self.assert_inline_bridge(response)
             self.assertNotIn("telegram.org", html)
             self.assertIn("HttpOnly", response.headers["Set-Cookie"])
             self.assertIn("SameSite=Strict", response.headers["Set-Cookie"])
@@ -94,7 +103,7 @@ class TrustedAuthCardTests(unittest.TestCase):
             self.assertEqual(broker.received["password"], "card-secret")
             self.assertNotIn("card-secret", rendered)
             self.assertIn("认证完成", rendered)
-            self.assertIn("if (true && (platform || canPost || canNotify))", rendered)
+            self.assert_inline_bridge(response, completed=True)
 
     def test_card_rejects_oversized_or_wrong_content_type(self):
         with TemporaryDirectory() as tmp:
