@@ -9,6 +9,7 @@ import hmac
 import json
 
 from agentbridge.adapters.seeyon_pending_verification import VERIFICATION_METHOD
+from agentbridge.adapters.seeyon_meeting_reply import VERSION as MEETING_VERSION
 from agentbridge.core.business_draft_profiles import BY_PREPARE
 from agentbridge.core.field_submissions import FieldSubmissionStateError, _submission_from_row
 from agentbridge.core.interactions import _interaction_from_row, build_interaction_envelope
@@ -28,6 +29,18 @@ def _plan(row):
     return value if isinstance(value, dict) else {}
 
 
+def _completion_kind(capability, profile, definition):
+    """Select business completion proof independently of card presentation."""
+    if not profile or definition.get("preflight_profile") != profile.review_kind:
+        return None
+    preflight = definition.get("preflight_function")
+    if capability == "oa.meeting.reply" and preflight == "preflight_meeting_reply":
+        return "meeting"
+    if preflight in {"preflight_pending_action", "preflight_missed_punch_approval"}:
+        return "collaboration"
+    return None
+
+
 def _scope(service, operation):
     if operation.get("status") != "succeeded":
         return None
@@ -37,17 +50,17 @@ def _scope(service, operation):
         return None
     prepare, definition = registered
     profile = BY_PREPARE.get(prepare)
-    if (not profile or profile.view_kind != "approval"
-            or definition.get("preflight_profile") != profile.review_kind
-            or definition.get("preflight_function") not in {"preflight_pending_action", "preflight_missed_punch_approval"}):
+    kind = _completion_kind(capability, profile, definition)
+    if kind is None:
         return None
+    meeting = kind == "meeting"
     result = operation.get("result") or {}
     verification = result.get("verification") or {}
     if (not isinstance(verification, dict)
             or verification.get("confirmed") is not True
-            or verification.get("method") != VERIFICATION_METHOD
-            or verification.get("pending_absence_confirmed") is not True
-            or verification.get("done_identity_confirmed") is not True):
+            or (not meeting and (verification.get("method") != VERIFICATION_METHOD
+                or verification.get("pending_absence_confirmed") is not True
+                or verification.get("done_identity_confirmed") is not True))):
         return None
     with service.tasks._connect() as connection:
         rows = connection.execute(
@@ -62,18 +75,37 @@ def _scope(service, operation):
     target, binding = plan.get("target") or {}, plan.get("session_binding") or {}
     affair = target.get("affair_id")
     if (not isinstance(affair, str) or not affair
-            or not target.get("summary_id") or not target.get("process_id")
             or plan.get("user_subject") != operation["user_subject"]
             or binding.get("session_id") != authorization["session_id"]
-            or plan.get("resume_arguments", {}).get("affair_id") != affair
+            or plan.get("resume_arguments", {}).get("affair_id") != affair):
+        return None
+    contract = plan.get("action_contract") or {}
+    if meeting:
+        reply = target.get("reply") or {}
+        attitude = plan.get("exact_input", {}).get("attitude")
+        if (plan.get("schema_version") != "agentbridge.oa_meeting_reply_plan.v1"
+                or contract != {"version": MEETING_VERSION, "verification": "exact_meeting_and_my_reply"}
+                or reply.get("feedbackFlag") != -100
+                or not target.get("meeting_id") or not reply.get("id") or not reply.get("userId")
+                or reply.get("meetingId") != target["meeting_id"]
+                or result.get("submitted") is not True or result.get("verified") is not True
+                or verification.get("method") != contract["verification"]
+                or verification.get("meeting_id") != target["meeting_id"]
+                or verification.get("reply_id") != reply["id"]
+                or attitude not in {"join", "not_join", "pending"}
+                or verification.get("attitude") != attitude
+                or result.get("summary") != {"meeting_reply": attitude, "submitted_count": 1}):
+            return None
+    elif (not target.get("summary_id") or not target.get("process_id")
             or result.get("target", {}).get("affair_id") != affair
-            or plan.get("action_contract", {}).get("action_kind") != profile.action_kind
-            or plan.get("action_contract", {}).get("verification") != VERIFICATION_METHOD
+            or contract.get("action_kind") != profile.action_kind
+            or contract.get("verification") != VERIFICATION_METHOD
             or target.get("profile", profile.review_kind) != profile.review_kind):
         return None
     return {"subject": operation["user_subject"], "session": authorization["session_id"],
             "capability": capability, "affair": affair, "profile": profile.review_kind,
-            "binding": binding, "operation": operation["operation_id"]}
+            "binding": binding, "operation": operation["operation_id"],
+            "meeting_target": target if meeting else None}
 
 
 def _eligible(service, connection, candidate, scope, winner_task_id):
@@ -122,8 +154,12 @@ def _eligible(service, connection, candidate, scope, winner_task_id):
         if (resource["capability_name"] != scope["capability"]
                 or plan.get("target", {}).get("affair_id") != scope["affair"]
                 or plan.get("session_binding") != scope["binding"]
-                or plan.get("action_contract", {}).get("action_kind") != BY_PREPARE[
-                    _TRUSTED_WRITE_COMMITS[scope["capability"]][0]].action_kind):
+                or (not scope["meeting_target"] and plan.get("action_contract", {}).get("action_kind") != BY_PREPARE[
+                    _TRUSTED_WRITE_COMMITS[scope["capability"]][0]].action_kind)):
+            raise _EntryChanged()
+        if scope["meeting_target"] and (
+                plan.get("action_contract") != {"version": MEETING_VERSION, "verification": "exact_meeting_and_my_reply"}
+                or plan.get("target") != scope["meeting_target"]):
             raise _EntryChanged()
     return record, resource
 

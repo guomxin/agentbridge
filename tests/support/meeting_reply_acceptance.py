@@ -20,7 +20,8 @@ class MeetingReplyAcceptanceFixture(BusinessViewAcceptanceFixture):
         original=self.service.adapter._fetch_workflow_collection
         def collection(worker,name,**kwargs):
             if name!='pending':return original(worker,name,**kwargs)
-            rows=[deepcopy(self.row)] if self.meeting['myReply']['feedbackFlag']==-100 else []
+            # OA can retain replied meetings in pending; receipt is authoritative.
+            rows=[deepcopy(self.row)]
             return {'items':rows,'count':len(rows),'total':len(rows),'page':0}
         self.service.adapter._fetch_workflow_collection=collection
         request=self.oa.request

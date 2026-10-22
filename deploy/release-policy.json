@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "0844820a0432"
+    "5ce38679e69c"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Add independently governed current-user meeting invitation replies, dedicated detail reading, exact receipt verification, pending selection and permission. No schema migration. OpenClaw 0.4.120 adds preparation and presentation hints."
+  "reason": "Reconcile unused duplicate meeting reply cards after exact first-reply receipt verification. Preserve approval, batch and execution boundaries. No schema migration or permission changes."
 }
