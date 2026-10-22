@@ -62,6 +62,8 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                 "oa.leave.submit.prepare",
                 "oa.meeting.create",
                 "oa.meeting.create.prepare",
+                "oa.meeting.reply",
+                "oa.meeting.reply.prepare",
                 "oa.meeting_room.application.cancel",
                 "oa.meeting_room.application.cancel.prepare",
                 "oa.meeting_room.application.create",

@@ -92,6 +92,30 @@ CONTRACT["permissions"][RC] = REWARD["permission"]
 CONTRACT["capability_permissions"].update({RP: RC, RC: RC})
 CONTRACT["planning"].update(REWARD["planning"])
 
+# Current meeting replies are an explicit extension, preserving prior fixture bytes.
+MEETING_REPLY = json.loads((Path(__file__).parent / "fixtures/oa_meeting_reply_contract.json").read_text())
+MP, MC = "oa.meeting.reply.prepare", "oa.meeting.reply"
+for key, values in (("registry_order", [MP, MC]), ("catalog_order", [MP]), ("scope_order", [MP, MC])):
+    index = CONTRACT[key].index("oa.meeting.create.prepare")
+    CONTRACT[key][index:index] = values
+for key, anchor, values in (
+    ("commits", "oa.meeting.create", [[MC, MP]]),
+    ("scopes", "oa.meeting.create.prepare", [[MP, ["oa:write:meeting"]], [MC, ["oa:write:meeting"]]]),
+):
+    index = next(i for i, item in enumerate(CONTRACT[key]) if item[0] == anchor)
+    CONTRACT[key][index:index] = values
+index = next(i for i, spec in enumerate(CONTRACT["capabilities"]) if spec["name"] == "oa.meeting.create.prepare")
+CONTRACT["capabilities"][index:index] = MEETING_REPLY["capabilities"]
+for spec in CONTRACT["capabilities"]:
+    if spec["name"] == "oa.workflow.pending.batch.prepare":
+        spec["input_schema"]["properties"]["workflow_types"]["items"]["enum"].insert(0, "meeting_reply")
+index = next(i for i, item in enumerate(CONTRACT["definitions"]) if item[0] == "oa.meeting.create.prepare")
+CONTRACT["definitions"].insert(index, [MP, MEETING_REPLY["definition"]])
+CONTRACT["function_names"].extend(["prepare_meeting_reply", "commit_meeting_reply", "preflight_meeting_reply"])
+CONTRACT["permissions"][MC] = MEETING_REPLY["permission"]
+CONTRACT["capability_permissions"].update({MP: MC, MC: MC})
+CONTRACT["planning"].update(MEETING_REPLY["planning"])
+
 DEFINITIONS = deepcopy(dict(CONTRACT["definitions"]))
 # The immutable migration fixture predates initial missed-punch material review.
 # The only declaration delta is a read-only preflight inherited by both aliases.
@@ -103,6 +127,7 @@ FUNCTION_NAMES = sorted([*CONTRACT["function_names"], "preflight_missed_punch_ap
 SPECS = {spec["name"]: spec for spec in CONTRACT["capabilities"]}
 SCOPES = {name: frozenset(scopes) for name, scopes in CONTRACT["scopes"]}
 MEETING_PREPARES = {
+    "oa.meeting.reply.prepare",
     "oa.meeting.create.prepare",
     "oa.meeting_room.application.prepare",
     "oa.meeting_room.application.cancel.prepare",
@@ -123,7 +148,7 @@ POSITIONAL_FIELDS = (
 )
 LEAF_MODULES = (
     "seeyon_business_trip", "seeyon_business_trip_submit", "seeyon_leave",
-    "seeyon_leave_submit", "seeyon_meeting", "seeyon_meeting_room_application",
+    "seeyon_leave_submit", "seeyon_meeting", "seeyon_meeting_reply", "seeyon_meeting_room_application",
     "seeyon_missed_punch", "seeyon_pending_actions", "seeyon_workflow_revoke",
     "taihua", "smartlight",
 )
@@ -151,10 +176,10 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
     assert hashlib.sha256(CONTRACT_BYTES).hexdigest() == (
         "5815e56c49564f20a8b67a0acb588a84c0937b6a8a958f53d7725ccd69606d3e"
     )
-    assert len(SPECS) == 52
-    assert len(DEFINITIONS) == 27
-    assert len(CONTRACT["commits"]) == 25
-    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 15
+    assert len(SPECS) == 54
+    assert len(DEFINITIONS) == 28
+    assert len(CONTRACT["commits"]) == 26
+    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 16
     assert len(PREFLIGHT_PREPARES) == 16
 
 

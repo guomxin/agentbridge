@@ -21,7 +21,7 @@
           "properties": {
             "schemaVersion": {"const": "agentbridge.business-view.v1"},
             "profileId": {"enum": [
-              "taihua.work_log.create", "oa.meeting_room.application.create", "oa.meeting.create",
+              "oa.meeting.reply", "taihua.work_log.create", "oa.meeting_room.application.create", "oa.meeting.create",
               "oa.meeting_room.application.cancel", "oa.workflow.revoke",
               "oa.business_trip.save_draft", "oa.business_trip.submit", "oa.leave.save_draft", "oa.leave.submit",
               "oa.missed_punch.save_draft", "smartlight.alarm.remark.update",

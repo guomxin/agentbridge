@@ -6520,6 +6520,74 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Review one meeting invitation from the current user's OA pending list. The trusted card collects attend, decline or tentative and optional feedback; only the user's explicit confirmation replies. Never use collaboration approval or meeting creation to reply.",
+      "inputSchema": {
+        "properties": {
+          "affair_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Affair Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "input_submission_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Submission Id"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "title": "oa_meeting_reply_prepareArguments",
+        "type": "object"
+      },
+      "name": "oa_meeting_reply_prepare",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "oa_meeting_reply_prepareDictOutput",
+        "type": "object"
+      },
+      "title": "Prepare OA Meeting Reply"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Create and send a full OA meeting, optionally including a room reservation. Do not use this tool when the user only asks to apply for, book, or reserve a meeting room; use oa_meeting_room_application_prepare for that request. On the first call, set meeting_creation_intent=true only when the user explicitly asks to create or send a meeting, invite attendees, or send a meeting notice, and pass any subject, requested room wording, start_time, and end_time already supplied by the user. AgentBridge checks live OA room availability before opening a prefilled full-meeting card with real room options. After field submission it rechecks availability and creates a separate confirmation.",
       "inputSchema": {
         "properties": {

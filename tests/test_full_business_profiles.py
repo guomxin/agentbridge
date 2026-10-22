@@ -28,12 +28,12 @@ class FullBusinessProfileTests(unittest.TestCase):
         return values
 
     def test_complete_current_catalog_is_explicitly_partitioned(self):
-        self.assertEqual(len(_TRUSTED_WRITE_DEFINITIONS), 32)
-        self.assertEqual(len(_TRUSTED_WRITE_COMMITS), 30)
+        self.assertEqual(len(_TRUSTED_WRITE_DEFINITIONS), 33)
+        self.assertEqual(len(_TRUSTED_WRITE_COMMITS), 31)
         field_names = {name for name, definition in _TRUSTED_WRITE_DEFINITIONS.items()
                        if definition.get("field_schema") and name not in BATCH_PREPARES}
         self.assertEqual(set(BY_PREPARE), field_names)
-        self.assertEqual(len(PROFILES), 27)
+        self.assertEqual(len(PROFILES), 28)
         self.assertEqual({name for name, definition in _TRUSTED_WRITE_DEFINITIONS.items() if not definition.get("field_schema")}, {
             "smartlight.alarm.work_area.submit.prepare", "smartlight.alarm.work_area.revoke.prepare", "smartlight.alarm.dispose.prepare"})
         for prepare in field_names:
@@ -44,7 +44,7 @@ class FullBusinessProfileTests(unittest.TestCase):
                 self.assertTrue(profile.effect)
                 self.assertEqual(profile.version, "1")
 
-    def test_all_27_field_contracts_normalize_and_reject_required_omissions(self):
+    def test_all_28_field_contracts_normalize_and_reject_required_omissions(self):
         for profile in PROFILES:
             source = self.source(profile.prepare)
             raw = self.values(source["form_schema"])
