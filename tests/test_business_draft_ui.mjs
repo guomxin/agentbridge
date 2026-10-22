@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {appendReading, bindDraftField, createDraftController, mountBusinessDraft, renderEvidence, REVIEW_DESIGNS, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
+import {appendReading, bindDraftField, createDraftController, createDraftTransport, mountBusinessDraft, renderEvidence, reviewDifferences, REVIEW_DESIGNS, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
 import {createDocument, descendants} from "./workspace_dom_fixture.mjs";
 
 const values = {log_date: "2026-10-13", hours: "8", project: "P001", content: "本页日志"};
@@ -860,4 +860,155 @@ test('settlement account and full expense rows open read-only and preserve row i
   renderEvidence(document, target, review, 'business_settlement');
   nodes = descendants(target);
   assert.equal(nodes.find(node => node.dataset.group === 'material:settlement-expenses').open, false);
+});
+
+function transportHarness() {
+  let time = 0, id = 0;
+  const timers = new Map(), requests = [], progress = [];
+  const transport = createDraftTransport({apiUrl:'/draft',csrfToken:'proof',now:()=>time,
+    onProgress:value=>progress.push(value),window:{
+      fetch:(url,options)=>{const wait=deferred(); requests.push({url,options,...wait}); return wait.promise;},
+      setTimeout:(fn,delay)=>{const key=++id;timers.set(key,{fn,at:time+delay});return key;},
+      clearTimeout:key=>timers.delete(key),
+    }});
+  async function advance(ms) {
+    const until=time+ms;
+    while (true) {
+      const next=[...timers].filter(([,entry])=>entry.at<=until).sort((a,b)=>a[1].at-b[1].at)[0];
+      if (!next) break;
+      timers.delete(next[0]);time=next[1].at;next[1].fn();await flush();
+    }
+    time=until;
+  }
+  return {transport,timers,requests,progress,advance};
+}
+
+test('all draft waits are bounded including a body that never decodes; late success cannot change the outcome', async () => {
+  for (const [action,limit] of [['state',15000],['values',15000],['preview',45000],['options',30000],['approve',30000]]) {
+    const h=transportHarness();
+    const promise=h.transport.request(action,action==='state'?undefined:{requestKey:'original'}).catch(error=>error);
+    if (action==='preview') h.requests[0].resolve({ok:true,json:()=>new Promise(()=>{})});
+    await h.advance(6000);
+    assert.equal(h.progress.at(-1).elapsedMs,6000);
+    await h.advance(limit-6000);
+    const error=await promise;
+    assert.equal(error.code,'REQUEST_TIMEOUT');assert.equal(error.action,action);
+    assert.equal(h.requests[0].options.signal.aborted,true);
+    assert.equal(h.timers.size,0);assert.equal(h.requests.length,1);
+    h.requests[0].resolve({ok:true,json:async()=>({receipt:{requestKey:'late'}})}); await flush();
+    assert.equal((await promise).code,'REQUEST_TIMEOUT');
+  }
+});
+
+test('draft transport preserves rejection status code and field errors and cancels waits on page departure', async () => {
+  const h=transportHarness();
+  const rejected=h.transport.request('preview',{}).catch(error=>error);
+  h.requests[0].resolve({ok:false,status:403,json:async()=>({error:{code:'DRAFT_CSRF_INVALID',message:'会话已失效',fieldErrors:{opinion:'错误'}}})});
+  const error=await rejected;
+  assert.equal(error.status,403);assert.equal(error.code,'DRAFT_CSRF_INVALID');assert.equal(error.fieldErrors.opinion,'错误');
+  const abandoned=h.transport.request('state').catch(error=>error); h.transport.suspend();
+  assert.equal((await abandoned).name,'AbortError');assert.equal(h.requests[1].options.signal.aborted,true);
+  assert.equal(h.timers.size,0);
+});
+
+test('save timeout retains local input and requires a fresh read before a conflicting save can resume', async () => {
+  const changed={...initial(),revision:1,version:2,values:{...values,content:'原请求已保存'}};
+  const h=harness(async action=>{
+    if (action==='values') throw Object.assign(new Error('等待超时'),{code:'REQUEST_TIMEOUT'});
+    return changed;
+  });
+  h.change({content:'本页新的输入'});await h.controller.save();
+  assert.equal(h.controller.state().canApprove,false);
+  h.change({content:'超时后继续编辑'});await h.controller.save();
+  assert.equal(h.controller.state().canRetry,true);
+  assert.match(h.controller.state().message,/重新检查/);
+  assert.deepEqual(h.calls.map(call=>call.action),['values']);
+  await h.controller.retry();
+  assert.deepEqual(h.calls.map(call=>call.action),['values','state']);
+  assert.equal(h.controller.state().conflict.revision,1);
+  assert.equal(h.local().content,'超时后继续编辑');
+});
+
+test('an uncertain approval never replays when its original receipt read is unavailable', async () => {
+  let online=false;
+  const state=reviewed(initial());
+  const h=harness(async (action,payload)=>{
+    if (action==='approve') throw Object.assign(new Error('timeout'),{status:408});
+    if (!online) throw new TypeError('offline');
+    return {...state,state:'finalized',version:2,allowedActions:[],receipt:{requestKey:'request-1'}};
+  },state);
+  await h.controller.approve();await h.controller.retry();
+  assert.equal(h.calls.filter(call=>call.action==='approve').length,1);
+  assert.equal(h.controller.state().canEdit,false);assert.equal(h.controller.state().uncertain,true);
+  online=true;await h.controller.retry();
+  assert.equal(h.calls.filter(call=>call.action==='approve').length,1);
+  assert.equal(h.receipts.length,1);
+});
+
+test('permanent draft permission failures stop scheduled polling and never enable retry', async () => {
+  const state=reviewed(initial());
+  const h=mountHarness(state,{fetch:async()=>({ok:false,status:410,json:async()=>({error:{code:'DRAFT_EXPIRED',message:'草稿已过期'}})})});
+  const poll=[...h.timers.values()].find(timer=>timer.delay===2500);
+  h.timers.clear();await poll.callback();await flush();
+  assert.equal(h.controller.state().canEdit,false);assert.equal(h.controller.state().canRetry,false);
+  assert.equal(h.timers.size,0);assert.equal(h.requests.length,1);
+});
+
+test('displayed material differences exclude current decision fields and bound source excerpts honestly', () => {
+  const before = {fields:[{label:'金额',value:'10'},{label:'处理意见',value:'旧意见'}],
+    sections:[{id:'body',title:'正文',kind:'text',text:'原文'}],attachments:[]};
+  const after = {...before,fields:[{label:'金额',value:'20'},{label:'处理意见',value:'新意见'}],
+    sections:[{id:'body',title:'正文',kind:'text',text:'<script>正文</script>'.repeat(200)}],attachments:[{name:'凭证.pdf'}]};
+  const result = reviewDifferences(before,after);
+  assert.equal(result.total,3);
+  assert.deepEqual(result.items.map(item=>item.label),['金额','正文','附件清单']);
+  assert.equal(result.items[0].before,'10'); assert.equal(result.items[0].after,'20');
+  assert.match(result.items[1].after,/节选，请核对下方完整材料/);
+  assert.equal(reviewDifferences(before,{...before,fields:[before.fields[0],{label:'处理意见',value:'仅修改意见'}]}).total,0);
+});
+
+test('material differences match field identity across inserted decision fields and reordered projections', () => {
+  const before = {fields:[{label:'申请人',value:'甲'},{label:'事由',value:'原事由'}],
+    groups:[{title:'费用明细',fields:[{label:'金额',value:'10'},{label:'金额',value:'20'}]}]};
+  const after = {fields:[{label:'本次操作',value:'审批通过'},{label:'事由',value:'新事由'},
+    {label:'申请人',value:'甲'},{label:'处理意见',value:'同意'}],
+    groups:[{title:'费用明细',fields:[{label:'金额',value:'10'},{label:'金额',value:'30'}]}]};
+  assert.deepEqual(reviewDifferences(before,after),{total:2,items:[
+    {label:'事由',before:'原事由',after:'新事由'},
+    {label:'费用明细 · 金额',before:'20',after:'30'}]});
+});
+
+test('long reading expands without altering content and a collapsed disclosure stays user controlled', () => {
+  const document=createDocument(),target=document.createElement('div'); target.querySelectorAll=()=>[];
+  const text='长材料段落'.repeat(500);
+  renderEvidence(document,target,{sections:[{id:'body',kind:'text',title:'正文',text}]},'efficiency_data');
+  const toggle=descendants(target).find(node=>node.tag==='button'&&node.textContent==='展开长文连续阅读');
+  const reading=descendants(target).find(node=>node.className==='material-body');
+  assert.equal(reading.textContent,text); toggle.events.click();
+  assert.match(reading.className,/expanded/); assert.equal(reading.textContent,text);
+  toggle.events.click(); assert.equal(reading.className,'material-body');
+});
+
+test('draft timeout preserves known permanent HTTP headers when an error body never finishes', async () => {
+  for (const status of [401,403,404,410]) {
+    const h=transportHarness();
+    const wait=h.transport.request('state').catch(error=>error);
+    h.requests[0].resolve({ok:false,status,json:()=>new Promise(()=>{})});await flush();
+    await h.advance(15000);
+    const error=await wait;
+    assert.equal(error.status,status);assert.match(error.message,/已失效/);
+    assert.equal(h.timers.size,0);
+  }
+});
+
+test('approval with a permanent header and hanging JSON locks without reading or replaying another request', async () => {
+  const state=reviewed(initial());
+  const h=mountHarness(state,{fetch:async()=>({ok:false,status:403,json:()=>new Promise(()=>{})})});
+  const approval=h.controller.approve();await flush();
+  const deadline=[...h.timers.values()].find(timer=>timer.delay===30000);
+  deadline.callback();await approval;
+  assert.equal(h.controller.state().locked,true);assert.equal(h.controller.state().canRetry,false);
+  assert.equal(h.controller.state().canEdit,false);
+  await h.controller.retry();await h.controller.approve();
+  assert.equal(h.requests.length,1);assert.deepEqual(h.navigations,[]);
 });

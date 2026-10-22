@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "4ba4590fdf0f"
+    "4ed18166683c"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Add the verified business-settlement reimbursement approval contract, trusted review and governed preparation across clients. Preserve existing authorization and verification boundaries. No schema migration; existing user grants unchanged by release."
+  "reason": "Improve application-card recovery, bounded waits, closed endpoint-owned OA read shortcuts, selection and form usability, authenticated material previews, and Telegram client integration. Preserve reviewed Skill, authorization, material-validation and business-verification boundaries. No schema migration; existing user grants unchanged by release."
 }

@@ -17,12 +17,13 @@ from urllib.parse import urlsplit
 from agentbridge.core import actionable_results as actions
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.trusted_flow_presentation import continuous_flow_presentation
+from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES, BATCH_STATES, ACTIVE_BATCH_STATES
 
 SCHEMA_VERSION = "agentbridge.result-view.v1"
 TICKET_TTL_SECONDS = 3600
 _EVENT = "task.result_view.issued"
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
-_TERMINAL = {"succeeded", "failed", "canceled", "expired", "outcome_unknown", "unknown", "partially_succeeded"}
+_TERMINAL = TERMINAL_TASK_STATUSES | (BATCH_STATES - ACTIVE_BATCH_STATES) | {"unknown", "completed", "skipped"}
 
 
 def _digest(token):
@@ -153,6 +154,44 @@ class ResultViewService:
             context["sourceTaskId"], body, binding_hash=context["endpointBindingHash"], view_hash=context["tokenHash"],
             source_hash=sources[body["operationId"]]["sourceHash"])
 
+    def refresh(self, token, body):
+        """An explicit POST creates a new read task; it never renews old choices."""
+        from agentbridge.core.quick_queries import queue_endpoint_query
+        context = self._context(token)
+        queued = queue_endpoint_query(self.service, context["subject"], context["endpointId"], body,
+            binding_hash=context["endpointBindingHash"], source_task_id=context["sourceTaskId"],
+            view_hash=context["tokenHash"])
+        state = self.query_status(token, queued["taskId"])
+        result = {**queued, "query": state}
+        if state["state"] == "succeeded" and state.get("selectionAvailable"):
+            # Ticket issuance is a POST effect; read/status never issue tickets.
+            result["resultView"] = self.issue(context["subject"], queued["taskId"], context["endpointId"])["resultView"]
+        return result
+
+    def query_status(self, token, task_id):
+        from agentbridge.core.quick_queries import COMMAND_KIND, _contract
+        context = self._context(token)
+        service, subject = self.service, context["subject"]
+        with service.tasks._connect() as connection:
+            task = actions._owned_task(connection, subject, task_id)
+            command = json.loads(task["summary_json"]).get("command") or {}
+            linked = connection.execute("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
+                "AND event_type='task.result_view.refreshed' AND causation_ref=?",
+                (task_id, subject, context["tokenHash"])).fetchone()
+            if (not linked or command.get("kind") != COMMAND_KIND or command.get("originKind") != "telegram"
+                    or command.get("sourceTaskId") != context["sourceTaskId"] or command.get("viewHash") != context["tokenHash"]
+                    or task["origin_endpoint_id"] != context["endpointId"]
+                    or task["active_conversation_ref"] != context["endpoint"]["conversation_ref"]
+                    or command.get("endpointBindingHash") != context["endpointBindingHash"]):
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "查询任务不属于本入口。")
+            actions._load_command(connection, subject, task_id, command.get("commandKey"))
+            _contract(service, command)
+        groups = self._groups(subject, task_id) if task["status"] == "succeeded" else []
+        return {"taskId": task_id, "state": task["status"], "title": "查询 OA 待办",
+            "terminal": task["status"] in _TERMINAL, "groups": groups,
+            "selectionAvailable": any(target["enabled"] for group in groups for target in group["targets"]),
+            "message": "已获取新的待办查询结果。" if task["status"] == "succeeded" else _status_message(task["status"])}
+
     def status(self, token, queued_task_id):
         return self._status(self._context(token), queued_task_id)
 
@@ -180,6 +219,8 @@ class ResultViewService:
                 if operation and operation[0] in {"unknown", "outcome_unknown"}:
                     state = "outcome_unknown"
             result = {"taskId": task_id, "state": state, "title": task["title"],
+                "selectedTitles": [str(item.get("display_summary", {}).get("title") or "")[:500]
+                    for item in command["selectedItems"]],
                 "terminal": state in _TERMINAL, "message": _status_message(state)}
             interaction_id = task["current_interaction_id"]
         batch = service.tasks.get_batch_for_task(parent_task_id=task_id, user_subject=subject)
@@ -247,5 +288,8 @@ def _status_message(state):
         return "业务结果待核实，请先到业务系统核对，不要重复提交。"
     return {"succeeded": "业务操作已通过原有结果核验。", "failed": "办理未完成，请查看原聊天的失败说明。",
         "canceled": "本次办理已取消。", "expired": "本次办理已过期，请返回原聊天查看。",
+        "superseded": "此卡已被替代，请回原聊天查看当前办理卡片和结果。",
+        "skipped": "此事项已跳过，未在本次批次办理；请查看原任务。",
+        "completed": "本次任务已结束，请回原聊天查看具体办理结果。",
         "partially_succeeded": "部分事项已完成，其余事项请核对原任务。",
         "waiting_user": "办理界面已准备，核对材料后再最终确认。"}.get(state, "正在准备或继续办理，请稍候；此状态不代表业务已成功。")

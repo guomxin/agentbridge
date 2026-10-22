@@ -102,6 +102,8 @@ def review_materials(profile, detail, business_snapshot=None):
                          "columns": [{"key": key, "label": label} for key, label in
                                      (("handler", "处理人"), ("opinion", "意见"), ("time", "时间"), ("text", "原始意见"))],
                          "rows": opinions})
+    from agentbridge.adapters.seeyon_material_preview import public_manifest
     return {"kind": profile, "materialsVersion": MATERIALS_VERSION, "sections": sections,
+            "materialPreviews": public_manifest(detail.get("_material_preview_sources", [])),
             "attachments": material["attachments"], "completeness": material["completeness"],
             "truncated": material["truncated"]}

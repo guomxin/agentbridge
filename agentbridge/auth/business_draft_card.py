@@ -28,11 +28,14 @@ UI_PROFILES = {
         "lead": "先核对申请材料，再填写本次处理意见。确认后仅审批通过这条请假申请。"},
 }
 _SCRIPT = Path(__file__).with_name("static").joinpath("business_draft.mjs")
+_PDF_SCRIPT = Path(__file__).with_name("static").joinpath("pdf_preview.mjs")
+_MATERIAL_SCRIPT = Path(__file__).with_name("static").joinpath("material_preview.mjs")
 
 # Group only fields present in the frozen schema. These headings add no inputs
 # and make draft-saving, submitting and reviewing distinct business operations.
 FORM_GROUPS = {
     "work_log": (("日志内容", ("log_date", "hours", "project", "content")),),
+    "meeting_reply": (("是否参加会议", ("attitude",)), ("本次回复", ("feedback",))),
     "meeting_room_application": (("申请用途", ("purpose",)), ("使用时段与会议室", ("start_time", "end_time", "room"))),
     "meeting": (("会议主题", ("subject",)), ("会议时段与会议室", ("start_time", "end_time", "room"))),
     "business_trip": (("出差行程", ("origin", "destination", "start_time", "end_time", "travel_mode")),
@@ -106,7 +109,9 @@ class BusinessDraftApplication:
             path = _path(source_submission_id, presentation_id)
             nonce = secrets.token_urlsafe(18)
             headers = _security_headers(nonce)
-            headers["Content-Security-Policy"] += "; connect-src 'self'"
+            headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace(
+                f"script-src 'nonce-{nonce}'", f"script-src 'nonce-{nonce}' 'strict-dynamic'")
+            headers["Content-Security-Policy"] += "; connect-src 'self'; img-src blob:; font-src blob:; worker-src 'self'"
             headers["Set-Cookie"] = (
                 f"agentbridge_csrf={token}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={opened['maxAge']}"
                 + ("; Secure" if secure_cookie else "")
@@ -206,6 +211,12 @@ def _room_control(value: str) -> str:
             '<p class="field-error" id="error-room" aria-live="polite"></p></div>')
 
 
+
+def _material_script():
+    return re.sub(r"import \{renderPdfMaterial\} from ['\"]\./pdf_preview\.mjs['\"];?", "",
+                  _MATERIAL_SCRIPT.read_text(encoding="utf-8"))
+
+
 def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     ui = state.get("ui") or {"profileId": "taihua.work_log.create", "profileVersion": "1"}
     registered = next((profile for profile in PROFILES if profile.profile_id == ui.get("profileId")), None)
@@ -216,6 +227,10 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
         raise ValueError("inconsistent trusted view")
     legacy = UI_PROFILES.get(registered.profile_id, {})
     definitions = ui.get("fields") or legacy.get("schema", {}).get("fields", [])
+    # Presentation only: preserve the frozen names, allowed values and requiredness.
+    definitions = [{**field, "control": "segmented"} if registered.review_kind == "meeting_reply"
+                   and field.get("control") == "select" and 1 < len(field.get("options", [])) <= 3
+                   else field for field in definitions]
     if {field["name"] for field in definitions} != set(registered.fields):
         raise ValueError("inconsistent trusted fields")
     if kind == "meeting_room":
@@ -236,6 +251,8 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
         control = (_room_control(value) if kind == "meeting_room" and name == "room" else _render_control(field, value))
         control = control.replace(f'name="{name}"', f'name="{name}" aria-describedby="error-{name}"', 1)
         error_node = f'<p class="field-error" id="error-{name}" aria-live="polite"></p>'
+        if field.get("control") in ("text", "textarea") and field.get("max_length"):
+            error_node += f'<p class="field-count" id="count-{name}"></p>'
         controls[name] = (control if kind == "meeting_room" and name == "room" else
                          control.replace("</fieldset>", error_node + "</fieldset>") if field["control"] == "segmented" else
                          control.replace("</div>", error_node + "</div>", 1))
@@ -292,17 +309,37 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   .material-attachments h3 {{font-size:14px}} .material-attachments li {{overflow-wrap:anywhere;line-height:1.7}}
   .material-attachments p,.material-completeness {{font-size:12px;line-height:1.6;color:var(--muted)}}
   .review-expense .review-key-facts,.review-attendance .review-key-facts {{background:#f2f8f4;padding:14px;border-radius:6px}}
+  .draft-nav {{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0;position:sticky;top:0;z-index:2;background:var(--paper,#fff);padding:10px 0;border-bottom:1px solid var(--line)}}
+  .draft-nav a {{padding:9px 13px;border-radius:5px;background:#edf4ef;color:var(--teal-dark);font-size:13px;text-decoration:none}}
+  #draft-form,#draft-evidence,#card-title {{scroll-margin-top:80px}}
+  .draft-expiry,.field-count,#draft-submit-hint {{font-size:12px;color:var(--muted);line-height:1.6}}
+  .draft-expiry.urgent {{color:#8b541d;background:#fff6df;padding:10px}}
+  .draft-submit-bar {{position:sticky;bottom:0;background:var(--paper,#fff);border-top:1px solid var(--line);padding:12px 0 max(12px,env(safe-area-inset-bottom));z-index:3}}
+  #draft-submit-hint {{display:block;margin-bottom:8px}} .draft-submit-bar button {{margin:0}}
+  .draft-field-summary {{padding:12px;border:1px solid #dcc69f;background:#fff8ea;border-radius:6px;font-size:13px;line-height:1.8}}
+  .draft-field-summary a {{color:var(--teal-dark)}} .material-reading-toggle {{width:auto!important;font-size:12px!important;margin:10px 0!important;padding:8px 12px!important}}
+  .material-body.expanded {{max-height:none}} #draft-material-diff {{font-size:13px}} #draft-material-diff pre {{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto}}
+  .material-preview-item {{border:1px solid var(--line);border-radius:8px;padding:14px;margin:14px 0}} .material-preview-item h3 {{font-size:15px;margin:0 0 8px;overflow-wrap:anywhere}}
+  .material-preview-actions {{display:flex;flex-wrap:wrap;gap:8px}} .material-preview-actions button,.material-preview-archive-item button {{width:auto!important;margin:4px 0!important;padding:9px 12px!important;font-size:13px!important}}
+  .material-preview-status,.material-preview-note {{font-size:12px;line-height:1.7;color:var(--muted)}} .material-preview-content {{overflow-wrap:anywhere}}
+  .material-preview-image-frame {{max-height:70vh;overflow:auto}} .material-preview-image {{display:block;max-width:100%;height:auto;transform-origin:top left}}
+  .material-preview-pdf {{width:100%;min-height:520px;border:1px solid var(--line)}} .material-preview-archive-item {{padding:12px 0;border-top:1px solid var(--line)}}
+  .oa-query-history {{padding:12px;border:1px solid var(--line)}}
   @media(max-width:620px) {{.draft-review dl {{grid-template-columns:85px 1fr}} .draft-difference,.material-primary-grid {{grid-template-columns:1fr}}}}
 </style>
 <main class="shell"><section class="card draft-card" aria-labelledby="card-title">
   <header class="card-header"><div class="brand-mark" aria-hidden="true"><span></span></div><div>
     <p class="eyebrow">AGENTBRIDGE · 可信办理</p><h1 id="card-title">{escape(title)}</h1><p class="system-name">{escape(system_name)}</p>
   </div></header>
-  <div id="draft-material-change" class="draft-material-change" role="alert" hidden><strong>材料已更新，请重新核对</strong>下方已显示最新申请材料。本次尚未提交，请核对变化后再次确认。</div>
+  <div id="draft-material-change" class="draft-material-change" role="alert" hidden><strong>材料已更新，请重新核对</strong>下方已显示最新申请材料。本次尚未提交，请核对变化后再次确认。<div id="draft-material-diff"></div></div>
   <p class="draft-lead">{escape(lead)}</p>
+  <p id="draft-expiry" class="draft-expiry" role="status"></p>
+  <nav class="draft-nav" aria-label="办理页导航"><a href="#card-title">事项概览</a>{'<a href="#draft-evidence">核对材料</a>' if has_evidence else ''}<a href="#draft-form">填写与确认</a></nav>
   {batch_html}<p class="draft-outcome"><strong>本次确认后的操作</strong>{escape(effect)}</p>
   <div id="draft-evidence" class="draft-evidence"{' hidden' if not has_evidence else ''}>{evidence}</div>
-  <form id="draft-form" method="post" action="{escape(path)}">{form_controls}
+  <section id="draft-material-previews" aria-label="材料文件预览" hidden></section>
+  <form id="draft-form" method="post" action="{escape(path)}">
+    <div id="draft-field-summary" class="draft-field-summary" hidden></div>{form_controls}
     <p id="draft-status" class="draft-status" role="status" aria-live="polite">正在读取草稿</p>
     <p id="draft-error" class="form-error" role="alert" hidden></p>
     <section id="draft-conflict" class="draft-conflict" aria-labelledby="conflict-title" hidden>
@@ -315,13 +352,15 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     <section id="draft-review" class="draft-review" aria-labelledby="review-title" hidden>
       <h2 id="review-title">核对本次操作</h2>{review_body}
     </section>
-    <button id="draft-submit" type="submit" disabled>{escape(submit_label)}</button>
+    <div class="draft-submit-bar"><span id="draft-submit-hint"></span><button id="draft-submit" type="submit" disabled>{escape(submit_label)}</button></div>
     <button id="draft-retry" type="button" class="secondary" hidden>重新检查</button>
   </form>
   <footer>确认后的操作：{escape(effect.rstrip('。'))}。草稿仅保存在可信办理服务中；页面到期后，请从原任务重新打开。</footer>
   <noscript><p class="notice">此办理页需要 JavaScript。请启用后刷新；页面不会自动提交。</p></noscript>
 </section></main>
 <script type="module" nonce="{nonce}">
+{_PDF_SCRIPT.read_text(encoding='utf-8')}
+{_material_script()}
 {_SCRIPT.read_text(encoding='utf-8')}
 mountBusinessDraft({config}, document, window);
 </script>"""

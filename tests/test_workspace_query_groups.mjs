@@ -60,3 +60,16 @@ test("failures, cancellations, unknown results and running steps remain visible 
   const active = group([query(), query("one", "endpoint-a", "active")])[0];
   assert.equal(active.children[0].children[1].textContent, "查询中");
 });
+
+test('only older expired OA queries fold; latest and active preparation stay visible and expansion persists', () => {
+  const {group}=fixture();
+  const old=element('article',{oaQueryScope:'owner-a',oaArchiveable:'true'});
+  const active=element('article',{oaQueryScope:'owner-a',oaArchiveable:'false'});
+  const other=element('article',{oaQueryScope:'owner-b',oaArchiveable:'true'});
+  const latest=element('article',{oaQueryScope:'owner-a',oaArchiveable:'true'});
+  const output=group([old,active,other,latest]);
+  assert.equal(output[0].tag,'details');assert.equal(output[0].children[1],old);
+  assert.equal(output[1],active);assert.equal(output[2],other);assert.equal(output[3],latest);
+  output[0].open=true;assert.equal(group([old,active,other,latest])[0],output[0]);
+  assert.equal(group([old,active,other,latest])[0].open,true);
+});

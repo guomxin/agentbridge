@@ -31,11 +31,16 @@ version = "0.1.0"
 include = ["agentbridge*"]
 [tool.setuptools.package-data]
 "agentbridge.adapters" = ["seeyon_page_scripts/*.js"]
+"agentbridge.auth" = ["static/vendor/pdfjs/*/*", "static/vendor/pdfjs/*/build/*", "static/vendor/pdfjs/*/cmaps/*", "static/vendor/pdfjs/*/standard_fonts/*", "static/vendor/pdfjs/*/wasm/*"]
 ''', encoding="utf-8")
         for name in ("agentbridge/__init__.py", "agentbridge/adapters/__init__.py", "agentbridge/adapters/page_scripts.py", *artifact.REQUIRED):
             target = cls.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
+        auth = cls.root / "agentbridge/auth"
+        auth.mkdir()
+        (auth / "__init__.py").write_text("")
+        shutil.copytree(ROOT / "agentbridge/auth/static/vendor/pdfjs", auth / "static/vendor/pdfjs")
         subprocess.run(["git", "init", str(cls.root)], check=True, capture_output=True)
         artifact.git(cls.root, "add", ".")
         artifact.git(cls.root, "-c", "user.name=Artifact Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
@@ -58,6 +63,10 @@ include = ["agentbridge*"]
         self.assertTrue(set(artifact.REQUIRED).issubset(names))
         self.assertTrue(all(self.manifest["installedProbe"]["loads"].values()))
         self.assertIn("site-packages", self.manifest["installedProbe"]["module"])
+        vendor = ROOT / "agentbridge/auth/static/vendor/pdfjs/6.4.299/manifest.json"
+        self.assertEqual(self.manifest["installedProbe"]["pdfjs"], {
+            "version": "6.4.299", "files": len(json.loads(vendor.read_text())["files"]),
+            "manifestSha256": artifact.digest(vendor)})
 
     def test_missing_resource_rejected(self):
         bad = Path(self.temp.name) / "missing.whl"
@@ -67,6 +76,33 @@ include = ["agentbridge*"]
                     target.writestr(name, source.read(name))
         with self.assertRaisesRegex(ValueError, "Missing required"):
             artifact.inspect_wheel(bad, Path(self.temp.name) / "result/source")
+
+    def test_missing_pdf_binary_cmap_fonts_license_and_manifest_are_rejected(self):
+        source_root = Path(self.temp.name) / "result/source"
+        with zipfile.ZipFile(self.manifest["wheel"]) as source:
+            vendor_names = [name for name in source.namelist() if "/static/vendor/pdfjs/" in name]
+            examples = [next(name for name in vendor_names if name.endswith(suffix))
+                        for suffix in (".bcmap", ".pfb", ".ttf", ".wasm", "/LICENSE", "/manifest.json")]
+            for index, missing in enumerate(examples):
+                with self.subTest(missing=missing):
+                    bad = Path(self.temp.name) / f"missing-pdf-{index}.whl"
+                    with zipfile.ZipFile(bad, "w") as target:
+                        for name in source.namelist():
+                            if name != missing:
+                                target.writestr(name, source.read(name))
+                    with self.assertRaisesRegex(ValueError, "Wheel/source mismatch"):
+                        artifact.inspect_wheel(bad, source_root)
+
+    def test_isolated_install_rejects_pdf_resource_whose_manifest_hash_no_longer_matches(self):
+        directory = Path(self.temp.name) / "tampered-probe"
+        directory.mkdir()
+        bad = directory / Path(self.manifest["wheel"]).name
+        with zipfile.ZipFile(self.manifest["wheel"]) as source, zipfile.ZipFile(bad, "w") as target:
+            changed = next(name for name in source.namelist() if name.endswith(".bcmap"))
+            for name in source.namelist():
+                target.writestr(name, b"modified CMap" if name == changed else source.read(name))
+        with self.assertRaises(subprocess.CalledProcessError):
+            artifact.installed_probe(bad, directory)
 
     def test_receipt_rejects_changed_commit_environment_skips_and_artifact(self):
         receipt = Path(self.temp.name) / "receipt.json"

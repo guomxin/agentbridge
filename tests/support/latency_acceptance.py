@@ -147,7 +147,11 @@ class TimedWorker(FullOaWorker):
 
 class LatencyAcceptanceFixture(FullBusinessAcceptanceFixture):
     def __init__(self, home: Path, *, latency=None, seed=True):
-        super().__init__(home, seed=False)
+        # Preserve the benchmark's original explicit Skill assignment points.
+        # Older frozen fixture archives do not accept the new switch.
+        import inspect
+        options = {"assign_skill": False} if "assign_skill" in inspect.signature(FullBusinessAcceptanceFixture).parameters else {}
+        super().__init__(home, seed=False, **options)
         self.latency = latency or LatencyContract()
         self.oa = TimedTransport(self.home / "synthetic-oa-views.json", self.latency)
         self.service._worker_factories_by_system["oa"] = lambda *_: TimedWorker(self.oa)
@@ -191,6 +195,8 @@ class LatencyAcceptanceFixture(FullBusinessAcceptanceFixture):
         return case
 
     def coordinate(self):
+        if hasattr(super(), "_coordinate_preparations"):
+            return super().coordinate()
         # Only this explicit fixture host drives prepared commands. Production
         # uses the registered OpenClaw coordinator, its lease and private tool.
         def prepare_commands():

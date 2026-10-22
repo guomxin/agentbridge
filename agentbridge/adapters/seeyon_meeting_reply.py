@@ -147,8 +147,11 @@ def meeting_review(target):
     fields += [{'label': '回复人', 'value': reply['userName']},
                {'label': '当前回执', 'value': {-100:'未回执', 1:'参加', 0:'不参加', -1:'待定'}.get(reply['feedbackFlag'], '未知')}]
     if body.images:
-        text += f'\n正文另含 {body.images} 张图片；当前页面展示文本，图片内容请在 OA 中核对。'
+        text += f'\n正文另含 {body.images} 张图片；图片尚未读取，可在下方逐项查看预览状态。'
+    from agentbridge.adapters.seeyon_material_preview import material_references, public_manifest
+    previews = public_manifest(material_references(text=meeting.get('content'), attachments=meeting.get('attachments') or []))
     return {'title': '会议邀请', 'kind': 'meeting_reply', 'materialsVersion': VERSION, 'fields': fields,
+            'materialPreviews': previews,
             'sections': [{'id':'meeting', 'title':'会议详情', 'kind':'facts', 'fields':fields},
                          {'id':'body', 'title':'会议说明', 'kind':'text', 'text':text}],
             'attachments': [{'name': str(a.get('filename') or a.get('name'))} for a in meeting.get('attachments') or []],

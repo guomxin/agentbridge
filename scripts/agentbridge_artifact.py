@@ -83,6 +83,10 @@ def inspect_wheel(wheel, source):
                      if p.is_file()]
         expected += [p.relative_to(source).as_posix() for p in (source / "agentbridge/business_skills").rglob("*")
                      if p.is_file() and p.suffix in {".json", ".md"}]
+        # PDF rendering also depends on binary CMaps/fonts, worker codecs and
+        # its pinned manifest/licenses, not just JS. Verify every shipped byte.
+        expected += [p.relative_to(source).as_posix() for p in
+                     (source / "agentbridge/auth/static/vendor/pdfjs").rglob("*") if p.is_file()]
         for name in expected:
             if name not in names or archive.read(name) != (source / name).read_bytes():
                 raise ValueError(f"Wheel/source mismatch: {name}")
@@ -95,13 +99,27 @@ def installed_probe(wheel, directory):
     run([sys.executable, "-m", "venv", env], directory)
     python = env / "bin/python"
     run([python, "-m", "pip", "install", "--no-index", "--no-deps", wheel], directory)
-    code = """import json, pathlib, sys, importlib.metadata
+    code = """import json, pathlib, sys, importlib.metadata, hashlib
 from agentbridge.adapters import page_scripts
 p = pathlib.Path(page_scripts.__file__).resolve()
 assert p.is_relative_to(pathlib.Path(sys.prefix).resolve()), str(p)
 loads = {a: len(page_scripts.load_seeyon_action_page_script(a)['script_source']) for a in ('ContinueSubmit','SaveDraft')}
 assert all(loads.values())
-print(json.dumps({'module': str(p), 'version': importlib.metadata.version('agentbridge'), 'loads': loads}))
+pdf_root = p.parents[1] / 'auth/static/vendor/pdfjs'
+manifest_paths = list(pdf_root.glob('*/manifest.json'))
+assert len(manifest_paths) == 1, 'Expected one pinned PDF renderer manifest'
+manifest_path = manifest_paths[0]
+assert manifest_path.resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())
+pdf_manifest = json.loads(manifest_path.read_text())
+assert pdf_manifest['version'] == manifest_path.parent.name and pdf_manifest['files']
+for name, entry in pdf_manifest['files'].items():
+    target = (manifest_path.parent / name).resolve()
+    assert target.is_relative_to(manifest_path.parent.resolve()), name
+    data = target.read_bytes()
+    assert len(data) == entry['bytes'] and hashlib.sha256(data).hexdigest() == entry['sha256'], name
+pdfjs = {'version': pdf_manifest['version'], 'files': len(pdf_manifest['files']),
+         'manifestSha256': hashlib.sha256(manifest_path.read_bytes()).hexdigest()}
+print(json.dumps({'module': str(p), 'version': importlib.metadata.version('agentbridge'), 'loads': loads, 'pdfjs': pdfjs}))
 """
     return json.loads(run([python, "-I", "-c", code], directory))
 

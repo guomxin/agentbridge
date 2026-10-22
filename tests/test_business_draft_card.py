@@ -95,7 +95,11 @@ class BusinessDraftCardTests(unittest.TestCase):
                 for field in schema["fields"]:
                     self.assertIn(f'id="{field["name"]}"', body)
                     self.assertIn(f'id="error-{field["name"]}"', body)
-                    if field["control"] == "select":
+                    if profile.review_kind == "meeting_reply" and field["name"] == "attitude":
+                        self.assertIn('<fieldset id="attitude"', body)
+                        for option in field["options"]:
+                            self.assertIn(f'value="{option["value"]}"', body)
+                    elif field["control"] == "select":
                         self.assertIn(f'<select id="{field["name"]}"', body)
                     if field["control"] == "segmented":
                         self.assertIn('value="false" checked', body)

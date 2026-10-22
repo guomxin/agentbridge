@@ -29,6 +29,12 @@ class Backend:
     def status(self, token, task_id):
         self.calls.append(('status', token, task_id))
         return {'taskId': task_id, 'state': 'unknown', 'terminal': True}
+    def refresh(self, token, body):
+        self.calls.append(('refresh', token, body))
+        return {'taskId': TASK, 'status': 'queued'}
+    def query_status(self, token, task_id):
+        self.calls.append(('query_status', token, task_id))
+        return {'taskId': task_id, 'state': 'active', 'terminal': False}
 
 
 def session(app, view=TOKEN):
@@ -56,6 +62,9 @@ class ResultViewTests(unittest.TestCase):
         self.assertNotIn('src="https://', html)
         self.assertIn('不会授权或提交业务', html)
         self.assertIn('不会取消任务', html)
+        for control in ("result-refresh", "result-query-recover", "result-search", "result-type", "result-selected-only", "result-validity"):
+            self.assertIn(f'id="{control}"', html)
+        self.assertIn('只看已选', html)
 
     def test_csrf_proof_is_bound_to_cookie_and_exact_view(self):
         _, cookie, proof = session(self.app)
@@ -120,6 +129,12 @@ class ResultViewTests(unittest.TestCase):
                 good = {'Origin': f'http://127.0.0.1:{port}', 'Sec-Fetch-Site': 'same-origin',
                         'Cookie': cookie, 'X-AgentBridge-Result-Token': proof, 'Content-Type': 'application/json'}
                 self.assertEqual(request('POST', '/results/'+TOKEN+'/prepare', b'{}', good)[0], 202)
+                self.assertEqual(request('POST', '/results/'+TOKEN+'/refresh', b'{"requestKey":"refresh-request-123"}', good)[0], 202)
+                self.assertEqual(self.backend.calls[-1], ('refresh', TOKEN, {'requestKey': 'refresh-request-123'}))
+                self.assertEqual(request('GET', '/results/'+TOKEN+'/refresh', headers=good)[0], 405)
+                self.assertEqual(request('GET', '/results/'+TOKEN+'/state?query='+TASK, headers=good)[0], 200)
+                self.assertEqual(self.backend.calls[-1], ('query_status', TOKEN, TASK))
+                self.assertEqual(request('GET', '/results/'+TOKEN+'/state?query='+TASK+'&task='+TASK, headers=good)[0], 400)
                 for patch in [{'Origin': 'https://evil.example'}, {'Sec-Fetch-Site': 'cross-site'}, {'Cookie': ''}]:
                     with self.subTest(patch=patch):
                         before = len(self.backend.calls)

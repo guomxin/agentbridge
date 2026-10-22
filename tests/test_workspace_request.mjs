@@ -253,3 +253,16 @@ test('task feedback conflict preserves HTTP status and the authoritative receipt
     error => error.status === 409 && error.code === 'TASK_FEEDBACK_CONFLICT' && error.feedback.receipt.feedback_id === 'feedback-1');
   assert.equal(calls,1); scope.dispose();
 });
+
+test('bounded selection requests timeout during JSON decoding without replay and preserve the caller key', async () => {
+  const scope=createLifecycle().scope(), pending=deferred(), callbacks=new Map(); let id=0,calls=0,signal;
+  const timers={setTimeout(fn){callbacks.set(++id,fn);return id;},clearTimeout(key){callbacks.delete(key);}};
+  const client=createWorkspaceRequests({document,getScope:()=>scope,timers,fetch:async (_url,options)=>{
+    calls++; signal=options.signal; assert.equal(options.body,JSON.stringify({requestKey:'same-request'}));
+    return {ok:true,json:()=>pending.promise};
+  }});
+  const result=client.api('/api/actions/oa-pending-query',{method:'POST',csrf:true,body:{requestKey:'same-request'},timeoutMs:30000});
+  await Promise.resolve(); const failed=assert.rejects(result,error=>error.code==='WORKSPACE_REQUEST_TIMEOUT');
+  [...callbacks.values()][0](); await failed; pending.resolve({taskId:'late'});
+  assert.equal(calls,1); assert.equal(signal.aborted,true); assert.equal(callbacks.size,0);scope.dispose();
+});

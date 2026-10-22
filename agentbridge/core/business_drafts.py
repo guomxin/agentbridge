@@ -1068,7 +1068,7 @@ class BusinessDraftService:
                 "reviewChanged": bool(summary.get("reviewChanged"))}
             result["ui"]["effect"] = summary.get("effect") or profile.effect
             if profile.view_kind == "approval" or source["form_schema"].get("review"):
-                result["ui"]["review"] = {**{key: summary[key] for key in ("kind", "materialsVersion", "sections", "attachments", "completeness", "truncated") if key in summary},
+                result["ui"]["review"] = {**{key: summary[key] for key in ("kind", "materialsVersion", "sections", "attachments", "materialPreviews", "completeness", "truncated") if key in summary},
                     "title": summary.get("title", ""), "effect": summary.get("effect", ""),
                     "fields": [field for field in summary.get("fields", []) if field.get("label") not in {"处理意见", "审批意见", "意见"}],
                     "snapshot": "preview", "reviewChanged": bool(summary.get("reviewChanged"))}

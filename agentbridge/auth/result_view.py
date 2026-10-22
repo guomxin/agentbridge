@@ -17,7 +17,7 @@ _SCRIPT = Path(__file__).with_name("static") / "result_view.mjs"
 
 
 def result_view_target(path):
-    match = re.fullmatch(r"/results/([A-Za-z0-9_-]{32,128})(?:/(state|prepare))?", path.split("?", 1)[0])
+    match = re.fullmatch(r"/results/([A-Za-z0-9_-]{32,128})(?:/(state|prepare|refresh))?", path.split("?", 1)[0])
     return (match[1], match[2] or "page") if match else None
 
 
@@ -76,6 +76,12 @@ class TrustedResultViewApplication:
 <p class="eyebrow">Telegram · 原查询结果</p><h1 id="result-title">选择待办并核对办理</h1>
 <p>选择只会准备办理材料，不会授权或提交业务。请在后续专门界面逐项核对并确认。</p>
 <p id="result-status" role="status" aria-live="polite"></p>
+<div class="result-query-actions"><button id="result-refresh" type="button">查询最新待办</button>
+<button id="result-query-recover" type="button" hidden>恢复原查询</button></div>
+<p id="result-validity" class="muted"></p>
+<div class="result-filters"><label for="result-search">搜索事项<input id="result-search" type="search" placeholder="标题、发起人或日期" autocomplete="off"></label>
+<label for="result-type">事项类型<select id="result-type"><option value="">全部类型</option></select></label>
+<label class="result-selected-filter"><input id="result-selected-only" type="checkbox">只看已选</label></div>
 <div id="result-groups"></div><p id="result-count"></p>
 <div class="actions"><button id="result-prepare" type="button" disabled>请选择待办</button>
 <button id="result-recover" type="button" hidden>恢复同一准备请求</button></div>
@@ -91,6 +97,15 @@ class TrustedResultViewApplication:
               #result-groups section {{ border-top:1px solid var(--line); margin-top:18px; }}
               #result-groups p {{ font-size:14px; overflow-wrap:anywhere; }}
               #result-resume {{ display:grid; gap:12px; margin-top:16px; }}
+              .result-filters {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:16px 0; }}
+              .result-filters label {{ display:grid; gap:6px; font-size:14px; min-width:0; }}
+              .result-filters input,.result-filters select {{ width:100%; min-width:0; }}
+              .result-filters .result-selected-filter {{ display:flex; align-items:center; gap:8px; }}
+              .result-selected-filter input[type=checkbox] {{ width:22px; height:22px; min-height:22px; margin:0; }}
+              .result-query-actions {{ display:flex; flex-wrap:wrap; gap:10px; }}
+              .result-select-current {{ font-size:14px; }}
+              .result-choice[hidden],#result-groups p[hidden] {{ display:none; }}
+              @media(max-width:480px) {{ .result-filters {{ grid-template-columns:1fr; }} }}
             </style>'''
             return AuthCardResponse(200, headers, _document(title="选择待办并核对办理", body=body, nonce=nonce).encode())
         except Exception as error:
@@ -102,22 +117,25 @@ class TrustedResultViewApplication:
                 or not hmac.compare_digest(_proof(cookie, view_token), token)):
             raise _ResultDenied()
 
-    def state(self, view_token, *, token, cookie, task_id=None):
+    def state(self, view_token, *, token, cookie, task_id=None, query_task_id=None):
         try:
             self._authenticate(view_token, token, cookie)
-            if task_id is not None:
+            if task_id is not None or query_task_id is not None:
+                if task_id is not None and query_task_id is not None:
+                    return self.json(400, {"error": {"code": "RESULT_TASK_INVALID", "message": "任务标识无效。"}})
+                task_id = query_task_id if query_task_id is not None else task_id
                 if not isinstance(task_id, str) or not re.fullmatch(
                     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", task_id,
                 ):
                     return self.json(400, {"error": {"code": "RESULT_TASK_INVALID", "message": "任务标识无效。"}})
-                state = self.backend.status(view_token, task_id)
+                state = self.backend.query_status(view_token, task_id) if query_task_id is not None else self.backend.status(view_token, task_id)
             else:
                 state = self.backend.read(view_token)
             return self.json(200, state)
         except Exception as error:
             return self.error(error)
 
-    def prepare(self, view_token, *, token, cookie, content_type, body):
+    def prepare(self, view_token, *, token, cookie, content_type, body, action="prepare"):
         try:
             self._authenticate(view_token, token, cookie)
             if len(body) > MAX_AUTH_BODY_BYTES:
@@ -128,7 +146,9 @@ class TrustedResultViewApplication:
                 value = json.loads(body)
             except (ValueError, UnicodeError):
                 return self.json(400, {"error": {"code": "INVALID_JSON", "message": "请求内容无效。"}})
-            return self.json(202, self.backend.prepare(view_token, value))
+            if action not in {"prepare", "refresh"}:
+                return self.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}})
+            return self.json(202, getattr(self.backend, action)(view_token, value))
         except Exception as error:
             return self.error(error)
 

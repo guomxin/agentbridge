@@ -241,12 +241,38 @@ class BusinessViewAcceptanceTests(unittest.TestCase):
         self.assertNotEqual(current["preview"]["previewId"], preview["preview"]["previewId"])
         self.assertIn("材料已经变更", str(current))
         self.assertEqual(self.rows("SELECT COUNT(*) FROM write_authorizations"), [(0,)])
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM business_draft_decisions"), [(0,)])
+        self.assertEqual(self.fixture.oa.writes, [])
         with self.assertRaises(BusinessDraftError):
             self.approve(preview)
         receipt = self.approve(current, request_key="review-changed-confirmation-2")["receipt"]
         self.drive()
         self.assertEqual(self.operation(receipt)["status"], "succeeded")
         self.assertEqual(len(self.fixture.oa.writes), 1)
+
+    def test_local_material_control_is_consumed_once_by_concurrent_dom_reads(self):
+        self.open("leave")
+        affair_id = self.case["arguments"]["affair_id"]
+        control = {"id": "concurrent-dom-drift", "action": "change_material", "affair_id": affair_id}
+        (self.fixture.home / "business-view-control.json").write_text(json.dumps(control))
+        workers = [SyntheticOaWorker(self.fixture.oa) for _ in range(2)]
+        for worker in workers:
+            worker.affair_id = affair_id
+        boundary = threading.Barrier(2)
+
+        def read(worker):
+            boundary.wait(5)
+            return worker.page.frames[0].evaluate("synthetic read")
+
+        with patch.object(self.fixture.oa, "change_material", wraps=self.fixture.oa.change_material) as change, \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            snapshots = list(pool.map(read, workers))
+        self.assertEqual(change.call_count, 1)
+        self.assertEqual(self.fixture.oa.data["last_control"], control["id"])
+        self.assertTrue(all(snapshot["reason"] == "材料已经变更，需要重新核对" for snapshot in snapshots))
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM write_authorizations"), [(0,)])
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM business_draft_decisions"), [(0,)])
+        self.assertEqual(self.fixture.oa.writes, [])
 
     def test_material_change_after_final_is_rejected_before_any_submission(self):
         receipt = self.approve(self.leave_preview())["receipt"]

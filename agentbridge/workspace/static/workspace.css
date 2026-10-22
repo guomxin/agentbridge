@@ -763,6 +763,14 @@ code {
 .actionable-results h3 { margin: 0 0 .5rem; font-size: 1rem; }
 .actionable-results > p { font-size: .85rem; color: var(--muted, #667085); }
 .actionable-results-list { display: grid; gap: .6rem; margin-bottom: .8rem; }
+.actionable-result-filters { display:flex; align-items:center; gap:.65rem; flex-wrap:wrap; margin:.8rem 0; }
+.actionable-result-filters input[type="search"] { flex:1 1 180px; min-width:120px; }
+.actionable-result-filters select { flex:0 1 180px; }
+.actionable-result-filters label { display:flex; align-items:center; gap:.4rem; white-space:nowrap; }
+.actionable-result-filters input[type="checkbox"] { width:1rem; }
+.actionable-result-count { font-weight:600; }
+.actionable-result-expiry { color:#88571b; }
+.actionable-result-row[hidden] { display:none; }
 .actionable-result-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .4rem .8rem; }
 .actionable-result-row label { display: flex; flex-direction: row; align-items: flex-start; gap: .6rem; min-width: 0; cursor: pointer; }
 .actionable-result-row input[type="checkbox"] { width: 1rem; height: 1rem; margin-top: .25rem; flex: 0 0 auto; }
@@ -1743,3 +1751,4 @@ td {
 #skill-quality-panel details { margin: 12px 0; }
 .skill-card details { margin-top: 16px; }
 .skill-card details textarea { width: 100%; box-sizing: border-box; margin: 10px 0; }
+.view-quick-actions {display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}

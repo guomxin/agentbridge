@@ -88,7 +88,7 @@ const { consumeChatStream } = createChatStream({
 const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets,
+  submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -143,6 +143,8 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  $("#query-oa-pending").disabled = false;
+  $("#query-oa-pending").textContent = "查询 OA 待办";
   projectionQueue.reset();
   projectionOrder.reset();
   historyControls = null;
@@ -194,6 +196,25 @@ async function bootstrap() {
 }
 
 function bindActions() {
+  let quickQueryKey = null, quickQueryScope = null;
+  $("#query-oa-pending").addEventListener("click", async event => {
+    const button = event.currentTarget, scope = sessionScope;
+    if (button.disabled) return;
+    if (quickQueryScope !== scope) { quickQueryScope = scope; quickQueryKey = null; }
+    quickQueryKey ||= crypto.randomUUID();
+    button.disabled = true; button.textContent = "正在查询待办…";
+    try {
+      await queryOaPending({requestKey:quickQueryKey});
+      scope.assertCurrent();
+      quickQueryKey = null;
+      button.textContent = "查询 OA 待办";
+    } catch (error) {
+      if (!isCancellation(error)) {
+        button.textContent = "恢复本次待办查询";
+        toast(error.message || "查询连接暂不可用，可恢复本次查询。", true);
+      }
+    } finally { if (scope === sessionScope) button.disabled = false; }
+  });
   $("#login-tab").addEventListener("click", () => switchAuth("login"));
   $("#enroll-tab").addEventListener("click", () => switchAuth("enroll"));
   $("#login-form").addEventListener("submit", login);
@@ -1247,12 +1268,27 @@ async function prepareTargets(sourceTaskId, payload) {
   const ticket = projectionOrder.begin();
   markWorkspaceTiming("selection_sent", {requestId: payload.requestKey});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(sourceTaskId)}/prepare-selection`,
-    { method: "POST", body: payload, csrf: true });
+    { method: "POST", body: payload, csrf: true, timeoutMs: 30000 });
   scope.assertCurrent();
   markWorkspaceTiming("selection_queued", {requestId: payload.requestKey, runId: result.commandKey, taskId: result.taskId});
   if (result.detail) {
     if (projectionOrder.accept(result.detail.task?.task_id, ticket)) upsertTaskCard(result.detail);
   }
+  if (result.taskId) scheduleTaskSync(result.taskId, "task.prepare.requested");
+  return result;
+}
+
+async function queryOaPending(payload) {
+  const scope = sessionScope;
+  const ticket = projectionOrder.begin();
+  markWorkspaceTiming("quick_query_sent", {requestId: payload.requestKey});
+  const result = await scopedApi(scope)("/api/actions/oa-pending-query", {method:"POST", body:payload, csrf:true, timeoutMs:30000});
+  scope.assertCurrent();
+  if (typeof result?.taskId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId)) {
+    throw new Error("查询受理状态尚未确认，请恢复本次查询。");
+  }
+  markWorkspaceTiming("quick_query_queued", {requestId:payload.requestKey, taskId:result.taskId});
+  if (result.detail && projectionOrder.accept(result.detail.task?.task_id, ticket)) upsertTaskCard(result.detail);
   if (result.taskId) scheduleTaskSync(result.taskId, "task.prepare.requested");
   return result;
 }

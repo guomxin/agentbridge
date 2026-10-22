@@ -46,6 +46,28 @@ function workspaceHandler(name, nextName, bindings) {
   return new Function(...Object.keys(bindings), `${workspaceSource.slice(start, end)}\nreturn ${name};`)(...Object.values(bindings));
 }
 
+test("quick query acknowledges only a valid task receipt so malformed success keeps its recovery request", async () => {
+  const scope = createLifecycle().scope(), calls = [], timings = [], projected = [], synced = [];
+  let receipt;
+  const query = workspaceHandler('queryOaPending', 'continueTask', {
+    sessionScope: scope, projectionOrder: {begin: () => 1, accept: () => true},
+    scopedApi: () => async (_url, options) => {calls.push(options.body);return receipt;},
+    markWorkspaceTiming: name => timings.push(name), upsertTaskCard: value => projected.push(value),
+    scheduleTaskSync: id => synced.push(id),
+  });
+  const payload = {requestKey:'same-explicit-read-request'};
+  for (receipt of [null, {}, {taskId:''}, {taskId:'unverified'}, {taskId:{value:'forged'}}]) {
+    await assert.rejects(query(payload), /查询受理状态尚未确认/);
+  }
+  assert.deepEqual(synced, []);assert.deepEqual(projected, []);
+  assert.ok(timings.every(name => name === 'quick_query_sent'));
+  const taskId='12345678-1234-1234-1234-123456789abc';
+  receipt={taskId,detail:{task:{task_id:taskId}}};
+  assert.equal((await query(payload)).taskId,taskId);
+  assert.deepEqual(synced,[taskId]);assert.equal(projected.length,1);
+  assert.ok(calls.every(body => body === payload));scope.dispose();
+});
+
 function composerFixture() {
   const scope = createLifecycle().scope();
   const state = { composerAttachments: [] };

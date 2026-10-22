@@ -27,7 +27,7 @@ import { createHostPerformance } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.121";
+export const PLUGIN_VERSION = "0.4.122";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;

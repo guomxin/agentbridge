@@ -1,10 +1,11 @@
 import { cancellationError, abortableDelay } from "./workspace_lifecycle.mjs";
 import { skillTrialBinding } from "./workspace_skill_trial.mjs";
 
-export function createWorkspaceRequests({ fetch = globalThis.fetch, document, getScope, addLiveProgress }) {
+export function createWorkspaceRequests({ fetch = globalThis.fetch, document, getScope, addLiveProgress, timers = globalThis }) {
   async function api(path, options = {}) {
     const scope = options.scope || getScope();
     const { controller, release } = scope.controller();
+    let timeout, timedOut = false;
     const abort = () => controller.abort();
     if (options.signal?.aborted) controller.abort();
     options.signal?.addEventListener("abort", abort, { once: true });
@@ -20,6 +21,7 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
         "agentbridge_workspace_csrf",
       );
     }
+    const receive = (async () => {
     const response = await fetch(path, {
       method: options.method || "GET",
       headers,
@@ -29,6 +31,14 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
         options.body === undefined ? undefined : JSON.stringify(options.body),
     });
     const payload = await response.json().catch(() => ({}));
+    return {response, payload};
+    })();
+    const {response, payload} = options.timeoutMs ? await Promise.race([receive, new Promise((_, reject) => {
+      timeout = timers.setTimeout(() => {
+        timedOut = true; controller.abort();
+        reject(Object.assign(new Error("等待应答已超时，请恢复本次请求；后台任务可能仍在处理。"), {code:"WORKSPACE_REQUEST_TIMEOUT"}));
+      }, options.timeoutMs);
+    })]) : await receive;
     scope.assertCurrent();
     if (controller.signal.aborted) throw cancellationError();
     if (!response.ok) {
@@ -42,9 +52,11 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
     }
     return payload;
     } catch (error) {
+      if (timedOut && scope.current()) throw Object.assign(new Error("等待应答已超时，请恢复本次请求；后台任务可能仍在处理。"), {code:"WORKSPACE_REQUEST_TIMEOUT"});
       if (!scope.current() || controller.signal.aborted) throw cancellationError();
       throw error;
     } finally {
+      timers.clearTimeout(timeout);
       release();
       options.signal?.removeEventListener("abort", abort);
     }

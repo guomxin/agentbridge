@@ -557,6 +557,9 @@ def create_workspace_http_server(
                     application.logout(self._cookie(SESSION_COOKIE))
                     self._json(200, {"status": "signed_out"}, clear=True)
                     return
+                if route.path == "/api/actions/oa-pending-query":
+                    self._json(202, application.query_oa_pending(account, body))
+                    return
                 preparation_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/prepare-selection", route.path)
                 if preparation_match:
                     self._json(202, application.prepare_selected_results(account, preparation_match.group(1), body))

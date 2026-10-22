@@ -1,6 +1,7 @@
 import { processToolResult } from "./interaction.js";
 import { hostContextMeta, TASK_CONTEXT_META_KEY } from "./host-contract.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
+import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
 
 // Only a command key and its original routing identity cross this boundary.
 // Capability, target, business arguments and Skill binding stay in Central.
@@ -85,8 +86,42 @@ export function createTaskCommandRunner({ identityRouter, coordinator, performan
       await coordinator.restoreRecoveredInteraction({ taskId: command.taskId,
         interaction, sessionKey: command.sessionKey, mcpClient: client });
     }
+    if (response?.status === "succeeded" && response.queryResult?.kind === "oa_pending_query" && command.endpoint) {
+      await presentQuery(command, response.queryResult, identity, client, lease);
+    }
     return { status: response?.status || "unconfirmed", taskId: command.taskId,
       commandKey: command.commandKey, interactionReady: processed.interactions.length > 0 };
+  }
+
+  async function presentQuery(command, query, identity, client, lease) {
+    if (query.taskId !== command.taskId || query.endpointId !== command.endpoint.endpointId ||
+        !Number.isInteger(query.count) || query.count < 0 || typeof query.complete !== "boolean") return;
+    const current = () => {
+      const pinned = identityRouter.resolvePinnedSession({ sessionKey: command.sessionKey });
+      return !stopped && pinned?.bound === true && pinned.client === client && pinned.binding?.key === identity.binding.key &&
+        pinned.binding.channel === "telegram" && pinned.binding.senderId === command.endpoint.externalSubject &&
+        (pinned.binding.accountId === null || sameTelegramAccount(pinned.binding.accountId, command.endpoint.accountId)) &&
+        identityRouter.endpointKeyForSession(command.sessionKey) === command.endpointKey;
+    };
+    if (!current()) return;
+    let view = null;
+    if (query.complete && query.count > 0) {
+      try {
+        const issued = await client.callTool("agentbridge_result_view", { operation: "issue", task_id: command.taskId }, {
+          signal: controller.signal, meta: { ...hostContextMeta(), [TASK_CONTEXT_META_KEY]: {
+            taskId: command.taskId, endpointId: command.endpoint.endpointId, hostRunId: command.commandKey,
+            coordinatorLeaseVersion: String(lease.version),
+          } },
+        });
+        view = normalizeTrustedResultView(issued?.resultView, { sourceTaskId: command.taskId,
+          endpointId: command.endpoint.endpointId, allowedOrigins: coordinator.config.allowedCardOrigins });
+      } catch { /* A query can succeed without a new eligible preparation entry. */ }
+    }
+    if (!current()) return;
+    const presentation = view ? resultViewPresentation([view], "telegram") : null;
+    const text = query.complete ? `已查询，发现 ${query.count} 项 OA 待办。` : `已读取 ${query.count} 项 OA 待办，结果尚不完整，请重新查询。`;
+    await coordinator.sendRoutePayload(command.sessionKey, command.endpoint.route,
+      { text, ...(presentation ? { presentation } : {}) }, presentation, current);
   }
 
   return { schedule,

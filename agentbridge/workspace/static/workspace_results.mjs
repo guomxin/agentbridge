@@ -423,6 +423,7 @@ export function historyMessageKey(message, index) {
 }
 
 export function createResultView({ document, state, reissueArtifact }) {
+  const archivedQueries = new WeakMap();
   function renderMarkdown(element, value) {
     const source = String(value ?? "");
     // Keep content readable if a static dependency failed to load.
@@ -472,6 +473,8 @@ export function createResultView({ document, state, reissueArtifact }) {
   function groupQueryCards(nodes) {
     const output = [];
     const groups = new Map();
+    const newest = new Map();
+    for (const node of nodes) if (node.dataset.oaQueryScope) newest.set(node.dataset.oaQueryScope, node);
     let userBoundary = "";
     for (const node of nodes) {
       if (node.dataset.messageRole === "user") {
@@ -480,7 +483,16 @@ export function createResultView({ document, state, reissueArtifact }) {
       const scope = node.dataset.queryScope;
       const turn = node.dataset.queryTurn || (userBoundary && `legacy:${userBoundary}`);
       if (!scope || !turn) {
-        output.push(node);
+        if (node.dataset.oaArchiveable === "true" && newest.get(node.dataset.oaQueryScope) !== node) {
+          let details = archivedQueries.get(node);
+          if (!details) {
+            details = document.createElement("details"); details.className = "oa-query-history";
+            const summary = document.createElement("summary"); summary.textContent = "历史待办查询 · 选择窗口已到期（展开查看结果）";
+            details.append(summary, node); archivedQueries.set(node, details);
+          }
+          if (node.parentNode && node.parentNode !== details) details.append(node);
+          output.push(details);
+        } else output.push(node);
         continue;
       }
       const key = JSON.stringify([scope, turn]);

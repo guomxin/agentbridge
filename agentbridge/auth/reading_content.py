@@ -275,6 +275,10 @@ def project_review(review):
     result = deepcopy(review)
     if not isinstance(result, dict):
         return result
+    from agentbridge.adapters.seeyon_material_preview import previews_for_review
+    previews = previews_for_review(review)
+    if previews:
+        result["materialPreviews"] = previews
     def fields(items):
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and "value" in item:

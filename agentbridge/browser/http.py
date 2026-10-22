@@ -61,6 +61,8 @@ class CentralHttpWorker:
         headers: dict[str, str] | None = None,
         body: Any = None,
         timeout_seconds: float = 30,
+        max_response_bytes: int | None = None,
+        deadline: float | None = None,
     ) -> dict:
         return self._request(
             method,
@@ -69,6 +71,8 @@ class CentralHttpWorker:
             body=body,
             timeout_seconds=timeout_seconds,
             raw=True,
+            max_response_bytes=max_response_bytes,
+            deadline=deadline,
         )
 
     def _request(
@@ -123,6 +127,12 @@ class CentralHttpWorker:
             from agentbridge.core.capability_runtime import CapabilityRejected
             def reject(code):
                 raise CapabilityRejected(code, "HTTP 读取超出预算、已中断或响应格式无效。")
+            try:
+                declared_length = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                reject("DATA_CONTRACT_CHANGED")
+            if declared_length < 0 or declared_length > max_response_bytes:
+                reject("RESULT_INCOMPLETE")
             content = bytearray()
             while True:
                 if cancellation is not None and cancellation.is_set():
@@ -156,7 +166,9 @@ class CentralHttpWorker:
             except zlib.error:
                 reject("DATA_CONTRACT_CHANGED")
         try:
-            response = self._open(request, timeout=max(timeout_seconds, 0.1))
+            open_timeout = (max(0.001, min(timeout_seconds, effective_deadline - time.monotonic()))
+                            if max_response_bytes is not None else max(timeout_seconds, 0.1))
+            response = self._open(request, timeout=open_timeout)
         except HTTPError as exc:
             with exc:
                 return self._response(

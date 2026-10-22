@@ -1,59 +1,23 @@
 from __future__ import annotations
 
 from html import escape
+from pathlib import Path
+
+
+_BRIDGE_SCRIPT = Path(__file__).with_name("static") / "telegram_bridge.mjs"
 
 
 def render_embedded_web_app_bridge(*, nonce: str, close_when_complete: bool = False) -> str:
-    """Render a data-blind Telegram Mini App lifecycle bridge."""
+    """Render the local, data-blind Telegram native presentation bridge."""
 
     escaped_nonce = escape(nonce, quote=True)
     completion = "true" if close_when_complete else "false"
+    script = _BRIDGE_SCRIPT.read_text().replace("export function installTelegramBridge", "function installTelegramBridge", 1)
     return f"""
 <script nonce="{escaped_nonce}">
 (() => {{
-  const launch = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const platform = launch.get("tgWebAppPlatform");
-  const proxy = window.TelegramWebviewProxy;
-  const canPost = proxy && typeof proxy.postEvent === "function";
-  let canNotify = false;
-  try {{
-    canNotify = window.external && typeof window.external.notify === "function";
-  }} catch (_error) {{
-    canNotify = false;
-  }}
-  const postEvent = (eventType, eventData = {{}}) => {{
-    try {{
-      if (canPost) {{
-        proxy.postEvent(eventType, JSON.stringify(eventData));
-        return true;
-      }}
-      if (canNotify) {{
-        window.external.notify(JSON.stringify({{ eventType, eventData }}));
-        return true;
-      }}
-    }} catch (_error) {{
-      return false;
-    }}
-    return false;
-  }};
-  if (!platform && !canPost && !canNotify) return;
-  document.documentElement.dataset.agentHost = "telegram";
-  // Only viewport geometry is observed; fields, credentials and launch data
-  // are never sent to the host or persisted by this lifecycle bridge.
-  const updateViewport = () => {{
-    const height = Number(window.visualViewport?.height || window.innerHeight);
-    if (Number.isFinite(height) && height > 0) {{
-      document.documentElement.style.setProperty("--agent-viewport-height", `${{height}}px`);
-    }}
-  }};
-  updateViewport();
-  window.visualViewport?.addEventListener("resize", updateViewport);
-  window.addEventListener("pageshow", updateViewport);
-  postEvent("web_app_ready");
-  postEvent("web_app_expand");
-  if ({completion} && (platform || canPost || canNotify)) {{
-    window.setTimeout(() => postEvent("web_app_close"), 1200);
-  }}
+{script}
+  installTelegramBridge({{window, document, closeWhenComplete: {completion}}});
 }})();
 </script>
 <p class="embedded-session-note">关闭此窗口不会取消原任务。未保存的输入可能丢失；已确认的操作会继续办理，请从原任务查看结果，勿重复提交。</p>
@@ -64,10 +28,10 @@ EMBEDDED_SAFE_AREA_CSS = """
 .embedded-session-note { display: none; }
 html[data-agent-host="telegram"] { scroll-padding-block: 20px; }
 html[data-agent-host="telegram"] body {
-  padding-top: max(20px, env(safe-area-inset-top));
-  padding-right: max(16px, env(safe-area-inset-right));
-  padding-bottom: max(20px, env(safe-area-inset-bottom));
-  padding-left: max(16px, env(safe-area-inset-left));
+  padding-top: max(20px, env(safe-area-inset-top), var(--agent-safe-top, 0px), var(--agent-content-safe-top, 0px));
+  padding-right: max(16px, env(safe-area-inset-right), var(--agent-safe-right, 0px), var(--agent-content-safe-right, 0px));
+  padding-bottom: max(20px, env(safe-area-inset-bottom), var(--agent-safe-bottom, 0px), var(--agent-content-safe-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left), var(--agent-safe-left, 0px), var(--agent-content-safe-left, 0px));
   overscroll-behavior: contain;
 }
 html[data-agent-host="telegram"] .shell,
@@ -78,6 +42,13 @@ html[data-agent-host="telegram"] .auth-shell {
 }
 html[data-agent-host="telegram"] .card,
 html[data-agent-host="telegram"] .auth-card { min-width: 0; }
+html[data-agent-host="telegram"] .review,
+html[data-agent-host="telegram"] input,
+html[data-agent-host="telegram"] select,
+html[data-agent-host="telegram"] textarea { background: var(--surface); color: var(--ink); }
+html[data-agent-host="telegram"] label,
+html[data-agent-host="telegram"] legend { color: var(--ink); }
+html[data-agent-host="telegram"] .reading-table th { background: var(--paper); }
 html[data-agent-host="telegram"] .embedded-session-note {
   display: block; max-width: 760px; margin: 0 auto 12px;
   font-size: 12px; line-height: 1.7; color: var(--muted);

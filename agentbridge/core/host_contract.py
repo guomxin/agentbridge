@@ -552,6 +552,10 @@ class HostContractStore:
                 "openclaw", "0.4.121", "L3",
                 "shared-contract-h01-h29-business-settlement-approval-v1",
             ),
+            (
+                "openclaw", "0.4.122", "L3",
+                "shared-contract-h01-h29-endpoint-owned-closed-oa-query-v1",
+            ),
         )
         for name, version, level, evidence in builtins:
             connection.execute(

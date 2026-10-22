@@ -499,6 +499,17 @@ def parse_oa_detail(html: str, *, base_url: str) -> dict:
     text = _clean(root.text(), 20000)
     fields = _parse_detail_fields(root)
     attachments = _parse_detail_attachments(root, base_url=base_url)
+    from agentbridge.adapters.seeyon_material_preview import material_references
+    # Unlike the legacy bounded detail list, trusted labels must never fall
+    # back to a URL basename: its query may contain private source credentials.
+    preview_attachments = []
+    for link in _find_all(root, tag="a"):
+        href = link.attr("href").replace("&amp;", "&")
+        name = link.attr("title") or _material_text(link) or "未命名附件"
+        if href and _looks_like_attachment(href, name):
+            preview_attachments.append({"name": name, "raw_href": href})
+    preview_sources = material_references(text=_material_text(root), attachments=preview_attachments,
+                                         base_url=base_url, rendered_html=html)
     workflow = _parse_detail_workflow(root)
     actions = _parse_detail_write_actions(html)
     return {
@@ -516,6 +527,9 @@ def parse_oa_detail(html: str, *, base_url: str) -> dict:
         # This complete evidence stays inside process adapters and trusted
         # pages; public read capabilities keep their existing bounded fields.
         "_trusted_materials": _parse_trusted_materials(root),
+        # Ephemeral adapter-only routes: only public manifest metadata is
+        # projected onto trusted review pages, never the public read API.
+        "_material_preview_sources": preview_sources,
     }
 
 

@@ -13,7 +13,7 @@ test("single selection submits only server target keys and does not silently inc
   const document=createDocument(), root=document.createElement("div"), calls=[];
   const ui=createActionableResults({document,state:{},makeRequestKey:()=>"request",prepareTargets:async (...args)=>{calls.push(args);return {taskId:"new"};}});
   ui.render(root,[group()]);
-  assert.equal(find(root,"button","选择全部").disabled,true);
+  assert.equal(find(root,"button","选择当前可办 2 项").disabled,false);
   await find(root,"button","核对办理").events.click();
   // DOM event callbacks start the asynchronous preparation without blocking UI.
   await new Promise(resolve=>setImmediate(resolve));
@@ -27,10 +27,10 @@ test("refresh and another view preserve selection, focus and one shared in-fligh
   const pending=new Promise(resolve=>{release=resolve;});
   const ui=createActionableResults({document,state,makeRequestKey:()=>"request",prepareTargets:async()=>{count++;await pending;return {taskId:"new"};}});
   ui.render(a,[group()]);ui.render(b,[group()]);
-  const checkbox=find(a,"input");checkbox.checked=true;checkbox.events.change();checkbox.focus();
+  const checkbox=find(rows(a)[0],"input");checkbox.checked=true;checkbox.events.change();checkbox.focus();
   ui.render(a,[group()]);
   assert.equal(document.activeElement,checkbox);
-  assert.equal(find(b,"input").checked,true);
+  assert.equal(find(rows(b)[0],"input").checked,true);
   find(a,"button","准备已选事项（1）").events.click();
   find(b,"button","正在准备…").events.click();
   assert.equal(count,1);release();await new Promise(resolve=>setImmediate(resolve));
@@ -40,7 +40,7 @@ test("lost single response can recover with the identical key and immutable targ
   const ui=createActionableResults({document,state:{},makeRequestKey:()=>"fixed",prepareTargets:async (_task,body)=>{
     calls.push(body);if(calls.length===1)throw new Error("应答丢失");return {taskId:"new"};}});
   ui.render(root,[group()]);find(root,"button","核对办理").events.click();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(find(root,"input").disabled,true);
+  assert.equal(find(rows(root)[0],"input").disabled,true);
   find(root,"button","恢复本次准备").events.click();await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(calls,[{operationId:"operation",targetKeys:["one"],requestKey:"fixed"},{operationId:"operation",targetKeys:["one"],requestKey:"fixed"}]);
 });
@@ -52,7 +52,7 @@ test("an unconfirmed request remains recoverable after expiry or availability ch
       calls.push(body);if(calls.length===1)throw new Error("应答丢失");return {taskId:"existing"};}});
     ui.render(root,[group()]);find(root,"button","核对办理").events.click();await new Promise(resolve=>setImmediate(resolve));
     ui.render(root,refreshed);
-    assert.equal(find(root,"input").disabled,true);
+    assert.equal(find(rows(root)[0],"input").disabled,true);
     find(root,"button","恢复本次准备").events.click();await new Promise(resolve=>setImmediate(resolve));
     assert.equal(calls.length,2);assert.deepEqual(calls[1],calls[0]);
   }
@@ -62,6 +62,50 @@ const preparedGroup = (state, taskId = "child-task") => ({...group(), targets: g
   index === 0 ? {...target, enabled: false, preparation: {taskId, state}} : target)});
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const rows = root => descendants(root).filter(node => node.className === "actionable-result-row");
+
+test("explicit available selection respects search and keeps unsupported items visible and counted", async () => {
+  const document=createDocument(), root=document.createElement("div"), calls=[];
+  const ui=createActionableResults({document,state:{},makeRequestKey:()=>"filtered",prepareTargets:async (...args)=>{calls.push(args);return {taskId:"new"};}});
+  ui.render(root,[group()]);
+  assert.match(root.textContent,/共 3 项 · 可新办 2 项.*当前不可新办 1 项/);
+  const search=descendants(root).find(n=>n.type==="search");
+  search.value="周报"; search.events.input();
+  find(root,"button","选择当前可办 1 项").events.click();
+  assert.deepEqual(rows(root).map(r=>find(r,"input").checked),[false,true,false]);
+  find(root,"button","准备已选事项（1）").events.click(); await flush();
+  assert.deepEqual(calls[0][1].targetKeys,["two"]);
+});
+
+test("expired sources lock fresh selection but query recovery preserves its original request key", async () => {
+  const document=createDocument(), root=document.createElement("div"), calls=[];
+  const ui=createActionableResults({document,state:{},now:()=>Date.parse("2026-10-22T12:00:00Z"),makeRequestKey:()=>"refresh-fixed",
+    refreshQuery:async body=>{calls.push(body);if(calls.length===1)throw new Error("应答丢失");return {taskId:"query-new"};}});
+  ui.render(root,[{...group(),expiresAt:"2026-10-22T11:59:00Z"}]);
+  assert.equal(find(root,"button","选择当前可办 0 项").disabled,true);
+  assert.ok(rows(root).every(row=>find(row,"input").disabled));
+  find(root,"button","重新查询待办").events.click(); await flush();
+  find(root,"button","恢复本次查询").events.click(); await flush();
+  assert.deepEqual(calls,[{requestKey:"refresh-fixed"},{requestKey:"refresh-fixed"}]);
+});
+
+test("a lost refresh remains recoverable when its original source disappears before or after acknowledgement", async () => {
+  const document=createDocument(), root=document.createElement("div"), state={}, calls=[];
+  let reject;
+  const first = new Promise((_, fail) => {reject=fail;});
+  const ui=createActionableResults({document,state,makeRequestKey:()=>"refresh-frozen",
+    refreshQuery:body=>{calls.push(body);return calls.length===1 ? first : Promise.resolve({taskId:"original-query"});}});
+  ui.render(root,[group()]);find(root,"button","重新查询待办").events.click();
+  ui.render(root,[]);
+  assert.equal(root.hidden,false);assert.equal(find(root,"button","恢复本次查询").disabled,true);
+  reject(new Error("查询回执丢失"));await flush();
+  ui.render(root,[]);
+  assert.match(root.textContent,/查询回执丢失/);
+  assert.equal(find(root,"button","恢复本次查询").disabled,false);
+  assert.ok(rows(root).every(row=>find(row,"input").disabled));
+  find(root,"button","恢复本次查询").events.click();await flush();
+  assert.deepEqual(calls,[{requestKey:"refresh-frozen"},{requestKey:"refresh-frozen"}]);
+  ui.render(root,[]);assert.equal(root.hidden,true);assert.equal(state.actionableGroups.size,0);
+});
 
 test("a freshly loaded historical query restores completed business state and opens only the original result", () => {
   const document = createDocument(), root = document.createElement("div"), opened = [], calls = [];
@@ -76,7 +120,7 @@ test("a freshly loaded historical query restores completed business state and op
   result.events.click();
   assert.deepEqual(opened, ["completed-reward"]);
   assert.deepEqual(calls, []);
-  assert.equal(find(root, "button", "选择全部").disabled, true);
+  assert.equal(find(root, "button", "选择当前可办 1 项").disabled, false);
 });
 
 test("accepted preparation advances through server review and submission states across both views without losing focus", async () => {
@@ -118,7 +162,7 @@ test("terminal or unknown child outcomes never reopen a preparation from an old 
     ui.render(root, [value]);
     const row = rows(root)[0];
     assert.equal(find(row, "input").disabled, true, state);
-    assert.equal(find(root, "button", "选择全部").disabled, true, state);
+    assert.equal(find(root, "button", "选择当前可办 1 项").disabled, false, state);
     const result = find(row, "button", "查看结果");
     assert.equal(result.disabled, false, state);
     if (state === "outcome_unknown") assert.match(row.textContent, /不要重复提交/);

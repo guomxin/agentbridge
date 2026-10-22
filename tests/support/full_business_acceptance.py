@@ -5,8 +5,15 @@ authorization ledgers, batch coordination, submission and verification stay real
 """
 from contextlib import contextmanager
 from copy import deepcopy
+import base64
 from html import escape
+from io import BytesIO
+import struct
+import threading
+from urllib.parse import parse_qsl, urlencode, urlparse
 from uuid import uuid4
+from zipfile import ZipFile, ZIP_DEFLATED
+import zlib
 
 from agentbridge.core.user_grants import PERMISSIONS
 from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
@@ -19,6 +26,36 @@ from tests.test_seeyon_pending_actions import ALL_PENDING_PROFILES, _fixture
 from tests.test_seeyon_work_handover import HandoverFrame, snapshot as handover_snapshot
 from tests.test_seeyon_flight_application import FlightFrame, snapshot as flight_snapshot
 from tests.test_seeyon_missed_punch import FakeAdapter as MissedAdapter, FakeApprovalPage
+
+
+def _preview_png():
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xffffffff)
+    width, height = 320, 180
+    pixels = b"".join(b"\0" + b"".join(bytes((40 + x // 2, 100 + y // 2, 170))
+                                      for x in range(width)) for y in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+
+
+def _preview_pdf():
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>",
+               b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>"]
+    for page, content in ((3, 4), (5, 6)):
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 480 320] /Resources << /Font << /F1 7 0 R >> >> /Contents {content} 0 R >>".encode())
+        stream = f"BT /F1 20 Tf 40 250 Td (SYNTHETIC OA MATERIAL) Tj 0 -40 Td (Page {(page - 1) // 2} of 2 - isolated preview acceptance) Tj ET".encode()
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    output, offsets = bytearray(b"%PDF-1.4\n"), [0]
+    for index, value in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode() + value + b"\nendobj\n")
+    start = len(output)
+    output.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode())
+    output.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode())
+    return bytes(output)
 
 
 def oa_case(profile, affair_id):
@@ -82,7 +119,23 @@ class FullOaWorker(SyntheticOaWorker):
         # Use real HTML parsing for complete material, not a fabricated review.
         text = escape(self.fixture.get("body_text", ""))
         rendered["html"] = rendered["html"].replace("</body>", f"<article>{text}</article></body>")
+        if self.fixture.get("preview_html"):
+            rendered["html"] = rendered["html"].replace("</body>", self.fixture["preview_html"] + "</body>")
         return rendered
+
+    def request_bytes(self, method, url, **_kwargs):
+        """Closed synthetic files only; this worker never opens a real socket."""
+        parsed = self.transport.validate_url(url, {"/seeyon/fileUpload.do", "/seeyon/fileDownload.do",
+            "/seeyon/rest/attachment/file/batchDownload/3101,3102,3103"})
+        route = parsed.path + "?" + urlencode(sorted(parse_qsl(parsed.query)))
+        files = self.fixture.get("preview_files", {}) if self.affair_id else {}
+        if method != "GET" or route not in files:
+            raise AssertionError("Synthetic material request is outside the frozen fixture")
+        item = files[route]
+        self.transport.data.setdefault("material_read_calls", []).append({"method": method, "route": parsed.path})
+        self.transport.persist()
+        return {"status": 200, "url": url, "content_type": item["content_type"],
+                "body": base64.b64decode(item["body_base64"])}
 
     @contextmanager
     def fork_page(self):
@@ -94,18 +147,49 @@ class FullOaWorker(SyntheticOaWorker):
 
 
 class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
-    def __init__(self, home, *, seed=True):
+    def __init__(self, home, *, seed=True, assign_skill=True):
         super().__init__(home, seed=False)
         self.oa = FullOaTransport(self.home / "synthetic-oa-views.json")
         self.service._worker_factories_by_system["oa"] = lambda *_: FullOaWorker(self.oa)
         grant_permissions(self.service.user_grants, OWNER, PERMISSIONS)
+        settings = self.service.skills.config("user:" + OWNER)
+        if assign_skill and "oa-pending" not in settings["value"]:
+            self.service.skills.save("user:" + OWNER, {**settings["value"], "oa-pending": {
+                "profiles": ["single", "batch"], "source_id": "", "detail": "standard"}},
+                expected_revision=settings["revision"], actor="synthetic-acceptance",
+                reason="Explicit isolated Workspace OA selection acceptance")
         self.meta.setdefault("full_cases", [])
         if seed and not self.meta["full_cases"]:
             for profile in ALL_PENDING_PROFILES:
                 self.add_pending_case(profile)
         write_metadata(self.meta_path, self.meta)
 
-    def add_pending_case(self, profile, *, case_key=None):
+    def _coordinate_preparations(self):
+        """The isolated host drives opaque intents; production uses L3 leases."""
+        from agentbridge.core.actionable_results import pending_preparations, execute_preparation
+        while not self.stop_event.wait(.05):
+            for command in pending_preparations(self.service, OWNER):
+                try:
+                    result = execute_preparation(self.service, OWNER, command["taskId"], command["commandKey"],
+                        runtime_context={"endpointId": self.account["endpoint_id"], "hostType": "openclaw",
+                            "hostInstanceId": "synthetic-host-coordinator"})
+                    if result.get("interaction"):
+                        with self.lock:
+                            if not any(case["task_id"] == command["taskId"] for case in self.meta["draft_cases"]):
+                                self.meta["draft_cases"].append({"task_id": command["taskId"]})
+                except Exception as exc:
+                    self.coordinator_errors.append(type(exc).__name__ + ": " + str(exc))
+                    self.coordinator_errors[:] = self.coordinator_errors[-10:]
+
+    def coordinate(self):
+        thread = threading.Thread(target=self._coordinate_preparations, daemon=True)
+        thread.start()
+        try:
+            super().coordinate()
+        finally:
+            thread.join(timeout=2)
+
+    def add_pending_case(self, profile, *, case_key=None, material_previews=False):
         case_key = case_key or uuid4().hex[:8]
         capability = {
             "missed_punch": "oa.missed_punch.approval.prepare",
@@ -115,6 +199,8 @@ class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
         assert capability in _TRUSTED_WRITE_DEFINITIONS
         affair_id = f"synthetic-{profile}-{case_key}"
         self.oa.add_affair(affair_id, profile=profile)
+        if material_previews:
+            self.add_material_preview_assets(affair_id)
         arguments = {"affair_id": affair_id}
         title = self.oa.data["affairs"][affair_id]["source"]["title"]
         task = self.service.ensure_host_task(user_subject=OWNER, token_id="fixture-token", agent_host="openclaw",
@@ -134,11 +220,37 @@ class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
         write_metadata(self.meta_path, self.meta)
         return case
 
+    def add_material_preview_assets(self, affair_id):
+        """Install PNG, two-page PDF and mixed ZIP before real OA preparation."""
+        image_route = "/seeyon/fileUpload.do?method=showRTE&type=image&fileId=3101&createDate=2026-10-22"
+        pdf_route = "/seeyon/fileDownload.do?method=download&viewMode=download&fileId=3102&createDate=2026-10-22&filename=preview.pdf&v=1"
+        zip_route = "/seeyon/rest/attachment/file/batchDownload/3101,3102,3103?zipFileName=preview.zip"
+        png, pdf = _preview_png(), _preview_pdf()
+        archive = BytesIO()
+        with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zipped:
+            zipped.writestr("材料/合成图示.png", png)
+            zipped.writestr("材料/两页说明.pdf", pdf)
+            zipped.writestr("费用表.xlsx", b"Synthetic spreadsheet - intentionally unsupported preview format")
+        fixture = self.oa.data["affairs"][affair_id]
+        fixture["preview_html"] = ('<section><h2>合成附件预览</h2><p>下列文件仅用于隔离验收。</p>'
+            f'<img src="{escape(image_route, quote=True)}" alt="合成蓝绿色图示">'
+            f'<a href="{escape(pdf_route, quote=True)}">合成两页说明.pdf</a>'
+            f'<a href="{escape(zip_route, quote=True)}">合成附件包（PNG、PDF、表格）.zip</a></section>')
+        fixture["preview_files"] = {}
+        for route, content_type, data in ((image_route, "image/png", png), (pdf_route, "application/pdf", pdf),
+                                           (zip_route, "application/zip", archive.getvalue())):
+            parsed = urlparse(route)
+            normalized = parsed.path + "?" + urlencode(sorted(parse_qsl(parsed.query)))
+            fixture["preview_files"][normalized] = {"content_type": content_type,
+                                                    "body_base64": base64.b64encode(data).decode()}
+        self.oa.persist()
+
     def public_metadata(self):
         return {"fixture": "full-business-real-central-synthetic-downstream-v1", "workspace_url": self.workspace_url,
                 "card_origin": self.card_url, "username": "cardreview", "cases": self.meta["full_cases"],
                 "oa_write_count": len(self.oa.writes),
                 "evidence_boundary": "Real central, adapters, HTML parsers, drafts, coordinator and readback; synthetic downstream IO only"}
+
 
     def add_pending_batch(self, profiles=ALL_PENDING_PROFILES, *, legacy=False):
         key = uuid4().hex[:8]

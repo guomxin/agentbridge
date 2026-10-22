@@ -286,7 +286,7 @@ def _intent(command):
 def _load_command(connection, subject, task_id, command_key):
     task = _owned_task(connection, subject, task_id)
     command = json.loads(task["summary_json"]).get("command")
-    if not isinstance(command, dict) or command.get("kind") != COMMAND_KIND or command.get("commandKey") != command_key:
+    if not isinstance(command, dict) or command.get("kind") not in {COMMAND_KIND, "oa_pending_query"} or command.get("commandKey") != command_key:
         _fail("ACTION_COMMAND_INVALID", "办理请求与原任务不一致。")
     events = connection.execute(
         "SELECT payload_json FROM task_events WHERE task_id=? AND user_subject=? AND event_type='task.prepare.requested' AND causation_ref=?",
@@ -511,6 +511,10 @@ def _record_queue_wait(service, subject, task_id, command, context, observed_at)
 def execute_preparation(service, subject, task_id, command_key, *, runtime_context=None):
     """Called only after the private host tool validates L3, lease and origin."""
     from agentbridge.core.central_service import operation_response
+    task = service.tasks.get_task(task_id, user_subject=subject)
+    if (task.get("summary", {}).get("command") or {}).get("kind") == "oa_pending_query":
+        from agentbridge.core.quick_queries import execute_query
+        return execute_query(service, subject, task_id, command_key, runtime_context=runtime_context or {})
     context = {**(runtime_context or {})}
     context["requestId"] = context.get("requestId") or command_key
     with service._task_call_lock(task_id):
@@ -576,8 +580,8 @@ def pending_preparations(service, subject, limit=16):
             "AND e.agent_host='openclaw' AND e.client_type IN ('web','webchat') AND e.state='active' "
             "WHERE t.user_subject=? AND t.agent_host='openclaw' "
             "AND t.status IN ('active','running','waiting_user') "
-            "AND json_extract(t.summary_json,'$.command.kind')=? AND json_extract(t.summary_json,'$.command.state')='pending' "
-            "ORDER BY t.created_at,t.rowid LIMIT ?", (subject, COMMAND_KIND, limit),
+            "AND json_extract(t.summary_json,'$.command.kind') IN (?,?) AND json_extract(t.summary_json,'$.command.state')='pending' "
+            "ORDER BY t.created_at,t.rowid LIMIT ?", (subject, COMMAND_KIND, "oa_pending_query", limit),
         ).fetchall()
         telegram_rows = connection.execute(
             "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "
@@ -585,9 +589,9 @@ def pending_preparations(service, subject, limit=16):
             "AND e.conversation_ref=t.active_conversation_ref AND e.agent_host='openclaw' "
             "AND e.client_type='telegram' AND e.state='active' WHERE t.user_subject=? AND t.agent_host='openclaw' "
             "AND t.status IN ('active','running','waiting_user') "
-            "AND json_extract(t.summary_json,'$.command.kind')=? AND json_extract(t.summary_json,'$.command.state')='pending' "
+            "AND json_extract(t.summary_json,'$.command.kind') IN (?,?) AND json_extract(t.summary_json,'$.command.state')='pending' "
             "AND json_extract(t.summary_json,'$.command.originKind')='telegram' ORDER BY t.created_at,t.rowid LIMIT ?",
-            (subject, COMMAND_KIND, limit)).fetchall()
+            (subject, COMMAND_KIND, "oa_pending_query", limit)).fetchall()
         rows = sorted([*rows, *telegram_rows], key=lambda row: (row["created_at"], row["task_id"]))[:limit]
         result = []
         for row in rows:

@@ -57,6 +57,89 @@ class TelegramResultViewTests(unittest.TestCase):
         self.service.finish_host_task(user_subject=OWNER, task_id=task["task_id"], outcome="succeeded", reason="synthetic_query_completed")
         return {"task_id": task["task_id"], "operation_id": result["operationId"]}
 
+    def test_expired_source_refresh_queues_new_read_and_post_issues_new_ticket(self):
+        token, _ = self.issue()
+        body = {"requestKey": uuid4().hex}
+        future = actions._now() + timedelta(minutes=11)
+        with patch.object(actions, "_now", return_value=future), patch("agentbridge.core.operations._utc_now", return_value=future.isoformat()):
+            self.assertFalse(self.views.read(token)["selectionAvailable"])
+            with patch.object(self.service, "invoke", side_effect=AssertionError("refresh POST cannot invoke")):
+                queued = self.views.refresh(token, body)
+            self.assertEqual(queued["query"]["state"], "active")
+            result = self.execute(queued)
+            self.assertEqual(result["status"], "succeeded")
+            with patch.object(self.service, "invoke", side_effect=AssertionError("status/recovery cannot requery")):
+                status = self.views.query_status(token, queued["taskId"])
+                recovered = self.views.refresh(token, body)
+            self.assertEqual(status["state"], "succeeded")
+            self.assertEqual(recovered["taskId"], queued["taskId"])
+            self.assertEqual(recovered["resultView"]["sourceTaskId"], queued["taskId"])
+            new_token = recovered["resultView"]["presentation"]["url"].rsplit("/", 1)[1]
+            self.assertNotEqual(new_token, token)
+            self.assertFalse(self.views.read(token)["selectionAvailable"])
+            self.assertTrue(self.views.read(new_token)["selectionAvailable"])
+        self.assertEqual(self.fixture.audit()["decisionCount"], 0)
+        self.assertEqual(self.fixture.audit()["authorizationStates"], {})
+        self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
+
+    def test_refresh_query_cannot_be_read_or_reused_from_another_ticket(self):
+        token, _ = self.issue(); another, _ = self.issue()
+        body = {"requestKey": uuid4().hex}
+        queued = self.views.refresh(token, body)
+        with self.assertRaises(actions.ActionableResultError):
+            self.views.query_status(another, queued["taskId"])
+        with self.assertRaises(actions.ActionableResultError):
+            self.views.refresh(another, body)
+        with self.assertRaises(actions.ActionableResultError):
+            self.views.status(token, queued["taskId"])
+
+    def test_refresh_login_stays_on_the_query_task_and_delivers_a_fresh_selection_ticket_after_resume(self):
+        token, _ = self.issue(); body = {"requestKey": uuid4().hex}
+        queued = self.views.refresh(token, body)
+        session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
+        self.service.sessions.mark_expired(session["session_id"], "test expired session")
+        first = self.execute(queued)
+        self.assertEqual(first["error"]["code"], "LOGIN_REQUIRED")
+        interaction_id = first["interaction"]["interactionId"]
+        self.assertEqual(self.views.query_status(token, queued["taskId"])["state"], "waiting_user")
+        record = self.service.interactions.get(interaction_id, user_subject=OWNER)
+        self.assertEqual(record["resume_spec"]["taskId"], queued["taskId"])
+        challenge_id = self.service._credential_challenge_id(record)
+        csrf = self.service.challenges.issue_csrf(challenge_id)
+        self.service.challenges.claim(challenge_id, csrf_token=csrf, csrf_cookie=csrf)
+        self.service.challenges.complete(challenge_id, result={"principal": OWNER})
+        self.service.sessions.activate(session["session_id"], observed_principal_ref=OWNER)
+        resumed = self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)
+        self.assertEqual(resumed["status"], "succeeded")
+        self.assertEqual(resumed["taskId"], queued["taskId"])
+        with patch.object(self.service, "invoke", side_effect=AssertionError("POST only recovers the same query ticket")):
+            recovered = self.views.refresh(token, body)
+        self.assertEqual(recovered["taskId"], queued["taskId"])
+        self.assertEqual(recovered["query"]["state"], "succeeded")
+        self.assertTrue(recovered["query"]["selectionAvailable"])
+        new_token = recovered["resultView"]["presentation"]["url"].rsplit("/", 1)[1]
+        self.assertTrue(self.views.read(new_token)["selectionAvailable"])
+        self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
+        self.assertEqual(self.fixture.audit()["decisionCount"], 0)
+        self.assertEqual(self.fixture.audit()["authorizationStates"], {})
+
+    def test_whole_ticket_expiry_stops_refresh_without_renewing_authority(self):
+        token, _ = self.issue()
+        with patch.object(actions, "_now", return_value=actions._now() + timedelta(seconds=TICKET_TTL_SECONDS + 1)):
+            with self.assertRaises(actions.ActionableResultError) as error:
+                self.views.refresh(token, {"requestKey": uuid4().hex})
+        self.assertEqual(error.exception.code, "RESULT_VIEW_EXPIRED")
+        self.assertEqual(actions.pending_preparations(self.service, OWNER), [])
+
+    def test_refresh_query_checks_live_private_route_and_read_permission(self):
+        token, _ = self.issue(); queued = self.views.refresh(token, {"requestKey": uuid4().hex})
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE client_endpoints SET route_json=? WHERE endpoint_id=?",
+                (json.dumps({"channel": "telegram", "to": "1002"}), self.endpoint["endpoint_id"]))
+        with self.assertRaises(actions.ActionableResultError): self.views.query_status(token, queued["taskId"])
+        with self.assertRaises(actions.ActionableResultError): self.execute(queued)
+        self.assertEqual(self.fixture.oa.writes, [])
+
     def issue(self):
         value = self.views.issue(OWNER, self.source["task_id"], self.endpoint["endpoint_id"],
             {"endpointId": self.endpoint["endpoint_id"], "tokenId": self.token["token_id"]})
@@ -550,6 +633,23 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual(self.views.prepare(token, self.body(token))["taskId"], queued["taskId"])
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
+    def test_superseded_task_stops_even_when_its_old_input_presentation_is_pending(self):
+        token, _ = self.issue()
+        queued = self.views.prepare(token, self.body(token))
+        response = self.execute(queued)
+        self.service.present_interaction(user_subject=OWNER, agent_host="openclaw", endpoint_key=self.endpoint["endpoint_key"],
+            interaction_id=response["interaction"]["interactionId"], continuous_flow=True)
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='superseded' WHERE task_id=?", (queued["taskId"],))
+        before = self.counts()
+        status = self.views.status(token, queued["taskId"])
+        self.assertTrue(status["terminal"])
+        self.assertEqual(status["state"], "superseded")
+        self.assertIn("已被替代", status["message"])
+        self.assertNotIn("interaction", status)
+        self.assertEqual(before, self.counts())
+        self.assertEqual(len(self.fixture.oa.writes), 0)
+
     def test_real_l3_lease_prepare_uses_exact_telegram_endpoint_without_web_account(self):
         registration = self.register_host()
         token, _ = self.issue()
@@ -566,6 +666,26 @@ class TelegramResultViewTests(unittest.TestCase):
             with self.subTest(change=change), patch.object(self.service, "invoke", side_effect=AssertionError("wrong binding cannot invoke")), \
                  self.assertRaises((ValueError, KeyError, PermissionError, TaskIntegrityError, HostLeaseConflict)):
                 self.service.prepare_host_task(**{**arguments, **change})
+
+    def test_shortcut_query_requires_real_original_l3_lease_and_cannot_run_on_foreign_route(self):
+        registration = self.register_host()
+        token, _ = self.issue()
+        queued = self.views.refresh(token, {"requestKey": uuid4().hex})
+        lease = self.service.acquire_host_coordinator_lease(user_subject=OWNER, task_id=queued["taskId"], registration=registration)
+        arguments = dict(user_subject=OWNER, task_id=queued["taskId"], command_key=queued["commandKey"], session_key=self.session,
+            endpoint_key=self.endpoint["endpoint_key"], registration=registration,
+            runtime_context={"endpointId": self.endpoint["endpoint_id"], "coordinatorLeaseVersion": str(lease["version"])})
+        for change in ({"session_key": self.fixture.account["openclaw_session_key"]}, {"endpoint_key": "telegram:default:2002"},
+                       {"runtime_context": {"endpointId": self.endpoint["endpoint_id"], "coordinatorLeaseVersion": "999"}}):
+            with self.subTest(change=change), patch.object(self.service, "invoke", side_effect=AssertionError("invalid scope cannot invoke")), \
+                 self.assertRaises((ValueError, KeyError, PermissionError, TaskIntegrityError, HostLeaseConflict)):
+                self.service.prepare_host_task(**{**arguments, **change})
+        response = self.service.prepare_host_task(**arguments)
+        self.assertEqual(response["status"], "succeeded")
+        self.assertEqual(response["queryResult"]["taskId"], queued["taskId"])
+        self.assertEqual(self.fixture.audit()["decisionCount"], 0)
+        self.assertEqual(self.fixture.audit()["authorizationStates"], {})
+        self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
     def test_all_17_types_prepare_without_decision_and_registered_action_labels_are_closed(self):

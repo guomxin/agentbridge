@@ -10,11 +10,11 @@ import { markWorkspaceTiming } from "./workspace_performance.mjs";
 import { createActionableResults } from "./workspace_actionable.mjs";
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, prepareTargets, refreshQuery, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   state.taskFeedback ||= new Map();
-  const actionable = createActionableResults({ document, state, prepareTargets,
+  const actionable = createActionableResults({ document, state, prepareTargets, refreshQuery,
     openPreparation: async taskId => {
       if (await switchView("tasks") === false) return;
       return loadTaskDetail(taskId);
@@ -345,8 +345,18 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     text(view.title, displayTaskTitle(task.title) || "业务办理");
     view.status.className = `application-card-status ${escapeClass(cardStatus)}`;
     const failure = taskPlanFailurePresentation(result.plan);
-    text(view.status, failure?.label || statusLabel(cardStatus));
-    text(view.description, failure?.message || taskCardStatusMessage(cardStatus, task.summary));
+    const oaQuery = task.title === "List Pending OA Workflows" || task.summary?.command?.kind === "oa_pending_query" ||
+      Boolean(result.actionableResults?.length);
+    card.dataset.oaQueryScope = oaQuery ? `${task.agent_host || ""}|${task.origin_endpoint_id || ""}|${task.active_conversation_ref || ""}` : "";
+    const oldSources = result.actionableResults || [];
+    card.dataset.oaArchiveable = String(oaQuery && cardStatus === "succeeded" && !active.length && oldSources.length > 0 &&
+      oldSources.every(group => Date.parse(group.expiresAt) <= Date.now() && !(group.targets || []).some(target =>
+        target.preparation && !["succeeded","completed","failed","outcome_unknown","canceled","expired","superseded","skipped"].includes(target.preparation.state))));
+    text(view.status, failure?.label || (oaQuery && cardStatus === "succeeded" ? "已查询" : statusLabel(cardStatus)));
+    const selectedCount = result.actionableResults?.reduce((sum, group) => sum + group.targets.length, 0);
+    if (oaQuery) text(view.title, "OA 待办查询");
+    text(view.description, failure?.message || (oaQuery && cardStatus === "succeeded" ?
+      selectedCount ? `本次查询返回 ${selectedCount} 项；具体办理状态见各事项。` : "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary)));
     const current = active[0] || result.interaction;
     updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
       ["计划进度", result.plan ? taskPlanProgress(result.plan) : null]]);

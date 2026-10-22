@@ -14,6 +14,8 @@ from agentbridge.auth.card import MAX_AUTH_BODY_BYTES, AuthCardResponse, Trusted
 from agentbridge.auth.field_card import TrustedFieldApplication
 from agentbridge.auth.flow import TrustedFlowApplication, flow_target
 from agentbridge.auth.business_draft_card import business_draft_target
+from agentbridge.auth.pdf_assets import pdf_asset_response
+from agentbridge.auth.material_preview import BusinessMaterialPreviewApplication, material_preview_target
 from agentbridge.auth.result_view import TrustedResultViewApplication, result_view_target
 from agentbridge.auth.interactive_browser import TrustedInteractiveBrowserApplication
 from agentbridge.auth.document_download import TrustedDocumentDownloadApplication
@@ -124,6 +126,10 @@ def create_auth_http_server(
                     tone="error",
                 ))
                 return
+            pdf_asset = pdf_asset_response(self.path)
+            if pdf_asset is not None:
+                self._send(pdf_asset)
+                return
             if self.path == "/favicon.ico":
                 self.send_response(204)
                 self.send_header("Cache-Control", "no-store")
@@ -144,7 +150,8 @@ def create_auth_http_server(
                 else:
                     try:
                         query = parse_qs(urlparse(self.path).query, keep_blank_values=True, max_num_fields=2)
-                        if set(query) - {"task"} or len(query.get("task", [])) > 1:
+                        if set(query) - {"task", "query"} or len(query.get("task", [])) > 1 or len(query.get("query", [])) > 1 \
+                                or ("task" in query and "query" in query):
                             raise ValueError("invalid query")
                     except ValueError:
                         self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "状态请求无效。"}}))
@@ -152,7 +159,20 @@ def create_auth_http_server(
                     self._send(result_application.state(view_token,
                         token=self.headers.get("X-AgentBridge-Result-Token") or "",
                         cookie=_result_cookie(self.headers.get("Cookie") or ""),
-                        task_id=query.get("task", [None])[0]))
+                        task_id=query.get("task", [None])[0], query_task_id=query.get("query", [None])[0]))
+                return
+            material = material_preview_target(self.path)
+            if material is not None and flow_application is not None:
+                source_id, presentation_id, material_id = material
+                draft_application = flow_application.draft_application
+                if (not self._origin_allowed()
+                        or (self.headers.get("Sec-Fetch-Site") or "").lower() not in {"", "same-origin"}):
+                    self._send(draft_application.json(403, {"error": {"code": "INVALID_ORIGIN", "message": "请求来源无效。"}}))
+                else:
+                    self._send(BusinessMaterialPreviewApplication(draft_application=draft_application).get_file(
+                        source_id, presentation_id=presentation_id, material_id=material_id,
+                        token=self.headers.get("X-AgentBridge-Draft-Token") or "",
+                        csrf_cookie=_csrf_cookie(self.headers.get("Cookie") or "")))
                 return
             draft = business_draft_target(self.path)
             if draft is not None and flow_application is not None:
@@ -299,7 +319,7 @@ def create_auth_http_server(
                 if len(body) != content_length:
                     self.close_connection = True
                     self._send(result_application.json(400, {"error": {"code": "INVALID_LENGTH", "message": "请求内容不完整。"}}))
-                elif action != "prepare":
+                elif action not in {"prepare", "refresh"}:
                     self._send(result_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
                 elif urlparse(self.path).query:
                     self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "办理请求无效。"}}))
@@ -310,7 +330,7 @@ def create_auth_http_server(
                         self._send(result_application.prepare(view_token,
                             token=self.headers.get("X-AgentBridge-Result-Token") or "",
                             cookie=_result_cookie(self.headers.get("Cookie") or ""),
-                            content_type=self.headers.get("Content-Type") or "", body=body))
+                            content_type=self.headers.get("Content-Type") or "", body=body, action=action))
                     finally:
                         body = b""
                 return

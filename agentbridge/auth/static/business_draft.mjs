@@ -42,6 +42,56 @@ export function safeFlowUrl(value, origin) {
   } catch { return null; }
 }
 
+/** A timeout ends this browser wait, never the server operation or its original decision key. */
+export function createDraftTransport({window, apiUrl, csrfToken, onProgress = () => {}, now = Date.now}) {
+  const waiting = new Set();
+  const limits = {state: 15000, values: 15000, options: 30000, preview: 45000, approve: 30000};
+  async function request(action, payload) {
+    const controller = new AbortController(), started = now();
+    let timer, progress, finished = false, cancelWait, responseStatus;
+    const entry = {action, cancel: () => { controller.abort(); cancelWait?.(Object.assign(new Error('页面已离开'), {name: 'AbortError'})); }};
+    waiting.add(entry);
+    const tick = () => {
+      if (finished) return;
+      onProgress({action, elapsedMs: now() - started, active: true, entry});
+      progress = window.setTimeout(tick, 1000);
+    };
+    progress = window.setTimeout(tick, 1000);
+    try {
+      const receive = (async () => {
+        const response = await window.fetch(`${apiUrl}/${action}`, {
+          method: payload ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+          headers: {'X-AgentBridge-Draft-Token': csrfToken, ...(payload ? {'Content-Type': 'application/json'} : {})},
+          ...(payload ? {body: JSON.stringify(payload)} : {}),
+        });
+        responseStatus = response.status;
+        let result;
+        try { result = await response.json(); }
+        catch { throw Object.assign(new Error(response.status === 403 ? '办理权限或页面会话已失效，请从原任务重新打开。' :
+          '暂时无法读取办理状态，请保留本页后重试。'), {status: response.ok ? undefined : response.status}); }
+        if (!response.ok) throw Object.assign(new Error(result.error?.message || '暂时无法继续，请保留本页后重试。'),
+          {status: response.status, code: result.error?.code, fieldErrors: result.error?.fieldErrors, current: result.current});
+        return result;
+      })();
+      return await Promise.race([receive, new Promise((_, reject) => {
+        cancelWait = reject;
+        timer = window.setTimeout(() => {
+          controller.abort();
+          const denied = [401, 403, 404, 410].includes(responseStatus);
+          reject(Object.assign(new Error(denied ? '办理入口或页面权限已失效，请从原任务重新打开。' :
+            action === 'approve' ? '确认应答等待超时，需查询原回执。' :
+            '等待应答已超时，本页输入已保留。请重新检查原草稿状态。'),
+            {code: 'REQUEST_TIMEOUT', action, ...(denied ? {status: responseStatus} : {})}));
+        }, limits[action] || 15000);
+      })]);
+    } finally {
+      finished = true; window.clearTimeout(timer); window.clearTimeout(progress); waiting.delete(entry);
+      onProgress({action, elapsedMs: now() - started, active: false, entry});
+    }
+  }
+  return {request, suspend() { for (const entry of waiting) entry.cancel(); }};
+}
+
 export function createDraftController({initial, request, readValues, writeValues, render,
   valid = () => true, optionsValid = () => true, fieldNames = DRAFT_FIELDS,
   viewKind = initial.ui?.viewKind || "work_log", makeKey = decisionKey, onReceipt = () => {}, now = Date.now}) {
@@ -61,7 +111,7 @@ export function createDraftController({initial, request, readValues, writeValues
   let optionsLoading = false;
   let optionsAttempt = -1;
   let reviewChanged = hasReviewChanged(initial);
-  let active = true, lifecycle = 0, restoring = false;
+  let active = true, lifecycle = 0, restoring = false, needsRead = false, decisionInFlight = false;
   const live = epoch => active && lifecycle === epoch;
 
   const allowed = action => !permanentlyLocked && current.allowedActions.includes(action);
@@ -74,14 +124,14 @@ export function createDraftController({initial, request, readValues, writeValues
     const review = current.preview?.summary || current.ui?.review;
     return review?.truncated !== true && (!review?.completeness || review.completeness.status === "complete");
   };
-  const ready = () => active && !restoring && saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
+  const ready = () => active && !restoring && !needsRead && saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
     materialReady() && allowed("approve") && current.preview?.revision === current.revision &&
     Date.parse(current.preview.expiresAt) > now();
   const view = () => ({current, dirty: saved !== edit, saving, previewing, optionsLoading,
     optionsFresh: optionsFresh(), materialReady: materialReady(), reviewChanged, conflict, message,
     fieldErrors, locked: permanentlyLocked || deciding, uncertain: deciding && !permanentlyLocked,
     canApprove: ready(), canEdit: active && allowed("save") && !deciding,
-    canRetry: !conflict && !permanentlyLocked && Boolean(message) && !saving && !previewing && !optionsLoading});
+    canRetry: !conflict && !permanentlyLocked && (Boolean(message) || needsRead || restoring) && !saving && !previewing && !optionsLoading && !decisionInFlight});
   function emit() { if (active) render(view()); }
   function accept(next) {
     if (!next || !Number.isInteger(next.version) || !Number.isInteger(next.revision) ||
@@ -106,10 +156,11 @@ export function createDraftController({initial, request, readValues, writeValues
       accept(error.current);
       if (!permanentlyLocked && error.code === "DRAFT_REVISION_CONFLICT") conflict = current;
     }
-    if (error.status === 403 || error.status === 410) permanentlyLocked = true;
+    if ([401, 403, 404, 410].includes(error.status)) permanentlyLocked = true;
+    if (error.code === 'REQUEST_TIMEOUT') needsRead = true;
   }
   async function preview(force = false) {
-    if (!active || restoring || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
+    if (!active || restoring || needsRead || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
         (!force && (previewAttempt === edit || ready()))) return;
     const epoch = lifecycle;
     const revision = current.revision;
@@ -136,7 +187,7 @@ export function createDraftController({initial, request, readValues, writeValues
     }
   }
   async function loadOptions(force = false) {
-    if (!active || restoring || viewKind !== "meeting_room" || optionsLoading || previewing || saving || conflict || deciding ||
+    if (!active || restoring || needsRead || viewKind !== "meeting_room" || optionsLoading || previewing || saving || conflict || deciding ||
         !allowed("options") || saved !== edit || !optionsValid() ||
         (!force && (optionsFresh() || optionsAttempt === current.revision))) return;
     const epoch = lifecycle;
@@ -167,7 +218,7 @@ export function createDraftController({initial, request, readValues, writeValues
     if (live(epoch)) await preview(force);
   }
   async function save() {
-    if (!active || restoring || saving || conflict || deciding || !allowed("save")) return;
+    if (!active || restoring || needsRead || saving || conflict || deciding || !allowed("save")) return;
     const epoch = lifecycle;
     if (saved === edit) { await prepare(); return; }
     saving = true;
@@ -208,13 +259,17 @@ export function createDraftController({initial, request, readValues, writeValues
       }
     } catch (error) {
       if (!live(epoch)) return;
-      if (error.status === 403 || error.status === 410) fail(error);
-      else if (deciding) message = "正在确认本次提交的状态，已填写内容不会重发。";
+      if ([401, 403, 404, 410].includes(error.status)) fail(error);
+      else if (deciding) { message = "暂时无法读取原回执，请重新检查；已填写内容不会重发。"; emit(); return false; }
       else if (restore) {
         // A restoration must establish the current permission and revision
         // before a local edit can be saved or a decision can be made.
         message = "暂时无法核对最新草稿，本页输入已保留，请重新检查后继续。";
-        return false;
+        emit(); return false;
+      } else {
+        needsRead = true;
+        message = error.message || "暂时无法读取最新状态，本页输入已保留，请重新检查后继续。";
+        emit(); return false;
       }
     }
     if (!live(epoch)) return;
@@ -225,11 +280,12 @@ export function createDraftController({initial, request, readValues, writeValues
     return true;
   }
   async function approve(retry = false) {
-    if (!active || restoring || permanentlyLocked || (deciding && !retry) || (!decision && !ready())) return;
+    if (!active || restoring || permanentlyLocked || decisionInFlight || (deciding && !retry) || (!decision && !ready())) return;
     const epoch = lifecycle;
     if (!decision) decision = {expectedRevision: current.revision,
       previewId: current.preview.previewId, requestKey: makeKey()};
     deciding = true;
+    decisionInFlight = true;
     message = "";
     emit();
     try {
@@ -239,7 +295,7 @@ export function createDraftController({initial, request, readValues, writeValues
       if (!result.receipt) throw new Error("批准回执暂未返回，正在查询本次提交状态。 ");
     } catch (error) {
       if (!live(epoch)) return;
-      if (error.status >= 400 && error.status < 500) {
+      if (error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status)) {
         deciding = false;
         decision = null;
         fail(error);
@@ -256,7 +312,7 @@ export function createDraftController({initial, request, readValues, writeValues
         message = "提交应答暂未确认。正在查询原回执；可恢复本次确认，不会新建提交。";
         await poll();
       }
-    }
+    } finally { decisionInFlight = false; }
     if (live(epoch)) emit();
   }
   async function restorePage() {
@@ -267,6 +323,7 @@ export function createDraftController({initial, request, readValues, writeValues
     const fresh = await poll({restore: true});
     if (!live(epoch)) return;
     restoring = fresh !== true;
+    if (fresh === true) needsRead = false;
     // Unsent edits remain in the same DOM. A known revision is required
     // before autosaving; an uncertain decision is only read, never replayed.
     if (fresh === true && !conflict && !permanentlyLocked && !deciding) {
@@ -281,7 +338,7 @@ export function createDraftController({initial, request, readValues, writeValues
     edit() {
       if (!active || !allowed("save") || deciding) return;
       edit += 1;
-      message = "";
+      message = needsRead || restoring ? "本页输入已保留，请重新检查最新草稿后继续。" : "";
       fieldErrors = {};
       emit();
     },
@@ -289,9 +346,13 @@ export function createDraftController({initial, request, readValues, writeValues
     suspend() { active = false; lifecycle++; },
     restore: restorePage,
     async retry() {
-      if (!active) return;
-      if (restoring) { await restorePage(); return; }
-      if (decision) await approve(true);
+      if (!active || permanentlyLocked) return;
+      if (restoring || needsRead) { await restorePage(); return; }
+      if (decision) {
+        // Read the durable original receipt before an explicit same-key recovery.
+        // An unavailable read must never turn into another POST.
+        if (await poll({restore: true}) === true && !permanentlyLocked) await approve(true);
+      }
       else {
         previewAttempt = -1; optionsAttempt = -1;
         if (saved === edit) await prepare(true); else await save();
@@ -471,6 +532,16 @@ export function renderEvidence(document, target, review, kind = "") {
       }
       const text = document.createElement(material.reading ? "div" : "pre"); text.className = "material-body"; text.tabIndex = 0;
       appendReading(document, text, material.text, material.reading); detail.append(text);
+      if (String(material.text || "").length > 1800) {
+        const expand = document.createElement("button"); expand.type = "button"; expand.className = "secondary material-reading-toggle";
+        let expanded = false; expand.textContent = "展开长文连续阅读"; expand.setAttribute("aria-expanded", "false");
+        expand.addEventListener("click", () => {
+          expanded = !expanded; text.className = `material-body${expanded ? " expanded" : ""}`;
+          expand.textContent = expanded ? "收起长文阅读区" : "展开长文连续阅读";
+          expand.setAttribute("aria-expanded", String(expanded));
+        });
+        detail.append(expand);
+      }
     } else {
       const columns = (Array.isArray(material.columns) ? material.columns : []).filter(column => typeof column?.key === "string");
       const table = document.createElement("table"), head = document.createElement("thead"), body = document.createElement("tbody");
@@ -516,6 +587,45 @@ export function renderEvidence(document, target, review, kind = "") {
   target.replaceChildren(section); target.dataset.signature = signature;
 }
 
+/** Display-only differences in source material; never changes the reviewed contract. */
+export function reviewDifferences(previous, next) {
+  const source = review => {
+    const entries = [];
+    const occurrences = new Map();
+    const identity = (scope, label) => {
+      const key = JSON.stringify([scope, label]), ordinal = occurrences.get(key) || 0;
+      occurrences.set(key, ordinal + 1);
+      return JSON.stringify([scope, label, ordinal]);
+    };
+    for (const field of review?.fields || []) {
+      if (["处理意见", "本次操作", "回复说明", "参会意向"].includes(field.label)) continue;
+      entries.push([identity("field", String(field.label)), String(field.label), String(field.value ?? "")]);
+    }
+    for (const group of review?.groups || []) {
+      const groupKey = identity("group", String(group.title || "申请明细"));
+      for (const field of group.fields || []) {
+        entries.push([identity(groupKey, String(field.label)), `${group.title || "申请明细"} · ${field.label}`, String(field.value ?? "")]);
+      }
+    }
+    for (const section of review?.sections || []) {
+      const text = section.kind === "text" ? String(section.text || "") : section.kind === "facts" ?
+        (section.fields || []).map(field => `${field.label}：${field.value ?? ""}`).join("\n") :
+        (section.rows || []).map(row => (section.columns || []).map(column => `${column.label}：${row.cells?.[column.key] ?? ""}`).join("；")).join("\n");
+      entries.push([identity("section", String(section.id || section.title || "原始材料")), String(section.title || "原始材料"), text]);
+    }
+    entries.push(["attachments", "附件清单", (review?.attachments || []).map(item => item.name || "未命名附件").join("\n")]);
+    return new Map(entries.map(([key, label, value]) => [key, {label, value}]));
+  };
+  const before = source(previous), after = source(next), changes = [];
+  for (const key of new Set([...before.keys(), ...after.keys()])) {
+    if (before.get(key)?.value === after.get(key)?.value) continue;
+    const shorten = value => value === undefined ? "（无）" : value.length > 1200 ? value.slice(0, 1200) + "…（节选，请核对下方完整材料）" : value || "（空）";
+    changes.push({label: after.get(key)?.label || before.get(key).label,
+      before: shorten(before.get(key)?.value), after: shorten(after.get(key)?.value)});
+  }
+  return {items: changes.slice(0, 20), total: changes.length};
+}
+
 export function mountBusinessDraft(config, document, window) {
   const form = document.getElementById("draft-form");
   const fieldNames = config.fieldNames || DRAFT_FIELDS;
@@ -524,6 +634,8 @@ export function mountBusinessDraft(config, document, window) {
   const fields = Object.fromEntries(fieldNames.map(name => [name,
     bindDraftField(document.getElementById(name), definitions.find(field => field.name === name))]));
   const node = id => document.getElementById(id);
+  const materials = node("draft-material-previews") && typeof createMaterialPreviews === "function" ?
+    createMaterialPreviews({document, window, target:node("draft-material-previews"), apiUrl:config.apiUrl, csrfToken:config.csrfToken}) : null;
   const readValues = () => Object.fromEntries(fieldNames.map(name => [name, fields[name].value]));
   const setText = (id, value) => { node(id).textContent = String(value ?? ""); };
   const touched = new Set();
@@ -532,6 +644,20 @@ export function mountBusinessDraft(config, document, window) {
   let lastOptions = config.state.options;
   let saveTimer, pollTimer;
   let stopped = false, pageEpoch = 0;
+  let statusCopy = '';
+  let displayedReview = config.state.preview?.summary || config.state.ui?.review || {};
+  let materialDiff = null;
+  const waiting = new Map();
+  function paintStatus() {
+    const slow = [...waiting.values()].filter(wait => wait.elapsedMs >= 5000)
+      .sort((a, b) => b.elapsedMs - a.elapsedMs)[0];
+    setText('draft-status', statusCopy + (slow ? ` · 已等待 ${Math.floor(slow.elapsedMs / 1000)} 秒，请保留本页，无需重复提交。` : ''));
+  }
+  const transport = createDraftTransport({window, apiUrl: config.apiUrl, csrfToken: config.csrfToken,
+    onProgress(wait) {
+      if (wait.active) waiting.set(wait.entry, wait); else waiting.delete(wait.entry);
+      if (!stopped) paintStatus();
+    }});
   function edited(name) {
     touched.add(name); controller.edit();
     window.clearTimeout(saveTimer);
@@ -578,28 +704,7 @@ export function mountBusinessDraft(config, document, window) {
     valid: () => form.checkValidity(),
     optionsValid: () => ["start_time", "end_time"].every(name => fields[name]?.value && fields[name].checkValidity()) &&
       fields.start_time.value < fields.end_time.value,
-    async request(action, payload) {
-      const response = await window.fetch(`${config.apiUrl}/${action}`, {
-        method: payload ? "POST" : "GET", credentials: "same-origin", cache: "no-store",
-        headers: {"X-AgentBridge-Draft-Token": config.csrfToken,
-          ...(payload ? {"Content-Type": "application/json"} : {})},
-        ...(payload ? {body: JSON.stringify(payload)} : {}),
-      });
-      let result;
-      try { result = await response.json(); }
-      catch {
-        const error = new Error(response.status === 403 ? "办理权限或页面会话已失效，请从原任务重新打开。" : "暂时无法读取办理状态，请保留本页后重试。");
-        if (!response.ok) error.status = response.status;
-        throw error;
-      }
-      if (!response.ok) {
-        const error = new Error(result.error?.message || "暂时无法继续，请保留本页后重试。");
-        Object.assign(error, {status: response.status, code: result.error?.code,
-          fieldErrors: result.error?.fieldErrors, current: result.current});
-        throw error;
-      }
-      return result;
-    },
+    request: transport.request,
     onReceipt(receipt) {
       if (stopped) return false;
       const next = safeFlowUrl(receipt.flowUrl, window.location.origin);
@@ -608,11 +713,42 @@ export function mountBusinessDraft(config, document, window) {
       window.location.replace(next.href);
     },
     render(view) {
+      const problems = [];
       for (const name of fieldNames) {
         fields[name].disabled = !view.canEdit;
         const error = view.fieldErrors[name] || (touched.has(name) && !fields[name].validity.valid ? fields[name].validationMessage : "");
         fields[name].setAttribute("aria-invalid", error ? "true" : "false");
         setText(`error-${name}`, error);
+        const definition = definitions.find(field => field.name === name) || {};
+        if (error || definition.required && !fields[name].value.trim() || !fields[name].validity.valid) {
+          problems.push({name, label: definition.label || name, error});
+        }
+        if (node(`count-${name}`)) setText(`count-${name}`, `${fields[name].value.length} / ${definition.max_length} 字`);
+      }
+      const errors = node("draft-field-summary");
+      if (errors) {
+        const visible = problems.filter(problem => problem.error), signature = JSON.stringify(visible);
+        errors.hidden = !visible.length;
+        if (errors.dataset.signature !== signature) {
+          errors.replaceChildren();
+          const title = document.createElement("strong"); title.textContent = `请检查 ${visible.length} 个填写项`; errors.append(title);
+          const list = document.createElement("ul");
+          for (const problem of visible) {
+            const item = document.createElement("li"), link = document.createElement("a"); link.href = `#${problem.name}`;
+            link.textContent = `${problem.label}：${problem.error}`;
+            link.addEventListener("click", () => { const field = node(problem.name); (field?.querySelector?.('input') || field)?.focus(); });
+            item.append(link); list.append(item);
+          }
+          errors.append(list); errors.dataset.signature = signature;
+        }
+      }
+      const expiry = node("draft-expiry"), expires = Date.parse(view.current.expiresAt), left = expires - Date.now();
+      if (expiry) {
+        expiry.hidden = !Number.isFinite(expires) || Boolean(view.current.receipt);
+        expiry.className = `draft-expiry${left < 120000 ? " urgent" : ""}`;
+        expiry.textContent = left <= 0 ? "本页已到期。输入仍保留在本页，请返回原任务重新打开；系统不会自动提交。" :
+          left < 120000 ? `本页约 ${Math.ceil(left / 1000)} 秒后到期，请及时核对；到期后从原任务重新打开。` :
+          `本页可办理至 ${new Date(expires).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit"})}；填写自动保存，确认后才执行。`;
       }
       renderRooms(view);
       node("draft-submit").disabled = !view.canApprove;
@@ -621,11 +757,14 @@ export function mountBusinessDraft(config, document, window) {
       setText("draft-error", view.message);
       node("draft-error").hidden = !view.message;
       node("draft-material-change").hidden = !view.reviewChanged;
-      setText("draft-status", view.locked ? (view.current.receipt ? "已确认，正在接续办理" : view.uncertain ? "正在确认提交状态" : "此草稿已停止编辑") :
+      statusCopy = view.locked ? (view.current.receipt ? "已确认，正在接续办理" : view.uncertain ? "正在确认提交状态" : "此草稿已停止编辑") :
         view.conflict ? "需要核对另一页面的修改" : view.saving ? "正在保存草稿" : view.dirty ? "有修改，正在准备检查" :
         view.optionsLoading ? "正在查询空闲会议室" : view.previewing ? (viewKind === "work_log" ? "正在解析项目并检查重复日志" : "正在核对申请信息") :
         !view.materialReady ? "原始材料尚未完整核对，暂不能确认提交" :
-        view.canApprove ? (view.reviewChanged ? "请重新核对更新后的材料，再确认提交" : "已检查，可以确认提交") : "填写完整后自动检查");
+        view.canApprove ? (view.reviewChanged ? "请重新核对更新后的材料，再确认提交" : "已检查，可以确认提交") : "填写完整后自动检查";
+      paintStatus();
+      if (node("draft-submit-hint")) setText("draft-submit-hint", problems.length ?
+        `还需检查 ${problems.length} 项：${problems.map(item => item.label).join("、")}` : statusCopy);
       node("draft-conflict").hidden = !view.conflict;
       if (view.conflict) {
         const local = readValues();
@@ -639,8 +778,25 @@ export function mountBusinessDraft(config, document, window) {
       }
       const preview = !view.dirty && view.current.preview?.revision === view.current.revision ? view.current.preview : null;
       const summary = !view.conflict ? preview?.summary : null;
-      if (viewKind === "approval" || view.current.ui?.review) renderEvidence(document, node("draft-evidence"),
-        preview?.summary || view.current.ui?.review || {}, view.current.ui?.reviewKind || "");
+      const currentReview = preview?.summary || view.current.ui?.review || {};
+      materials?.render(currentReview);
+      if (view.reviewChanged) {
+        const diff = reviewDifferences(displayedReview, currentReview);
+        if (diff.total) materialDiff = diff;
+      }
+      displayedReview = currentReview;
+      const diffTarget = node("draft-material-diff");
+      if (diffTarget && view.reviewChanged && diffTarget.dataset.signature !== JSON.stringify(materialDiff)) {
+        diffTarget.replaceChildren(); diffTarget.dataset.signature = JSON.stringify(materialDiff);
+        if (!materialDiff?.total) { const note = document.createElement("p"); note.textContent = "来源材料绑定已变化，请重新核对下方完整材料。"; diffTarget.append(note); }
+        for (const item of materialDiff?.items || []) {
+          const detail = document.createElement("details"), label = document.createElement("summary"), before = document.createElement("pre"), after = document.createElement("pre");
+          label.textContent = item.label; before.textContent = `之前：${item.before}`; after.textContent = `现在：${item.after}`;
+          detail.append(label, before, after); diffTarget.append(detail);
+        }
+        if (materialDiff?.total > 20) { const note = document.createElement("p"); note.textContent = `共 ${materialDiff.total} 处变化，此处显示前 20 处，请核对下方完整材料。`; diffTarget.append(note); }
+      }
+      if (viewKind === "approval" || view.current.ui?.review) renderEvidence(document, node("draft-evidence"), currentReview, view.current.ui?.reviewKind || "");
       node("draft-review").hidden = !summary;
       if (summary) {
         setText("review-effect", summary.effect || view.current.ui?.effect || "执行已核对的本次操作");
@@ -659,6 +815,10 @@ export function mountBusinessDraft(config, document, window) {
           }
         }
       }
+      form.dataset.agentbridgeDirty = String(view.dirty && !view.locked);
+      form.dataset.agentbridgeBusy = String(view.saving || view.previewing || view.optionsLoading || view.uncertain);
+      form.dataset.agentbridgeLocked = String(view.locked);
+      if (window.CustomEvent) document.dispatchEvent(new window.CustomEvent('agentbridge:draft-state'));
     },
   });
   form.addEventListener("input", event => { if (fieldNames.includes(event.target.name)) edited(event.target.name); });
@@ -673,20 +833,24 @@ export function mountBusinessDraft(config, document, window) {
     stopped = true; pageEpoch++;
     window.clearTimeout(saveTimer); window.clearTimeout(pollTimer);
     controller.suspend();
+    materials?.suspend();
+    transport.suspend(); waiting.clear();
   });
   window.addEventListener("pageshow", event => {
     if (!event.persisted || !stopped) return;
     stopped = false;
     const epoch = ++pageEpoch;
     void controller.restore().finally(() => {
-      if (!stopped && pageEpoch === epoch) pollTimer = window.setTimeout(poll, 2500);
+      if (!stopped && pageEpoch === epoch && !controller.state().locked) pollTimer = window.setTimeout(poll, 2500);
     });
   });
   async function poll() {
     if (stopped) return;
     const epoch = pageEpoch;
-    await controller.poll();
-    if (!stopped && pageEpoch === epoch) pollTimer = window.setTimeout(poll, 2500);
+    const refreshed = await controller.poll();
+    if (!stopped && pageEpoch === epoch && refreshed !== false && (!controller.state().locked || controller.state().uncertain)) {
+      pollTimer = window.setTimeout(poll, 2500);
+    }
   }
   controller.start();
   pollTimer = window.setTimeout(poll, 2500);

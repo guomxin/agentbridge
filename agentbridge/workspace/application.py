@@ -382,6 +382,13 @@ class WorkspaceApplication:
     def prepare_selected_results(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.actionable_results import queue_preparation
         result = queue_preparation(self.service, account, task_id, body)
+        return self._queued_command(account, result)
+
+    def query_oa_pending(self, account: dict, body: dict) -> dict:
+        from agentbridge.core.quick_queries import queue_query
+        return self._queued_command(account, queue_query(self.service, account, body))
+
+    def _queued_command(self, account: dict, result: dict) -> dict:
         queued_task = self.service.tasks.get_task(result["taskId"], user_subject=account["user_subject"])
         try:
             requested_at = queued_task["summary"]["command"]["requestedAt"]

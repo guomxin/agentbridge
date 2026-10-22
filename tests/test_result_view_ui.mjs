@@ -6,24 +6,38 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const task = '12345678-1234-1234-1234-123456789abc';
 const opaque = 'a'.repeat(43);
 
-function fixture(saved = null, {extraState = {}} = {}) {
+function fixture(saved = null, {extraState = {}, savedQuery = null} = {}) {
   function node(tag = '') { return {tag, children: [], listeners: {}, textContent: '', hidden: false,
     append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
     addEventListener(name, fn) { this.listeners[name] = fn; }, click() { return this.listeners.click?.(); }}; }
-  const ids = Object.fromEntries(['result-groups','result-title','result-status','result-count','result-prepare','result-recover','result-resume'].map(x => [x, node()]));
+  const ids = Object.fromEntries(['result-groups','result-title','result-status','result-count','result-prepare','result-recover','result-resume',
+    'result-refresh','result-query-recover','result-search','result-type','result-selected-only','result-validity'].map(x => [x, node()]));
   const document = {getElementById: id => ids[id], createElement: node};
   const events = {}, timers = new Map(), calls = [], navigations = [];
-  let value = saved ? JSON.stringify(saved) : null, seq = 0;
+  const key=`agentbridge-result-view:/results/${opaque}`;
+  const storage = new Map([[key,JSON.stringify(saved)],[`${key}:query`,JSON.stringify(savedQuery)]]);
+  let seq = 0, elapsed = 0, requestsMade = 0;
   const window = {location: {origin: 'https://trusted.test', href: `https://trusted.test/results/${opaque}`, hash: '#tgWebAppPlatform=android', replace: u => navigations.push(u)},
-    addEventListener: (k,v) => { events[k] = v; }, sessionStorage: {getItem: () => value, setItem: (_k,v) => { value = v; }},
-    crypto: {randomUUID: () => 'request-1234567890'}};
+    addEventListener: (k,v) => { events[k] = v; }, sessionStorage: {getItem: k => storage.get(k), setItem: (k,v) => { storage.set(k,v); }},
+    crypto: {randomUUID: () => requestsMade++ ? `request-1234567890-${requestsMade}` : 'request-1234567890'}};
   const state = {title:'OA 待办',groups:[{operationId:'op1', targets:[{targetKey:'b'.repeat(64),title:'月度考勤',enabled:true,workflowLabel:'考勤确认'},
     {targetKey:'c'.repeat(64),title:'未支持事项',enabled:false}]}],preparations:[], ...extraState};
-  const fetch = (url, options) => new Promise((resolve, reject) => { calls.push({url,options,resolve: (v,ok=true) => resolve({ok,json:async()=>v}),reject}); });
+  const fetch = (url, options) => new Promise((resolve, reject) => { calls.push({url,options,respond:resolve,
+    resolve: (v,ok=true,status=ok?200:503) => resolve({ok,status,json:async()=>v}),reject}); });
   const controller = installResultView({document,window,fetch,initial:{path:`/results/${opaque}`,csrfToken:'proof',state},
-    setTimeout: fn => {const id=++seq;timers.set(id,fn);return id;},clearTimeout:id=>timers.delete(id)});
+    now:()=>elapsed, setTimeout: (fn,delay) => {const id=++seq;fn.at=elapsed+delay;timers.set(id,fn);return id;},clearTimeout:id=>timers.delete(id)});
+  const advance = async ms => {
+    const until=elapsed+ms;
+    while (true) {
+      const next=[...timers].filter(([,fn])=>fn.at<=until).sort((a,b)=>a[1].at-b[1].at)[0];
+      if (!next) break;
+      timers.delete(next[0]); elapsed=next[1].at; next[1](); await flush();
+    }
+    elapsed=until;
+  };
   function select() { const input = ids['result-groups'].children[0].children.find(x=>x.tag==='label').children[0]; input.checked=true; input.listeners.change(); }
-  return {controller,ids,calls,navigations,timers,select,state,hide:()=>events.pagehide(),show:()=>events.pageshow({persisted:true}),saved:()=>JSON.parse(value)};
+  return {controller,ids,calls,navigations,timers,select,state,advance,hide:()=>events.pagehide(),show:()=>events.pageshow({persisted:true}),
+    saved:()=>JSON.parse(storage.get(key)),savedQuery:()=>JSON.parse(storage.get(`${key}:query`))};
 }
 
 test('selection queues only the exact original keys; no business approval is sent', async () => {
@@ -173,7 +187,7 @@ test('checking an exact source keeps the same checkbox DOM for keyboard and scre
   assert.equal(f.ids['result-groups'].children[0],section);
   assert.equal(section.children.find(node=>node.tag==='label').children[0],input);
   assert.equal(input.checked,true);
-  assert.equal(f.ids['result-count'].textContent,'已选择 1 项；每项仍需单独确认。');
+  assert.equal(f.ids['result-count'].textContent,'显示 2 项，其中可办 1 项、不可直接办理 1 项。已选择 1 项；每项仍需单独确认。');
   input.checked=false; input.listeners.change();
   assert.equal(input.checked,false);
   assert.equal(f.ids['result-prepare'].disabled,true);
@@ -201,4 +215,261 @@ test('restoration cannot enable selections after the fresh permission read faile
   assert.equal(f.ids['result-prepare'].disabled,true);
   f.ids['result-prepare'].click();
   assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0);
+});
+
+test('superseded skipped and completed are terminal even with a stale pending interaction', async () => {
+  for (const state of ['superseded','skipped','completed','partially_succeeded']) {
+    const f=fixture({taskId:task});
+    f.calls[0].resolve({state,terminal:false,interaction:{state:'pending',presentation:{url:`/flow/input/${opaque}`}}});
+    await flush();
+    assert.deepEqual(f.navigations,[]); assert.equal(f.timers.size,0);
+    assert.equal(f.ids['result-resume'].children.at(-1).textContent,'返回待办选择');
+  }
+});
+
+test('permanent endpoint and expiry errors stop reads and prevent another preparation', async () => {
+  for (const [status,code] of [[403,'RESULT_CSRF_INVALID'],[410,'RESULT_VIEW_EXPIRED'],[409,'RESULT_VIEW_EXPIRED'],[404,'ACTION_SOURCE_NOT_FOUND']]) {
+    const f=fixture({taskId:task});
+    f.calls[0].resolve({error:{code,message:'原入口不可用'}},false,status); await flush();
+    assert.equal(f.timers.size,0); assert.equal(f.ids['result-recover'].hidden,true);
+    assert.match(f.ids['result-status'].textContent,/回原 Telegram 聊天/);
+    f.ids['result-prepare'].click(); f.show(); await flush();
+    assert.equal(f.calls.length,1); assert.deepEqual(f.navigations,[]);
+  }
+});
+
+test('slow state reads show measured elapsed time, then offer an explicit bounded GET recovery', async () => {
+  const f=fixture({taskId:task});
+  await f.advance(6000); assert.match(f.ids['result-status'].textContent,/已等待 6 秒/);
+  await f.advance(9000);
+  assert.equal(f.calls[0].options.signal.aborted,true);
+  assert.equal(f.timers.size,0);
+  assert.equal(f.ids['result-recover'].hidden,false);
+  assert.match(f.ids['result-status'].textContent,/超时/);
+  f.ids['result-recover'].click();
+  assert.equal(f.calls.length,2); assert.equal(f.calls[1].options.method,'GET');
+  f.calls[1].resolve({state:'superseded',terminal:true,message:'原卡已替代'}); await flush();
+  f.calls[0].resolve({state:'waiting_user',interaction:{state:'pending',presentation:{url:`/flow/input/${opaque}`}}}); await flush();
+  assert.deepEqual(f.navigations,[]); assert.equal(f.ids['result-status'].textContent,'原卡已替代');
+  assert.equal(f.timers.size,0);
+});
+
+test('prepare timeout preserves the exact frozen request and ignores its late reply', async () => {
+  const f=fixture(); f.select(); const first=f.ids['result-prepare'].click();
+  const original=f.calls[0].options.body;
+  await f.advance(30000); await first;
+  assert.equal(f.calls.length,1); assert.equal(f.ids['result-recover'].hidden,false);
+  const second=f.ids['result-recover'].click();
+  assert.equal(f.calls[1].options.body,original);
+  f.calls[1].resolve({taskId:task}); await flush();
+  f.calls[2].resolve({state:'unknown',terminal:true,message:'原结果待核对'}); await second;
+  f.calls[0].resolve({taskId:'22345678-1234-1234-1234-123456789abc'}); await flush();
+  assert.equal(f.saved().taskId,task); assert.equal(f.calls.length,3);
+  assert.deepEqual(f.navigations,[]); assert.equal(f.timers.size,0);
+});
+
+test('an unrecognized task state stops rather than navigating or polling forever', async () => {
+  const f=fixture({taskId:task});
+  f.calls[0].resolve({state:'new-unknown-state',terminal:false,interaction:{state:'pending',presentation:{url:`/flow/input/${opaque}`}}});
+  await flush();
+  assert.equal(f.timers.size,0);assert.deepEqual(f.navigations,[]);
+  assert.match(f.ids['result-status'].textContent,/无法识别/);
+  assert.equal(f.ids['result-recover'].hidden,true);assert.equal(f.saved().taskId,task);
+});
+
+test('search and type filters select only visible enabled targets without replacing focused checkboxes', async () => {
+  const f=fixture(null,{extraState:{groups:[{operationId:'op1',targets:[
+    {targetKey:'a'.repeat(64),title:'财务周报',workflowType:'weekly',workflowLabel:'周报',sender:'张甲',enabled:true},
+    {targetKey:'b'.repeat(64),title:'研发周报',workflowType:'weekly',workflowLabel:'周报',sender:'李乙',enabled:true},
+    {targetKey:'c'.repeat(64),title:'财务考勤',workflowType:'attendance',workflowLabel:'考勤',enabled:true},
+    {targetKey:'d'.repeat(64),title:'财务附件审批',workflowType:'unsupported',workflowLabel:'其他',enabled:false,disabledReason:'暂不支持'},
+  ]}]}});
+  const section=f.ids['result-groups'].children[0], labels=section.children.filter(child=>child.tag==='label');
+  f.ids['result-search'].value='财务';f.ids['result-search'].listeners.input();
+  f.ids['result-type'].value='weekly';f.ids['result-type'].listeners.change();
+  assert.deepEqual(labels.map(label=>label.hidden),[false,true,true,true]);
+  const all=section.children.find(child=>child.className==='result-select-current');
+  assert.equal(all.textContent,'选择当前可办 1 项');all.click();
+  assert.equal(f.ids['result-groups'].children[0],section);
+  assert.equal(labels[0].children[0].checked,true);assert.equal(labels[3].children[0].checked,false);
+  f.ids['result-search'].value='';f.ids['result-search'].listeners.input();
+  f.ids['result-type'].value='';f.ids['result-type'].listeners.change();
+  f.ids['result-selected-only'].checked=true;f.ids['result-selected-only'].listeners.change();
+  assert.deepEqual(labels.map(label=>label.hidden),[false,true,true,true]);
+  const prepare=f.ids['result-prepare'].click();
+  assert.deepEqual(JSON.parse(f.calls[0].options.body).targetKeys,['a'.repeat(64)]);
+  f.calls[0].reject(new Error('stop'));await prepare;
+});
+
+test('select current eligible explicitly reports disabled items and cannot mix source groups', async () => {
+  const f=fixture(null,{extraState:{groups:[
+    {operationId:'op1',targets:[{targetKey:'a'.repeat(64),title:'甲',enabled:true},{targetKey:'d'.repeat(64),title:'不可办',enabled:false}]},
+    {operationId:'op2',targets:[{targetKey:'b'.repeat(64),title:'乙',enabled:true}]},
+  ]}});
+  assert.match(f.ids['result-count'].textContent,/不可直接办理 1 项/);
+  const groups=f.ids['result-groups'].children;
+  groups[0].children.find(node=>node.className==='result-select-current').click();
+  groups[1].children.find(node=>node.className==='result-select-current').click();
+  assert.equal(groups[0].children.find(node=>node.tag==='label').children[0].checked,false);
+  const prepare=f.ids['result-prepare'].click();
+  assert.deepEqual(JSON.parse(f.calls[0].options.body),{operationId:'op2',targetKeys:['b'.repeat(64)],requestKey:'request-1234567890'});
+  f.calls[0].reject(new Error('stop'));await prepare;
+});
+
+test('resume cards identify actual titles, one-based batch position and explicit terminal result action', () => {
+  const f=fixture(null,{extraState:{preparations:[
+    {taskId:task,title:'核对并办理OA待办',selectedTitles:['九月考勤','部门周报'],state:'waiting_user',batch:{totalCount:2,currentIndex:2,succeededCount:1}},
+    {taskId:'22345678-1234-1234-1234-123456789abc',selectedTitles:['会议邀请'],state:'superseded',terminal:true},
+  ]}});
+  assert.equal(f.ids['result-resume'].children[0].textContent,'继续办理 · 九月考勤、部门周报 · 等待核对 · 已完成 1/2 项，当前第 2 项');
+  assert.equal(f.ids['result-resume'].children[1].textContent,'查看结果 · 会议邀请 · 已被替代');
+});
+
+test('query shortcut uses its own durable key, polls the read task and retrieves only its new same-origin ticket', async () => {
+  const f=fixture();const start=f.ids['result-refresh'].click();
+  assert.match(f.calls[0].url,/\/refresh$/);
+  assert.deepEqual(JSON.parse(f.calls[0].options.body),{requestKey:'request-1234567890'});
+  assert.equal(f.saved(),null);assert.equal(f.ids['result-prepare'].disabled,true);
+  f.calls[0].resolve({taskId:task,query:{taskId:task,state:'active',terminal:false}});await start;
+  assert.match(f.ids['result-status'].textContent,/查询已排队/);
+  await f.advance(1000);assert.match(f.calls[1].url,/\/state\?query=/);assert.equal(f.calls[1].options.method,'GET');
+  f.calls[1].resolve({taskId:task,state:'succeeded',terminal:true,selectionAvailable:true});await flush();
+  assert.equal(f.calls[2].options.body,f.calls[0].options.body);
+  f.calls[2].resolve({taskId:task,resultView:{presentation:{url:`https://trusted.test/results/${'z'.repeat(43)}`}}});await flush();
+  assert.deepEqual(f.navigations,[`https://trusted.test/results/${'z'.repeat(43)}#tgWebAppPlatform=android`]);
+  assert.equal(f.savedQuery(),null);assert.equal(f.timers.size,0);
+  assert.equal(f.calls.filter(call=>/\/prepare$/.test(call.url)).length,0);
+});
+
+test('lost query acknowledgement recovers the same read request independently of prepare and a new query is explicit', async () => {
+  const f=fixture();const first=f.ids['result-refresh'].click();const body=f.calls[0].options.body;
+  f.calls[0].reject(new Error('offline'));await first;
+  assert.equal(f.ids['result-query-recover'].hidden,false);assert.equal(f.saved(),null);
+  const second=f.ids['result-query-recover'].click();
+  assert.equal(f.calls[1].options.body,body);
+  f.calls[1].resolve({taskId:task,query:{taskId:task,state:'succeeded',terminal:true,selectionAvailable:false,groups:[{targets:[{title:'未支持单据',enabled:false,disabledReason:'需原系统核对'}]}]}});await second;await flush();
+  assert.match(f.ids['result-status'].textContent,/已查询，发现 1 项/);
+  assert.equal(f.ids['result-refresh'].disabled,false);
+  assert.equal(f.ids['result-prepare'].disabled,true);
+  assert.equal(f.ids['result-groups'].children.some(node=>node.tag==='label'),false);
+  const third=f.ids['result-refresh'].click();
+  assert.notEqual(f.calls[2].options.body,body);
+  f.calls[2].reject(new Error('offline'));await third;
+});
+
+test('page restoration with a lost query reply exposes recovery without replaying its POST', async () => {
+  const f=fixture();const first=f.ids['result-refresh'].click();const body=f.calls[0].options.body;
+  f.hide();await first;f.show();
+  assert.equal(f.calls[1].options.method,'GET');f.calls[1].resolve(f.state);await flush();
+  assert.equal(f.ids['result-query-recover'].hidden,false);
+  assert.equal(f.calls.filter(call=>call.options.method==='POST').length,1);
+  const recovered=f.ids['result-query-recover'].click();assert.equal(f.calls[2].options.body,body);
+  f.calls[2].resolve({taskId:task,query:{taskId:task,state:'failed',terminal:true,message:'查询未完成'}});await recovered;
+  f.calls[0].resolve({taskId:'22345678-1234-1234-1234-123456789abc',query:{state:'active'}});await flush();
+  assert.equal(f.savedQuery().taskId,task);
+});
+
+test('a refreshed pending read task resumes with GET and expired whole tickets never start new queries', async () => {
+  const query={body:{requestKey:'original-query-request'},taskId:task};
+  const f=fixture(null,{savedQuery:query});
+  assert.match(f.calls[0].url,/\?query=/);assert.equal(f.calls[0].options.method,'GET');
+  f.calls[0].resolve({error:{code:'RESULT_VIEW_EXPIRED',message:'入口已过期'}},false,409);await flush();
+  assert.equal(f.ids['result-query-recover'].hidden,true);assert.equal(f.ids['result-refresh'].disabled,true);
+  f.ids['result-refresh'].click();f.ids['result-query-recover'].click();f.show();await flush();
+  assert.equal(f.calls.length,1);assert.equal(f.timers.size,0);
+});
+
+test('fresh result tickets accept only exact same-origin opaque paths and never follow forged links', async () => {
+  const f=fixture();
+  for (const url of [`https://evil.test/results/${opaque}`,`https://user:pass@trusted.test/results/${opaque}`,
+    `/results/${opaque}?x=1`,`/results/${opaque}#override`,`/results/${'a'.repeat(42)}`,`/results/${opaque}/state`,`javascript:alert(1)`]) {
+    assert.equal(f.controller.safeResultUrl(url),null);
+  }
+  const started=f.ids['result-refresh'].click();
+  f.calls[0].resolve({taskId:task,query:{taskId:task,state:'succeeded',terminal:true,selectionAvailable:true},resultView:{presentation:{url:`https://evil.test/results/${opaque}`}}});await started;
+  assert.deepEqual(f.navigations,[]);assert.equal(f.ids['result-query-recover'].hidden,false);
+  assert.equal(f.calls.length,1);
+});
+
+test('timed out query preparation keeps its key and cannot be replaced with a second read request', async () => {
+  const f=fixture();const started=f.ids['result-refresh'].click();const body=f.calls[0].options.body;
+  await f.advance(30000);await started;
+  assert.equal(f.ids['result-refresh'].disabled,true);assert.equal(f.ids['result-query-recover'].hidden,false);
+  f.ids['result-refresh'].click();assert.equal(f.calls.length,1);
+  const resumed=f.ids['result-query-recover'].click();assert.equal(f.calls[1].options.body,body);
+  f.calls[1].resolve({taskId:task,query:{taskId:task,state:'succeeded',terminal:true,selectionAvailable:false,groups:[]}});await resumed;await flush();
+  f.calls[0].resolve({taskId:'22345678-1234-1234-1234-123456789abc',query:{state:'active'}});await flush();
+  assert.equal(f.savedQuery().taskId,task);assert.equal(f.timers.size,0);
+  assert.match(f.ids['result-status'].textContent,/已查询，发现 0 项/);
+});
+
+test('query navigation freezes the old selection until the new ticket page replaces it', async () => {
+  const f=fixture();f.select();const started=f.ids['result-refresh'].click();
+  f.calls[0].resolve({taskId:task,query:{taskId:task,state:'succeeded',terminal:true,selectionAvailable:true},
+    resultView:{presentation:{url:`/results/${'z'.repeat(43)}`}}});await started;
+  assert.equal(f.ids['result-prepare'].disabled,true);
+  f.ids['result-prepare'].click();f.ids['result-refresh'].click();assert.equal(f.calls.length,1);
+});
+
+test('known permanent response headers survive a hanging error body and cannot restart polling', async () => {
+  for (const status of [401,403,404,410]) {
+    const f=fixture({taskId:task});
+    f.calls[0].respond({ok:false,status,json:()=>new Promise(()=>{})});await flush();
+    await f.advance(15000);
+    assert.equal(f.timers.size,0);assert.equal(f.ids['result-recover'].hidden,true);
+    assert.equal(f.ids['result-prepare'].disabled,true);assert.match(f.ids['result-status'].textContent,/已失效/);
+    f.show();f.ids['result-recover'].click();f.ids['result-refresh'].click();await flush();
+    assert.equal(f.calls.length,1);assert.deepEqual(f.navigations,[]);
+  }
+});
+
+test('source expiry removes only new choices and preserves current task and explicit refresh actions', async () => {
+  const f=fixture(null,{extraState:{groups:[{operationId:'op1',expiresAt:new Date(1000).toISOString(),targets:[
+    {targetKey:'b'.repeat(64),title:'月度考勤',enabled:true}]}],preparations:[{taskId:task,state:'waiting_user'}]}});
+  f.select();assert.equal(f.ids['result-prepare'].disabled,false);
+  const section=f.ids['result-groups'].children[0], input=section.children.find(x=>x.tag==='label').children[0];
+  await f.advance(1000);
+  assert.equal(input.disabled,true);assert.equal(input.checked,false);
+  assert.equal(f.ids['result-prepare'].disabled,true);assert.equal(f.ids['result-refresh'].disabled,false);
+  assert.equal(f.ids['result-resume'].children[0].disabled,false);
+  assert.equal(section.children.find(x=>x.className==='result-select-current').textContent,'选择当前可办 0 项');
+  assert.match(f.ids['result-count'].textContent,/已选择 0 项/);
+  assert.ok(section.children.some(x=>/原查询选择已过期/.test(x.textContent)));
+  f.ids['result-prepare'].click();assert.equal(f.calls.length,0);assert.equal(f.timers.size,0);
+});
+
+test('expired source choices cannot be selected even with a forced checkbox event and expiry waits suspend on leave', async () => {
+  for (const expiresAt of [new Date(0).toISOString(),'invalid-date']) {
+    const f=fixture(null,{extraState:{groups:[{operationId:'op1',expiresAt,targets:[{targetKey:'b'.repeat(64),enabled:true}]}]}});
+    f.select();f.ids['result-prepare'].click();
+    assert.equal(f.calls.length,0);assert.equal(f.saved(),null);assert.equal(f.ids['result-refresh'].disabled,false);
+  }
+  const f=fixture(null,{extraState:{groups:[{operationId:'op1',expiresAt:new Date(1000).toISOString(),targets:[{targetKey:'b'.repeat(64),enabled:true}]}]}});
+  assert.equal(f.timers.size,1);f.hide();assert.equal(f.timers.size,0);
+  await f.advance(2000);f.show();assert.equal(f.calls[0].options.method,'GET');
+  f.calls[0].resolve({...f.state,groups:[]});await flush();
+  assert.equal(f.ids['result-prepare'].disabled,true);assert.equal(f.ids['result-refresh'].disabled,false);
+});
+
+test('a known source-expired rejection refreshes only the original state and keeps the one-hour ticket query available', async () => {
+  const f=fixture();f.select();const started=f.ids['result-prepare'].click();
+  f.calls[0].resolve({error:{code:'ACTION_SOURCE_EXPIRED',message:'原查询已过期'}},false,409);await flush();
+  assert.equal(f.saved(),null);assert.equal(f.calls[1].options.method,'GET');assert.match(f.calls[1].url,/\/state$/);
+  f.calls[1].resolve({...f.state,groups:[],preparations:[{taskId:task,state:'waiting_user'}]});await started;
+  assert.equal(f.ids['result-refresh'].disabled,false);assert.equal(f.ids['result-recover'].hidden,true);
+  assert.equal(f.ids['result-resume'].children[0].disabled,false);
+  const refreshed=f.ids['result-refresh'].click();assert.match(f.calls[2].url,/\/refresh$/);
+  assert.equal(f.calls.filter(call=>/\/prepare$/.test(call.url)).length,1);
+  f.calls[2].resolve({taskId:task,query:{taskId:task,state:'succeeded',terminal:true,selectionAvailable:false,groups:[]}});await refreshed;
+});
+
+test('an unresolved preparation survives source expiry and recovers its original frozen key', async () => {
+  const f=fixture(null,{extraState:{groups:[{operationId:'op1',expiresAt:new Date(1000).toISOString(),targets:[{targetKey:'b'.repeat(64),enabled:true}]}]}});
+  f.select();const started=f.ids['result-prepare'].click();const original=f.calls[0].options.body;
+  f.calls[0].reject(new Error('lost reply'));await started;await f.advance(2000);
+  assert.deepEqual(f.saved().body,JSON.parse(original));
+  const recovered=f.ids['result-recover'].click();assert.equal(f.calls[1].options.body,original);
+  f.calls[1].resolve({taskId:task});await flush();
+  f.calls[2].resolve({state:'superseded',terminal:true});await recovered;
+  assert.equal(f.saved().taskId,task);assert.equal(f.calls.filter(call=>/\/prepare$/.test(call.url)).length,2);
 });

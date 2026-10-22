@@ -144,9 +144,15 @@ class CentralBrowserWorker:
         headers: dict[str, str] | None = None,
         body: Any = None,
         timeout_seconds: float = 30,
+        max_response_bytes: int | None = None,
+        deadline: float | None = None,
     ) -> dict:
         self._require_started()
         self._validate_url(url)
+        if max_response_bytes is not None:
+            from agentbridge.browser.bounded_download import bounded_browser_download
+            return bounded_browser_download(self, method, url, headers=headers, body=body,
+                timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, deadline=deadline)
         started_at = time.monotonic()
         options: dict[str, Any] = {
             "method": method.upper(),
@@ -574,6 +580,8 @@ class CentralBrowserPageWorker:
         headers: dict[str, str] | None = None,
         body: Any = None,
         timeout_seconds: float = 30,
+        max_response_bytes: int | None = None,
+        deadline: float | None = None,
     ) -> dict:
         return self._owner.request_bytes(
             method,
@@ -581,6 +589,7 @@ class CentralBrowserPageWorker:
             headers=headers,
             body=body,
             timeout_seconds=timeout_seconds,
+            **({"max_response_bytes": max_response_bytes, "deadline": deadline} if max_response_bytes is not None else {}),
         )
     def goto(self, url: str, *, timeout_seconds: float = 30):
         self._owner._require_started()

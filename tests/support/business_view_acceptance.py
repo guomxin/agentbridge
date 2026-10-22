@@ -53,20 +53,21 @@ class SyntheticOaTransport:
 
     def apply_control(self):
         """A local operator can change synthetic evidence while Chrome stays open."""
-        path = self.path.parent / "business-view-control.json"
-        if not path.exists():
-            return
-        control = json.loads(path.read_text())
-        if control["id"] == self.data.get("last_control"):
-            return
-        if control["action"] == "change_material":
-            self.change_material(control["affair_id"])
-        elif control["action"] == "fault":
-            self.arm(control["fault"])
-        else:
-            raise ValueError("Unknown local synthetic acceptance control")
-        self.data["last_control"] = control["id"]
-        self.persist()
+        with self.lock:
+            path = self.path.parent / "business-view-control.json"
+            if not path.exists():
+                return
+            control = json.loads(path.read_text())
+            if control["id"] == self.data.get("last_control"):
+                return
+            if control["action"] == "change_material":
+                self.change_material(control["affair_id"])
+            elif control["action"] == "fault":
+                self.arm(control["fault"])
+            else:
+                raise ValueError("Unknown local synthetic acceptance control")
+            self.data["last_control"] = control["id"]
+            self.persist()
 
     def arm(self, fault):
         if fault not in {None, "room_readback_missing", "approval_reply_lost", "pending_partial", "done_identity_changed"}:
@@ -236,7 +237,12 @@ class SyntheticOaWorker(NetworkFreeHttpWorker):
 
     @property
     def fixture(self):
-        return self.transport.data["affairs"][self.affair_id]
+        # DOM preflight does not necessarily perform an HTTP request. Consume
+        # local controls before this read, so final review sees the changed
+        # evidence before any authorization or synthetic submission occurs.
+        with self.transport.lock:
+            self.transport.apply_control()
+            return deepcopy(self.transport.data["affairs"][self.affair_id])
 
     @property
     def page_url(self):
