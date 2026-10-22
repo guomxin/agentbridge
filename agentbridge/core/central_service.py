@@ -5768,6 +5768,7 @@ def _timeline_notification_message(entry: dict) -> str:
 _TASK_TITLE_LABELS = {
     "Prepare OA Efficiency-Data Approval": "OA 效能数据审批",
     "Prepare OA Travel-Expense Approval": "OA 差旅费审批",
+    "Prepare OA Business-Settlement Approval": "OA 业务结算单审批",
     "Prepare OA Labor-Contract Renewal Approval": "OA 劳动合同续签审批",
     "Prepare OA Intellectual-Property Declaration Approval": "OA 知识产权申报审批",
     "Prepare OA Intellectual-Property Reward Acknowledgement": "OA 知识产权奖励阅办",

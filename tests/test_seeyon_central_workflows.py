@@ -37,6 +37,8 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                 "oa.addressbook.private_contact.search",
                 "oa.attendance_confirmation.confirm",
                 "oa.attendance_confirmation.prepare",
+                "oa.business_settlement.approval.prepare",
+                "oa.business_settlement.approve",
                 "oa.business_trip.approval.prepare",
                 "oa.business_trip.approve",
                 "oa.business_trip.prepare",

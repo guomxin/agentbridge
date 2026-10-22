@@ -1169,6 +1169,141 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Bind one exact pending business-settlement approval. AgentBridge freezes the read-only settlement form, payment and reimbursement materials, and verifies the exact form and reimbursement-approval node; pass any opinion already supplied by the user.",
+      "inputSchema": {
+        "properties": {
+          "affair_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Affair Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "input_submission_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Submission Id"
+          },
+          "opinion": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Opinion"
+          }
+        },
+        "required": [
+          "affair_id"
+        ],
+        "title": "prepare_pending_actionArguments",
+        "type": "object"
+      },
+      "name": "oa_business_settlement_approval_prepare",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "prepare_pending_actionDictOutput",
+        "type": "object"
+      },
+      "title": "Prepare OA Business-Settlement Approval"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Consume one approved authorization, approve the exact frozen business settlement, and verify complete pending absence and exact done identity.",
+      "inputSchema": {
+        "properties": {
+          "authorization_id": {
+            "maxLength": 128,
+            "minLength": 32,
+            "title": "Authorization Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          }
+        },
+        "required": [
+          "authorization_id"
+        ],
+        "title": "commit_pending_actionArguments",
+        "type": "object"
+      },
+      "name": "oa_business_settlement_approve",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "commit_pending_actionDictOutput",
+        "type": "object"
+      },
+      "title": "Approve Authorized OA Business Settlement"
+    },
+    {
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://agentbridge/trusted-interaction.html",
+          "visibility": [
+            "model",
+            "app"
+          ]
+        },
+        "ui/resourceUri": "ui://agentbridge/trusted-interaction.html"
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Bind one exact pending labor-contract renewal approval. AgentBridge freezes employee, contract term, evaluation, and renewal recommendation; pass any opinion already supplied by the user.",
       "inputSchema": {
         "properties": {
@@ -5892,6 +6027,7 @@
                     "efficiency_data",
                     "travel_expense",
                     "business_trip",
+                    "business_settlement",
                     "labor_contract_renewal",
                     "intellectual_property_declaration",
                     "intellectual_property_reward",

@@ -25,6 +25,7 @@ export function interactionActionLabel(type: string, display: unknown): string {
     "oa.efficiency_data.approval": ["approval", "核对效能数据"],
     "oa.travel_expense.approval": ["approval", "核对差旅报销"],
     "oa.business_trip.approval": ["approval", "核对出差材料"],
+    "oa.business_settlement.approval": ["approval", "核对业务结算单"],
     "oa.labor_contract_renewal.approval": ["approval", "核对合同续签"],
     "oa.intellectual_property_declaration.approval": ["approval", "核对知识产权材料"],
     "oa.intellectual_property_reward.acknowledgement": ["approval", "核对知识产权奖励并阅办"],

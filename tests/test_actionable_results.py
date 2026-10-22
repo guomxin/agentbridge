@@ -303,6 +303,28 @@ class ActionableResultsTests(unittest.TestCase):
             self.queue({**body, "requestKey": uuid4().hex})
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
+    def test_business_settlement_selection_requires_its_independent_approval_permission(self):
+        self.mutate_source(lambda result: result["items"].append({
+            "affair_id": "synthetic-settlement", "title": "【报销】业务结算单-合成申请人",
+        }))
+        group = self.groups()[0]
+        target = group["targets"][-1]
+        self.assertEqual(target["workflowType"], "business_settlement")
+        self.assertEqual(target["workflowLabel"], "业务结算单")
+        self.assertTrue(target["enabled"])
+        body = {"operationId": group["operationId"], "targetKeys": [target["targetKey"]], "requestKey": uuid4().hex}
+        queued = self.queue(body)
+        self.assertEqual(self.command(queued)["capabilityName"], "oa.business_settlement.approval.prepare")
+        self.assertEqual(self.command(queued)["affairIds"], ["synthetic-settlement"])
+        grant_permissions(self.service.user_grants, OWNER,
+                          ["oa.workflow.read", "oa.travel_expense.approve", "oa.standard_collaboration.approve"])
+        disabled = self.groups()[0]["targets"][-1]
+        self.assertFalse(disabled["enabled"])
+        self.assertIn("权限", disabled["disabledReason"])
+        with self.assertRaises(PermissionError):
+            self.queue({**body, "requestKey": uuid4().hex})
+        self.assertEqual(len(self.fixture.oa.writes), 0)
+
     def test_unknown_intellectual_property_form_cannot_fall_back_to_generic_collaboration(self):
         self.mutate_source(lambda result: result["items"].append({
             "affair_id": "synthetic-unknown-ip", "title": "【知识产权】未注册奖励变更单(合成申请人)",

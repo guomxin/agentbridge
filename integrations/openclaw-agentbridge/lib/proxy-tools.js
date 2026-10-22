@@ -24,6 +24,7 @@ export const AGENTBRIDGE_GOVERNED_ENTRY_TOOL_NAMES = Object.freeze([
   "oa_efficiency_data_approval_prepare",
   "oa_travel_expense_approval_prepare",
   "oa_business_trip_approval_prepare",
+  "oa_business_settlement_approval_prepare",
   "oa_labor_contract_renewal_approval_prepare",
   "oa_intellectual_property_declaration_approval_prepare",
   "oa_intellectual_property_reward_acknowledgement_prepare",

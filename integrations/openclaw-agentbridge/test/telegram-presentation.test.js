@@ -52,6 +52,7 @@ test("all native authorization paths keep the exact approved URL and business-sp
     ["smartlight.alarm.work_area.revoke", "核对工区撤回"],
     ["smartlight.alarm.dispose", "核对 RTU 告警处置"],
     ["oa.attendance_confirmation.confirm", "核对月度考勤"],
+    ["oa.business_settlement.approve", "核对业务结算单"],
     ["oa.quarterly_performance.acknowledge", "核对季度绩效"],
     ["oa.intellectual_property_reward.acknowledge", "核对知识产权奖励并阅办"],
     ["oa.weekly_report.acknowledge", "核对周报"],

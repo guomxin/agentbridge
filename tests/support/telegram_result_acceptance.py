@@ -9,6 +9,7 @@ from copy import deepcopy
 from tests.support.latency_acceptance import TimedPage, TimedWorker
 from tests.test_seeyon_quarterly_performance import PerformanceFrame, target
 from tests.test_seeyon_intellectual_property_reward import RewardFrame, target as reward_target
+from tests.test_seeyon_business_settlement import SettlementFrame, target as settlement_target
 
 
 class TelegramOaPage(TimedPage):
@@ -18,6 +19,8 @@ class TelegramOaPage(TimedPage):
             return [PerformanceFrame(self.worker.fixture["row_snapshot"])]
         if self.worker.affair_id and self.worker.fixture.get("profile") == "intellectual_property_reward":
             return [RewardFrame(self.worker.fixture["row_snapshot"])]
+        if self.worker.affair_id and self.worker.fixture.get("profile") == "business_settlement":
+            return [SettlementFrame(self.worker.fixture["row_snapshot"])]
         return super().frames
 
 
@@ -58,6 +61,22 @@ def add_reward_affair(fixture, affair_id="synthetic-tg-intellectual-property-rew
     source.update(profile="intellectual_property_reward", row_snapshot=snapshot, processed=False,
         body_text="合成知识产权奖励原始材料；保留奖励金额和奖励人员，仅进行知会阅办。")
     source["source"].update(affair_id=affair_id, sender="合成申请人", date="2026-10-21")
+    source["detail"]["title"] = source["source"]["title"]
+    source["detail"].setdefault("attachments", [])
+    source["signals"]["identity"].update(summary_id="summary-" + affair_id,
+        process_id="process-" + affair_id, form_record_id="record-" + affair_id)
+    fixture.oa.data["affairs"][affair_id] = source
+    fixture.oa.persist()
+    fixture.service._worker_factories_by_system["oa"] = lambda *_: TelegramOaWorker(fixture.oa)
+    return affair_id
+
+
+def add_settlement_affair(fixture, affair_id="synthetic-tg-business-settlement"):
+    source, snapshot, _, _ = settlement_target.__wrapped__()
+    source = deepcopy(source)
+    source.update(profile="business_settlement", row_snapshot=snapshot, processed=False,
+        body_text="合成业务结算单原始材料；核对只读收款账户、费用明细和应付金额后审批。")
+    source["source"].update(affair_id=affair_id, sender="合成申请人", date="2026-10-22")
     source["detail"]["title"] = source["source"]["title"]
     source["detail"].setdefault("attachments", [])
     source["signals"]["identity"].update(summary_id="summary-" + affair_id,

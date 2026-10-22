@@ -7,7 +7,7 @@ import { interactionActionLabel as workspaceLabel, displayTaskTitle } from "../.
 test("all registered business entry labels match Workspace and never borrow a final action label", () => {
   const schema = JSON.parse(readFileSync(new URL('../../../schemas/agent-host/v1/interaction-presentation.schema.json',import.meta.url)));
   const profiles = schema.properties.display.properties.businessView.properties.profileId.enum;
-  assert.equal(profiles.length,28);
+  assert.equal(profiles.length,29);
   for (const profileId of profiles) {
     let recognized=0;
     for (const viewKind of ['work_log','meeting_room','approval','form','future']) {
@@ -71,4 +71,15 @@ test("completed interaction is labeled by its purpose, never as operation succes
   assert.equal(interactionStateLabel("execution_authorization", "completed"), "已授权");
   assert.equal(interactionStateLabel("business_input", "completed"), "信息已提交");
   assert.equal(interactionStateLabel("credential", "completed"), "登录已完成");
+});
+
+test("business settlement review keeps the same closed entry and title in both clients", () => {
+  const businessView = {schemaVersion: "agentbridge.business-view.v1", profileVersion: "1",
+    profileId: "oa.business_settlement.approval", viewKind: "approval", entryLabel: "直接付款"};
+  for (const label of [interactionActionLabel, workspaceLabel]) {
+    assert.equal(label("business_input", {businessView}), "核对业务结算单");
+    assert.equal(label("business_input", {businessView: {...businessView,
+      profileId: "oa.business_settlement.acknowledgement"}}), "填写信息");
+  }
+  assert.equal(displayTaskTitle("Prepare OA Business-Settlement Approval"), "OA 业务结算单审批");
 });

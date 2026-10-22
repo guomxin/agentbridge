@@ -84,6 +84,7 @@ _PROFILE_CONTRACTS = (
 _PENDING_CONTRACTS = (
     ("missed_punch", "补签申请"), ("efficiency_data", "效能数据"),
     ("travel_expense", "差旅费报销"), ("business_trip", "出差申请"),
+    ("business_settlement", "业务结算单"),
     ("labor_contract_renewal", "劳动合同续签"), ("intellectual_property_declaration", "知识产权申报"),
     ("overtime", "加班申请"), ("leave", "请假申请"), ("resignation", "离职申请"),
     ("work_handover", "工作交接"), ("flight_application", "乘坐飞机申请"),

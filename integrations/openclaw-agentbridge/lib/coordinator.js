@@ -3503,6 +3503,7 @@ function safeSucceededMessage(response) {
       labor_contract_renewal: "OA \u52b3\u52a8\u5408\u540c\u7eed\u7b7e\u8868",
       intellectual_property_declaration: "OA \u77e5\u8bc6\u4ea7\u6743\u7533\u62a5\u5ba1\u6279\u5355",
       intellectual_property_reward: "OA 知识产权奖励单",
+      business_settlement: "OA 业务结算单",
       overtime: "OA \u52a0\u73ed\u7533\u8bf7\u5ba1\u6838\u5355",
       leave: "OA \u8bf7\u5047\u7533\u8bf7\u5355",
       resignation: "OA \u79bb\u804c\u7533\u8bf7\u5355",

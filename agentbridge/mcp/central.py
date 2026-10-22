@@ -72,6 +72,8 @@ from agentbridge.adapters.seeyon_pending_actions import (
     ATTENDANCE_CONFIRM_CAPABILITY,
     BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY,
     BUSINESS_TRIP_APPROVE_CAPABILITY,
+    BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY,
+    BUSINESS_SETTLEMENT_APPROVE_CAPABILITY,
     EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY,
     EFFICIENCY_DATA_APPROVE_CAPABILITY,
     INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_PREPARE_CAPABILITY,
@@ -252,6 +254,7 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "oa_efficiency_data_approval_prepare": frozenset({"oa:write:approval"}),
     "oa_travel_expense_approval_prepare": frozenset({"oa:write:approval"}),
     "oa_business_trip_approval_prepare": frozenset({"oa:write:approval"}),
+    "oa_business_settlement_approval_prepare": frozenset({"oa:write:approval"}),
     "oa_labor_contract_renewal_approval_prepare": frozenset(
         {"oa:write:approval"}
     ),
@@ -1265,6 +1268,24 @@ def create_central_mcp_server(
                 "business-trip request leaves the pending collection."
             ),
             "commit_capability": BUSINESS_TRIP_APPROVE_CAPABILITY,
+        },
+        {
+            "prepare_tool_name": "oa_business_settlement_approval_prepare",
+            "prepare_title": "Prepare OA Business-Settlement Approval",
+            "prepare_description": (
+                "Bind one exact pending business-settlement approval. AgentBridge freezes "
+                "the read-only settlement form, payment and reimbursement materials, "
+                "and verifies the exact form and reimbursement-approval node; pass any "
+                "opinion already supplied by the user."
+            ),
+            "prepare_capability": BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY,
+            "commit_tool_name": "oa_business_settlement_approve",
+            "commit_title": "Approve Authorized OA Business Settlement",
+            "commit_description": (
+                "Consume one approved authorization, approve the exact frozen business "
+                "settlement, and verify complete pending absence and exact done identity."
+            ),
+            "commit_capability": BUSINESS_SETTLEMENT_APPROVE_CAPABILITY,
         },
         {
             "prepare_tool_name": "oa_labor_contract_renewal_approval_prepare",
@@ -2892,7 +2913,7 @@ def create_central_mcp_server(
         affair_ids: Annotated[list[str] | None, Field(min_length=1, max_length=100)] = None,
         workflow_types: list[Literal[
             "missed_punch", "efficiency_data", "travel_expense", "business_trip",
-            "labor_contract_renewal", "intellectual_property_declaration", "intellectual_property_reward", "overtime",
+            "business_settlement", "labor_contract_renewal", "intellectual_property_declaration", "intellectual_property_reward", "overtime",
             "leave", "resignation", "work_handover", "flight_application", "attendance_confirmation",
             "weekly_report", "quarterly_performance", "standard_collaboration",
         ]] | None = None,

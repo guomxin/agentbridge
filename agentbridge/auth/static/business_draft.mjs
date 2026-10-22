@@ -330,6 +330,7 @@ export const REVIEW_DESIGNS = {
   efficiency_data: {title: "效能数据材料", family: "document", keys: []},
   travel_expense: {title: "差旅报销材料", family: "expense", keys: ["姓名", "应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项", "关联出差申请单"]},
   business_trip: {title: "出差行程", family: "journey", keys: ["申请人", "出差始发地", "出差目的地", "出差开始时间", "出差结束时间", "出差工具", "出差天数", "出差小时数", "出差事由"]},
+  business_settlement: {title: "业务结算单材料", family: "expense", keys: ["流水号", "姓名", "发起部门", "日期", "结算方式", "费用归属部门", "结算实体", "费用归属事项", "应付金额合计", "账户类型", "收款账户名称", "收款账号", "收款账户开户行"]},
   labor_contract_renewal: {title: "劳动合同续签材料", family: "personnel", keys: ["员工信息", "合同期限", "综合评价", "续签建议", "综合评价指导意见"]},
   intellectual_property_declaration: {title: "知识产权申报材料", family: "ownership", keys: ["申报名称", "知识产权类型", "申请人", "申请部门", "权属类型", "权属单位", "发明/设计人", "申请用途"]},
   intellectual_property_reward: {title: "知识产权奖励知会材料", family: "ownership", keys: ["申请人", "工号", "所属部门", "申请日期", "奖项名称", "奖励金额", "奖励事由", "团队负责人", "团队负责人部门"]},
@@ -455,7 +456,7 @@ export function renderEvidence(document, target, review, kind = "") {
     if (!material || !["facts", "text", "table"].includes(material.kind)) continue;
     const detail = document.createElement("details"); detail.className = `review-group material-${material.kind}`;
     detail.dataset.group = `material:${String(material.id || material.title || "")}`;
-    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs", "reward-information", "reward-allocations"].includes(material.id) ||
+    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs", "reward-information", "reward-allocations", "settlement-information", "settlement-expenses", "settlement-payments"].includes(material.id) ||
       material.id === "body" && design?.family === "document" && (kind !== "weekly_report" || !weeklySections.length);
     detail.open = opened.has(detail.dataset.group) ? opened.get(detail.dataset.group) : primary;
     const summary = document.createElement("summary"); summary.textContent = String(material.title || "原始材料");

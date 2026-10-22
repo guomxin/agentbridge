@@ -601,8 +601,8 @@ test('weekly report and handover layouts retain full source material and distinc
   assert.deepEqual(descendants(target).filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId), ['a', 'b']);
 });
 
-test('all seventeen named materials expose their existing key facts without editable decisions', () => {
-  assert.equal(Object.keys(REVIEW_DESIGNS).length, 17);
+test('all eighteen named materials expose their existing key facts without editable decisions', () => {
+  assert.equal(Object.keys(REVIEW_DESIGNS).length, 18);
   for (const [kind, design] of Object.entries(REVIEW_DESIGNS)) {
     const document = createDocument(), target = document.createElement('div');
     target.querySelectorAll = () => [];
@@ -824,4 +824,40 @@ test('meeting invitation exposes exact title time place and expanded body', () =
   for (const value of ['合成会议', '08:45', '合成会议室', '未回执']) assert.ok(target.textContent.includes(value));
   assert.ok(descendants(target).some(node => node.tag === 'details' && node.dataset.group === 'material:body' && node.open));
   assert.ok(target.textContent.includes('正文保留08:50原始说明'));
+});
+
+test('settlement account and full expense rows open read-only and preserve row identities', () => {
+  const document = createDocument(), target = document.createElement('div');
+  target.querySelectorAll = selector => selector === 'details' ? descendants(target).filter(node => node.tag === 'details') : [];
+  const review = {title: '合成业务结算单', fields: [
+    {label: '应付金额合计', value: '155.00'}, {label: '收款账号', value: 'SYNTHETIC-ACCOUNT'},
+  ], sections: [
+    {id: 'settlement-information', title: '业务结算信息', kind: 'facts', fields: [
+      {label: '账户类型', value: '个人账户'}, {label: '收款账户名称', value: '合成收款人'},
+    ]},
+    {id: 'settlement-expenses', title: '费用明细', kind: 'table', columns: [
+      {key: 'field0010_id', label: '事项说明'}, {key: 'field0015_id', label: '金额（元）'},
+    ], rows: [
+      {id: 'expense-a', cells: {field0010_id: '合成费用甲', field0015_id: '100.00'}},
+      {id: 'expense-b', cells: {field0010_id: '合成费用乙', field0015_id: '55.00'}},
+    ]},
+    {id: 'settlement-payments', title: '付款记录', kind: 'table', columns: [
+      {key: 'field0110_id', label: '付款金额（元）'},
+    ], rows: [{id: 'payment-empty', cells: {field0110_id: ''}}]},
+  ]};
+  renderEvidence(document, target, review, 'business_settlement');
+  let nodes = descendants(target);
+  for (const id of ['settlement-information', 'settlement-expenses', 'settlement-payments']) {
+    assert.equal(nodes.find(node => node.dataset.group === `material:${id}`).open, true);
+  }
+  assert.deepEqual(nodes.filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId),
+    ['expense-a', 'expense-b', 'payment-empty']);
+  for (const value of ['合成收款人', 'SYNTHETIC-ACCOUNT', '100.00', '55.00', '155.00']) {
+    assert.ok(target.textContent.includes(value));
+  }
+  assert.ok(!nodes.some(node => ['input', 'select', 'textarea', 'button', 'form'].includes(node.tag)));
+  nodes.find(node => node.dataset.group === 'material:settlement-expenses').open = false;
+  renderEvidence(document, target, review, 'business_settlement');
+  nodes = descendants(target);
+  assert.equal(nodes.find(node => node.dataset.group === 'material:settlement-expenses').open, false);
 });

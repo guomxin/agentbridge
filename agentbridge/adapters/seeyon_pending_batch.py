@@ -12,7 +12,7 @@ from agentbridge.adapters.seeyon_pending_actions import pending_action_profile_f
 
 PENDING_BATCH_PREPARE_CAPABILITY = "oa.workflow.pending.batch.prepare"
 PENDING_BATCH_TYPES = (
-    "meeting_reply", "missed_punch", "efficiency_data", "travel_expense", "business_trip",
+    "meeting_reply", "missed_punch", "efficiency_data", "travel_expense", "business_trip", "business_settlement",
     "labor_contract_renewal",
     "intellectual_property_declaration", "intellectual_property_reward", "overtime", "leave", "resignation", "work_handover",
     "flight_application",

@@ -176,6 +176,7 @@ export function displayTaskTitle(value) {
     {
       "Prepare OA Efficiency-Data Approval": "OA 效能数据审批",
       "Prepare OA Travel-Expense Approval": "OA 差旅费审批",
+      "Prepare OA Business-Settlement Approval": "OA 业务结算单审批",
       "Prepare OA Labor-Contract Renewal Approval": "OA 劳动合同续签审批",
       "Prepare OA Intellectual-Property Declaration Approval": "OA 知识产权申报审批",
       "Prepare OA Intellectual-Property Reward Acknowledgement": "OA 知识产权奖励阅办",
@@ -269,6 +270,7 @@ export function interactionActionLabel(type, display) {
       "oa.efficiency_data.approval": ["approval", "核对效能数据"],
       "oa.travel_expense.approval": ["approval", "核对差旅报销"],
       "oa.business_trip.approval": ["approval", "核对出差材料"],
+      "oa.business_settlement.approval": ["approval", "核对业务结算单"],
       "oa.labor_contract_renewal.approval": ["approval", "核对合同续签"],
       "oa.intellectual_property_declaration.approval": ["approval", "核对知识产权材料"],
       "oa.meeting.reply": ["form", "核对会议邀请"],

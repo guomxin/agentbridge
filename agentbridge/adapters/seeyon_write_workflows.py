@@ -72,6 +72,7 @@ from agentbridge.adapters.seeyon_missed_punch import (
 from agentbridge.adapters.seeyon_pending_actions import (
     ATTENDANCE_CONFIRMATION_FIELD_CARD_SCHEMA,
     BUSINESS_TRIP_APPROVAL_FIELD_CARD_SCHEMA,
+    BUSINESS_SETTLEMENT_APPROVAL_FIELD_CARD_SCHEMA,
     EFFICIENCY_DATA_APPROVAL_FIELD_CARD_SCHEMA,
     FLIGHT_APPLICATION_APPROVAL_FIELD_CARD_SCHEMA,
     INTELLECTUAL_PROPERTY_DECLARATION_APPROVAL_FIELD_CARD_SCHEMA,
@@ -93,6 +94,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     acknowledge_weekly_report,
     acknowledge_quarterly_performance,
     approve_business_trip_request,
+    approve_business_settlement,
     approve_efficiency_data,
     approve_flight_application,
     approve_intellectual_property_declaration,
@@ -108,6 +110,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     preflight_pending_action,
     prepare_attendance_confirmation,
     prepare_business_trip_approval,
+    prepare_business_settlement_approval,
     prepare_efficiency_data_approval,
     prepare_flight_application_approval,
     prepare_intellectual_property_declaration_approval,
@@ -176,6 +179,13 @@ _PENDING_ACTION_BINDINGS = {
         commit_function=approve_business_trip_request,
         field_message="The business-trip approval opinion must be entered in the trusted field card.",
         authorization_message="The business-trip approval requires trusted confirmation.",
+    ),
+    'business_settlement': _PendingActionBinding(
+        field_schema=BUSINESS_SETTLEMENT_APPROVAL_FIELD_CARD_SCHEMA,
+        prepare_function=prepare_business_settlement_approval,
+        commit_function=approve_business_settlement,
+        field_message="The business-settlement opinion must be entered in the trusted field card.",
+        authorization_message="The business-settlement approval requires trusted confirmation.",
     ),
     'labor_contract_renewal': _PendingActionBinding(
         field_schema=LABOR_CONTRACT_RENEWAL_APPROVAL_FIELD_CARD_SCHEMA,

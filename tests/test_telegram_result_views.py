@@ -18,9 +18,9 @@ from agentbridge.core.host_contract import HostLeaseConflict
 from tests.authorization_fixtures import grant_permissions
 from tests.support.latency_acceptance import LatencyAcceptanceFixture, LatencyContract, OWNER
 from tests.test_seeyon_pending_actions import ALL_PENDING_PROFILES
-from tests.support.telegram_result_acceptance import add_quarterly_affair, add_reward_affair
+from tests.support.telegram_result_acceptance import add_quarterly_affair, add_reward_affair, add_settlement_affair
 
-CURRENT_PROFILES = (*ALL_PENDING_PROFILES, "quarterly_performance", "intellectual_property_reward")
+CURRENT_PROFILES = (*ALL_PENDING_PROFILES, "quarterly_performance", "intellectual_property_reward", "business_settlement")
 
 
 class TelegramResultViewTests(unittest.TestCase):
@@ -44,6 +44,7 @@ class TelegramResultViewTests(unittest.TestCase):
             self.fixture.oa.add_affair("synthetic-tg-" + profile, profile=profile)
         add_quarterly_affair(self.fixture)
         add_reward_affair(self.fixture)
+        add_settlement_affair(self.fixture)
         self.source = self.query()
         self.views = ResultViewService(self.service)
 
@@ -567,7 +568,7 @@ class TelegramResultViewTests(unittest.TestCase):
                 self.service.prepare_host_task(**{**arguments, **change})
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
-    def test_all_16_types_prepare_without_decision_and_registered_action_labels_are_closed(self):
+    def test_all_17_types_prepare_without_decision_and_registered_action_labels_are_closed(self):
         token, _ = self.issue()
         for profile in CURRENT_PROFILES:
             with self.subTest(profile=profile):

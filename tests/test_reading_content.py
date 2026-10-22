@@ -253,7 +253,7 @@ def test_initial_application_page_projects_only_display_review_and_preserves_bac
     backend.approve.assert_not_called()
 
 
-@pytest.mark.parametrize("kind", ["missed_punch", "efficiency_data", "travel_expense", "business_trip",
+@pytest.mark.parametrize("kind", ["missed_punch", "efficiency_data", "travel_expense", "business_trip", "business_settlement",
                                  "labor_contract_renewal", "intellectual_property_declaration", "intellectual_property_reward", "overtime", "leave",
                                  "resignation", "work_handover", "flight_application", "attendance_confirmation",
                                  "weekly_report", "standard_collaboration", "quarterly_performance"])

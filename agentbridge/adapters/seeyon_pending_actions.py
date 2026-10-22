@@ -27,6 +27,10 @@ from agentbridge.adapters.seeyon_intellectual_property_reward import (
     TEMPLATE_ID as REWARD_TEMPLATE_ID, FORM_APP_ID as REWARD_FORM_APP_ID,
     intellectual_property_reward_business_snapshot, intellectual_property_reward_summary_fields,
 )
+from agentbridge.adapters.seeyon_business_settlement import (
+    TEMPLATE_ID as SETTLEMENT_TEMPLATE_ID, FORM_APP_ID as SETTLEMENT_FORM_APP_ID,
+    business_settlement_business_snapshot, business_settlement_summary_fields,
+)
 from agentbridge.adapters.seeyon_work_handover import (
     work_handover_business_snapshot, work_handover_summary_fields,
 )
@@ -76,6 +80,8 @@ QUARTERLY_PERFORMANCE_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = "oa.quarterly_perform
 QUARTERLY_PERFORMANCE_ACKNOWLEDGE_CAPABILITY = "oa.quarterly_performance.acknowledge"
 INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_PREPARE_CAPABILITY = "oa.intellectual_property_reward.acknowledgement.prepare"
 INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGE_CAPABILITY = "oa.intellectual_property_reward.acknowledge"
+BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY = "oa.business_settlement.approval.prepare"
+BUSINESS_SETTLEMENT_APPROVE_CAPABILITY = "oa.business_settlement.approve"
 STANDARD_COLLABORATION_APPROVAL_PREPARE_CAPABILITY = (
     "oa.standard_collaboration.approval.prepare"
 )
@@ -214,6 +220,11 @@ INTELLECTUAL_PROPERTY_REWARD_ACKNOWLEDGEMENT_FIELD_CARD_SCHEMA = _opinion_card(
     effect="阅办一条知识产权奖励知会，不调整奖励金额或人员",
     submit_label="提交阅办意见",
 )
+BUSINESS_SETTLEMENT_APPROVAL_FIELD_CARD_SCHEMA = _opinion_card(
+    schema_version="agentbridge.oa_business_settlement_approval_fields.v1",
+    title="填写业务结算审批意见", effect="审批通过一条业务结算单的报销审批节点，不登记或执行付款",
+    submit_label="提交审批意见",
+)
 STANDARD_COLLABORATION_APPROVAL_FIELD_CARD_SCHEMA = _opinion_card(
     schema_version="agentbridge.oa_standard_collaboration_approval_fields.v1",
     title="填写普通协同事项审批意见",
@@ -304,6 +315,23 @@ _PROFILES = {
         "summary_effect": "审批通过后该出差申请将离开待办列表",
         "authorize_label": "授权审批通过",
         "business_snapshot_policy": "business_trip_approval_v1",
+    },
+    "business_settlement": {
+        "prepare_capability": BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY,
+        "commit_capability": BUSINESS_SETTLEMENT_APPROVE_CAPABILITY,
+        "contract_version": "seeyon-business-settlement-approval-v1",
+        "plan_schema": "agentbridge.oa_business_settlement_approval_plan.v1",
+        "result_schema": "agentbridge.oa_business_settlement_approval_result.v1",
+        "business_intent": "approve_business_settlement",
+        "title_rule": {"kind": "prefix", "value": "【报销】业务结算单-"},
+        "required_fields": {"流水号", "姓名", "结算方式", "应付金额合计", "收款账号"},
+        "allowed_fields": None,
+        "template_id": SETTLEMENT_TEMPLATE_ID, "form_app_id": SETTLEMENT_FORM_APP_ID,
+        "node_policies": {"报销审批"}, "node_policy_names": {"报销审批"},
+        "action_kind": "approval", "attitude_code": "agree",
+        "action_display": "审批通过业务结算单", "summary_title": "审批业务结算单",
+        "summary_effect": "审批通过当前业务结算单的报销审批节点；不登记或执行付款",
+        "authorize_label": "授权审批通过", "business_snapshot_policy": "business_settlement_v1",
     },
     "labor_contract_renewal": {
         "prepare_capability": LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY,
@@ -641,6 +669,7 @@ PENDING_ACTION_CAPABILITY_DEFINITIONS = tuple(
 )
 
 _SPECIALIZED_TITLE_MARKERS = (
+    "业务结算",
     "效能数据",
     "周报发送流程",
     "【HR】",
@@ -915,6 +944,15 @@ def prepare_quarterly_performance_acknowledgement(adapter, worker, arguments: di
 
 def acknowledge_quarterly_performance(adapter, worker, plan: dict, *, enter_commit_boundary, timeout_seconds=60) -> dict:
     return _commit_pending_action(adapter, worker, plan, profile_key="quarterly_performance",
+                                  enter_commit_boundary=enter_commit_boundary, timeout_seconds=timeout_seconds)
+
+
+def prepare_business_settlement_approval(adapter, worker, arguments: dict) -> dict:
+    return _prepare_pending_action(adapter, worker, arguments, "business_settlement")
+
+
+def approve_business_settlement(adapter, worker, plan: dict, *, enter_commit_boundary, timeout_seconds=60) -> dict:
+    return _commit_pending_action(adapter, worker, plan, profile_key="business_settlement",
                                   enter_commit_boundary=enter_commit_boundary, timeout_seconds=timeout_seconds)
 
 
@@ -1250,6 +1288,16 @@ def _validate_target(
     elif profile.get("business_snapshot_policy") == "business_trip_approval_v1":
         signals = dict(signals)
         signals["business_snapshot"] = _business_trip_business_snapshot(page)
+    elif profile.get("business_snapshot_policy") == "business_settlement_v1":
+        if node_policy != "报销审批" or node_policy_name != "报销审批" or attitudes != {"agree", "disagree"}:
+            raise PendingActionContractMismatch("The business-settlement reimbursement approval node identity is inconsistent.")
+        if str(identity.get("body_type") or "").upper() not in {"20", "FORM"} or not str(identity.get("form_record_id") or ""):
+            raise PendingActionContractMismatch("The business-settlement form record identity is unavailable.")
+        try:
+            signals = dict(signals)
+            signals["business_snapshot"] = business_settlement_business_snapshot(page)
+        except ValueError as exc:
+            raise PendingActionContractMismatch(str(exc)) from exc
     elif profile.get("business_snapshot_policy") == "intellectual_property_reward_v1":
         if node_policy != "inform" or node_policy_name != "知会" or attitudes:
             raise PendingActionContractMismatch("The intellectual-property reward inform node identity is inconsistent.")
@@ -2015,6 +2063,8 @@ def _summary(
         ):
             if snapshot.get(name):
                 fields.append({"label": label, "value": snapshot[name]})
+    elif profile_key == "business_settlement":
+        fields.extend(business_settlement_summary_fields(target["business_snapshot"]))
     elif profile_key == "intellectual_property_reward":
         fields.extend(intellectual_property_reward_summary_fields(target["business_snapshot"]))
     elif profile_key == "quarterly_performance":

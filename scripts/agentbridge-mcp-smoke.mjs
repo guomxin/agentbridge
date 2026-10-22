@@ -421,6 +421,8 @@ const REQUIRED_RELEASE_TOOLS = [
   "oa_travel_expense_approve",
   "oa_business_trip_approval_prepare",
   "oa_business_trip_approve",
+  "oa_business_settlement_approval_prepare",
+  "oa_business_settlement_approve",
   "oa_labor_contract_renewal_approval_prepare",
   "oa_labor_contract_renewal_approve",
   "oa_intellectual_property_declaration_approval_prepare",

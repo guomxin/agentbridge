@@ -343,6 +343,22 @@
       "resource": "绑定下游账号实际可见范围"
     },
     {
+      "id": "oa.business_settlement.approve",
+      "label": "业务结算单审批",
+      "capabilities": [
+        "oa.business_settlement.approval.prepare",
+        "oa.business_settlement.approve"
+      ],
+      "tools": [
+        "oa_business_settlement_approval_prepare"
+      ],
+      "legacy_scopes": [
+        "oa:write:approval"
+      ],
+      "dependencies": "可信表单/流程类型核验；查列表或详情另需 oa.workflow.read",
+      "resource": "绑定下游账号实际可见范围"
+    },
+    {
       "id": "oa.labor_contract_renewal.approve",
       "label": "劳动合同续签审批",
       "capabilities": [

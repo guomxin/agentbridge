@@ -116,6 +116,31 @@ CONTRACT["permissions"][MC] = MEETING_REPLY["permission"]
 CONTRACT["capability_permissions"].update({MP: MC, MC: MC})
 CONTRACT["planning"].update(MEETING_REPLY["planning"])
 
+# Business settlements retain an independent form, permission and approval contract.
+SETTLEMENT = json.loads((Path(__file__).parent / "fixtures/oa_business_settlement_contract.json").read_text())
+SP, SC = "oa.business_settlement.approval.prepare", "oa.business_settlement.approve"
+for key, values in (("registry_order", [SP, SC]), ("catalog_order", [SP]), ("scope_order", [SP, SC])):
+    index = CONTRACT[key].index("oa.labor_contract_renewal.approval.prepare")
+    CONTRACT[key][index:index] = values
+for key, anchor, values in (
+    ("commits", "oa.labor_contract_renewal.approve", [[SC, SP]]),
+    ("scopes", "oa.labor_contract_renewal.approval.prepare", [[SP, ["oa:write:approval"]], [SC, ["oa:write:approval"]]]),
+):
+    index = next(i for i, item in enumerate(CONTRACT[key]) if item[0] == anchor)
+    CONTRACT[key][index:index] = values
+index = next(i for i, spec in enumerate(CONTRACT["capabilities"]) if spec["name"] == "oa.labor_contract_renewal.approval.prepare")
+CONTRACT["capabilities"][index:index] = SETTLEMENT["capabilities"]
+for spec in CONTRACT["capabilities"]:
+    if spec["name"] == "oa.workflow.pending.batch.prepare":
+        enum = spec["input_schema"]["properties"]["workflow_types"]["items"]["enum"]
+        enum.insert(enum.index("labor_contract_renewal"), "business_settlement")
+index = next(i for i, item in enumerate(CONTRACT["definitions"]) if item[0] == "oa.labor_contract_renewal.approval.prepare")
+CONTRACT["definitions"].insert(index, [SP, SETTLEMENT["definition"]])
+CONTRACT["function_names"].extend(["prepare_business_settlement_approval", "approve_business_settlement"])
+CONTRACT["permissions"][SC] = SETTLEMENT["permission"]
+CONTRACT["capability_permissions"].update({SP: SC, SC: SC})
+CONTRACT["planning"].update(SETTLEMENT["planning"])
+
 DEFINITIONS = deepcopy(dict(CONTRACT["definitions"]))
 # The immutable migration fixture predates initial missed-punch material review.
 # The only declaration delta is a read-only preflight inherited by both aliases.
@@ -176,11 +201,11 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
     assert hashlib.sha256(CONTRACT_BYTES).hexdigest() == (
         "5815e56c49564f20a8b67a0acb588a84c0937b6a8a958f53d7725ccd69606d3e"
     )
-    assert len(SPECS) == 54
-    assert len(DEFINITIONS) == 28
-    assert len(CONTRACT["commits"]) == 26
-    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 16
-    assert len(PREFLIGHT_PREPARES) == 16
+    assert len(SPECS) == 56
+    assert len(DEFINITIONS) == 29
+    assert len(CONTRACT["commits"]) == 27
+    assert sum("preflight_function" in definition for _, definition in CONTRACT["definitions"]) == 17
+    assert len(PREFLIGHT_PREPARES) == 17
 
 
 def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
@@ -290,16 +315,16 @@ def test_new_declarations_project_the_frozen_pair_or_alias_contract(prepare_name
     assert declaration.canonical_prepare_name == expected_canonical
 
 
-def test_unified_declarations_cover_exactly_twenty_two_pairs_and_two_prepare_aliases():
+def test_unified_declarations_cover_exactly_twenty_three_pairs_and_two_prepare_aliases():
     assert list(OA_WRITE_DECLARATIONS) == NEW_PREPARES
-    assert len(PAIR_PREPARES) == 22
+    assert len(PAIR_PREPARES) == 23
     specs = oa_write_capability_specs_by_name()
     expected_names = {
         name for prepare in NEW_PREPARES
         for name in (prepare, DEFINITIONS[prepare]["commit_capability"])
     }
     assert set(specs) == expected_names
-    assert len(specs) == 46
+    assert len(specs) == 48
     for name, spec in specs.items():
         assert spec.to_dict() == SPECS[name]
         _change_schema(spec)
@@ -490,7 +515,7 @@ def test_prepare_alias_constructor_preserves_arguments_and_lazy_dynamic_builder(
 
 def test_pending_verification_revision_is_limited_to_fourteen_versioned_pairs():
     assert len(PENDING_REVISION) == 28
-    expected_prepares = (set(PREFLIGHT_PREPARES) - {QP, RP}) | {CANONICAL_PREPARE}
+    expected_prepares = (set(PREFLIGHT_PREPARES) - {QP, RP, SP}) | {CANONICAL_PREPARE}
     expected_commits = {DEFINITIONS[name]["commit_capability"] for name in expected_prepares}
     assert set(PENDING_REVISION) == expected_prepares | expected_commits
     for name, change in PENDING_REVISION.items():

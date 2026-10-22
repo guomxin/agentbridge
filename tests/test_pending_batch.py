@@ -101,12 +101,13 @@ def test_five_mixed_items_advance_once_and_survive_restart(run, tmp_path, monkey
 def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run, monkeypatch):
     service, tid, rows, _prepared, _committed = run
     rows[:] = [row(1), row(2, "周报发送流程"), row(3, "【HR】补签申请单"),
-               row(4, "【知识产权】知识产权奖励审批单(合成申请人)")]
+               row(4, "【知识产权】知识产权奖励审批单(合成申请人)"), row(5, "【报销】业务结算单-合成申请人")]
     cases = (
         ("efficiency_data", "prepare_efficiency_data_approval", "approve_efficiency_data", "oa.efficiency_data.approve"),
         ("weekly_report", "prepare_weekly_report_acknowledgement", "acknowledge_weekly_report", "oa.weekly_report.acknowledge"),
         ("missed_punch", "prepare_missed_punch_approval", "approve_missed_punch_request", "oa.missed_punch.approve"),
         ("intellectual_property_reward", "prepare_intellectual_property_reward_acknowledgement", "acknowledge_intellectual_property_reward", "oa.intellectual_property_reward.acknowledge"),
+        ("business_settlement", "prepare_business_settlement_approval", "approve_business_settlement", "oa.business_settlement.approve"),
     )
     preflights, prepared, committed, authorization_ids = [], [], [], []
 
@@ -154,10 +155,10 @@ def test_mixed_batch_uses_each_frozen_definition_and_separate_authorization(run,
         assert len(committed) == ordinal - 1
         field = finish(service, auth)
         assert committed[-1] == (profile, f"affair-{ordinal}")
-    assert len(set(authorization_ids)) == 4
+    assert len(set(authorization_ids)) == 5
     assert prepared == committed == [(profile, f"affair-{i}") for i, (profile, *_rest) in enumerate(cases, 1)]
     assert preflights == [("efficiency_data", "affair-1"), ("weekly_report", "affair-2"), ("missed_punch", "affair-3"),
-                          ("intellectual_property_reward", "affair-4")]
+                          ("intellectual_property_reward", "affair-4"), ("business_settlement", "affair-5")]
     assert field["batch"]["state"] == "succeeded"
 
 

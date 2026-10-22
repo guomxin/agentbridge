@@ -134,8 +134,11 @@ from agentbridge.adapters.seeyon_pending_actions import (
     ATTENDANCE_CONFIRMATION_PREPARE_CAPABILITY,
     ATTENDANCE_CONFIRM_CAPABILITY,
     BUSINESS_TRIP_APPROVAL_FIELD_CARD_SCHEMA,
+    BUSINESS_SETTLEMENT_APPROVAL_FIELD_CARD_SCHEMA,
     BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY,
     BUSINESS_TRIP_APPROVE_CAPABILITY,
+    BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY,
+    BUSINESS_SETTLEMENT_APPROVE_CAPABILITY,
     EFFICIENCY_DATA_APPROVAL_FIELD_CARD_SCHEMA,
     EFFICIENCY_DATA_APPROVAL_PREPARE_CAPABILITY,
     EFFICIENCY_DATA_APPROVE_CAPABILITY,
@@ -180,6 +183,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     acknowledge_weekly_report,
     acknowledge_quarterly_performance,
     approve_business_trip_request,
+    approve_business_settlement,
     confirm_attendance,
     approve_efficiency_data,
     approve_intellectual_property_declaration,
@@ -195,6 +199,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     prepare_efficiency_data_approval,
     prepare_attendance_confirmation,
     prepare_business_trip_approval,
+    prepare_business_settlement_approval,
     prepare_labor_contract_renewal_approval,
     prepare_leave_approval,
     prepare_overtime_approval,
@@ -259,6 +264,9 @@ _TRUSTED_WRITE_DEFINITIONS.update(
         ].legacy_definition(),
         BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
             BUSINESS_TRIP_APPROVAL_PREPARE_CAPABILITY
+        ].legacy_definition(),
+        BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
+            BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY
         ].legacy_definition(),
         LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY: OA_WRITE_DECLARATIONS[
             LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY
@@ -391,6 +399,12 @@ _CAPABILITY_SCOPES = {
     ],
     BUSINESS_TRIP_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
         BUSINESS_TRIP_APPROVE_CAPABILITY
+    ],
+    BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_SETTLEMENT_APPROVAL_PREPARE_CAPABILITY
+    ],
+    BUSINESS_SETTLEMENT_APPROVE_CAPABILITY: _OA_WRITE_SCOPES[
+        BUSINESS_SETTLEMENT_APPROVE_CAPABILITY
     ],
     LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY: _OA_WRITE_SCOPES[
         LABOR_CONTRACT_RENEWAL_APPROVAL_PREPARE_CAPABILITY

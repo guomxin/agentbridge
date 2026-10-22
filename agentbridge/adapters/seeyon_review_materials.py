@@ -71,6 +71,13 @@ def review_materials(profile, detail, business_snapshot=None):
     if profile == "quarterly_performance" and snapshot:
         from agentbridge.adapters.seeyon_quarterly_performance import FIELD_LABELS, ROW_FIELDS
         sections.append(_table("performance-employees", "季度绩效人员明细（只读）", snapshot, FIELD_LABELS, ROW_FIELDS))
+    if profile == "business_settlement" and snapshot:
+        from agentbridge.adapters.seeyon_business_settlement import FIELD_LABELS, MASTER_FIELDS, EXPENSE_FIELDS, PAYMENT_FIELDS
+        sections.append({"id": "settlement-information", "title": "业务结算信息（只读）", "kind": "facts",
+                         "fields": [{"label": FIELD_LABELS[field["id"]], "value": field["value"]}
+                                    for field in snapshot.get("fields") or [] if field["id"] in MASTER_FIELDS]})
+        sections.append(_table("settlement-expenses", "费用与发票明细（只读）", snapshot, FIELD_LABELS, EXPENSE_FIELDS))
+        sections.append(_table("settlement-payments", "付款登记信息（只读）", snapshot, FIELD_LABELS, PAYMENT_FIELDS))
     if profile == "intellectual_property_reward" and snapshot:
         from agentbridge.adapters.seeyon_intellectual_property_reward import FIELD_LABELS, MASTER_FIELDS, ROW_FIELDS
         sections.append({"id": "reward-information", "title": "知识产权奖励信息（只读）", "kind": "facts",
