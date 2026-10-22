@@ -47,6 +47,7 @@ export const AGENTBRIDGE_GOVERNED_ENTRY_TOOL_NAMES = Object.freeze([
   "oa_workflow_pending_batch_prepare",
   "oa_meeting_room_application_prepare",
   "oa_meeting_room_application_cancel_prepare",
+  "oa_meeting_reply_prepare",
   "oa_meeting_create_prepare",
   "yuque_session_login",
   "taihua_work_log_create_prepare",
