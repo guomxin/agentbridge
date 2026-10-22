@@ -601,8 +601,8 @@ test('weekly report and handover layouts retain full source material and distinc
   assert.deepEqual(descendants(target).filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId), ['a', 'b']);
 });
 
-test('all sixteen named materials expose their existing key facts without editable decisions', () => {
-  assert.equal(Object.keys(REVIEW_DESIGNS).length, 16);
+test('all seventeen named materials expose their existing key facts without editable decisions', () => {
+  assert.equal(Object.keys(REVIEW_DESIGNS).length, 17);
   for (const [kind, design] of Object.entries(REVIEW_DESIGNS)) {
     const document = createDocument(), target = document.createElement('div');
     target.querySelectorAll = () => [];
@@ -811,4 +811,17 @@ test('offline restoration keeps local editing available but cannot save or appro
   assert.deepEqual(h.calls.map(call => call.action), ['state', 'state', 'values', 'preview']);
   assert.equal(h.local().content, '离线期间继续编辑的文字');
   assert.equal(h.controller.state().canApprove, true);
+});
+
+
+test('meeting invitation exposes exact title time place and expanded body', () => {
+  const document = createDocument(), target = document.createElement('div');
+  target.querySelectorAll = () => [];
+  renderEvidence(document, target, {fields: [
+    {label: '会议主题', value: '合成会议'}, {label: '开始时间', value: '08:45'},
+    {label: '地点', value: '合成会议室'}, {label: '当前回执', value: '未回执'},
+  ], sections: [{id: 'body', kind: 'text', title: '会议说明', text: '正文保留08:50原始说明'}]}, 'meeting_reply');
+  for (const value of ['合成会议', '08:45', '合成会议室', '未回执']) assert.ok(target.textContent.includes(value));
+  assert.ok(descendants(target).some(node => node.tag === 'details' && node.dataset.group === 'material:body' && node.open));
+  assert.ok(target.textContent.includes('正文保留08:50原始说明'));
 });
