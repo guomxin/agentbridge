@@ -300,7 +300,7 @@ class WorkspaceApplication:
         )
         from agentbridge.core.actionable_results import preparation_source_task_ids
         with self.service.tasks._connect() as connection:
-            actionable_sources = preparation_source_task_ids(connection, account["user_subject"], task_id)
+            actionable_sources = preparation_source_task_ids(connection, account["user_subject"], task_id, service=self.service)
         business = self._business_task_presentation(account, task, interactions)
         return {
             "task": _public_task(task),
@@ -383,8 +383,10 @@ class WorkspaceApplication:
                         execution.update(phase="not_submitted", reason="pre_submit_validation_failed")
                     result["businessExecution"] = execution
                     if execution.get("readOnlyQuery") == "oa_pending" and task.get("status") == "outcome_unknown":
-                        from agentbridge.core.oa_pending_recovery import can_recover_pending
-                        result["oaPendingRecoveryAvailable"] = can_recover_pending(self.service, subject=user_subject, task_id=task_id)
+                        from agentbridge.core.oa_pending_recovery import pending_recovery_presentation
+                        recovery = pending_recovery_presentation(self.service, subject=user_subject, task_id=task_id)
+                        result["oaPendingRecovery"] = recovery
+                        result["oaPendingRecoveryAvailable"] = recovery["canProbe"]
         return result
 
     def task_projections(self, account: dict, task_ids: list[str], *, versions: list[int] | None = None) -> dict:
@@ -493,7 +495,7 @@ class WorkspaceApplication:
     def _public_oa_recovery(result: dict) -> dict:
         # The core owns the assessment. Never expose its persisted principal,
         # original authorization, captured materials or recovery plan here.
-        allowed = {"status", "assessmentId", "assessmentHash", "revision", "expiresAt", "reason",
+        allowed = {"status", "assessmentId", "assessmentHash", "revision", "observedAt", "expiresAt", "reason",
             "canPrepare", "previousOutcome", "recoveryTaskId", "taskId", "originalTaskId"}
         public = {key: value for key, value in result.items() if key in allowed}
         if isinstance(result.get("doneCoverage"), str) and result["doneCoverage"] in {"complete", "partial", "incomplete", "unknown"}:

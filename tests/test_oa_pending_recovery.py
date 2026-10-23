@@ -258,3 +258,206 @@ def test_recovery_child_inherits_original_skill_and_revocation_blocks_it(fixture
     with pytest.raises(Exception):
         prepare(fixture)
     assert counts(fixture) == (1, 1, 1) and len(fixture.oa.writes) == 1
+
+
+def current_recovery(fixture):
+    from agentbridge.core.oa_pending_recovery import pending_recovery_presentation
+    return pending_recovery_presentation(fixture.service, subject=OWNER, task_id=origin(fixture)["task_id"])
+
+
+def query_source(fixture, number):
+    from agentbridge.core.quick_queries import execute_query, queue_query
+    queued = queue_query(fixture.service, fixture.account, {"requestKey": f"recovery-live-query-{number:04}"})
+    result = execute_query(fixture.service, OWNER, queued["taskId"], queued["commandKey"],
+        runtime_context={"endpointId": fixture.account["endpoint_id"], "hostType": "openclaw",
+                         "hostInstanceId": "synthetic-recovery-projection"})
+    assert result["status"] == "succeeded"
+    return queued["taskId"]
+
+
+def test_current_projection_restores_saved_readonly_evidence_without_restoring_prepare_authority(fixture):
+    import agentbridge.core.oa_pending_recovery as recovery
+    initial = current_recovery(fixture)
+    assert initial["status"] == "not_checked" and initial["nextAction"] == "probe"
+    assessment = probe(fixture)
+    before = counts(fixture)
+    with patch.object(recovery, "_live", side_effect=AssertionError("GET must never read OA")):
+        result = fixture.app.task_detail(fixture.account, origin(fixture)["task_id"])["oaPendingRecovery"]
+    assert result["status"] == "unresolved_still_pending" and result["stale"] is False
+    assert result["observedAt"] == assessment["observedAt"] and result["expiresAt"] == assessment["expiresAt"]
+    assert result["canPrepare"] is result["canExecute"] is False and result["canProbe"] is True
+    assert not {"assessmentId", "assessmentHash", "revision", "sessionHash", "scopeHash", "originPlanHash"}.intersection(result)
+    with patch.object(recovery, "_now", return_value=recovery._now() + timedelta(seconds=121)):
+        expired = current_recovery(fixture)
+    assert expired["stale"] is True and expired["nextAction"] == "probe" and expired["canPrepare"] is False
+    session = fixture.service.sessions.find(user_subject=OWNER, system_id="oa")
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET authority_generation=authority_generation+1 WHERE session_id=?", (session["session_id"],))
+    assert current_recovery(fixture)["stale"] is True
+    assert counts(fixture) == before and len(fixture.oa.writes) == 1
+
+
+def test_recovery_completion_invalidates_original_and_six_sources_without_refresh_or_new_business_work(fixture):
+    from agentbridge.core.actionable_results import preparation_source_task_ids
+    sources = [query_source(fixture, number) for number in range(6)]
+    old = origin(fixture)
+    original_auth = fixture.service.write_authorizations.get(old["original_authorization_id"])
+    case, drafts, credentials, preview = ready(fixture)
+    expected = {old["task_id"], *sources}
+    for phase in ("waiting", "completed"):
+        if phase == "completed":
+            decide(drafts, credentials, preview)
+            drive(fixture, case)
+        before = counts(fixture)
+        detail = fixture.app.task_detail(fixture.account, case["task_id"])
+        assert set(detail["actionableSourceTaskIds"]) == expected
+        current = current_recovery(fixture)
+        assert current["recoveryTaskId"] == case["task_id"] and current["nextAction"] == "open_recovery"
+        assert current["status"] == ("recovery_in_progress" if phase == "waiting" else "recovery_succeeded")
+        assert current["recoveryTaskStatus"] == ("waiting_user" if phase == "waiting" else "succeeded")
+        # Simulate exactly the read-only IDs the live projection queue receives.
+        for task_id in sources:
+            projected = fixture.app.task_detail(fixture.account, task_id)
+            targets = projected["actionableResults"][0]["targets"]
+            target = next(item for item in targets if item["preparation"] and item["preparation"]["taskId"] == case["task_id"])
+            assert target["preparation"]["state"] == ("waiting_user" if phase == "waiting" else "succeeded")
+            assert not projected["actionableSourceTaskIds"], "source projections must not enqueue children"
+        assert counts(fixture) == before
+    assert fixture.service.write_authorizations.get(old["original_authorization_id"]) == original_auth
+    assert fixture.service.tasks.get_task(old["task_id"], user_subject=OWNER)["status"] == "outcome_unknown"
+    assert fixture.service.operations.get(old["original_operation_id"])["status"] == "unknown"
+    assert counts(fixture) == (2, 2, 2) and len(fixture.oa.writes) == 2
+    session = fixture.service.sessions.find(user_subject=OWNER, system_id="oa")
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET downstream_principal_ref='other-principal' WHERE session_id=?", (session["session_id"],))
+    historical = current_recovery(fixture)
+    assert historical["status"] == "recovery_succeeded" and historical["stale"] is True
+    assert historical["canProbe"] is False and historical["canPrepare"] is False
+    # Identity changes do not erase an owned history dependency, but no old
+    # completion or invalidation hint grants the new identity an action.
+    assert set(fixture.app.task_detail(fixture.account, case["task_id"])["actionableSourceTaskIds"]) == expected
+    with fixture.service.tasks._connect() as db:
+        from agentbridge.core.actionable_results import ActionableResultError
+        with pytest.raises(ActionableResultError):
+            preparation_source_task_ids(db, "other-user", case["task_id"], service=fixture.service)
+
+
+def test_saved_verified_completion_is_visible_after_reload_and_does_not_rewrite_original(fixture):
+    import agentbridge.core.oa_pending_recovery as recovery
+    sources = [query_source(fixture, number) for number in range(6)]
+    original_id = origin(fixture)["task_id"]
+    def source_states():
+        projections = [fixture.app.task_detail(fixture.account, task_id) for task_id in sources]
+        assert all(not item["actionableSourceTaskIds"] for item in projections), "query-to-origin dependency would create a loop"
+        return [next(target["preparation"] for target in item["actionableResults"][0]["targets"]
+            if target["preparation"] and target["preparation"]["taskId"] == original_id) for item in projections]
+    assert {item["state"] for item in source_states()} == {"outcome_unknown"}
+    fixture.oa.data["affairs"][origin(fixture)["arguments"]["affair_id"]]["processed"] = True
+    observation = probe(fixture)
+    assert observation["status"] == "verified_complete"
+    with patch("agentbridge.core.oa_pending_recovery._live", side_effect=AssertionError("No OA read on projection")):
+        public = current_recovery(fixture)
+        again = fixture.app.task_detail(fixture.account, origin(fixture)["task_id"])["oaPendingRecovery"]
+    assert public == again and public["status"] == "verified_complete"
+    assert public["observedAt"] == observation["observedAt"] and not public["canPrepare"]
+    assert set(fixture.app.task_detail(fixture.account, original_id)["actionableSourceTaskIds"]) == set(sources)
+    assert all(item == {"taskId": original_id, "state": "verified_complete", "observedAt": observation["observedAt"],
+                        "expiresAt": observation["expiresAt"]} for item in source_states())
+    with patch.object(recovery, "_now", return_value=recovery._now() + timedelta(seconds=121)):
+        expired = current_recovery(fixture)
+        assert {item["state"] for item in source_states()} == {"outcome_unknown"}
+    assert expired["status"] == "verified_complete" and expired["stale"] is True
+    assert expired["canProbe"] is True and expired["nextAction"] == "probe" and expired["canPrepare"] is False
+    session = fixture.service.sessions.find(user_subject=OWNER, system_id="oa")
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET authority_generation=authority_generation+1 WHERE session_id=?", (session["session_id"],))
+    assert {item["state"] for item in source_states()} == {"outcome_unknown"}
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET downstream_principal_ref='other-principal' WHERE session_id=?", (session["session_id"],))
+    changed_identity = current_recovery(fixture)
+    assert changed_identity["status"] == "verified_complete" and changed_identity["stale"] is True
+    assert changed_identity["canProbe"] is False and changed_identity["reason"] == "identity_changed"
+    assert fixture.service.tasks.get_task(origin(fixture)["task_id"], user_subject=OWNER)["status"] == "outcome_unknown"
+    assert counts(fixture) == (1, 1, 1)
+
+
+def test_source_complete_requires_the_attested_verification_event_and_preserves_unknown_history(fixture):
+    source = query_source(fixture, 0)
+    original_id = origin(fixture)["task_id"]
+    fixture.oa.data["affairs"][origin(fixture)["arguments"]["affair_id"]]["processed"] = True
+    assert probe(fixture)["status"] == "verified_complete"
+    with fixture.service.tasks._connect() as db:
+        db.execute("DELETE FROM task_events WHERE task_id=? AND event_type='task.oa_recovery.verified_complete'", (original_id,))
+    public = current_recovery(fixture)
+    assert public["status"] == "blocked" and public["reason"] == "assessment_evidence_invalid"
+    rows = fixture.app.task_detail(fixture.account, source)["actionableResults"][0]["targets"]
+    target = next(item for item in rows if item["preparation"] and item["preparation"]["taskId"] == original_id)
+    assert target["preparation"]["state"] == "outcome_unknown"
+    assert fixture.service.tasks.get_task(original_id, user_subject=OWNER)["status"] == "outcome_unknown"
+    assert counts(fixture) == (1, 1, 1) and len(fixture.oa.writes) == 1
+
+
+def test_recovery_child_success_label_requires_authoritative_completion_not_only_task_status(fixture):
+    child_id = prepare(fixture)["taskId"]
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE agent_tasks SET status='succeeded' WHERE task_id=?", (child_id,))
+    result = current_recovery(fixture)
+    assert result["status"] == "recovery_unknown" and result["reason"] == "recovery_result_unverified"
+    assert result["nextAction"] == "open_recovery" and result["canPrepare"] is False
+    assert counts(fixture) == (1, 1, 1)
+
+
+def test_recovery_failure_and_unknown_remain_distinct_and_do_not_allow_a_second_child(fixture):
+    child_id = prepare(fixture)["taskId"]
+    for state, status in (("failed", "recovery_failed"), ("outcome_unknown", "recovery_unknown")):
+        with fixture.service.tasks._connect() as db:
+            db.execute("UPDATE agent_tasks SET status=? WHERE task_id=?", (state, child_id))
+        result = current_recovery(fixture)
+        assert result["status"] == status and result["recoveryTaskId"] == child_id
+        assert result["canPrepare"] is False and result["nextAction"] == "open_recovery"
+    assert counts(fixture) == (1, 1, 1)
+
+
+def test_recovery_availability_explains_login_identity_and_grant_failures_without_reading_or_writing(fixture):
+    session = fixture.service.sessions.find(user_subject=OWNER, system_id="oa")
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET state='expired' WHERE session_id=?", (session["session_id"],))
+    result = current_recovery(fixture)
+    assert (result["availability"], result["reason"], result["nextAction"], result["canProbe"]) == (
+        "login_required", "login_required", "restore_login", False)
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET state='active',downstream_principal_ref='other-principal' WHERE session_id=?", (session["session_id"],))
+    assert current_recovery(fixture)["reason"] == "identity_changed"
+    with fixture.service.tasks._connect() as db:
+        db.execute("UPDATE sessions SET downstream_principal_ref=? WHERE session_id=?", (session["downstream_principal_ref"], session["session_id"]))
+    with patch.object(fixture.service.user_grants, "require_capability", side_effect=PermissionError("PRIVATE_GRANT")):
+        result = current_recovery(fixture)
+    assert result["reason"] == "permission_required" and "PRIVATE_GRANT" not in json.dumps(result)
+    assert counts(fixture) == (1, 1, 1) and len(fixture.oa.writes) == 1
+
+
+def test_tampered_recovery_link_never_exports_parent_or_source_dependency_or_success(fixture):
+    child_id = prepare(fixture)["taskId"]
+    query_source(fixture, 0)
+    with fixture.service.tasks._connect() as db:
+        task = fixture.service.tasks._select_owned_task(db, child_id, OWNER)
+        summary = json.loads(task["summary_json"])
+        summary["oaPendingRecovery"]["affairId"] = "forged-exact-affair"
+        db.execute("UPDATE agent_tasks SET summary_json=? WHERE task_id=?", (json.dumps(summary), child_id))
+    detail = fixture.app.task_detail(fixture.account, child_id)
+    assert detail["actionableSourceTaskIds"] == []
+    result = current_recovery(fixture)
+    assert result["status"] == "blocked" and result["reason"] == "recovery_evidence_invalid"
+    assert "recoveryTaskId" not in result and counts(fixture) == (1, 1, 1)
+
+
+def test_corrupt_saved_assessment_is_not_presented_as_current_verified_evidence(fixture):
+    probe(fixture)
+    with fixture.service.tasks._connect() as db:
+        row = db.execute("SELECT event_id,payload_json FROM task_events WHERE task_id=? AND event_type='task.oa_recovery.assessed'", (origin(fixture)["task_id"],)).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload.update(status="verified_complete", reason="PRIVATE_RAW_ERROR")
+        db.execute("UPDATE task_events SET payload_json=? WHERE event_id=?", (json.dumps(payload), row["event_id"]))
+    result = current_recovery(fixture)
+    assert result["status"] == "blocked" and result["reason"] == "assessment_evidence_invalid"
+    assert "PRIVATE_RAW_ERROR" not in json.dumps(result) and result["canPrepare"] is False

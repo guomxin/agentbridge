@@ -26,7 +26,7 @@ export function actionableTaskInteractions(result) {
 }
 
 export function batchItemStatusLabel(state) {
-  return ({queued: "未处理", preparing: "准备中", waiting_user: "等待填写或授权",
+  return ({queued: "未处理", preparing: "准备中", waiting_user: "等待填写并确认",
     running: "提交与核验中", succeeded: "已核验成功", failed: "失败",
     outcome_unknown: "结果待核对", skipped: "已跳过", canceled: "已取消",
     expired: "已过期", superseded: "已被替换"})[state] || "状态待更新";
@@ -124,8 +124,85 @@ export function businessExecutionPresentation(result) {
   }
   const submission = {scheduled: "提交入口已排队，尚不能证明请求发出", invoked: "已调用原始提交入口，仍须核验业务结果",
     not_invoked: "未调用提交入口", observation_unavailable: "暂未取得提交入口观察证据"}[execution.submissionState];
-  return {phase, message, submission, observedAt: execution.lastObservedAt, updatedAt: execution.updatedAt,
+  return {phase, message, submission: execution.phase === "verified" ? null : submission,
+    historicalSubmission: execution.phase === "verified" ? submission : null,
+    observedAt: execution.lastObservedAt, updatedAt: execution.updatedAt,
     readOnlyQuery: result.task?.status === "outcome_unknown" && execution.readOnlyQuery === "oa_pending"};
+}
+
+// This public projection is display-only. Fresh assessment identifiers and
+// explicit acknowledgement are still required by the recovery controller.
+export function oaRecoveryPresentation(result, now = Date.now()) {
+  const recovery = result?.oaPendingRecovery;
+  if (!recovery || recovery.originalTaskId !== result.task?.task_id || recovery.canExecute !== false
+      || recovery.canPrepare !== false) return null;
+  const labels = {not_checked:"原事项待核对", verified_complete:"原事项已核验完成",
+    unresolved_still_pending:"原事项仍待核对", blocked:"需先核对办理条件",
+    recovery_in_progress:"后续办理进行中", recovery_succeeded:"后续办理已完成",
+    recovery_failed:"后续办理未完成", recovery_unknown:"后续办理结果待核对"};
+  if (!labels[recovery.status]) return null;
+  const messages = {
+    not_checked:"先只读核对本事项的当前状态。",
+    verified_complete:"已根据 OA 当前记录核验原事项完成，无需重新办理。首次尝试的回执未知记录保留在历史中。",
+    unresolved_still_pending:"上次核对时原事项仍在待办中；这不能证明首次提交未执行。继续前需要重新核对。",
+    blocked:"当前条件不足，暂不能准备新的办理。请按提示核对原事项。",
+    recovery_in_progress:"已建立新的办理任务，请在该任务继续。首次尝试的回执未知记录保留在历史中。",
+    recovery_succeeded:"后续办理已完成并取得业务核验证据。首次尝试回执未知，随后重新核对并完成；原执行记录保留在历史中。",
+    recovery_failed:"后续办理未完成，请查看该任务的原因。首次尝试的原结果仍待核对。",
+    recovery_unknown:"后续办理结果也待核对，请查看该任务的核验记录；不要重复提交。",
+  };
+  const reasonMessages = {login_required:"OA 登录已失效，请先恢复原账号登录，再核对本事项。",
+    identity_changed:"当前 OA 身份与原办理不一致，请先恢复原账号登录。",
+    material_changed:"原事项材料已变化，请先到 OA 核对当前材料。",
+    target_identity_changed:"原事项或审批节点已变化，请先到 OA 核对。",
+    conflicting_or_completed_evidence:"发现冲突或完成证据，请先到 OA 核对，不能重复准备。",
+    permission_required:"当前账号暂不具备原事项的办理权限，请先核对账号和权限。",
+    recovery_chain_unsupported:"此任务已经是一次后续办理，请先核对其结果，不能继续创建新的尝试。",
+    origin_evidence_invalid:"原办理记录缺少完整的核对依据，请到 OA 核对原事项。",
+    assessment_evidence_invalid:"上次核对记录已不可用，请重新核对原事项。",
+    recovery_evidence_invalid:"后续办理关联暂不能核验，请到 OA 核对原事项。",
+    recovery_result_unverified:"后续任务已结束，但业务完成证据尚未核验，请先查看结果记录。",
+    recovery_prepare_retryable:"同一后续任务的材料准备尚未完成，请先重新核对原事项，再恢复材料准备。",
+    unsupported:"此历史任务暂不支持恢复，请到 OA 核对原事项。"};
+  const expiry = Date.parse(recovery.expiresAt);
+  const historicalVerification = recovery.status === "verified_complete" &&
+    (recovery.stale === true || Number.isFinite(expiry) && expiry <= now);
+  const historicalRecovery = recovery.status === "recovery_succeeded" && recovery.stale === true;
+  const currentLimit = reasonMessages[recovery.reason] ||
+    (recovery.availability === "login_required" ? reasonMessages.login_required : "当前身份或办理条件需重新核对。");
+  const message = historicalRecovery
+    ? `此前后续办理已核验完成${recovery.observedAt ? `（核验时间：${formatTime(recovery.observedAt)}）` : ""}，此处保留历史完成证据。${currentLimit}`
+    : historicalVerification
+    ? "上次核对时已取得原事项完成证据；该次核对已过期，这是一条历史结论。需要了解当前状态时，请重新核对本事项。"
+    : reasonMessages[recovery.reason] || (recovery.availability === "login_required" ? reasonMessages.login_required : messages[recovery.status]);
+  const childId = typeof recovery.recoveryTaskId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(recovery.recoveryTaskId)
+    && recovery.recoveryTaskId !== result.task.task_id ? recovery.recoveryTaskId : null;
+  return {...recovery, recoveryTaskId:childId,
+    label:historicalRecovery ? "此前后续办理已完成" : historicalVerification ? "上次核对已完成（已过期）" : labels[recovery.status], message,
+    completed:recovery.status === "recovery_succeeded" || recovery.status === "verified_complete" && !historicalVerification};
+}
+
+export function taskPrimaryAction(result) {
+  const task = result?.task || {}, recovery = oaRecoveryPresentation(result);
+  if (recovery?.recoveryTaskId && recovery.recoveryTaskId !== task.task_id) {
+    return {kind:"open_task", taskId:recovery.recoveryTaskId,
+      label:recovery.completed ? "查看办理结果" : recovery.recoveryTaskStatus === "waiting_user" ? "继续新办理" : "查看后续办理"};
+  }
+  if (recovery?.completed) return {kind:"result", label:"查看办理结果"};
+  if (task.status === "outcome_unknown") return recovery?.canProbe === false
+    ? {kind:"unavailable", label:recovery.availability === "login_required" ? "请先恢复 OA 登录" : "请到 OA 核对"}
+    : result.oaPendingRecoveryAvailable !== false && result.businessExecution?.readOnlyQuery === "oa_pending"
+      ? {kind:"probe", label:"核对本事项"} : {kind:"unavailable", label:"请到业务系统核对"};
+  if (task.status === "succeeded") return {kind:"result", label:"查看办理结果"};
+  if (TERMINAL_TASK_STATES.has(task.status)) return {kind:"result", label:"查看处理记录"};
+  const interactions = actionableTaskInteractions(result);
+  const pending = interactions.filter(item => item.state === "pending" && trustedInteractionUrl(item.presentation?.url));
+  if (pending.length === 1) {
+    const label = interactionActionLabel(pending[0].type, pending[0].display);
+    return {kind:"form", interactionId:pending[0].interactionId, url:trustedInteractionUrl(pending[0].presentation.url),
+      label:label === "填写信息" && pending[0].confirmation?.mode === "single" ? "继续填写并确认" : label};
+  }
+  return {kind:"progress", label:pending.length > 1 ? "查看当前操作" : "查看进度"};
 }
 
 export function taskResultTitle(result) {
@@ -184,7 +261,7 @@ export function taskCardStatusMessage(status, summary = null) {
   return (
     {
       active: "任务已创建，等待智能体继续处理。",
-      waiting_user: "任务正在等待你的填写或确认。",
+      waiting_user: "等待填写并确认本次事项。",
       running: "智能体正在执行已确认的操作。",
       succeeded: "任务已经完成。",
       partially_succeeded: "部分事项已完成，批次已停止，请查看进度。",

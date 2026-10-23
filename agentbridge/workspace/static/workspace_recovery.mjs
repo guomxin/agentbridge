@@ -1,4 +1,5 @@
 import { isCancellation } from "./workspace_lifecycle.mjs";
+import { oaRecoveryPresentation, formatTime } from "./workspace_results.mjs";
 
 const ACK_VERSION = "oa_unknown_new_attempt_v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -19,7 +20,7 @@ const reasons = {
 // This panel can only request a read-only assessment and a fresh draft. The
 // reviewed business form remains the sole place for a new execution decision.
 export function createOaPendingRecovery({ document, state, probeRecovery, prepareRecovery, openTask,
-  now = () => Date.now(), makeRequestKey = () => crypto.randomUUID() }) {
+  now = () => Date.now(), makeRequestKey = () => crypto.randomUUID(), getScope, timers = globalThis }) {
   state.oaPendingRecovery ||= new Map();
   const roots = new WeakMap();
   const node = (tag, className = "", text = "") => {
@@ -29,12 +30,32 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
     let model = state.oaPendingRecovery.get(taskId);
     if (!model) {
       model = {taskId, views:new Set(), assessment:null, acknowledgement:false, pending:false,
-        probeRequest:null, prepareRequest:null, prepareRetryable:false, recoveryTaskId:null, notice:"", eligible:true};
+        probeRequest:null, prepareRequest:null, prepareRetryable:false, recoveryTaskId:null, notice:"", eligible:true,
+        projection:null, timer:null, scope:getScope?.(), disposed:false};
       state.oaPendingRecovery.set(taskId, model);
+      model.scope?.defer(() => { model.disposed = true; clearExpiry(model); });
     }
     return model;
   }
   const validUntil = assessment => Number.isFinite(Date.parse(assessment?.expiresAt)) && Date.parse(assessment.expiresAt) > now();
+  const current = model => !model.disposed && state.oaPendingRecovery.get(model.taskId) === model
+    && (!model.scope || model.scope.current());
+  function clearExpiry(model) {
+    if (model.timer === null) return;
+    if (model.scope) model.scope.clearTimer(model.timer); else timers.clearTimeout(model.timer);
+    model.timer = null;
+  }
+  function armExpiry(model) {
+    clearExpiry(model);
+    const expiresAt = Date.parse(model.assessment?.expiresAt ||
+      (model.projection?.status === "verified_complete" ? model.projection.expiresAt : undefined));
+    if (!current(model) || !model.views.size || !Number.isFinite(expiresAt) || expiresAt <= now()) return;
+    const expire = () => { model.timer = null; if (current(model)) update(model); };
+    const delay = Math.min(2147483647, Math.max(1, expiresAt - now() + 1));
+    model.timer = model.scope ? model.scope.timeout(expire, delay) : timers.setTimeout(expire, delay);
+    // Node fixtures should not stay alive solely for a browser expiry timer.
+    model.timer?.unref?.();
+  }
   const validAssessment = value => value && ["verified_complete", "unresolved_still_pending", "blocked"].includes(value.status)
     && value.canExecute === false && typeof value.canPrepare === "boolean"
     && (!value.recoveryTaskId || !value.canPrepare || value.childPreparation === "retryable")
@@ -43,16 +64,24 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
       && Number.isSafeInteger(value.revision) && value.revision > 0 && Number.isFinite(Date.parse(value.expiresAt)));
 
   function update(model) {
+    if (!current(model)) return;
+    if (model.projection) model.projection = oaRecoveryPresentation({task:{task_id:model.taskId},oaPendingRecovery:model.projection}, now());
     const assessment = model.assessment;
-    const expired = Boolean(assessment && assessment.canPrepare && !validUntil(assessment));
+    const expired = Boolean(assessment && Number.isFinite(Date.parse(assessment.expiresAt)) && !validUntil(assessment));
+    if (expired && !model.prepareRequest) model.acknowledgement = false;
     const ready = model.eligible && assessment?.status === "unresolved_still_pending" && assessment.canPrepare === true && !expired;
     const retryableChild = Boolean(model.recoveryTaskId) && assessment?.childPreparation === "retryable";
     for (const view of model.views) {
-      view.root.hidden = !model.eligible;
+      view.root.hidden = !model.eligible && !model.projection;
+      view.probe.hidden = Boolean(model.projection?.completed) || model.projection?.canProbe === false;
       view.probe.disabled = model.pending || Boolean(model.prepareRequest && !model.prepareRetryable) || !model.eligible;
       view.probe.textContent = model.pending && !model.prepareRequest ? "正在核对原事项…" : model.probeRequest ? "恢复本次核对" : "只读核对原事项";
       view.notice.textContent = model.notice || "先核对原事项的当前状态；本步骤不会重新提交。";
+      if (model.projection && (!assessment && !model.pending && !model.notice || model.projection.completed)) {
+        view.notice.textContent = `${model.projection.message}${model.projection.observedAt ? ` 上次核对：${formatTime(model.projection.observedAt)}。` : ""}`;
+      }
       if (expired && !model.prepareRequest) view.notice.textContent = "本次核对已过期，请重新核对原事项。";
+      else if (ready && !model.prepareRequest) view.notice.textContent += ` 本次核对有效至 ${formatTime(assessment.expiresAt)}。`;
       view.risk.hidden = !(ready || model.prepareRequest) || Boolean(model.recoveryTaskId && !retryableChild);
       view.riskCopy.textContent = `${assessment?.status === "unresolved_still_pending" && assessment.doneCoverage !== "complete" ? PARTIAL_DONE_NOTICE : ""}${RISK_ACK}`;
       view.ack.checked = model.acknowledgement;
@@ -61,19 +90,22 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
       view.prepare.disabled = model.pending || !model.eligible || (!model.prepareRequest && (!ready || !model.acknowledgement));
       view.prepare.textContent = model.pending && model.prepareRequest ? "正在准备新表单…" : model.prepareRequest ? "恢复本次新表单准备" : retryableChild ? "恢复同一任务材料准备" : "准备全新办理表单";
       view.open.hidden = !model.recoveryTaskId;
-      view.open.textContent = retryableChild ? "查看恢复任务进度" : "查看新办理表单";
+      view.open.textContent = model.projection?.completed ? "查看办理结果" : retryableChild ? "查看恢复任务进度" : "查看新办理表单";
       view.open.disabled = typeof openTask !== "function";
     }
+    armExpiry(model);
   }
 
   async function probe(model) {
-    if (model.pending || model.prepareRequest && !model.prepareRetryable || !model.eligible) return;
+    if (!current(model) || model.pending || model.prepareRequest && !model.prepareRetryable || !model.eligible
+        || model.projection?.completed || model.projection?.canProbe === false) return;
     if (model.prepareRetryable) { model.prepareRequest = null; model.prepareRetryable = false; }
     model.probeRequest ||= {requestKey:makeRequestKey()};
     model.pending = true; model.assessment = null; model.acknowledgement = false;
     model.notice = "正在只读核对原事项；不会重新提交，请稍候。"; update(model);
     try {
       const result = await probeRecovery(model.taskId, {...model.probeRequest});
+      if (!current(model)) return;
       if (!validAssessment(result)) throw Error("核对回执尚未确认，请恢复本次核对。");
       model.assessment = result; model.probeRequest = null;
       model.recoveryTaskId = UUID.test(result.recoveryTaskId) && result.recoveryTaskId !== model.taskId ? result.recoveryTaskId : null;
@@ -92,11 +124,12 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
       if (isCancellation(error)) return;
       model.notice = error.message || "原事项核对尚未确认，请恢复本次核对。";
       if ([400, 403, 404, 409, 422].includes(error.status)) model.probeRequest = null;
-    } finally { model.pending = false; update(model); }
+    } finally { if (current(model)) { model.pending = false; update(model); } }
   }
 
   async function prepare(model) {
-    if (model.pending || !model.eligible || model.recoveryTaskId && model.assessment?.childPreparation !== "retryable") return;
+    if (!current(model) || model.pending || !model.eligible || model.projection?.completed
+        || model.recoveryTaskId && model.assessment?.childPreparation !== "retryable") return;
     if (!model.prepareRequest) {
       if (!model.acknowledgement || !validUntil(model.assessment)
           || model.assessment?.status !== "unresolved_still_pending" || model.assessment.canPrepare !== true) {
@@ -108,6 +141,7 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
     model.pending = true; model.prepareRetryable = false; model.notice = "正在重新读取材料并准备全新表单；不会提交原事项。"; update(model);
     try {
       const result = await prepareRecovery(model.taskId, {...model.prepareRequest});
+      if (!current(model)) return;
       if (result?.canExecute !== false || !["prepared", "existing", "verified_complete"].includes(result.status)
           || result.originalTaskId !== model.taskId || result.assessmentId !== model.prepareRequest.assessmentId
           || result.status !== "verified_complete" && (!UUID.test(result.taskId) || result.taskId === model.taskId)) {
@@ -130,7 +164,7 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
       } else if ([400, 403, 404, 409, 422].includes(error.status)) {
         model.prepareRequest = null; model.assessment = null; model.acknowledgement = false;
       }
-    } finally { model.pending = false; update(model); }
+    } finally { if (current(model)) { model.pending = false; update(model); } }
   }
 
   function create(root, model) {
@@ -147,21 +181,37 @@ export function createOaPendingRecovery({ document, state, probeRecovery, prepar
     probeButton.addEventListener("click", () => { if (!probeButton.disabled) void probe(model); });
     ack.addEventListener("change", () => { if (!ack.disabled) { model.acknowledgement = ack.checked; update(model); } });
     prepareButton.addEventListener("click", () => { if (!prepareButton.disabled) void prepare(model); });
-    open.addEventListener("click", () => { if (!open.disabled && model.recoveryTaskId) void openTask(model.recoveryTaskId); });
+    open.addEventListener("click", () => { if (current(model) && !open.disabled && model.recoveryTaskId) void openTask(model.recoveryTaskId); });
     const view = {root, notice, probe:probeButton, risk, riskCopy, ack, prepare:prepareButton, open};
     model.views.add(view); roots.set(root, model); return view;
   }
 
-  return {detach(root) {
+  return {probe(taskId) {
+    const model = state.oaPendingRecovery.get(taskId);
+    return model ? probe(model) : undefined;
+  }, reset() {
+    for (const model of state.oaPendingRecovery.values()) { model.disposed = true; clearExpiry(model); model.views.clear(); }
+  }, detach(root) {
     const model = roots.get(root);
     if (model) for (const view of model.views) if (view.root === root) model.views.delete(view);
     roots.delete(root);
+    if (model && !model.views.size) clearExpiry(model);
   }, render(root, result) {
     const task = result?.task;
+    if (!task?.task_id) { root.hidden = true; return; }
+    const projection = oaRecoveryPresentation(result, now());
     const eligible = task?.status === "outcome_unknown" && result?.businessExecution?.readOnlyQuery === "oa_pending"
       && result.oaPendingRecoveryAvailable !== false && typeof probeRecovery === "function" && typeof prepareRecovery === "function";
-    if (!eligible && !roots.has(root)) { root.hidden = true; return; }
+    if (!eligible && !projection && !roots.has(root)) { root.hidden = true; return; }
     const model = modelFor(task.task_id); model.eligible = eligible;
+    model.projection = projection;
+    if (projection?.recoveryTaskId && UUID.test(projection.recoveryTaskId) && projection.recoveryTaskId !== task.task_id) {
+      model.recoveryTaskId = projection.recoveryTaskId;
+    }
+    if (projection?.completed || projection?.canProbe === false) {
+      model.assessment = null; model.acknowledgement = false;
+      if (!model.pending) { model.prepareRequest = null; model.prepareRetryable = false; model.notice = ""; }
+    }
     if (!roots.has(root)) create(root, model);
     update(model);
   }};

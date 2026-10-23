@@ -85,11 +85,11 @@ const { consumeChatStream } = createChatStream({
   addLiveProgress, ensureLiveMessage, handleChatProgress, handleChatDelta,
   attachDispatchCancel, agentFailureMessage, renderRunFailure,
 });
-const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = createTaskCards({
+const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTaskCardControllers } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
   submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
-  prepareRecovery:prepareOaPendingRecovery,
+  prepareRecovery:prepareOaPendingRecovery, getScope:() => sessionScope,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -144,6 +144,7 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  resetTaskCardControllers();
   projectionQueue.reset();
   projectionOrder.reset();
   historyControls = null;
@@ -1252,10 +1253,16 @@ async function prepareTargets(sourceTaskId, payload) {
   const scope = sessionScope;
   const ticket = projectionOrder.begin();
   markWorkspaceTiming("selection_sent", {requestId: payload.requestKey});
+  const batch = Array.isArray(payload.targetKeys) && payload.targetKeys.length > 1;
+  if (batch) markWorkspaceTiming("batch_selection_sent", {requestId:payload.requestKey, taskId:sourceTaskId});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(sourceTaskId)}/prepare-selection`,
     { method: "POST", body: payload, csrf: true, timeoutMs: 30000 });
   scope.assertCurrent();
+  if (typeof result?.taskId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId)) {
+    throw new Error("办理准备的受理状态尚未确认，请恢复本次准备。");
+  }
   markWorkspaceTiming("selection_queued", {requestId: payload.requestKey, runId: result.commandKey, taskId: result.taskId});
+  if (batch) markWorkspaceTiming("batch_selection_queued", {requestId:payload.requestKey, taskId:result.taskId});
   if (result.detail) {
     if (projectionOrder.accept(result.detail.task?.task_id, ticket)) upsertTaskCard(result.detail);
   }
@@ -1265,17 +1272,26 @@ async function prepareTargets(sourceTaskId, payload) {
 
 async function probeOaPendingRecovery(taskId, payload) {
   const scope = sessionScope;
+  markWorkspaceTiming("recovery_probe_sent", {requestId:payload.requestKey, taskId});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-pending-recovery/probe`,
     {method:"POST", body:payload, csrf:true, timeoutMs:30000});
   scope.assertCurrent();
+  if (result?.canExecute === false && ["verified_complete", "unresolved_still_pending", "blocked"].includes(result.status)) {
+    markWorkspaceTiming("recovery_probe_received", {requestId:payload.requestKey, taskId, status:result.status});
+  }
   return result;
 }
 
 async function prepareOaPendingRecovery(taskId, payload) {
   const scope = sessionScope;
+  markWorkspaceTiming("recovery_prepare_sent", {requestId:payload.requestKey, taskId});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-pending-recovery/prepare`,
     {method:"POST", body:payload, csrf:true, timeoutMs:30000});
   scope.assertCurrent();
+  if (result?.canExecute === false && result.originalTaskId === taskId
+      && ["prepared", "existing", "verified_complete"].includes(result.status)) {
+    markWorkspaceTiming("recovery_prepare_received", {requestId:payload.requestKey, taskId:result.taskId, status:result.status});
+  }
   if (["prepared", "existing"].includes(result?.status) && typeof result.taskId === "string"
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId) && result.taskId !== taskId) {
     scheduleTaskSync(result.taskId, "task.prepare.requested");

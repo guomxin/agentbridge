@@ -1,5 +1,7 @@
 // Diagnostic marks contain identifiers and clocks only; never messages or fields.
-const STAGES = new Set(["send", "accepted", "first_tool", "first_text", "host_terminal", "card_rendered", "timeline_received", "chat_loaded", "selection_sent", "selection_queued"]);
+const STAGES = new Set(["send", "accepted", "first_tool", "first_text", "host_terminal", "card_rendered", "timeline_received", "chat_loaded",
+  "selection_sent", "selection_queued", "batch_selection_sent", "batch_selection_queued", "quick_query_sent", "quick_query_queued",
+  "recovery_probe_sent", "recovery_probe_received", "recovery_prepare_sent", "recovery_prepare_received", "form_opened"]);
 const dataKey = stage => `timing${stage.replace(/(^|_)([a-z])/g, (_, _sep, c) => c.toUpperCase())}`;
 export function clearWorkspaceTimings(clock = globalThis.performance) {
   for (const stage of STAGES) {

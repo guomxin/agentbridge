@@ -100,7 +100,8 @@ test("an uncertain read-only query restores its original request key and never c
   assert.doesNotMatch(f.detail.textContent, /PRIVATE_GATEWAY_ERROR/);
   delete r.businessExecution; r.task.version++;
   f.renderTaskDetail(r);
-  assert.equal(button.textContent, "请到业务系统核对");
+  assert.equal(button.hidden, true);
+  assert.equal(descendants(f.detail).find(node => node.tag === "button" && node.textContent === "请到业务系统核对").disabled, true);
   assert.equal(button.disabled, true);
 });
 
@@ -384,4 +385,62 @@ test('trusted business view metadata yields precise entry labels while mismatche
     f.upsertTaskCard(result(++version,'waiting_user',[auth]));
     assert.equal(links(f.chat)[0].textContent,'核对并确认');
   }
+});
+
+test("the primary action opens an existing trusted single-confirmation form without model continuation", async () => {
+  const f = fixture({continueTask:() => assert.fail("form must not invoke model continuation")});
+  const r = result(1, "waiting_user", [{...interaction("current"), confirmation:{mode:"single", state:"pending"}}]);
+  f.renderTaskDetail(r);
+  const action = links(f.detail)[0];
+  assert.equal(action.textContent, "继续填写并确认");
+  assert.equal(action.href, "https://cards.example.test/current");
+  assert.equal(action.target, "_blank");
+  assert.equal(links(f.detail).length, 1);
+  for (const status of ["running", "succeeded", "failed", "expired", "canceled", "outcome_unknown"]) {
+    r.task = {...r.task, version:r.task.version+1, status}; r.interactions[0].state="completed";
+    f.renderTaskDetail(r);
+    assert.equal(links(f.detail).length, 0);
+    assert.doesNotMatch(f.detail.textContent, /继续任务/);
+  }
+});
+
+test("the unknown primary action probes the exact original task while all-pending query stays secondary", async () => {
+  const probes=[], queries=[], f=fixture({continueTask:() => assert.fail("unknown must not continue"),
+    probeRecovery:async (...args) => {probes.push(args);return {status:"blocked",canPrepare:false,canExecute:false};},
+    prepareRecovery:() => assert.fail("probe cannot prepare"), refreshQuery:payload => queries.push(payload)});
+  const r=result(1,"outcome_unknown",[]);
+  r.businessExecution={schemaVersion:"agentbridge.business-execution.v1",phase:"outcome_unknown",readOnlyQuery:"oa_pending"};
+  f.renderTaskDetail(r);
+  const primary=descendants(f.detail).find(node=>node.tag==="button" && node.textContent==="核对本事项");
+  assert.equal(primary.className,"primary"); await primary.events.click();
+  assert.equal(probes.length,1);assert.equal(probes[0][0],"task");assert.deepEqual(queries,[]);
+  const query=descendants(f.detail).find(node=>node.tag==="button" && node.textContent==="只读查询 OA 待办");
+  assert.equal(query.className,"secondary");
+});
+
+test("durable recovery completion becomes the current conclusion while the original unknown remains collapsed history", async () => {
+  const opened=[], child="22222222-2222-2222-2222-222222222222";
+  const f=fixture({switchView:async()=>{},loadTaskDetail:id=>opened.push(id)}), r=result(7,"outcome_unknown",[]);
+  r.businessExecution={schemaVersion:"agentbridge.business-execution.v1",phase:"outcome_unknown",submissionState:"scheduled",readOnlyQuery:"oa_pending"};
+  r.oaPendingRecovery={originalTaskId:"task",status:"recovery_succeeded",availability:"can_probe",canProbe:false,
+    canPrepare:false,canExecute:false,nextAction:"open_recovery",recoveryTaskId:child,recoveryTaskStatus:"succeeded"};
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  const card=f.chat.children[0];
+  assert.match(findClass(card,"application-card-status").textContent,/后续办理已完成/);
+  assert.match(card.className,/succeeded/);
+  assert.doesNotMatch(findClass(f.detail,"detail-grid").textContent,/结果待核对|尚不能证明请求发出/);
+  const history=findClass(f.detail,"execution-history");
+  assert.equal(history.open,false);assert.match(history.textContent,/首次尝试：结果待核对.*提交入口已排队/);
+  const action=descendants(f.detail).find(node=>node.tag==="button" && node.textContent==="查看办理结果");
+  await action.events.click();assert.deepEqual(opened,[child]);
+  assert.equal(r.task.status,"outcome_unknown");
+});
+
+test("verified completion moves prior submission observation below the current result", () => {
+  const f=fixture(),r=result(1,"succeeded",[]);
+  r.businessExecution={schemaVersion:"agentbridge.business-execution.v1",phase:"verified",submissionState:"scheduled"};
+  f.renderTaskDetail(r);
+  assert.doesNotMatch(findClass(f.detail,"detail-grid").textContent,/尚不能证明请求发出/);
+  assert.match(findClass(f.detail,"execution-history").textContent,/完成核验前的提交观察.*最终结论以当前业务核验结果为准/);
+  assert.match(findClass(f.detail,"application-card-copy").textContent,/已取得本次业务操作的完成核验证据/);
 });

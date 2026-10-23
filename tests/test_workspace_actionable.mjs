@@ -227,3 +227,36 @@ test("unrecognized or malformed child state stays locked without borrowing an ar
   assert.deepEqual(opened, ["known-child", "known-child"]);
   assert.deepEqual(calls, []);
 });
+
+test("a fresh read-only completion updates every source and expires even when the source query has already expired", () => {
+  const document=createDocument(),a=document.createElement("div"),b=document.createElement("div"),scheduled=new Map(),opened=[];
+  const start=Date.parse("2026-10-23T12:00:00Z");let clock=start,next=0;
+  const ui=createActionableResults({document,state:{},now:()=>clock,openPreparation:id=>opened.push(id),
+    prepareTargets:()=>assert.fail("verified source cannot prepare"),
+    timers:{setTimeout:(fn,ms)=>{scheduled.set(++next,{fn,ms});return next;},clearTimeout:id=>scheduled.delete(id)}});
+  const value=preparedGroup("verified_complete","original-unknown");value.expiresAt=new Date(start-60000).toISOString();
+  value.targets[0].preparation={taskId:"original-unknown",state:"verified_complete",observedAt:new Date(start).toISOString(),expiresAt:new Date(start+120000).toISOString()};
+  ui.render(a,[value]);ui.render(b,[value]);
+  for (const root of [a,b]) {
+    const row=rows(root)[0];assert.equal(row.dataset.preparationState,"verified_complete");
+    assert.match(row.textContent,/原事项已核验完成.*核验时间/);assert.equal(find(row,"input").disabled,true);
+    find(row,"button","查看结果").events.click();
+  }
+  assert.deepEqual(opened,["original-unknown","original-unknown"]);assert.equal(scheduled.size,1);
+  clock=start+120001;const timer=[...scheduled.values()][0];scheduled.clear();timer.fn();
+  for (const root of [a,b]) {
+    const row=rows(root)[0];assert.equal(row.dataset.preparationState,"outcome_unknown");
+    assert.match(row.textContent,/上次核验已完成.*核对已过期.*重新核对当前状态/);
+    assert.equal(find(row,"input").disabled,true);assert.equal(find(row,"button","核对原事项").disabled,false);
+  }
+  assert.equal(scheduled.size,0);
+  clock=start;ui.render(a,[value]);assert.equal(scheduled.size,1);ui.reset();assert.equal(scheduled.size,0);
+});
+
+test("a read-only completion without a valid evidence expiry remains historical and cannot reopen selection", () => {
+  const document=createDocument(),root=document.createElement("div");
+  const ui=createActionableResults({document,state:{},openPreparation(){},prepareTargets:()=>assert.fail("must remain read only")});
+  ui.render(root,[preparedGroup("verified_complete","original-unknown")]);
+  const row=rows(root)[0];assert.equal(row.dataset.preparationState,"outcome_unknown");
+  assert.match(row.textContent,/核对已过期/);assert.equal(find(row,"input").disabled,true);
+});

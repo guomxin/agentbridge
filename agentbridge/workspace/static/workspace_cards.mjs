@@ -3,7 +3,7 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
   taskPlanFailurePresentation, interactionLabel, interactionActionLabel,
   escapeClass, formatTime, statusLabel, eventLabel, taskInteractions,
   actionableTaskInteractions, batchItemStatusLabel, interactionStateLabel, trustedInteractionUrl,
-  TERMINAL_TASK_STATES, businessExecutionPresentation, taskResultTitle } from "./workspace_results.mjs";
+  TERMINAL_TASK_STATES, businessExecutionPresentation, taskResultTitle, taskPrimaryAction, oaRecoveryPresentation } from "./workspace_results.mjs";
 
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
@@ -11,16 +11,16 @@ import { createActionableResults } from "./workspace_actionable.mjs";
 import { createOaPendingRecovery } from "./workspace_recovery.mjs";
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   state.taskFeedback ||= new Map();
-  const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery,
+  const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery, getScope,
     makeRequestKey:makeFeedbackRequestKey, openTask: async taskId => {
       if (await switchView("tasks") === false) return;
       return loadTaskDetail(taskId);
     }});
-  const actionable = createActionableResults({ document, state, prepareTargets, refreshQuery,
+  const actionable = createActionableResults({ document, state, prepareTargets, refreshQuery, getScope,
     openPreparation: async taskId => {
       if (await switchView("tasks") === false) return;
       return loadTaskDetail(taskId);
@@ -167,6 +167,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const active = { root: element("div", "business-interactions"), rows: new Map() };
     const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
     const history = disclosure("办理记录", "business-disclosure interaction-history");
+    const executionHistory = disclosure("查看历史执行观察", "business-disclosure execution-history");
     const feedback = createFeedbackView(taskId);
     const artifacts = element("div");
     const query = element("div");
@@ -181,8 +182,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     });
     actions.append(progress);
     card.append(header, description, facts.root, active.root, batch.root,
-      history.root, artifacts, query, recoveryPanel, feedback.root, actions);
-    return { title, status, description, facts, active, batch, history, artifacts, query, recoveryPanel, feedback, progress };
+      history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, actions);
+    return { title, status, description, facts, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -219,7 +220,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     reconcileChildren(view.body, nodes);
   }
 
-  function renderInteractions(view, result) {
+  function renderInteractions(view, result, primaryInteractionId = null) {
     const nodes = [];
     const active = actionableTaskInteractions(result);
     for (const interaction of active) {
@@ -243,7 +244,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
         "请填写并核对本次事项，在可信页面一次确认提交；提交后将核对业务结果。" :
         interaction.message || "请在可信页面完成当前操作。");
       const url = trustedInteractionUrl(interaction.presentation?.url);
-      row.action.hidden = !url;
+      row.action.hidden = !url || interaction.interactionId === primaryInteractionId;
       if (url) row.action.href = url;
       else row.action.removeAttribute("href");
       text(row.action, interactionActionLabel(interaction.type, interaction.display));
@@ -284,6 +285,15 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       nodes.push(row.root);
     }
     reconcileChildren(view.body, nodes);
+  }
+
+  function renderExecutionHistory(view, result) {
+    const execution = businessExecutionPresentation(result), recovered = oaRecoveryPresentation(result);
+    const copy = recovered && (recovered.completed || recovered.recoveryTaskId)
+      ? `首次尝试：${statusLabel(result.task.status)}。${execution?.message || ""}${execution?.submission ? ` ${execution.submission}。` : ""}`
+      : execution?.historicalSubmission ? `完成核验前的提交观察：${execution.historicalSubmission}。最终结论以当前业务核验结果为准。` : "";
+    view.root.hidden = !copy;
+    text(view.body, copy);
   }
 
   function updateArtifacts(view, result, compact) {
@@ -366,24 +376,30 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const oldSources = result.actionableResults || [];
     card.dataset.oaArchiveable = String(oaQuery && cardStatus === "succeeded" && !active.length && oldSources.length > 0 &&
       oldSources.every(group => Date.parse(group.expiresAt) <= Date.now() && !(group.targets || []).some(target =>
-        target.preparation && !["succeeded","completed","failed","outcome_unknown","canceled","expired","superseded","skipped"].includes(target.preparation.state))));
-    text(view.status, failure?.label || (oaQuery && cardStatus === "succeeded" ? "已查询" : statusLabel(cardStatus)));
+        target.preparation && !["succeeded","completed","verified_complete","failed","outcome_unknown","canceled","expired","superseded","skipped"].includes(target.preparation.state))));
+    const recovered = oaRecoveryPresentation(result);
+    if (recovered?.completed) {
+      card.className = "message assistant application-card succeeded";
+      view.status.className = "application-card-status succeeded";
+    }
+    text(view.status, recovered?.label || failure?.label || (oaQuery && cardStatus === "succeeded" ? "已查询" : statusLabel(cardStatus)));
     const selectedCount = result.actionableResults?.reduce((sum, group) => sum + group.targets.length, 0);
     if (oaQuery) text(view.title, "OA 待办查询");
     const execution = businessExecutionPresentation(result);
     const statusCopy = oaQuery && cardStatus === "succeeded" ?
       selectedCount ? `本次查询返回 ${selectedCount} 项；具体办理状态见各事项。` : "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary);
-    text(view.description, failure?.message || (execution?.message ?
+    text(view.description, recovered?.message || failure?.message || (execution?.message ?
       task.summary?.batch ? `${statusCopy} ${execution.message}` : execution.message : statusCopy));
     const current = active[0] || result.interaction;
     updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
-      ["办理阶段", execution?.phase], ["最近核验", execution?.observedAt ? formatTime(execution.observedAt) : null],
+      ["办理阶段", recovered?.label || execution?.phase], ["最近核验", recovered?.observedAt ? formatTime(recovered.observedAt) : execution?.observedAt ? formatTime(execution.observedAt) : null],
       ["计划进度", result.plan ? taskPlanProgress(result.plan) : null]]);
     renderInteractions(view.active, result);
     renderBatch(view.batch, result.batch);
     renderHistory(view.history, result, active);
+    renderExecutionHistory(view.executionHistory, result);
     updateArtifacts(view, result, true);
-    text(view.progress, cardStatus === "outcome_unknown" ? "查看核验详情" : result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
+    text(view.progress, recovered?.completed || cardStatus === "succeeded" ? "查看办理结果" : cardStatus === "outcome_unknown" ? "查看核验详情" : result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
     recovery.render(view.recoveryPanel, result);
@@ -440,13 +456,35 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const actions = element("div", "detail-heading-actions");
       const resume = element("button", "primary");
       resume.type = "button";
-      text(resume, "继续任务");
+      text(resume, "查看进度");
       resume.addEventListener("click", async () => {
         if (resume.disabled) return;
-        if (view.task?.status !== "outcome_unknown") return continueTask(view.task, resume);
+        const action = view.primaryAction;
+        if (action?.kind === "probe") {
+          resume.disabled = true;
+          try { await recovery.probe(view.taskId); }
+          finally { resume.disabled = view.primaryAction?.kind === "unavailable"; }
+          return;
+        }
+        if (action?.kind === "open_task") {
+          if (await switchView("tasks") === false) return;
+          return loadTaskDetail(action.taskId);
+        }
+        if (!["progress", "result"].includes(action?.kind)) return;
+        const target = action.kind === "progress" && !view.active.root.hidden ? view.active.root : view.outcomeNotice;
+        target.setAttribute("tabindex", "-1");
+        target.scrollIntoView?.({block:"nearest"}); target.focus({preventScroll:true});
+      });
+      const resumeLink = element("a", "primary");
+      resumeLink.target = "_blank"; resumeLink.rel = "noopener noreferrer";
+      resumeLink.addEventListener("click", () => markWorkspaceTiming("form_opened", {taskId:view.taskId}));
+      const queryAction = element("button", "secondary"); queryAction.type = "button";
+      text(queryAction, "只读查询 OA 待办");
+      queryAction.addEventListener("click", async () => {
+        if (queryAction.disabled) return;
         if (!view.readOnlyQuery || typeof refreshQuery !== "function") return;
         view.queryPending = true;
-        resume.disabled = true;
+        queryAction.disabled = true;
         view.queryRequestKey ||= makeFeedbackRequestKey();
         text(view.outcomeNotice, "正在发起只读查询，本次不会重新提交原事项。");
         try {
@@ -458,10 +496,10 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
           text(view.outcomeNotice, "只读查询的受理状态尚未确认，请重试恢复本次查询；不要重新提交原事项。");
         } finally {
           view.queryPending = false;
-          resume.disabled = view.task?.status === "outcome_unknown" && !view.readOnlyQuery;
+          queryAction.disabled = !view.readOnlyQuery;
         }
       });
-      actions.append(resume);
+      actions.append(resume, resumeLink, queryAction);
       heading.append(back, copy, actions);
       const facts = {root:element("dl", "detail-grid"), rows:new Map()};
       const outcomeNotice = element("p", "application-card-copy");
@@ -470,13 +508,14 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const active = {root:element("div", "business-interactions"), rows:new Map()};
       const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
       const history = disclosure("办理记录", "business-disclosure interaction-history");
+      const executionHistory = disclosure("查看历史执行观察", "business-disclosure execution-history");
       const artifacts = element("div");
       const query = element("div");
       const recoveryPanel = element("section");
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, outcomeNotice, plan, active.root, batch.root, history.root, artifacts, query, recoveryPanel, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, facts, outcomeNotice, plan, active, batch, history, artifacts, query, recoveryPanel, feedback, timeline};
+      detail.append(heading, facts.root, outcomeNotice, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, plan, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -486,18 +525,27 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     view.version = Number(task.version);
     view.task = task;
     const execution = businessExecutionPresentation(result);
+    const recovered = oaRecoveryPresentation(result);
+    const primaryAction = taskPrimaryAction(result);
+    view.primaryAction = primaryAction;
     text(view.title, displayTaskTitle(taskResultTitle(result)));
-    text(view.status, statusLabel(task.status));
+    text(view.status, recovered?.label || statusLabel(task.status));
     view.readOnlyQuery = execution?.readOnlyQuery === true;
-    text(view.resume, task.status === "outcome_unknown" ?
-      view.readOnlyQuery ? "只读查询 OA 待办" : "请到业务系统核对" : "继续任务");
-    view.resume.disabled = Boolean(view.queryPending) || task.status === "outcome_unknown" && (!view.readOnlyQuery || typeof refreshQuery !== "function");
-    if (!view.queryRequestKey) text(view.outcomeNotice, execution?.message || "");
+    view.resume.hidden = primaryAction.kind === "form";
+    text(view.resume, primaryAction.label);
+    view.resume.disabled = primaryAction.kind === "unavailable" || primaryAction.kind === "probe" && typeof probeRecovery !== "function";
+    view.resumeLink.hidden = primaryAction.kind !== "form";
+    text(view.resumeLink, primaryAction.kind === "form" ? primaryAction.label : "");
+    if (primaryAction.kind === "form") view.resumeLink.href = primaryAction.url;
+    else view.resumeLink.removeAttribute("href");
+    view.queryAction.hidden = !view.readOnlyQuery || Boolean(recovered?.completed);
+    view.queryAction.disabled = Boolean(view.queryPending) || !view.readOnlyQuery || typeof refreshQuery !== "function";
+    if (!view.queryRequestKey) text(view.outcomeNotice, recovered?.message || execution?.message || taskCardStatusMessage(task.status, task.summary));
     updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
       ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
         ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],
-      ["任务编号", task.task_id], ["办理阶段", execution?.phase], ["提交观察", execution?.submission],
-      ["最近核验", execution?.observedAt ? formatTime(execution.observedAt) : null],
+      ["任务编号", task.task_id], ["办理阶段", recovered?.label || execution?.phase], ["提交观察", recovered?.completed || recovered?.recoveryTaskId ? null : execution?.submission],
+      ["最近核验", recovered?.observedAt ? formatTime(recovered.observedAt) : execution?.observedAt ? formatTime(execution.observedAt) : null],
       ["状态记录更新", execution?.updatedAt ? formatTime(execution.updatedAt) : null],
       ["批量结果", task.summary?.batch ? taskCardStatusMessage(task.status, task.summary) : null]]);
     const planSignature = JSON.stringify(result.plan || null);
@@ -506,9 +554,10 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       view.plan.replaceChildren();
       if (result.plan) view.plan.append(renderTaskPlan(result.plan));
     }
-    const active = renderInteractions(view.active, result);
+    const active = renderInteractions(view.active, result, primaryAction.kind === "form" ? primaryAction.interactionId : null);
     renderBatch(view.batch, result.batch);
     renderHistory(view.history, result, active);
+    renderExecutionHistory(view.executionHistory, result);
     updateArtifacts(view, result, false);
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
@@ -563,5 +612,6 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     list.append(dt, dd);
   }
 
-  return { upsertTaskCard, upsertTaskCardVariant, renderTasks, renderTaskDetail, renderSkillCard, addDetail };
+  return { upsertTaskCard, upsertTaskCardVariant, renderTasks, renderTaskDetail, renderSkillCard, addDetail,
+    resetTaskCardControllers: () => {recovery.reset();actionable.reset();} };
 }

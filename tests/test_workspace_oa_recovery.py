@@ -137,6 +137,12 @@ def test_http_original_unknown_can_only_create_one_new_blank_draft_without_reusi
             status, _, probe = post(base+"/probe", {"requestKey":"real-isolated-probe"})
             assert status == 200 and probe["status"] == "unresolved_still_pending", probe
             assert probe["canPrepare"] is True and probe["canExecute"] is False
+            status, _, original_projection = post.get(f"/api/tasks/{case['task_id']}")
+            assert status == 200
+            current = original_projection["oaPendingRecovery"]
+            assert current["status"] == "unresolved_still_pending" and current["observedAt"] == probe["observedAt"]
+            assert current["canPrepare"] is False and current["canExecute"] is False
+            assert not {"assessmentId", "assessmentHash", "revision", "scopeHash", "sessionHash"}.intersection(current)
             status, _, recovery = post(base+"/prepare", {"assessmentId":probe["assessmentId"],
                 "assessmentHash":probe["assessmentHash"],"expectedRevision":probe["revision"],
                 "requestKey":"real-isolated-prepare","acknowledgement":ACK_VERSION})
@@ -149,6 +155,11 @@ def test_http_original_unknown_can_only_create_one_new_blank_draft_without_reusi
             child = fixture.app.task_detail(fixture.account,recovery["taskId"])
             assert child["task"]["status"] == "waiting_user"
             assert child["task"]["summary"]["oaPendingRecovery"] == {"originalTaskId":case["task_id"]}
+            assert case["task_id"] in child["actionableSourceTaskIds"]
+            status, _, original_projection = post.get(f"/api/tasks/{case['task_id']}")
+            assert status == 200 and original_projection["task"]["status"] == "outcome_unknown"
+            assert original_projection["oaPendingRecovery"]["status"] == "recovery_in_progress"
+            assert original_projection["oaPendingRecovery"]["recoveryTaskId"] == recovery["taskId"]
             public = json.dumps(child,ensure_ascii=False)
             assert "scopeHash" not in public and "sessionHash" not in public and "permitHash" not in public
             assert original_auth["authorization_id"] not in public
@@ -172,6 +183,15 @@ def test_http_original_unknown_can_only_create_one_new_blank_draft_without_reusi
             assert streamed_recovery
             for entry in streamed_recovery:
                 assert entry["payload"] == {"eventType":entry["payload"]["eventType"],"taskId":entry["task_id"]}
+            # The live stream retains only the minimal event; its child read
+            # supplies the verified invalidation edge and the original's new
+            # read-only presentation without leaking recovery credentials.
+            assert recovery["taskId"] in {entry["task_id"] for entry in streamed_recovery}
+            status, _, projections = post.get("/api/tasks/projections?ids=" + recovery["taskId"])
+            assert status == 200
+            child_projection = projections["items"][0]["detail"]
+            assert case["task_id"] in child_projection["actionableSourceTaskIds"]
+            assert not any(secret in json.dumps(child_projection) for secret in ("sessionHash", "scopeHash", "permitHash"))
         assert fixture.oa.writes == writes
         assert fixture.service.write_authorizations.get(original_auth["authorization_id"]) == original_auth
         assert fixture.service.tasks.get_task(case["task_id"],user_subject=OWNER)["status"] == "outcome_unknown"

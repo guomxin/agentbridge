@@ -74,7 +74,7 @@ def _endpoint_hash(endpoint):
         "client_type", "external_subject", "conversation_ref", "state")})
 
 
-def _origin(service, connection, subject, task_id):
+def _origin(service, connection, subject, task_id, *, current=True):
     task = service.tasks._select_owned_task(connection, task_id, subject)
     if json.loads(task["summary_json"]).get("oaPendingRecovery"):
         _fail("OA_RECOVERY_CHAIN_UNSUPPORTED", "这次恢复仍未确定结果，请核对该恢复任务；不会再自动创建新的尝试。")
@@ -107,13 +107,15 @@ def _origin(service, connection, subject, task_id):
         _fail("OA_RECOVERY_ORIGIN_INVALID", "原提交缺少可核对的身份或事项绑定。")
     session_row = connection.execute("SELECT * FROM sessions WHERE user_subject=? AND system_id='oa'", (subject,)).fetchone()
     session = dict(session_row) if session_row else {}
-    if session.get("state") != "active" or _principal(session) != principal:
+    if current and (session.get("state") != "active" or _principal(session) != principal):
         _fail("OA_RECOVERY_IDENTITY_CHANGED", "请先恢复与原提交相同的 OA 账号；不能替另一账号继续办理。")
     prepare, definition = registered
-    service.validate_skill_task(subject, task_id, capability=row["capability_name"], connection=connection)
+    if current:
+        service.validate_skill_task(subject, task_id, capability=row["capability_name"], connection=connection)
     skill = service.skills.for_task(subject, task_id, connection)
-    service.user_grants.require_capability(subject, prepare)
-    service.user_grants.require_capability(subject, row["capability_name"])
+    if current:
+        service.user_grants.require_capability(subject, prepare)
+        service.user_grants.require_capability(subject, row["capability_name"])
     return {"task": dict(task), "operation": dict(row), "target": target, "plan": plan,
             "prepare": prepare, "definition": definition, "session": session,
             "scopeHash": _hash({"subject": subject, "principal": principal, "prepare": prepare,
@@ -128,6 +130,198 @@ def can_recover_pending(service, *, subject, task_id):
         return True
     except (OaPendingRecoveryError, KeyError, PermissionError, ValueError):
         return False
+
+
+def recovery_source_context(service, connection, subject, task_id):
+    """Read an attested child-to-origin edge, never an execution permission.
+
+    Historical progress must still invalidate its visible parents after login or
+    grant changes. Every subsequent action rechecks current authority in _origin;
+    this reader validates immutable ownership, identity and both server events.
+    """
+    child = service.tasks._select_owned_task(connection, task_id, subject)
+    permit = json.loads(child["summary_json"]).get("oaPendingRecovery")
+    if not isinstance(permit, dict):
+        return None
+    original_id = permit.get("originTaskId")
+    if not isinstance(original_id, str) or original_id == task_id:
+        _fail("OA_RECOVERY_PERMIT_INVALID", "恢复任务关联校验失败。")
+    origin = _origin(service, connection, subject, original_id, current=False)
+    linked = recovery_child_for_origin(service, subject=subject, task_id=original_id, connection=connection)
+    if (linked != task_id or permit.get("kind") != PERMIT_KIND or permit.get("acknowledgement") != ACK_VERSION
+            or permit.get("originOperationId") != origin["operation"]["operation_id"]
+            or permit.get("originPlanHash") != origin["planHash"] or permit.get("scopeHash") != origin["scopeHash"]
+            or permit.get("affairId") != origin["target"]["affair_id"]
+            or permit.get("prepareCapability") != origin["prepare"]
+            or permit.get("commitCapability") != origin["operation"]["capability_name"]):
+        _fail("OA_RECOVERY_PERMIT_INVALID", "恢复任务与原事项绑定不一致。")
+    return {"origin": origin, "child": dict(child)}
+
+
+def recovery_origin_source_context(service, connection, subject, task_id):
+    """A persisted read-only assessment invalidates its owned query snapshots."""
+    if not connection.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
+        "AND event_type IN ('task.oa_recovery.assessed','task.oa_recovery.child_created') LIMIT 1",
+        (task_id, subject)).fetchone():
+        return None
+    return _origin(service, connection, subject, task_id, current=False)
+
+
+def fresh_recovery_completion(service, connection, subject, task_id):
+    """Project a fresh attested read-only success, never rewrite the attempt.
+
+    The query row may show this current conclusion only while the same session
+    generation, principal, grants and short assessment lifetime remain valid.
+    This does not issue any of the credentials accepted by prepare.
+    """
+    row = connection.execute(
+        "SELECT payload_json FROM task_events WHERE task_id=? AND user_subject=? "
+        "AND event_type='task.oa_recovery.assessed' ORDER BY created_at DESC,rowid DESC LIMIT 1",
+        (task_id, subject)).fetchone()
+    if not row:
+        return None
+    assessment = json.loads(row[0])
+    digest = assessment.pop("assessmentHash", None)
+    if assessment.get("status") != "verified_complete" or not isinstance(digest, str):
+        return None
+    origin = _origin(service, connection, subject, task_id)
+    observed = _projection_time(assessment.get("observedAt"))
+    expires = _projection_time(assessment.get("expiresAt"))
+    if (not observed or not expires or datetime.fromisoformat(expires) <= _now()
+            or not hmac.compare_digest(digest, _hash(assessment))
+            or assessment.get("originOperationId") != origin["operation"]["operation_id"]
+            or assessment.get("originPlanHash") != origin["planHash"]
+            or assessment.get("scopeHash") != origin["scopeHash"]
+            or assessment.get("sessionHash") != _session_hash(origin["session"])):
+        return None
+    verified = _events(connection, task_id, subject, "task.oa_recovery.verified_complete", assessment.get("assessmentId"))
+    if (len(verified) != 1 or verified[0].get("assessmentId") != assessment.get("assessmentId")
+            or verified[0].get("assessmentHash") != digest
+            or verified[0].get("originOperationId") != origin["operation"]["operation_id"]
+            or verified[0].get("method") != "complete_pending_absence_and_done_identity"):
+        return None
+    return {"observedAt": observed, "expiresAt": expires}
+
+
+_PUBLIC_REASONS = frozenset({
+    "not_checked", "verified_complete", "still_pending_previous_unknown", "read_unavailable",
+    "read_or_contract_unavailable", "not_verified", "conflicting_or_completed_evidence",
+    "pending_coverage_incomplete", "target_identity_changed", "pending_response_invalid",
+    "pending_coverage_inconsistent", "done_response_invalid", "done_affair_not_found",
+    "done_affair_ambiguous", "done_title_mismatch", "done_detail_affair_mismatch",
+    "done_detail_identity_unavailable", "done_identity_mismatch", "frozen_identity_incomplete",
+})
+
+
+def _projection_time(value):
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        return value if parsed.tzinfo is not None else None
+    except ValueError:
+        return None
+
+
+def pending_recovery_presentation(service, *, subject, task_id):
+    """Persisted current result, separate from the immutable unknown attempt.
+
+    GET never reads OA, restores an assessment nonce, or grants preparation. Only
+    an explicit fresh probe can produce the bounded evidence used by prepare.
+    """
+    result = {"originalTaskId": task_id, "status": "not_checked", "availability": "can_probe",
+              "reason": "not_checked", "canProbe": True, "canPrepare": False, "canExecute": False,
+              "nextAction": "probe", "stale": False}
+    with service.tasks._connect() as connection:
+        try:
+            origin = _origin(service, connection, subject, task_id, current=False)
+        except OaPendingRecoveryError as error:
+            reason = {"OA_RECOVERY_CHAIN_UNSUPPORTED": "recovery_chain_unsupported",
+                      "OA_RECOVERY_UNSUPPORTED": "unsupported", "OA_RECOVERY_NOT_UNKNOWN": "not_unknown"}.get(error.code, "origin_evidence_invalid")
+            return {**result, "status": "blocked", "availability": "unsupported" if reason in {
+                "recovery_chain_unsupported", "unsupported", "not_unknown"} else "blocked",
+                "reason": reason, "canProbe": False, "nextAction": "inspect_oa"}
+        try:
+            _origin(service, connection, subject, task_id)
+        except OaPendingRecoveryError as error:
+            login = error.code == "OA_RECOVERY_IDENTITY_CHANGED" and origin["session"].get("state") != "active"
+            result.update(availability="login_required" if login else "blocked", canProbe=False,
+                          nextAction="restore_login" if login else "inspect_oa",
+                          reason="login_required" if login else "identity_changed")
+        except (PermissionError, ValueError):
+            result.update(availability="blocked", canProbe=False, nextAction="inspect_oa", reason="permission_required")
+        assessment_row = connection.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND user_subject=? "
+            "AND event_type='task.oa_recovery.assessed' ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (task_id, subject)).fetchone()
+        if assessment_row:
+            assessment = json.loads(assessment_row[0])
+            digest = assessment.pop("assessmentHash", None)
+            valid = (isinstance(digest, str) and hmac.compare_digest(digest, _hash(assessment))
+                and assessment.get("originOperationId") == origin["operation"]["operation_id"]
+                and assessment.get("originPlanHash") == origin["planHash"] and assessment.get("scopeHash") == origin["scopeHash"]
+                and assessment.get("status") in {"verified_complete", "unresolved_still_pending", "blocked"})
+            if valid and assessment["status"] == "verified_complete":
+                verified = _events(connection, task_id, subject, "task.oa_recovery.verified_complete", assessment.get("assessmentId"))
+                valid = (len(verified) == 1 and verified[0].get("assessmentHash") == digest
+                    and verified[0].get("assessmentId") == assessment.get("assessmentId")
+                    and verified[0].get("originOperationId") == origin["operation"]["operation_id"]
+                    and verified[0].get("method") == "complete_pending_absence_and_done_identity")
+            if valid:
+                observed = _projection_time(assessment.get("observedAt"))
+                expires = _projection_time(assessment.get("expiresAt"))
+                result.update(status=assessment["status"], stale=not expires or datetime.fromisoformat(expires) <= _now()
+                              or assessment.get("sessionHash") != _session_hash(origin["session"]) or not result["canProbe"])
+                if result["canProbe"]:
+                    result["reason"] = assessment.get("reason") if assessment.get("reason") in _PUBLIC_REASONS else "not_verified"
+                if observed:
+                    result["observedAt"] = observed
+                if expires:
+                    result["expiresAt"] = expires
+                if assessment.get("doneCoverage") in {"complete", "partial"}:
+                    result["doneCoverage"] = assessment["doneCoverage"]
+            else:
+                result.update(status="blocked", reason="assessment_evidence_invalid", stale=True)
+        try:
+            child_id = recovery_child_for_origin(service, subject=subject, task_id=task_id, connection=connection)
+            linked = recovery_source_context(service, connection, subject, child_id) if child_id else None
+        except (OaPendingRecoveryError, KeyError, ValueError):
+            return {**result, "status": "blocked", "reason": "recovery_evidence_invalid", "canProbe": False,
+                    "availability": "blocked", "nextAction": "inspect_oa"}
+        if linked:
+            child = linked["child"]
+            child_status = child["status"]
+            preparation = _child_preparation(connection, child_id)
+            result.update(recoveryTaskId=child_id, recoveryTaskStatus=child_status, childPreparation=preparation,
+                          nextAction="probe" if preparation == "retryable" and result["canProbe"] else "open_recovery")
+            updated = _projection_time(child.get("updated_at"))
+            if updated:
+                result["recoveryUpdatedAt"] = updated
+            if child_status == "succeeded":
+                from agentbridge.core.oa_pending_reconciliation import _scope
+                operation = service.operations.get(child["current_operation_id"]) if child["current_operation_id"] else {}
+                scope = _scope(service, operation)
+                proven = (scope and scope["subject"] == subject and scope["affair"] == origin["target"]["affair_id"]
+                    and scope["capability"] == origin["operation"]["capability_name"]
+                    and _principal(scope["binding"]) == _principal(origin["plan"].get("session_binding") or {}))
+                result.update(status="recovery_succeeded" if proven else "recovery_unknown",
+                              reason="recovery_verified_complete" if proven else "recovery_result_unverified")
+                if proven:
+                    result["stale"] = not result["canProbe"]
+                    result.pop("expiresAt", None)
+                    result.pop("observedAt", None)
+                    readback = ((operation.get("result") or {}).get("execution") or {}).get("readback") or {}
+                    observed = _projection_time(readback.get("last_observed_at"))
+                    if observed:
+                        result["observedAt"] = observed
+            elif child_status == "outcome_unknown":
+                result.update(status="recovery_unknown", reason="recovery_outcome_unknown")
+            elif child_status in {"failed", "expired", "canceled", "superseded"}:
+                result.update(status="recovery_failed", reason="recovery_prepare_retryable" if preparation == "retryable" else "recovery_stopped")
+            else:
+                result.update(status="recovery_in_progress", reason="recovery_in_progress")
+        return result
 
 
 def _local_verified(service, origin):
@@ -226,7 +420,7 @@ def _child_preparation(connection, child):
 
 
 def _public(assessment, child=None, preparation=None):
-    return {key: assessment[key] for key in ("status", "assessmentId", "assessmentHash", "revision", "expiresAt", "reason", "doneCoverage") if key in assessment} | {
+    return {key: assessment[key] for key in ("status", "assessmentId", "assessmentHash", "revision", "observedAt", "expiresAt", "reason", "doneCoverage") if key in assessment} | {
         "canPrepare": assessment["status"] == "unresolved_still_pending" and (child is None or preparation == "retryable"),
         "canExecute": False, "previousOutcome": "unknown", **({"recoveryTaskId": child, "childPreparation": preparation} if child else {})}
 

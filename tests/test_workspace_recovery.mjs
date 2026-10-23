@@ -214,3 +214,83 @@ test("business-card recovery opens only the new task while keeping the existing 
   await click(find(detail,"button","查看新办理表单"));
   assert.deepEqual(calls.at(-2),["view","tasks"]);assert.deepEqual(calls.at(-1),["task",CHILD]);
 });
+
+test("persisted recovery projection restores a child and completion without reviving an execution assessment", () => {
+  const f=fixture(), r=outcome();
+  r.oaPendingRecovery={originalTaskId:ORIGINAL,status:"recovery_in_progress",availability:"can_probe",canProbe:true,
+    canPrepare:false,canExecute:false,nextAction:"open_recovery",recoveryTaskId:CHILD,recoveryTaskStatus:"waiting_user"};
+  f.ui.render(f.root,r);
+  assert.equal(find(f.root,"button","查看新办理表单").hidden,false);
+  assert.equal(find(f.root,"button","准备全新办理表单").hidden,true);
+  assert.equal(find(f.root,"input").checked,false);
+  r.oaPendingRecovery={...r.oaPendingRecovery,status:"recovery_succeeded",recoveryTaskStatus:"succeeded",canProbe:false};
+  f.ui.render(f.root,r);
+  assert.match(f.root.textContent,/后续办理已完成并取得业务核验证据/);
+  assert.equal(find(f.root,"button","查看办理结果").hidden,false);
+  assert.equal(find(f.root,"button","只读核对原事项").hidden,true);
+  assert.equal(r.task.status,"outcome_unknown");
+});
+
+test("an unavailable original recovery remains visible with an actionable reason instead of disappearing", () => {
+  const f=fixture(),r=outcome();r.oaPendingRecoveryAvailable=false;
+  r.oaPendingRecovery={originalTaskId:ORIGINAL,status:"blocked",availability:"login_required",reason:"login_required",
+    canProbe:false,canPrepare:false,canExecute:false,nextAction:"restore_login"};
+  f.ui.render(f.root,r);assert.equal(f.root.hidden,false);
+  assert.match(f.root.textContent,/登录已失效.*恢复原账号登录/);
+  assert.equal(find(f.root,"button","只读核对原事项").hidden,true);
+  assert.equal(find(f.root,"button","准备全新办理表单").hidden,true);
+});
+
+test("assessment expiry updates both visible panels without a user click and releases timer resources", async () => {
+  const scheduled=new Map();let next=0;
+  const timers={setTimeout:(fn,ms)=>{scheduled.set(++next,{fn,ms});return next;},clearTimeout:id=>scheduled.delete(id)};
+  const f=fixture({timers});const detail=f.document.createElement("section");f.ui.render(detail,outcome());
+  await click(find(f.root,"button","只读核对原事项"));
+  const ack=find(f.root,"input");ack.checked=true;ack.events.change();
+  assert.equal(find(detail,"button","准备全新办理表单").disabled,false);
+  assert.equal(scheduled.size,1);
+  f.setClock(T0+120001);const timer=[...scheduled.values()][0];scheduled.clear();timer.fn();
+  for (const root of [f.root,detail]) {
+    assert.match(root.textContent,/核对已过期/);assert.equal(find(root,"input").checked,false);
+    assert.equal(find(root,"button","准备全新办理表单").disabled,true);
+  }
+  assert.equal(scheduled.size,0);
+  f.setClock(T0);await click(find(f.root,"button","只读核对原事项"));assert.equal(scheduled.size,1);
+  f.ui.detach(f.root);assert.equal(scheduled.size,1);f.ui.detach(detail);assert.equal(scheduled.size,0);
+  f.ui.render(f.root,outcome());assert.equal(scheduled.size,1);f.ui.reset();assert.equal(scheduled.size,0);
+});
+
+test("discarded account models cannot accept a delayed assessment response or schedule expiry", async () => {
+  let resolve;const scheduled=[];
+  const f=fixture({probeRecovery:()=>new Promise(done=>{resolve=done;}),
+    timers:{setTimeout:(fn,ms)=>{scheduled.push([fn,ms]);return 1;},clearTimeout(){}}});
+  find(f.root,"button","只读核对原事项").events.click();
+  f.ui.reset();f.state.oaPendingRecovery.clear();
+  const next=f.document.createElement("section");f.ui.render(next,outcome());
+  resolve(assessment());await flush();
+  assert.equal(find(next,"button","准备全新办理表单").hidden,true);assert.deepEqual(scheduled,[]);
+});
+
+test("an expired persisted complete assessment is labelled historical and allows a new read only", () => {
+  const f=fixture(),r=outcome();
+  r.oaPendingRecovery={originalTaskId:ORIGINAL,status:"verified_complete",stale:true,
+    observedAt:"2026-10-23T09:55:00Z",expiresAt:"2026-10-23T09:57:00Z",canProbe:true,
+    canPrepare:false,canExecute:false,availability:"can_probe",nextAction:"probe"};
+  f.ui.render(f.root,r);
+  assert.match(f.root.textContent,/上次核对时.*该次核对已过期.*历史结论.*重新核对/);
+  assert.doesNotMatch(f.root.textContent,/OA 当前记录|无需重新办理/);
+  assert.equal(find(f.root,"button","只读核对原事项").hidden,false);
+  assert.equal(find(f.root,"button","准备全新办理表单").hidden,true);
+});
+
+test("a prior recovery success remains a dated historical result after the current OA identity changes", () => {
+  const f=fixture(),r=outcome();r.oaPendingRecoveryAvailable=false;
+  r.oaPendingRecovery={originalTaskId:ORIGINAL,status:"recovery_succeeded",stale:true,reason:"identity_changed",
+    observedAt:"2026-10-23T09:55:00Z",availability:"blocked",canProbe:false,canPrepare:false,canExecute:false,
+    nextAction:"open_recovery",recoveryTaskId:CHILD,recoveryTaskStatus:"succeeded"};
+  f.ui.render(f.root,r);
+  assert.match(f.root.textContent,/此前后续办理已核验完成.*核验时间.*历史完成证据.*身份与原办理不一致/);
+  assert.equal(find(f.root,"button","只读核对原事项").hidden,true);
+  assert.equal(find(f.root,"button","准备全新办理表单").hidden,true);
+  assert.equal(find(f.root,"button","查看办理结果").hidden,false);
+});

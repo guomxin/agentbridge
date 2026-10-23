@@ -386,7 +386,7 @@ def _cross_source_preparations(service, connection, subject, pending, operation_
         return {}
     result = {}
     conflicts = oa_preparation_conflicts(service, user_subject=subject, session=session, selections=selections, connection=connection)
-    from agentbridge.core.oa_pending_recovery import recovery_child_for_origin, OaPendingRecoveryError
+    from agentbridge.core.oa_pending_recovery import recovery_child_for_origin, fresh_recovery_completion, OaPendingRecoveryError
     for conflict in conflicts:
         key = keys[(conflict["affairId"], conflict["prepareCapability"], conflict["commitCapability"])]
         if conflict["identityVerified"]:
@@ -400,6 +400,14 @@ def _cross_source_preparations(service, connection, subject, pending, operation_
                 result[key] = {"taskId": child_id, "state": child_state or
                                ("preparing" if child["status"] == "active" else child["status"])}
                 continue
+            if conflict["state"] == "outcome_unknown":
+                try:
+                    completed = fresh_recovery_completion(service, connection, subject, conflict["taskId"])
+                except (OaPendingRecoveryError, KeyError, ValueError, PermissionError):
+                    completed = None
+                if completed:
+                    result.setdefault(key, {"taskId": conflict["taskId"], "state": "verified_complete", **completed})
+                    continue
         result.setdefault(key, {"taskId": conflict["taskId"],
                                "state": conflict["state"] if conflict["identityVerified"] else "identity_unverified"})
     return result
@@ -446,19 +454,40 @@ def _source_preparations(connection, subject, source_task_id, operation_id):
     return result
 
 
-def preparation_source_task_ids(connection, subject, task_id):
+def preparation_source_task_ids(connection, subject, task_id, *, service=None):
     """Refresh owned queries showing an exact affair; never enqueue new work."""
     task = _owned_task(connection, subject, task_id)
-    command = json.loads(task["summary_json"]).get("command") or {}
-    if command.get("kind") != COMMAND_KIND:
+    summary = json.loads(task["summary_json"])
+    command = summary.get("command") or {}
+    if command.get("kind") == COMMAND_KIND:
+        try:
+            _, command = _load_command(connection, subject, task_id, command.get("commandKey"))
+            _owned_task(connection, subject, command["sourceTaskId"])
+        except (ActionableResultError, KeyError):
+            return []
+        result = [command["sourceTaskId"]] if command["sourceTaskId"] != task_id else []
+        affairs = command.get("affairIds") or []
+    elif service is not None and (isinstance(summary.get("oaPendingRecovery"), dict) or task["status"] == "outcome_unknown"):
+        from agentbridge.core.oa_pending_recovery import recovery_source_context, recovery_origin_source_context, OaPendingRecoveryError
+        try:
+            if isinstance(summary.get("oaPendingRecovery"), dict):
+                context = recovery_source_context(service, connection, subject, task_id)
+                origin = context["origin"] if context else None
+                result = [origin["task"]["task_id"]] if origin else []
+            else:
+                origin = recovery_origin_source_context(service, connection, subject, task_id)
+                result = []
+        except (OaPendingRecoveryError, KeyError, ValueError, PermissionError):
+            return []
+        if origin is None:
+            return []
+        # Recovery creates no ordinary preparation command. Its attested edge
+        # invalidates the immutable original's *current presentation* as well as
+        # every owned query that can display this exact affair. No child is ever
+        # queued from a parent projection, so these edges remain one-way.
+        affairs = [origin["target"]["affair_id"]]
+    else:
         return []
-    try:
-        _, command = _load_command(connection, subject, task_id, command.get("commandKey"))
-        _owned_task(connection, subject, command["sourceTaskId"])
-    except (ActionableResultError, KeyError):
-        return []
-    result = [command["sourceTaskId"]] if command["sourceTaskId"] != task_id else []
-    affairs = command.get("affairIds") or []
     if not affairs:
         return result
     placeholders = ",".join("?" for _ in affairs)

@@ -1,10 +1,11 @@
 import { reconcileChildren } from "./workspace_dom.mjs";
+import { formatTime } from "./workspace_results.mjs";
 
 // A selected result records preparation intent only. Approval remains on the
 // existing trusted page, with one explicit decision for each business item.
 export function createActionableResults({ document, state, prepareTargets,
   openPreparation, refreshQuery, now = () => Date.now(),
-  makeRequestKey = () => crypto.randomUUID() }) {
+  makeRequestKey = () => crypto.randomUUID(), getScope, timers = globalThis }) {
   state.actionableGroups ||= new Map();
   const node = (tag, className = "", text = "") => {
     const element = document.createElement(tag);
@@ -16,11 +17,17 @@ export function createActionableResults({ document, state, prepareTargets,
     let model = state.actionableGroups.get(key);
     if (!model) {
       model = { selected: new Set(), accepted: new Map(), views: new Set(), pending: false,
-        request: null, status: "", group, search: "", type: "", onlySelected: false, refreshRequest: null };
+        request: null, status: "", group, search: "", type: "", onlySelected: false, refreshRequest: null,
+        scope:getScope?.(), disposed:false };
       state.actionableGroups.set(key, model);
+      model.scope?.defer(() => { model.disposed = true; clearExpiry(model); });
     }
     model.group = group;
     return model;
+  }
+  function clearExpiry(model) {
+    if (model.scope) model.scope.clearTimer(model.expiryTimer); else timers.clearTimeout(model.expiryTimer);
+    model.expiryTimer = null;
   }
   const preparationStates = {
     queued: ["准备中", "查看进度"],
@@ -28,6 +35,7 @@ export function createActionableResults({ document, state, prepareTargets,
     waiting_user: ["等待确认", "继续办理"],
     running: ["提交中", "查看进度"],
     succeeded: ["已完成", "查看结果"],
+    verified_complete: ["原事项已核验完成", "查看结果"],
     partially_succeeded: ["部分完成，请查看结果", "查看结果"],
     failed: ["办理未完成，请查看原任务的提交与核验说明；不要重复准备或提交。", "查看结果"],
     expired: ["办理已过期，重新办理请重新查询待办。", "查看结果"],
@@ -42,6 +50,12 @@ export function createActionableResults({ document, state, prepareTargets,
       const known = typeof supplied === "object" && !Array.isArray(supplied) &&
         Object.hasOwn(preparationStates, supplied.state) ? preparationStates[supplied.state] : null;
       const taskId = typeof supplied?.taskId === "string" && supplied.taskId.trim() ? supplied.taskId : null;
+      if (known && supplied.state === "verified_complete") {
+        const fresh = Number.isFinite(Date.parse(supplied.expiresAt)) && Date.parse(supplied.expiresAt) > now();
+        const checked = Number.isFinite(Date.parse(supplied.observedAt)) ? ` 核验时间：${formatTime(supplied.observedAt)}。` : "";
+        return {taskId, state:fresh ? "verified_complete" : "outcome_unknown", label:fresh ? "查看结果" : "核对原事项",
+          message:fresh ? `原事项已核验完成。${checked}` : `上次核验已完成；该次核对已过期，请查看原任务重新核对当前状态。${checked}`};
+      }
       return {taskId, message: known?.[0] || "办理状态待核实，请查看原任务。",
         label: known?.[1] || "查看原任务", state: known ? supplied.state : "unknown"};
     }
@@ -110,11 +124,18 @@ export function createActionableResults({ document, state, prepareTargets,
     } finally { model.pending = false; update(model); }
   }
   function update(model) {
+    if (model.disposed || model.scope && !model.scope.current()) return;
     const group = model.group;
-    globalThis.clearTimeout(model.expiryTimer);
-    const remaining = Date.parse(group.expiresAt) - now();
+    clearExpiry(model);
+    // A read-only verification has its own short evidence lifetime, which can
+    // expire after the source query. Keep both boundaries live on open pages.
+    const expiries = [Date.parse(group.expiresAt), ...group.targets.filter(target =>
+      target.preparation?.state === "verified_complete").map(target => Date.parse(target.preparation.expiresAt))]
+      .filter(value => Number.isFinite(value) && value > now());
+    const remaining = expiries.length ? Math.min(...expiries) - now() : NaN;
     if (Number.isFinite(remaining) && remaining > 0 && model.views.size) {
-      model.expiryTimer = globalThis.setTimeout(() => update(model), Math.min(remaining + 20, 2147483647));
+      const expire = () => update(model), delay = Math.min(remaining + 20, 2147483647);
+      model.expiryTimer = model.scope ? model.scope.timeout(expire, delay) : timers.setTimeout(expire, delay);
       model.expiryTimer?.unref?.();
     }
     const targets = new Map(group.targets.map(t => [t.targetKey, t]));
@@ -246,12 +267,14 @@ export function createActionableResults({ document, state, prepareTargets,
     for (const [key, view] of container._actionableViews) {
       if (!groups.some(group => `${group.sourceTaskId}:${group.operationId}` === key)) {
         view.model.views.delete(view); container._actionableViews.delete(key);
-        if (!view.model.views.size) globalThis.clearTimeout(view.model.expiryTimer);
+        if (!view.model.views.size) clearExpiry(view.model);
         if (!view.model.views.size && !view.model.request && !view.model.refreshRequest && !view.model.pending) state.actionableGroups.delete(key);
       }
     }
     reconcileChildren(container, children);
     container.hidden = !children.length;
   }
-  return { render };
+  return { render, reset() {
+    for (const model of state.actionableGroups.values()) {model.disposed=true;clearExpiry(model);model.views.clear();}
+  } };
 }
