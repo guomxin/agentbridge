@@ -17,7 +17,7 @@ _SCRIPT = Path(__file__).with_name("static") / "result_view.mjs"
 
 
 def result_view_target(path):
-    match = re.fullmatch(r"/results/([A-Za-z0-9_-]{32,128})(?:/(state|prepare|refresh))?", path.split("?", 1)[0])
+    match = re.fullmatch(r"/results/([A-Za-z0-9_-]{32,128})(?:/(state|prepare|refresh|open|recovery-probe|recovery-prepare|recovery-open))?", path.split("?", 1)[0])
     return (match[1], match[2] or "page") if match else None
 
 
@@ -105,6 +105,15 @@ class TrustedResultViewApplication:
               .result-query-actions {{ display:flex; flex-wrap:wrap; gap:10px; }}
               .result-select-current {{ font-size:14px; }}
               .result-choice[hidden],#result-groups p[hidden] {{ display:none; }}
+              .result-choice:has(input:checked) {{ background:var(--selected-bg);color:var(--selected-ink);border-radius:5px; }}
+              .result-choice:has(input:disabled) {{ color:var(--muted);cursor:default; }}
+              .result-recovery {{ padding:16px;border:1px solid var(--line);border-radius:6px;background:var(--subtle-bg);color:var(--subtle-ink); }}
+              .result-recovery h3 {{ margin:0 0 10px;font-size:17px; }}
+              .result-recovery p {{ line-height:1.65;overflow-wrap:anywhere; }}
+              .result-recovery button {{ margin-top:10px; }}
+              .result-recovery [hidden] {{ display:none!important; }}
+              .result-risk {{ display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:12px;background:var(--warning-bg);color:var(--warning-ink);line-height:1.65; }}
+              .result-risk input {{ width:22px;height:22px;min-height:22px;flex:0 0 22px;margin-top:2px; }}
               @media(max-width:480px) {{ .result-filters {{ grid-template-columns:1fr; }} }}
             </style>'''
             return AuthCardResponse(200, headers, _document(title="选择待办并核对办理", body=body, nonce=nonce).encode())
@@ -146,9 +155,9 @@ class TrustedResultViewApplication:
                 value = json.loads(body)
             except (ValueError, UnicodeError):
                 return self.json(400, {"error": {"code": "INVALID_JSON", "message": "请求内容无效。"}})
-            if action not in {"prepare", "refresh"}:
+            if action not in {"prepare", "refresh", "open", "recovery-probe", "recovery-prepare", "recovery-open"}:
                 return self.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}})
-            return self.json(202, getattr(self.backend, action)(view_token, value))
+            return self.json(202, getattr(self.backend, action.replace("-", "_"))(view_token, value))
         except Exception as error:
             return self.error(error)
 

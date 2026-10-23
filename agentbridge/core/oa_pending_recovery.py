@@ -71,10 +71,17 @@ def _endpoint(connection, subject, endpoint_id):
                              (endpoint_id, subject)).fetchone()
     if not row or row["state"] != "active":
         _fail("OA_RECOVERY_ENDPOINT_INVALID", "当前会话不可用于恢复此任务。")
-    return dict(row)
+    endpoint = dict(row)
+    if str(endpoint.get("client_type") or "").lower() == "telegram":
+        from agentbridge.core.actionable_results import _telegram_endpoint
+        return _telegram_endpoint(connection, subject, endpoint_id)
+    return endpoint
 
 
 def _endpoint_hash(endpoint):
+    if str(endpoint.get("client_type") or "").lower() == "telegram":
+        # The canonical private route also attests the live host token/account.
+        return _hash({"kind": "telegram", "bindingHash": endpoint.get("_binding_hash")})
     return _hash({key: endpoint.get(key) for key in ("endpoint_id", "user_subject", "agent_host",
         "client_type", "external_subject", "conversation_ref", "state")})
 
@@ -110,6 +117,14 @@ def _origin(service, connection, subject, task_id, *, current=True):
             or plan.get("user_subject") != subject or auth["capability_name"] != row["capability_name"]
             or (plan.get("resume_arguments") or {}).get("affair_id") != target["affair_id"]):
         _fail("OA_RECOVERY_ORIGIN_INVALID", "原提交缺少可核对的身份或事项绑定。")
+    batch = connection.execute("SELECT * FROM task_batches WHERE parent_task_id=? AND user_subject=?",
+                               (task_id, subject)).fetchone()
+    if batch is not None:
+        item = connection.execute("SELECT * FROM task_batch_items WHERE batch_id=? AND ordinal=?",
+                                  (batch["batch_id"], batch["current_ordinal"])).fetchone()
+        if (batch["state"] != "outcome_unknown" or not item or item["state"] != "outcome_unknown"
+                or item["operation_id"] != row["operation_id"] or item["resource_ref"] != target["affair_id"]):
+            _fail("OA_RECOVERY_ORIGIN_INVALID", "仅能核对原批次当前结果未知的事项。")
     session_row = connection.execute("SELECT * FROM sessions WHERE user_subject=? AND system_id='oa'", (subject,)).fetchone()
     session = dict(session_row) if session_row else {}
     if current and (session.get("state") != "active" or _principal(session) != principal):
@@ -586,11 +601,12 @@ def _prepare_child(service, subject, child, origin):
         if operations and operations[-1]["status"] in {"pending", "running"}:
             return
         generation = len(operations)
-        endpoint = task["origin_endpoint_id"]
+        endpoint = _endpoint(connection, subject, task["origin_endpoint_id"])
+        host_type = "openclaw" if str(endpoint["client_type"]).lower() == "telegram" else "workspace"
     response = service.invoke(user_subject=subject, task_id=child, capability_name=origin["prepare"],
         arguments={"affair_id": origin["target"]["affair_id"]},
         idempotency_key="oa-recovery-source:" + child + ":" + str(generation),
-        host_type="workspace", origin_endpoint_id=endpoint)
+        host_type=host_type, origin_endpoint_id=endpoint["endpoint_id"])
     if response.get("status") != "requires_user_action":
         _fail("OA_RECOVERY_PREPARE_FAILED", "恢复任务已保存，但新材料暂未准备好；重新核对后可在同一恢复任务再次准备。")
 

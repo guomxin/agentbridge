@@ -224,9 +224,19 @@ def create_auth_http_server(
                         return
                     response.headers["Connection"] = "close"
                 else:
+                    try:
+                        query = parse_qs(urlparse(self.path).query, keep_blank_values=True, max_num_fields=1)
+                        valid_query = not query or (set(query) == {"result"} and len(query["result"]) == 1
+                            and re.fullmatch(r"[A-Za-z0-9_-]{43}", query["result"][0]))
+                    except ValueError:
+                        query, valid_query = {}, False
+                    if not valid_query:
+                        self._send(flow_application._unavailable())
+                        return
                     response = flow_application.get_card(
                         kind, resource_id, presentation_id=presentation_id,
                         secure_cookie=config.secure_cookie, csrf_cookie=csrf_cookie,
+                        result_token=query.get("result", [None])[0],
                     )
                 try:
                     self._send(response)
@@ -319,7 +329,7 @@ def create_auth_http_server(
                 if len(body) != content_length:
                     self.close_connection = True
                     self._send(result_application.json(400, {"error": {"code": "INVALID_LENGTH", "message": "请求内容不完整。"}}))
-                elif action not in {"prepare", "refresh"}:
+                elif action not in {"prepare", "refresh", "open", "recovery-probe", "recovery-prepare", "recovery-open"}:
                     self._send(result_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
                 elif urlparse(self.path).query:
                     self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "办理请求无效。"}}))

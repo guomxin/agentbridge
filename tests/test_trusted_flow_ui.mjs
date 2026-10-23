@@ -9,12 +9,13 @@ const state = (extra = {}) => ({state: 'processing', title: '提交与核验中'
   terminal: false, stateVersion: signature, ...extra});
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture({respectAbort = true} = {}) {
-  const nodes = Object.fromEntries(['flow-title','flow-message','flow-recovery','flow-batch','flow-continue'].map(id =>
+function fixture({respectAbort = true, navigation} = {}) {
+  const nodes = Object.fromEntries(['flow-title','flow-message','flow-recovery','flow-batch','flow-continue','agentbridge-back'].map(id =>
     [id, {textContent: '', hidden: true, removeAttribute(name) { delete this[name]; }}]));
   const calls = [], timers = new Map(), delays = [], events = new Map(), navigations = [];
   let sequence = 0, active = 0, maxActive = 0, now = 0;
-  const window = {document: {getElementById: id => nodes[id]},
+  const documentEvents=new Map();
+  const window = {document: {getElementById: id => nodes[id],addEventListener:(name,fn)=>documentEvents.set(name,fn)},
     location: {origin: 'https://trusted.example', hash: '#lifecycle-proof', replace: url => navigations.push(url)},
     addEventListener: (name, callback) => events.set(name, callback),
     setTimeout(callback, delay) { const id = ++sequence; delays.push(delay); timers.set(id, {callback, delay}); return id; },
@@ -34,11 +35,12 @@ function fixture({respectAbort = true} = {}) {
     }, {once: true});
     return promise;
   };
-  const controller = mountTrustedFlow(config, {window, fetch, now: () => now});
+  const controller = mountTrustedFlow({...config,navigation}, {window, fetch, now: () => now});
   return {controller, calls, timers, delays, nodes, navigations,
     maxActive: () => maxActive,
     hide() { events.get('pagehide')(); },
     restore() { events.get('pageshow')({persisted: true}); },
+    nativeRestore() { documentEvents.get('agentbridge:native-resume')(); },
     advance(milliseconds) { now += milliseconds; },
     fireTimer(delay) { const entry = delay === undefined ? [...timers.entries()].at(-1)
       : [...timers.entries()].find(([, timer]) => timer.delay === delay);
@@ -210,4 +212,25 @@ test('slow status shows real observed elapsed time without inventing progress', 
   assert.match(f.nodes['flow-recovery'].textContent, /本页已等待 7 秒/);
   assert.doesNotMatch(f.nodes['flow-recovery'].textContent, /%/);
   f.hide(); await f.controller.done;
+});
+
+test('validated source navigation preserves native launch and opens new warning and batch interactions through the source',async()=>{
+  const navigation={back:{kind:'result_list',url:`/results/${opaque}`}};
+  const f=fixture({navigation});
+  assert.equal(f.nodes['agentbridge-back'].href,`https://trusted.example/results/${opaque}#lifecycle-proof`);
+  f.calls[0].resolve(state({state:'review_ready',nextUrl:`/flow/authorize/${opaque}`}));await f.controller.done;
+  assert.deepEqual(f.navigations,[`https://trusted.example/results/${opaque}#lifecycle-proof`]);
+  const batch=fixture({navigation});
+  batch.calls[0].resolve(state({state:'completed',terminal:true,continueUrl:`/flow/input/${'c'.repeat(43)}`}));await batch.controller.done;
+  assert.equal(batch.nodes['flow-continue'].href,`https://trusted.example/results/${opaque}#lifecycle-proof`);
+  assert.equal(batch.nodes['flow-continue'].textContent,'返回待办列表继续下一项');
+  assert.ok(batch.calls.every(call=>call.options.method==='GET'));
+});
+
+test('native receipt reactivation replaces the old readonly wait without replaying an execution',async()=>{
+  const f=fixture({respectAbort:false});f.nativeRestore();assert.equal(f.calls.length,2);
+  f.calls[0].resolve(state({state:'review_ready',nextUrl:`/flow/authorize/${opaque}`}));await flush();
+  assert.deepEqual(f.navigations,[]);
+  f.calls[1].resolve(state({state:'outcome_unknown',terminal:true}));await f.controller.done;
+  assert.ok(f.calls.every(call=>call.options.method==='GET'));assert.equal(f.timers.size,0);
 });

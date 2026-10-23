@@ -545,7 +545,13 @@ def _document(
   <style nonce="{nonce}">
     :root {{ color-scheme:light; --paper:#f3f5f2; --surface:#fff; --ink:#17201d;
       --muted:#62706a; --line:#d5dbd7; --teal:#087d72; --teal-dark:#075f58;
-      --amber:#9b6517; --red:#b23a3a; }}
+      --amber:#9b6517; --red:#b23a3a; --button-ink:#fff; --button-hover:#075f58;
+      --field-bg:#fff; --field-ink:#17201d; --field-label:#35423d; --field-border:#899b91;
+      --subtle-bg:#f1f5f1; --subtle-ink:#17201d; --subtle-muted:#62706a; --table-bg:#edf3ef;
+      --selected-bg:#e5f4f1; --selected-ink:#075f58; --selected-border:#087d72;
+      --warning-bg:#fff8ea; --warning-ink:#684a19; --warning-border:#b08038;
+      --error-bg:#fff0ef; --error-ink:#7f2828; --disabled-bg:#e8ede9; --disabled-ink:#56655d;
+      --secondary-bg:#edf1ee; --secondary-ink:#17201d; --focus-ring:#087d72; }}
     * {{ box-sizing:border-box; }} html,body {{ min-height:100%; }}
     body {{ margin:0; background:var(--paper); color:var(--ink);
       font-family:"Microsoft YaHei UI","Noto Sans CJK SC",sans-serif; letter-spacing:0; }}
@@ -563,12 +569,12 @@ def _document(
     h1 {{ margin:0; font-size:24px; line-height:1.3; }}
     .system-name {{ margin:5px 0 0; color:var(--muted); font-size:12px; }}
     .review {{ margin:0 0 24px; padding:18px; border:1px solid var(--line);
-      border-radius:6px; background:#f8faf8; }}
+      border-radius:6px; background:var(--subtle-bg);color:var(--subtle-ink);--ink:var(--subtle-ink);--muted:var(--subtle-muted); }}
     .review-kicker {{ margin:0 0 5px; color:var(--teal-dark); font-size:11px; font-weight:700; }}
     .review h2 {{ margin:0; font-size:18px; line-height:1.45; }}
     .review-effect {{ margin:7px 0 0; color:var(--muted); font-size:13px; line-height:1.55; }}
     .review dl {{ display:grid; grid-template-columns:1fr 1fr; gap:0 18px; margin:16px 0 0; }}
-    .review-row {{ min-width:0; padding:10px 0; border-top:1px solid #e3e8e5; }}
+    .review-row {{ min-width:0; padding:10px 0; border-top:1px solid var(--line); }}
     .review dt {{ margin:0 0 4px; color:var(--muted); font-size:11px; font-weight:700; }}
     .review dd {{ margin:0; color:var(--ink); font-size:14px; line-height:1.55;
       overflow-wrap:anywhere; white-space:pre-wrap; }}
@@ -584,32 +590,38 @@ def _document(
     .reading-table {{overflow-x:auto;max-width:100%;margin:10px 0}}
     .reading-table table {{border-collapse:collapse;width:100%;font-size:13px}}
     .reading-table th,.reading-table td {{border:1px solid var(--line);padding:8px;vertical-align:top;text-align:left;min-width:80px;white-space:pre-wrap}}
-    .reading-table th {{background:#edf3ef}} .reading-notice {{color:var(--muted);font-size:12px;line-height:1.6;margin:8px 0}}
+    .reading-table th {{background:var(--table-bg);color:var(--subtle-ink)}} .reading-notice {{color:var(--muted);font-size:12px;line-height:1.6;margin:8px 0}}
     .form-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:17px 16px; }}
     .field {{ min-width:0; }} .field.wide {{ grid-column:1 / -1; }}
-    label,legend {{ display:block; margin:0 0 7px; color:#35423d; font-size:13px; font-weight:700; }}
-    input,select,textarea {{ width:100%; min-height:44px; border:1px solid #aeb9b3;
-      border-radius:5px; background:#fff; color:var(--ink); padding:9px 11px; font:inherit; font-size:14px; }}
+    label,legend {{ display:block; margin:0 0 7px; color:var(--field-label); font-size:13px; font-weight:700; }}
+    input,select,textarea {{ width:100%; min-height:44px; border:1px solid var(--field-border);
+      border-radius:5px; background:var(--field-bg); color:var(--field-ink); padding:9px 11px; font:inherit; font-size:14px; }}
     textarea {{ min-height:96px; resize:vertical; line-height:1.55; }}
-    input:focus,select:focus,textarea:focus {{ outline:3px solid rgba(8,125,114,.16); border-color:var(--teal); }}
+    input:focus,select:focus,textarea:focus {{ outline:3px solid var(--focus-ring); border-color:var(--teal); }}
     fieldset {{ margin:0; padding:0; border:0; }}
     .segments {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0; }}
     .segments label {{ margin:0; cursor:pointer; }}
     .segments input {{ position:absolute; width:1px; height:1px; min-height:0; margin:0;
       opacity:0; pointer-events:none; }}
-    .segments span {{ display:grid; place-items:center; min-height:44px; border:1px solid #aeb9b3;
-      background:#fff; font-size:14px; }}
+    .segments span {{ display:grid; place-items:center; min-height:44px; border:1px solid var(--field-border);
+      background:var(--field-bg);color:var(--field-ink); font-size:14px; }}
     .segments label:first-child span {{ border-radius:5px 0 0 5px; }}
     .segments label:last-child span {{ border-radius:0 5px 5px 0; border-left:0; }}
-    .segments input:checked + span {{ background:#e5f4f1; border-color:var(--teal); color:var(--teal-dark); }}
-    .segments input:focus-visible + span {{ outline:3px solid rgba(8,125,114,.16); outline-offset:2px; }}
-    .notice {{ margin:20px 0 16px; padding:12px; border-left:4px solid var(--amber); background:#fff8ea;
-      color:#684a19; font-size:13px; line-height:1.6; }}
+    .segments input:checked + span {{ background:var(--selected-bg); border-color:var(--selected-border); color:var(--selected-ink); }}
+    .segments input:disabled + span {{background:var(--disabled-bg);color:var(--disabled-ink);cursor:not-allowed}}
+    .segments input:focus-visible + span {{ outline:3px solid var(--focus-ring); outline-offset:2px; }}
+    .notice {{ margin:20px 0 16px; padding:12px; border-left:4px solid var(--amber); background:var(--warning-bg);
+      color:var(--warning-ink); font-size:13px; line-height:1.6; }}
     .form-error {{ margin:0 0 18px; padding:11px 12px; border-left:4px solid var(--red);
-      background:#fff0ef; color:#7f2828; font-size:13px; }}
+      background:var(--error-bg); color:var(--error-ink); font-size:13px; }}
     button {{ width:100%; min-height:48px; border:0; border-radius:5px; padding:10px 16px;
-      background:var(--teal); color:#fff; font:inherit; font-weight:700; cursor:pointer; }}
-    button:hover {{ background:var(--teal-dark); }}
+      background:var(--teal); color:var(--button-ink); font:inherit; font-weight:700; cursor:pointer; }}
+    button:hover:not(:disabled) {{ background:var(--button-hover); }}
+    button:disabled,input:disabled,select:disabled,textarea:disabled {{background:var(--disabled-bg);color:var(--disabled-ink);cursor:not-allowed;opacity:1}}
+    button.secondary {{background:var(--secondary-bg);color:var(--secondary-ink);border:1px solid var(--line)}}
+    button.secondary:disabled {{background:var(--disabled-bg);color:var(--disabled-ink)}}
+    button.secondary:hover:not(:disabled) {{background:var(--selected-bg);color:var(--selected-ink)}}
+    a {{color:var(--teal-dark)}}
     footer {{ margin-top:18px; color:var(--muted); font-size:11px; text-align:center; }}
     .status-card {{ text-align:center; padding-block:44px; }}
     .status-mark {{ width:24px; height:24px; margin:0 auto 20px; border:5px solid var(--teal); transform:rotate(45deg); }}

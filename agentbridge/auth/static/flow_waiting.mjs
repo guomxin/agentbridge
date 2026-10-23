@@ -11,6 +11,17 @@ export function mountTrustedFlow(config, environment = {}) {
   const recovery = document.getElementById('flow-recovery');
   const batch = document.getElementById('flow-batch');
   const continued = document.getElementById('flow-continue');
+  let returnTo = null;
+  try {
+    const candidate = new URL(config.navigation?.back?.url, location.origin);
+    if (config.navigation?.back?.kind === 'result_list' && candidate.origin === location.origin
+        && !candidate.username && !candidate.password && !candidate.search && !candidate.hash
+        && /^\/results\/[A-Za-z0-9_-]{43}$/.test(candidate.pathname)) {
+      returnTo = candidate; returnTo.hash = location.hash;
+      const back = document.getElementById('agentbridge-back');
+      if (back) back.href = returnTo.href;
+    }
+  } catch {}
   let stopped = false, failures = 0, after = '';
   let epoch = 0, terminal = false, restorePending = false;
   let controller = null, timer = null, finishBackoff = null;
@@ -52,6 +63,10 @@ export function mountTrustedFlow(config, environment = {}) {
       trackElapsed();
       done = poll();
     }
+  });
+  document.addEventListener?.('agentbridge:native-resume', () => {
+    if (stopped || terminal) return;
+    stop(); stopped = false; trackElapsed(); done = poll();
   });
 
   function nextUrl(value, kind) {
@@ -145,12 +160,17 @@ export function mountTrustedFlow(config, environment = {}) {
           const next = nextUrl(state.nextUrl, 'authorize');
           terminal = true;
           stop();
-          location.replace(next.href);
+          // A warning can introduce a different authorization presentation.
+          // The source list must explicitly open that exact new interaction.
+          location.replace(returnTo?.href || next.href);
           return;
         }
         if (state.continueUrl && state.state === 'completed') {
           const next = nextUrl(state.continueUrl, 'input');
-          continued.href = next.href;
+          // A new batch item needs its own endpoint presentation. Return to
+          // the validated source so its explicit open issues the correct one.
+          continued.href = returnTo?.href || next.href;
+          if (returnTo) continued.textContent = '返回待办列表继续下一项';
           continued.hidden = false;
         }
         if (state.terminal === true) { terminal = true; stop(); return; }

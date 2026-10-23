@@ -14,7 +14,7 @@ from agentbridge.core.field_submissions import FieldSubmissionStore
 class TrustedFieldCardTests(unittest.TestCase):
     def assert_inline_bridge(self, response, *, completed=False):
         html = response.body.decode("utf-8")
-        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}}});", html)
+        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}, actionLabels: [", html)
         nonces = re.findall(r'<script\b[^>]*\bnonce="([^"]+)"', html)
         self.assertTrue(nonces)
         policy = response.headers["Content-Security-Policy"]

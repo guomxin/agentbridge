@@ -69,15 +69,21 @@ class TrustedFlowApplication:
         return AuthCardResponse(303, headers, b"")
 
     def get_card(self, kind: str, resource_id: str, *, presentation_id: str | None,
-                 secure_cookie: bool, csrf_cookie: str) -> AuthCardResponse:
+                 secure_cookie: bool, csrf_cookie: str, result_token: str | None = None) -> AuthCardResponse:
         try:
             context = self.reader.context(kind, resource_id, presentation_id)
+            navigation = None
+            if result_token is not None:
+                from agentbridge.core.telegram_result_views import ResultViewService
+                navigation = {"back": ResultViewService(self.reader.service).navigation_back(result_token,
+                    task_id=context.task_id, interaction_id=context.interaction["interaction_id"],
+                    endpoint_id=context.endpoint_id, presentation_id=context.presentation_id)}
             if self.draft_application.supports(context) and (
                 context.resource["state"] == "pending"
                 or self.draft_application.has_decision(resource_id)
             ):
                 return self.draft_application.get_card(resource_id, presentation_id=presentation_id,
-                    secure_cookie=secure_cookie, csrf_cookie=csrf_cookie)
+                    secure_cookie=secure_cookie, csrf_cookie=csrf_cookie, navigation=navigation)
             if context.resource["state"] == "pending":
                 if not context.actionable:
                     raise TrustedFlowDenied("batch item is no longer actionable")
@@ -89,14 +95,14 @@ class TrustedFlowApplication:
                 self.reader.authenticate(context, token=csrf_cookie, cookie=csrf_cookie)
             except TrustedFlowDenied:
                 token, ttl = self.reader.issue_read_session(context)
-                response = self._waiting(kind, resource_id, presentation_id, token)
+                response = self._waiting(kind, resource_id, presentation_id, token, navigation=navigation)
                 path = f"/flow/{kind}/{resource_id}" + (f"/present/{presentation_id}" if presentation_id else "")
                 response.headers["Set-Cookie"] = (
                     f"agentbridge_csrf={token}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={ttl}"
                     + ("; Secure" if secure_cookie else "")
                 )
                 return response
-            return self._waiting(kind, resource_id, presentation_id, csrf_cookie)
+            return self._waiting(kind, resource_id, presentation_id, csrf_cookie, navigation=navigation)
         except _UNAVAILABLE_ERRORS:
             return self._unavailable()
 
@@ -235,12 +241,14 @@ class TrustedFlowApplication:
 
     @staticmethod
     def _waiting(kind: str, resource_id: str, presentation_id: str | None,
-                 token: str) -> AuthCardResponse:
+                 token: str, *, navigation: dict | None = None) -> AuthCardResponse:
         nonce = secrets.token_urlsafe(18)
         path = f"/flow/{kind}/{resource_id}" + (f"/present/{presentation_id}" if presentation_id else "")
         # All configuration values are opaque IDs, never business fields. Escape
         # '<' nonetheless, so the script cannot terminate via future callers.
-        config = json.dumps({"statusUrl": path + "/status", "token": token}).replace("<", "\\u003c")
+        config = json.dumps({"statusUrl": path + "/status", "token": token, "navigation": navigation}).replace("<", "\\u003c")
+        back = (f'<a id="agentbridge-back" href="{escape(navigation["back"]["url"])}">返回待办列表</a>'
+                if navigation else "")
         script = _WAITING_SCRIPT.read_text(encoding="utf-8").replace(
             "export function mountTrustedFlow", "function mountTrustedFlow", 1,
         )
@@ -257,6 +265,7 @@ class TrustedFlowApplication:
   <p class="status-copy" id="flow-recovery"></p>
   <p class="status-copy" id="flow-batch" hidden></p>
   <a id="flow-continue" hidden>核对下一项</a>
+  {back}
   <noscript><p>请启用 JavaScript 后刷新此页查看办理状态；页面不会自行提交业务。</p></noscript>
 </section></main>
 <script nonce="{escape(nonce)}">

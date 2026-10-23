@@ -47,7 +47,7 @@ class BusinessDraftCardTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         for name in ("log_date", "hours", "project", "content"):
             self.assertIn(f'id="{name}"', body)
-        self.assertIn('id="draft-submit" type="submit" disabled>确认并提交日志', body)
+        self.assertIn('id="draft-submit" data-agentbridge-action-label="确认并提交日志" type="submit" disabled>确认并提交日志', body)
         self.assertIn('method="post"', body)
         self.assertIn("项目编码", body)
         self.assertIn("重复检查", body)
@@ -82,6 +82,7 @@ class BusinessDraftCardTests(unittest.TestCase):
             with self.subTest(profile=profile.profile_id):
                 schema = _TRUSTED_WRITE_DEFINITIONS[profile.prepare]["field_schema"]
                 self.state["ui"] = profile.ui(schema)
+                self.state["ui"]["submitLabel"] = "不可信自定义按钮文案"
                 values = {name: "" for name in profile.fields}
                 for field in schema["fields"]:
                     if field["control"] in {"select", "segmented"}:
@@ -91,6 +92,7 @@ class BusinessDraftCardTests(unittest.TestCase):
                 body = response.body.decode()
                 self.assertEqual(response.status, 200)
                 self.assertIn(profile.submit_label, body)
+                self.assertIn(f'data-agentbridge-action-label="{profile.submit_label}" type="submit" disabled>{profile.submit_label}</button>', body)
                 self.assertIn(schema["system"], body)
                 for field in schema["fields"]:
                     self.assertIn(f'id="{field["name"]}"', body)

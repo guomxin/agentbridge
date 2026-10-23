@@ -200,6 +200,29 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual(after["task_events"], before["task_events"] + 1)
         self.assertTrue(all(after[key] == before[key] for key in before if key != "task_events"))
 
+    def test_missing_endpoint_presentation_requires_explicit_open_and_nonce_is_stable(self):
+        token, _ = self.issue()
+        queued = self.views.prepare(token, self.body(token, ("efficiency_data",)))
+        self.execute(queued)
+        task_id = queued["taskId"]
+        interaction_id = self.service.tasks.get_task(task_id, user_subject=OWNER)["current_interaction_id"]
+        record = self.service.interactions.get(interaction_id, user_subject=OWNER)
+        with self.service.tasks._connect() as db:
+            db.execute("DELETE FROM field_submission_presentations WHERE submission_id=? AND endpoint_id=?",
+                (record["resource_id"], self.endpoint["endpoint_id"]))
+        with patch.object(self.service, "present_interaction", side_effect=AssertionError("GET must not issue")):
+            state = self.views.status(token, task_id)
+        self.assertTrue(state["canOpen"])
+        self.assertNotIn("interaction", state)
+        before = self.counts()
+        body = {"taskId": task_id, "requestKey": uuid4().hex}
+        first = self.views.open(token, body)
+        self.assertEqual(self.views.open(token, body), first)
+        self.assertTrue(first["interaction"]["presentation"]["url"].endswith("?result=" + token))
+        self.assertEqual(first["interaction"]["presentation"]["endpointId"], self.endpoint["endpoint_id"])
+        self.assertEqual(self.counts()["business_draft_decisions"], before["business_draft_decisions"])
+        self.assertEqual(self.counts()["write_authorizations"], before["write_authorizations"])
+
     def test_issue_rejects_foreign_workspace_group_or_wrong_host_token(self):
         workspace = self.fixture.add_query_case(case_key=uuid4().hex)
         for subject, task_id, endpoint_id, host in (

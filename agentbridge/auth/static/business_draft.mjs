@@ -36,9 +36,18 @@ function decisionKey() {
 export function safeFlowUrl(value, origin) {
   try {
     const url = new URL(value, origin);
-    if (url.origin !== origin || url.username || url.password || url.search || url.hash ||
+    if (url.origin !== origin || url.username || url.password || (url.search && !/^\?result=[A-Za-z0-9_-]{43}$/.test(url.search)) || url.hash ||
         !/^\/flow\/authorize\/[A-Za-z0-9_-]{32,128}(?:\/present\/[A-Za-z0-9_-]{32,128})?$/.test(url.pathname)) return null;
     return url;
+  } catch { return null; }
+}
+
+export function safeResultReturn(navigation, origin) {
+  if (navigation?.back?.kind !== 'result_list') return null;
+  try {
+    const url = new URL(navigation.back.url, origin);
+    return url.origin === origin && !url.username && !url.password && !url.search && !url.hash
+      && /^\/results\/[A-Za-z0-9_-]{43}$/.test(url.pathname) ? url : null;
   } catch { return null; }
 }
 
@@ -634,6 +643,9 @@ export function mountBusinessDraft(config, document, window) {
   const fields = Object.fromEntries(fieldNames.map(name => [name,
     bindDraftField(document.getElementById(name), definitions.find(field => field.name === name))]));
   const node = id => document.getElementById(id);
+  // Only the initial server-validated source may own this navigation. Polls
+  // cannot replace it with a different source or a client-supplied return URL.
+  const returnTo = safeResultReturn(config.state.navigation, window.location.origin);
   const materials = node("draft-material-previews") && typeof createMaterialPreviews === "function" ?
     createMaterialPreviews({document, window, target:node("draft-material-previews"), apiUrl:config.apiUrl, csrfToken:config.csrfToken}) : null;
   const readValues = () => Object.fromEntries(fieldNames.map(name => [name, fields[name].value]));
@@ -643,7 +655,7 @@ export function mountBusinessDraft(config, document, window) {
   const roomLabels = new Map();
   let lastOptions = config.state.options;
   let saveTimer, pollTimer;
-  let stopped = false, pageEpoch = 0;
+  let stopped = false, pageEpoch = 0, navigationApproved = false;
   let statusCopy = '';
   let displayedReview = config.state.preview?.summary || config.state.ui?.review || {};
   let materialDiff = null;
@@ -709,6 +721,7 @@ export function mountBusinessDraft(config, document, window) {
       if (stopped) return false;
       const next = safeFlowUrl(receipt.flowUrl, window.location.origin);
       if (!next) return false;
+      if (returnTo) next.searchParams.set('result', returnTo.pathname.split('/').at(-1));
       next.hash = window.location.hash;
       window.location.replace(next.href);
     },
@@ -821,13 +834,27 @@ export function mountBusinessDraft(config, document, window) {
       if (window.CustomEvent) document.dispatchEvent(new window.CustomEvent('agentbridge:draft-state'));
     },
   });
+  if (returnTo) {
+    const back = document.createElement('button'); back.id = 'agentbridge-back'; back.type = 'button';
+    back.className = 'secondary draft-return'; back.textContent = '返回待办列表';
+    back.addEventListener('click', () => {
+      if (stopped) return;
+      const view = controller.state();
+      if (view.dirty && !view.locked && (typeof window.confirm !== 'function' ||
+          !window.confirm('本页还有未保存的输入。返回可能丢失这些输入，已开始的任务会继续。确认返回待办列表？'))) return;
+      navigationApproved = true;
+      const target = new URL(returnTo.href); target.hash = window.location.hash;
+      window.location.replace(target.href);
+    });
+    form.append(back);
+  }
   form.addEventListener("input", event => { if (fieldNames.includes(event.target.name)) edited(event.target.name); });
   form.addEventListener("submit", event => { event.preventDefault(); void controller.approve(); });
   node("draft-retry").addEventListener("click", () => void controller.retry());
   node("draft-use-server").addEventListener("click", () => void controller.adoptServer());
   node("draft-keep-local").addEventListener("click", () => void controller.keepLocal());
   window.addEventListener("beforeunload", event => {
-    if (controller.state().dirty && !controller.state().locked) { event.preventDefault(); event.returnValue = ""; }
+    if (!navigationApproved && controller.state().dirty && !controller.state().locked) { event.preventDefault(); event.returnValue = ""; }
   });
   window.addEventListener("pagehide", () => {
     stopped = true; pageEpoch++;
@@ -839,6 +866,15 @@ export function mountBusinessDraft(config, document, window) {
   window.addEventListener("pageshow", event => {
     if (!event.persisted || !stopped) return;
     stopped = false;
+    const epoch = ++pageEpoch;
+    void controller.restore().finally(() => {
+      if (!stopped && pageEpoch === epoch && !controller.state().locked) pollTimer = window.setTimeout(poll, 2500);
+    });
+  });
+  document.addEventListener?.('agentbridge:native-resume', () => {
+    if (stopped) return;
+    window.clearTimeout(pollTimer);
+    // Re-read the same draft and receipt; restoration never invokes approve.
     const epoch = ++pageEpoch;
     void controller.restore().finally(() => {
       if (!stopped && pageEpoch === epoch && !controller.state().locked) pollTimer = window.setTimeout(poll, 2500);

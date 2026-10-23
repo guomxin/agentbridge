@@ -11,7 +11,7 @@ from agentbridge.core.write_authorizations import WriteAuthorizationStore
 class TrustedActionCardTests(unittest.TestCase):
     def assert_inline_bridge(self, response, *, completed=False):
         html = response.body.decode("utf-8")
-        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}}});", html)
+        self.assertIn(f"installTelegramBridge({{window, document, closeWhenComplete: {str(completed).lower()}, actionLabels: [", html)
         nonces = re.findall(r'<script\b[^>]*\bnonce="([^"]+)"', html)
         self.assertTrue(nonces)
         policy = response.headers["Content-Security-Policy"]
@@ -50,7 +50,7 @@ class TrustedActionCardTests(unittest.TestCase):
             self.assertIn("不调整奖励金额或人员", html)
             self.assertIn('value="approve" class="primary">授权阅办知识产权奖励', html)
             self.assertIn(authorization["plan_hash"], html)
-            self.assertNotIn("审批通过", html)
+            self.assertNotIn("审批通过", re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S))
             self.assertNotIn("workflow_approved", html)
             self.assertNotIn("<textarea", html)
             self.assertEqual(worker.page.commit_calls, [])

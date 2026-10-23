@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+import json
 from pathlib import Path
 
 
@@ -12,12 +13,14 @@ def render_embedded_web_app_bridge(*, nonce: str, close_when_complete: bool = Fa
 
     escaped_nonce = escape(nonce, quote=True)
     completion = "true" if close_when_complete else "false"
+    from agentbridge.core.business_draft_profiles import PROFILES
+    labels = json.dumps(sorted({profile.submit_label for profile in PROFILES}), ensure_ascii=False).replace("<", "\\u003c")
     script = _BRIDGE_SCRIPT.read_text().replace("export function installTelegramBridge", "function installTelegramBridge", 1)
     return f"""
 <script nonce="{escaped_nonce}">
 (() => {{
 {script}
-  installTelegramBridge({{window, document, closeWhenComplete: {completion}}});
+  installTelegramBridge({{window, document, closeWhenComplete: {completion}, actionLabels: {labels}}});
 }})();
 </script>
 <p class="embedded-session-note">关闭此窗口不会取消原任务。未保存的输入可能丢失；已确认的操作会继续办理，请从原任务查看结果，勿重复提交。</p>
@@ -42,13 +45,15 @@ html[data-agent-host="telegram"] .auth-shell {
 }
 html[data-agent-host="telegram"] .card,
 html[data-agent-host="telegram"] .auth-card { min-width: 0; }
-html[data-agent-host="telegram"] .review,
 html[data-agent-host="telegram"] input,
 html[data-agent-host="telegram"] select,
-html[data-agent-host="telegram"] textarea { background: var(--surface); color: var(--ink); }
+html[data-agent-host="telegram"] textarea { background: var(--field-bg, var(--surface)); color: var(--field-ink, var(--ink)); }
+html[data-agent-host="telegram"] input:disabled,
+html[data-agent-host="telegram"] select:disabled,
+html[data-agent-host="telegram"] textarea:disabled { background: var(--disabled-bg); color: var(--disabled-ink); }
 html[data-agent-host="telegram"] label,
 html[data-agent-host="telegram"] legend { color: var(--ink); }
-html[data-agent-host="telegram"] .reading-table th { background: var(--paper); }
+html[data-agent-host="telegram"] .reading-table th { background: var(--table-bg, var(--paper)); color: var(--subtle-ink, var(--ink)); }
 html[data-agent-host="telegram"] .embedded-session-note {
   display: block; max-width: 760px; margin: 0 auto 12px;
   font-size: 12px; line-height: 1.7; color: var(--muted);

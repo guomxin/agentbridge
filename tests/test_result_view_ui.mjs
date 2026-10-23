@@ -7,12 +7,13 @@ const task = '12345678-1234-1234-1234-123456789abc';
 const opaque = 'a'.repeat(43);
 
 function fixture(saved = null, {extraState = {}, savedQuery = null} = {}) {
-  function node(tag = '') { return {tag, children: [], listeners: {}, textContent: '', hidden: false,
+  function node(tag = '') { return {tag, children: [], listeners: {}, dataset:{}, textContent: '', hidden: false,
     append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
     addEventListener(name, fn) { this.listeners[name] = fn; }, click() { return this.listeners.click?.(); }}; }
   const ids = Object.fromEntries(['result-groups','result-title','result-status','result-count','result-prepare','result-recover','result-resume',
     'result-refresh','result-query-recover','result-search','result-type','result-selected-only','result-validity'].map(x => [x, node()]));
-  const document = {getElementById: id => ids[id], createElement: node};
+  const documentEvents={};
+  const document = {getElementById: id => ids[id], createElement: node,addEventListener:(name,fn)=>documentEvents[name]=fn};
   const events = {}, timers = new Map(), calls = [], navigations = [];
   const key=`agentbridge-result-view:/results/${opaque}`;
   const storage = new Map([[key,JSON.stringify(saved)],[`${key}:query`,JSON.stringify(savedQuery)]]);
@@ -37,7 +38,8 @@ function fixture(saved = null, {extraState = {}, savedQuery = null} = {}) {
   };
   function select() { const input = ids['result-groups'].children[0].children.find(x=>x.tag==='label').children[0]; input.checked=true; input.listeners.change(); }
   return {controller,ids,calls,navigations,timers,select,state,advance,hide:()=>events.pagehide(),show:()=>events.pageshow({persisted:true}),
-    saved:()=>JSON.parse(storage.get(key)),savedQuery:()=>JSON.parse(storage.get(`${key}:query`))};
+    nativeRestore:()=>documentEvents['agentbridge:native-resume'](),
+    saved:()=>JSON.parse(storage.get(key)),savedQuery:()=>JSON.parse(storage.get(`${key}:query`)),savedRecovery:()=>JSON.parse(storage.get(`${key}:recovery`)||'[]')};
 }
 
 test('selection queues only the exact original keys; no business approval is sent', async () => {
@@ -47,7 +49,10 @@ test('selection queues only the exact original keys; no business approval is sen
   f.calls[0].resolve({taskId:task}); await flush();
   assert.match(f.calls[1].url,/\/state\?task=/); assert.equal(f.calls[1].options.method,'GET');
   f.calls[1].resolve({state:'waiting_user',terminal:false,interaction:{state:'pending',presentation:{url:`https://trusted.test/flow/input/${opaque}`}}});
-  await promise; assert.deepEqual(f.navigations,[`https://trusted.test/flow/input/${opaque}#tgWebAppPlatform=android`]);
+  await flush();assert.match(f.calls[2].url,/\/open$/);
+  assert.equal(JSON.parse(f.calls[2].options.body).taskId,task);
+  f.calls[2].resolve({taskId:task,interaction:{state:'pending',presentation:{url:`https://trusted.test/flow/input/${opaque}?result=${opaque}`}}});
+  await promise; assert.deepEqual(f.navigations,[`https://trusted.test/flow/input/${opaque}?result=${opaque}#tgWebAppPlatform=android`]);
 });
 
 test('lost prepare receipt requires an explicit recovery with the identical request', async () => {
@@ -488,4 +493,133 @@ test('an unresolved preparation survives source expiry and recovers its original
   f.calls[1].resolve({taskId:task});await flush();
   f.calls[2].resolve({state:'superseded',terminal:true});await recovered;
   assert.equal(f.saved().taskId,task);assert.equal(f.calls.filter(call=>/\/prepare$/.test(call.url)).length,2);
+});
+
+const childTask='22345678-1234-1234-1234-123456789abc';
+const publicRecovery=(extra={})=>({originalTaskId:task,status:'not_checked',availability:'can_probe',reason:'not_checked',canProbe:true,
+  canPrepare:false,canExecute:false,stale:false,...extra});
+const assessment=(extra={})=>({status:'unresolved_still_pending',canPrepare:true,canExecute:false,assessmentId:'32345678-1234-1234-1234-123456789abc',
+  assessmentHash:`sha256:${'d'.repeat(64)}`,revision:3,expiresAt:new Date(2000).toISOString(),doneCoverage:'partial',...extra});
+const recoveryItem=(p=publicRecovery())=>({taskId:task,state:'outcome_unknown',terminal:true,selectedTitles:['原事项'],oaPendingRecovery:p});
+const recoveryPanel=f=>f.ids['result-resume'].children.find(n=>n.className==='result-recovery');
+
+test('GET recovery state cannot supply preparation authority; only a fresh probe and explicit risk choice can', async()=>{
+  const f=fixture(null,{extraState:{preparations:[{...recoveryItem(),assessment:assessment()}]}});
+  const panel=recoveryPanel(f),probe=panel.children[4],risk=panel.children[5],prepare=panel.children[6];
+  assert.equal(risk.hidden,true);assert.equal(prepare.hidden,true);
+  prepare.click();assert.equal(f.calls.length,0);
+  const checking=probe.click();assert.equal(f.calls[0].options.method,'POST');
+  assert.match(f.calls[0].url,/recovery-probe$/);
+  assert.equal(JSON.parse(f.calls[0].options.body).taskId,task);
+  f.calls[0].resolve({taskId:task,oaPendingRecovery:publicRecovery({status:'unresolved_still_pending'}),assessment:assessment()});await checking;
+  assert.equal(risk.hidden,false);assert.equal(prepare.disabled,true);
+  assert.match(panel.children[3].textContent,/部分覆盖/);
+  risk.children[0].checked=true;risk.children[0].listeners.change();assert.equal(prepare.disabled,false);
+  await f.advance(2001);assert.equal(prepare.hidden,true);assert.equal(risk.children[0].checked,false);
+  prepare.click();assert.equal(f.calls.length,1);
+  assert.match(panel.children[3].textContent,/已到期/);
+});
+
+test('lost recovery prepare receipt keeps the exact original task and request while blocking another attempt',async()=>{
+  const f=fixture(null,{extraState:{preparations:[{...recoveryItem(),taskId:childTask,batch:{totalCount:3,succeededCount:1,currentIndex:2}}]}});
+  const panel=recoveryPanel(f),probe=panel.children[4],risk=panel.children[5],prepare=panel.children[6];
+  const checking=probe.click();f.calls[0].resolve({taskId:task,oaPendingRecovery:publicRecovery({status:'unresolved_still_pending'}),assessment:assessment()});await checking;
+  risk.children[0].checked=true;risk.children[0].listeners.change();const first=prepare.click();
+  const body=f.calls[1].options.body;assert.equal(JSON.parse(body).taskId,task);assert.equal(JSON.parse(body).acknowledgement,'oa_unknown_new_attempt_v1');
+  f.calls[1].reject(Error('reply lost'));await first;
+  assert.equal(f.savedRecovery()[0].command.body.taskId,task);
+  probe.click();assert.equal(f.calls.length,2);
+  const retried=prepare.click();assert.equal(f.calls[2].options.body,body);
+  f.calls[2].resolve({taskId:task,recoveryTaskId:childTask,oaPendingRecovery:publicRecovery({status:'recovery_in_progress',recoveryTaskId:childTask,canProbe:false})});await retried;
+  assert.equal(f.savedRecovery().length,0);assert.equal(panel.children[7].hidden,false);assert.deepEqual(f.navigations,[]);
+  const opened=panel.children[7].click();assert.match(f.calls[3].url,/recovery-open$/);
+  f.calls[3].resolve({taskId:task,oaPendingRecovery:publicRecovery({status:'recovery_in_progress',recoveryTaskId:childTask,canProbe:false}),
+    interaction:{state:'pending',presentation:{url:`/flow/input/${opaque}?result=${opaque}`}}});await opened;
+  assert.equal(f.navigations.length,1);assert.ok(f.calls.every(call=>!/approve|authorize|commit/.test(call.url)));
+});
+
+test('native restoration drops probe authority and performs only a fresh GET, retaining no risk choice',async()=>{
+  const f=fixture(null,{extraState:{preparations:[recoveryItem()]}});
+  let panel=recoveryPanel(f);const checking=panel.children[4].click();
+  f.calls[0].resolve({taskId:task,oaPendingRecovery:publicRecovery({status:'unresolved_still_pending'}),assessment:assessment()});await checking;
+  panel.children[5].children[0].checked=true;panel.children[5].children[0].listeners.change();
+  f.nativeRestore();assert.equal(f.calls[1].options.method,'GET');
+  f.calls[1].resolve({...f.state,preparations:[recoveryItem(publicRecovery({status:'unresolved_still_pending'}))]});await flush();
+  panel=recoveryPanel(f);assert.equal(panel.children[5].hidden,true);assert.equal(panel.children[6].hidden,true);
+  assert.equal(f.calls.filter(c=>c.options.method==='POST').length,1);
+});
+
+test('expired verification is displayed as historical and no longer suppresses the readonly probe',async()=>{
+  const f=fixture(null,{extraState:{preparations:[recoveryItem(publicRecovery({status:'verified_complete',canProbe:false,
+    observedAt:new Date(0).toISOString(),expiresAt:new Date(500).toISOString()}))]}});
+  const panel=recoveryPanel(f);assert.equal(panel.children[4].hidden,true);
+  await f.advance(501);assert.match(panel.children[1].textContent,/上次核对/);assert.match(panel.children[1].textContent,/现已过期/);
+  assert.equal(panel.children[4].hidden,false);assert.equal(panel.children[6].hidden,true);
+});
+
+test('return tokens accept only this exact source and never arbitrary query keys or duplicated values',()=>{
+  const f=fixture();
+  for(const query of [`?result=${'b'.repeat(43)}`,`?result=${opaque}&result=${opaque}`,`?result=${opaque}&returnUrl=https://evil.test`,`?result=%61${opaque.slice(1)}`])
+    assert.equal(f.controller.safeAction({state:'pending',presentation:{url:`/flow/input/${opaque}${query}`}}),null);
+});
+
+test('a recovered child completed on another endpoint refreshes only the public result and stays read-only after reopen',async()=>{
+  const finished=publicRecovery({status:'recovery_succeeded',recoveryTaskId:childTask,canProbe:false,observedAt:new Date(0).toISOString()});
+  const f=fixture(null,{extraState:{preparations:[recoveryItem(finished)]}});
+  let panel=recoveryPanel(f);assert.match(panel.children[1].textContent,/后续办理已核验完成/);
+  const refreshing=panel.children[7].click();assert.equal(f.calls[0].options.method,'GET');
+  assert.match(f.calls[0].url,/\/state\?task=/);
+  f.calls[0].resolve({...recoveryItem(finished),taskId:task});await refreshing;
+  assert.deepEqual(f.navigations,[]);assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0);
+  f.hide();f.show();f.calls[1].resolve({...f.state,preparations:[recoveryItem(finished)]});await flush();
+  panel=recoveryPanel(f);assert.equal(panel.children[6].hidden,true);assert.equal(panel.children[4].hidden,true);
+  panel.children[7].click();assert.equal(f.calls[2].options.method,'GET');
+  f.calls[2].resolve({...recoveryItem(finished),taskId:task});await flush();
+  assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0);
+});
+
+test('a known form without a local presentation uses the explicit endpoint open capability',async()=>{
+  const f=fixture({taskId:task});f.calls[0].resolve({taskId:task,state:'waiting_user',terminal:false,canOpen:true});await flush();
+  assert.match(f.calls[1].url,/\/open$/);assert.equal(f.calls[1].options.method,'POST');
+  f.calls[1].resolve({taskId:task,interaction:{state:'pending',presentation:{url:`/flow/input/${opaque}?result=${opaque}`}}});await flush();
+  assert.deepEqual(f.navigations,[`https://trusted.test/flow/input/${opaque}?result=${opaque}#tgWebAppPlatform=android`]);
+});
+
+test('acknowledged form open retires the pending selection so trusted Back does not reopen the same form',async()=>{
+  const f=fixture({taskId:task});f.calls[0].resolve({taskId:task,state:'waiting_user',terminal:false,canOpen:true});await flush();
+  f.calls[1].resolve({taskId:task,interaction:{state:'pending',presentation:{url:`/flow/input/${opaque}?result=${opaque}`}}});await flush();
+  assert.equal(f.saved(),null);
+  const reopened=fixture(f.saved(),{extraState:{preparations:[{taskId:task,state:'waiting_user',canOpen:true}]}});
+  assert.equal(reopened.calls.length,0);assert.deepEqual(reopened.navigations,[]);
+});
+
+test('an input receipt changing before open offers a readonly status retry instead of expiring the whole ticket',async()=>{
+  const f=fixture({taskId:task});f.calls[0].resolve({taskId:task,state:'waiting_user',terminal:false,canOpen:true});await flush();
+  f.calls[1].resolve({error:{code:'ACTION_SOURCE_UNAVAILABLE',message:'界面尚未就绪'}},false,409);await flush();
+  assert.equal(f.ids['result-recover'].hidden,false);assert.equal(f.saved().openRequestKey,undefined);
+  f.ids['result-recover'].click();assert.equal(f.calls[2].options.method,'GET');
+  f.calls[2].resolve({taskId:task,state:'outcome_unknown',terminal:true});await flush();
+  assert.deepEqual(f.navigations,[]);
+});
+
+test('resume buttons show fresh recovery conclusions while retaining original unknown history and expiring in place',async()=>{
+  for(const [status,label] of [['recovery_succeeded','后续办理已完成'],['verified_complete','原事项已核验完成']]) {
+    const projection=publicRecovery({status,canProbe:false,recoveryTaskId:status==='recovery_succeeded'?childTask:undefined,
+      observedAt:new Date(0).toISOString(),expiresAt:new Date(500).toISOString()});
+    const f=fixture(null,{extraState:{preparations:[recoveryItem(projection)]}});
+    const button=f.ids['result-resume'].children[0],panel=recoveryPanel(f);
+    assert.match(button.textContent,new RegExp(label));assert.doesNotMatch(button.textContent,/结果待核实/);
+    assert.match(panel.children[2].textContent,/原尝试的结果仍保留为待核对/);
+    assert.equal(f.state.preparations[0].state,'outcome_unknown');assert.equal(f.calls.length,0);
+    await f.advance(501);assert.match(button.textContent,/上次核对已过期/);assert.equal(f.calls.length,0);
+  }
+  const forged=fixture(null,{extraState:{preparations:[recoveryItem({...publicRecovery({status:'recovery_succeeded'}),canExecute:true})]}});
+  assert.match(forged.ids['result-resume'].children[0].textContent,/结果待核实/);
+});
+
+test('conflicting or completed evidence explains the bounded reason without enabling preparation',()=>{
+  const f=fixture(null,{extraState:{preparations:[recoveryItem(publicRecovery({status:'blocked',reason:'conflicting_or_completed_evidence'}))]}});
+  const panel=recoveryPanel(f);
+  assert.equal(panel.children[3].textContent,'已有完成或待办、已办相互冲突的证据，请先到 OA 核对原事项。');
+  assert.equal(panel.children[6].hidden,true);panel.children[6].click();assert.equal(f.calls.length,0);
 });

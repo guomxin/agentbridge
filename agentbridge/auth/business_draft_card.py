@@ -101,11 +101,13 @@ class BusinessDraftApplication:
         return self.backend.has_decision(source_submission_id=source_submission_id)
 
     def get_card(self, source_submission_id: str, *, presentation_id: str | None,
-                 csrf_cookie: str, secure_cookie: bool) -> AuthCardResponse:
+                 csrf_cookie: str, secure_cookie: bool, navigation: dict | None = None) -> AuthCardResponse:
         try:
             opened = self.backend.open(source_submission_id=source_submission_id,
                 presentation_id=presentation_id, csrf_cookie=csrf_cookie)
             state, token = project_draft_state(opened["state"]), opened["csrfToken"]
+            if navigation is not None:
+                state["navigation"] = navigation
             path = _path(source_submission_id, presentation_id)
             nonce = secrets.token_urlsafe(18)
             headers = _security_headers(nonce)
@@ -238,7 +240,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
         definitions = sorted(definitions, key=lambda field: order.index(field["name"]) if field["name"] in order else len(order))
     title = str(ui.get("title") or registered.title)
     effect = str(ui.get("effect") or legacy.get("schema", {}).get("effect") or "执行已核对的本次操作")
-    submit_label = str(ui.get("submitLabel") or registered.submit_label)
+    submit_label = registered.submit_label
     system_name = str(ui.get("systemName") or legacy.get("schema", {}).get("system") or "业务系统")
     lead = legacy.get("lead") or ("核对下方原始材料并填写本次意见。检查完成后，再明确确认本次操作。"
         if kind == "approval" else "填写后自动保存和检查。请核对实际办理内容及执行后果，再确认本次操作。")
@@ -278,45 +280,46 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     body = f"""
 <style nonce="{nonce}">
   [hidden] {{display:none!important}} .draft-card {{width:760px}} .draft-lead {{color:var(--muted);font-size:14px;line-height:1.6}}
-  .draft-card button:disabled {{opacity:.5;cursor:not-allowed}} .draft-card input:disabled,.draft-card textarea:disabled {{background:#f3f5f2;color:#62706a}}
+  .draft-card button:disabled,.draft-card input:disabled,.draft-card select:disabled,.draft-card textarea:disabled {{background:var(--disabled-bg);color:var(--disabled-ink);opacity:1;cursor:not-allowed}}
   .draft-card .field:has(#project) {{grid-column:1/-1}} .draft-status {{margin:18px 0 10px;color:var(--teal-dark);font-size:13px;line-height:1.6}}
   .draft-fields {{margin:24px 0}} .draft-fields h2 {{font-size:16px;margin:0 0 14px}} .draft-fields .form-grid {{margin-top:0}}
-  .draft-outcome,.draft-batch {{padding:12px 14px;background:#f1f5f1;border-left:3px solid var(--teal);font-size:13px;line-height:1.6}}
+  .draft-outcome,.draft-batch {{padding:12px 14px;background:var(--subtle-bg);color:var(--subtle-ink);border-left:3px solid var(--teal);font-size:13px;line-height:1.6}}
   .draft-outcome strong {{display:block;margin-bottom:4px}} .material-excerpt {{font-size:13px;color:var(--muted);line-height:1.7;white-space:pre-wrap}}
-  .draft-review {{margin:20px 0;background:#f1f8f5;border:1px solid #c4ded4;border-radius:6px;padding:18px}}
+  .draft-review {{margin:20px 0;background:var(--subtle-bg);color:var(--subtle-ink);--ink:var(--subtle-ink);--muted:var(--subtle-muted);border:1px solid var(--line);border-radius:6px;padding:18px}}
   .draft-review h2,.draft-conflict h2 {{font-size:17px;margin:0 0 12px}} .draft-review dl {{margin:0;display:grid;grid-template-columns:110px 1fr;gap:10px}}
   .draft-review dt {{color:var(--muted);font-size:13px}} .draft-review dd {{margin:0;overflow-wrap:anywhere;font-size:14px;line-height:1.6;white-space:pre-wrap}}
   .draft-review details {{margin-top:12px;font-size:13px}} .draft-review pre,.draft-difference pre {{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.6;margin:6px 0 0}}
-  .draft-conflict {{padding:18px;margin:18px 0;border:1px solid #dcc69f;background:#fff8ea;border-radius:6px}}
-  .draft-conflict>p {{font-size:13px;line-height:1.6}} .draft-difference {{display:grid;grid-template-columns:1fr 1fr;gap:12px;border-top:1px solid #dcc69f;padding:12px 0}}
+  .draft-conflict {{padding:18px;margin:18px 0;border:1px solid var(--warning-border);background:var(--warning-bg);color:var(--warning-ink);border-radius:6px}}
+  .draft-conflict>p {{font-size:13px;line-height:1.6}} .draft-difference {{display:grid;grid-template-columns:1fr 1fr;gap:12px;border-top:1px solid var(--warning-border);padding:12px 0}}
   .draft-difference h3 {{grid-column:1/-1;margin:0;font-size:13px}} .draft-difference p {{color:var(--muted);margin:0;font-size:12px}}
   .draft-difference pre {{max-height:160px;overflow:auto;font-size:13px}} .draft-actions {{display:flex;gap:10px;flex-wrap:wrap}}
-  .draft-actions button {{width:auto;flex:1;font-size:13px}} .draft-card button.secondary {{background:#edf1ee;color:var(--ink);border:1px solid var(--line)}}
+  .draft-actions button {{width:auto;flex:1;font-size:13px}} .draft-card button.secondary {{background:var(--secondary-bg);color:var(--secondary-ink);border:1px solid var(--line)}}
+  .draft-card button.secondary:disabled {{background:var(--disabled-bg);color:var(--disabled-ink)}}
   .field-error {{margin:5px 0 0;color:var(--red);font-size:12px}} #draft-retry {{margin-top:10px}}
   .room-field {{grid-column:1/-1}} .room-status,.room-selected {{font-size:13px;line-height:1.6;margin:8px 0;color:var(--muted)}}
-  .room-selected {{color:#8b541d}} .room-options {{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}}
-  .room-option {{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:6px;padding:14px;cursor:pointer;background:#fff}}
-  .room-option:has(input:checked) {{border-color:var(--teal);background:#edf8f2}} .room-option:has(input:focus-visible) {{outline:2px solid var(--teal);outline-offset:2px}}
-  .room-option:has(input:disabled) {{opacity:.55;cursor:not-allowed}} .room-option input {{width:auto;margin:0;accent-color:var(--teal)}}
+  .room-selected {{color:var(--warning-ink)}} .room-options {{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}}
+  .room-option {{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:6px;padding:14px;cursor:pointer;background:var(--field-bg);color:var(--field-ink)}}
+  .room-option:has(input:checked) {{border-color:var(--selected-border);background:var(--selected-bg);color:var(--selected-ink)}} .room-option:has(input:focus-visible) {{outline:2px solid var(--teal);outline-offset:2px}}
+  .room-option:has(input:disabled) {{background:var(--disabled-bg);color:var(--disabled-ink);opacity:1;cursor:not-allowed}} .room-option input {{width:auto;margin:0;accent-color:var(--teal)}}
   .room-option strong {{display:block;font-size:14px}} .room-option small {{display:block;color:var(--muted);font-size:12px;margin-top:5px}}
-  .draft-material-change {{margin:0 0 18px;border:1px solid #c99f53;border-radius:6px;padding:16px;background:#fff6df;color:#664a19;font-size:14px;line-height:1.6}}
+  .draft-material-change {{margin:0 0 18px;border:1px solid var(--warning-border);border-radius:6px;padding:16px;background:var(--warning-bg);color:var(--warning-ink);font-size:14px;line-height:1.6}}
   .draft-material-change strong {{display:block;margin-bottom:4px}} .draft-evidence {{margin-top:20px}}
   .material-body {{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7;margin:14px 0 0;max-height:480px;overflow:auto}}
   .material-primary-grid {{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}}
   .material-table {{overflow-x:auto;margin-top:14px}} .material-table table {{border-collapse:collapse;width:100%;font-size:13px}}
   .material-table th,.material-table td {{padding:10px;text-align:left;vertical-align:top;border:1px solid var(--line);white-space:pre-wrap;min-width:100px}}
-  .material-table th {{background:#f1f5f1;font-weight:600}} .material-attachments {{margin:18px 0}}
+  .material-table th {{background:var(--subtle-bg);color:var(--subtle-ink);font-weight:600}} .material-attachments {{margin:18px 0}}
   .material-attachments h3 {{font-size:14px}} .material-attachments li {{overflow-wrap:anywhere;line-height:1.7}}
   .material-attachments p,.material-completeness {{font-size:12px;line-height:1.6;color:var(--muted)}}
-  .review-expense .review-key-facts,.review-attendance .review-key-facts {{background:#f2f8f4;padding:14px;border-radius:6px}}
+  .review-expense .review-key-facts,.review-attendance .review-key-facts {{background:var(--subtle-bg);color:var(--subtle-ink);padding:14px;border-radius:6px}}
   .draft-nav {{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0;position:sticky;top:0;z-index:2;background:var(--paper,#fff);padding:10px 0;border-bottom:1px solid var(--line)}}
-  .draft-nav a {{padding:9px 13px;border-radius:5px;background:#edf4ef;color:var(--teal-dark);font-size:13px;text-decoration:none}}
+  .draft-nav a {{padding:9px 13px;border-radius:5px;background:var(--selected-bg);color:var(--selected-ink);font-size:13px;text-decoration:none}}
   #draft-form,#draft-evidence,#card-title {{scroll-margin-top:80px}}
   .draft-expiry,.field-count,#draft-submit-hint {{font-size:12px;color:var(--muted);line-height:1.6}}
-  .draft-expiry.urgent {{color:#8b541d;background:#fff6df;padding:10px}}
+  .draft-expiry.urgent {{color:var(--warning-ink);background:var(--warning-bg);padding:10px}}
   .draft-submit-bar {{position:sticky;bottom:0;background:var(--paper,#fff);border-top:1px solid var(--line);padding:12px 0 max(12px,env(safe-area-inset-bottom));z-index:3}}
   #draft-submit-hint {{display:block;margin-bottom:8px}} .draft-submit-bar button {{margin:0}}
-  .draft-field-summary {{padding:12px;border:1px solid #dcc69f;background:#fff8ea;border-radius:6px;font-size:13px;line-height:1.8}}
+  .draft-field-summary {{padding:12px;border:1px solid var(--warning-border);background:var(--warning-bg);color:var(--warning-ink);border-radius:6px;font-size:13px;line-height:1.8}}
   .draft-field-summary a {{color:var(--teal-dark)}} .material-reading-toggle {{width:auto!important;font-size:12px!important;margin:10px 0!important;padding:8px 12px!important}}
   .material-body.expanded {{max-height:none}} #draft-material-diff {{font-size:13px}} #draft-material-diff pre {{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto}}
   .material-preview-item {{border:1px solid var(--line);border-radius:8px;padding:14px;margin:14px 0}} .material-preview-item h3 {{font-size:15px;margin:0 0 8px;overflow-wrap:anywhere}}
@@ -352,7 +355,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     <section id="draft-review" class="draft-review" aria-labelledby="review-title" hidden>
       <h2 id="review-title">核对本次操作</h2>{review_body}
     </section>
-    <div class="draft-submit-bar"><span id="draft-submit-hint"></span><button id="draft-submit" type="submit" disabled>{escape(submit_label)}</button></div>
+    <div class="draft-submit-bar"><span id="draft-submit-hint"></span><button id="draft-submit" data-agentbridge-action-label="{escape(submit_label)}" type="submit" disabled>{escape(submit_label)}</button></div>
     <button id="draft-retry" type="button" class="secondary" hidden>重新检查</button>
   </form>
   <footer>确认后的操作：{escape(effect.rstrip('。'))}。草稿仅保存在可信办理服务中；页面到期后，请从原任务重新打开。</footer>

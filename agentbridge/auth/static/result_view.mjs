@@ -21,6 +21,9 @@ export function installResultView({ document, window, fetch, initial, setTimeout
   const permanentError = error => error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status);
   const storageKey = `agentbridge-result-view:${initial.path}`;
   const queryStorageKey = `${storageKey}:query`;
+  const recoveryStorageKey = `${storageKey}:recovery`;
+  const recoveryModels = new Map();
+  let recoveryBusy = false;
   const say = (text) => { status.textContent = text; };
   const save = () => { try { window.sessionStorage.setItem(storageKey, JSON.stringify(pending)); } catch {} };
   const saveQuery = () => { try { window.sessionStorage.setItem(queryStorageKey, JSON.stringify(queryPending)); } catch {} };
@@ -35,7 +38,8 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       && body.targetKeys.every(key => typeof key === 'string' && /^[0-9a-f]{64}$/.test(key))
       && new Set(body.targetKeys).size === body.targetKeys.length);
     if (typeof pending !== 'object' || Array.isArray(pending)
-        || Object.keys(pending).some(key => !['taskId', 'body'].includes(key))
+        || Object.keys(pending).some(key => !['taskId', 'body', 'openRequestKey'].includes(key))
+        || pending.openRequestKey !== undefined && !/^[A-Za-z0-9_-]{12,128}$/.test(pending.openRequestKey)
         || (pending.taskId !== undefined && !uuid.test(pending.taskId))
         || (!pending.taskId && !body) || !bodyValid) pending = null;
   }
@@ -57,7 +61,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
   const stateLabel = value => ({active:'等待准备',running:'正在办理',waiting_user:'等待核对',paused:'已暂停',
     succeeded:'已核验完成',completed:'任务已结束',partially_succeeded:'部分已完成',failed:'未完成',
     canceled:'已取消',expired:'已过期',superseded:'已被替代',skipped:'已跳过',unknown:'结果待核实',outcome_unknown:'结果待核实'}[value] || '状态待核对');
-  const blocked = () => unavailable || navigated || busy || Boolean(pending) || Boolean(queryPending);
+  const blocked = () => unavailable || navigated || busy || recoveryBusy || Boolean(pending) || Boolean(queryPending);
   const sourceExpiry = value => value === undefined ? Infinity : new Date(value).getTime();
   const eligible = choice => choice.enabled && choice.expiresAt > now();
   function matches(choice) {
@@ -92,7 +96,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       entry.empty.hidden = visible.length > 0;
     }
     if (refresh) {
-      refresh.disabled = unavailable || navigated || busy || Boolean(pending) || Boolean(queryPending) && !queryFinished;
+      refresh.disabled = unavailable || navigated || busy || recoveryBusy || Boolean(pending) || Boolean(queryPending) && !queryFinished;
       refresh.textContent = queryFinished ? '再次查询最新待办' : '查询最新待办';
     }
     if (queryRecover) queryRecover.disabled = unavailable || busy;
@@ -100,8 +104,10 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       const next = Math.min(...choices.filter(eligible).map(choice => choice.expiresAt));
       if (Number.isFinite(next)) expiryTimer = setTimeout(count, Math.max(1, Math.min(next - now(), 2147483647)));
     }
+    for (const model of recoveryModels.values()) updateRecovery(model);
   }
   function render() {
+    for (const model of recoveryModels.values()) { clearTimeout(model.timer); model.view = null; }
     byId('result-title').textContent = state.title || '选择待办并核对办理';
     root.replaceChildren(); resume.replaceChildren();
     choices = []; resumeButtons = []; groupActions = [];
@@ -158,13 +164,15 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       const title = titles.length ? titles.join('、') : item.title || '原办理任务';
       const batch = item.batch;
       const progress = batch && Number.isInteger(batch.totalCount) ? ` · 已完成 ${batch.succeededCount || 0}/${batch.totalCount} 项${!terminal && Number.isInteger(batch.currentIndex) ? `，当前第 ${batch.currentIndex} 项` : ''}` : '';
-      const button = element('button', `${terminal ? '查看结果' : '继续办理'} · ${title} · ${stateLabel(item.state)}${progress}`); button.type = 'button';
+      const summaryPrefix = `${terminal ? '查看结果' : '继续办理'} · ${title} · `;
+      const button = element('button', `${summaryPrefix}${recoveryResultLabel(item.oaPendingRecovery, stateLabel(item.state))}${progress}`); button.type = 'button';
       button.addEventListener('click', () => {
         if (stopped || blocked() || !uuid.test(item.taskId)) return;
         waitingSince = now(); pending = { taskId: item.taskId }; save(); count(); poll();
       });
       resumeButtons.push(button);
       resume.append(button);
+      renderRecovery(item, resume, {button,prefix:summaryPrefix,suffix:progress,fallback:stateLabel(item.state)});
     }
     recover.hidden = unavailable || (!recoverRead && (!pending?.body || Boolean(pending.taskId)));
     recover.textContent = recoverRead ? '重新读取原办理状态' : '恢复同一准备请求';
@@ -182,7 +190,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
     const tick = () => {
       if (finished || stopped || epoch !== requestEpoch) return;
       const seconds = Math.floor((now() - (waitingSince ?? started)) / 1000);
-      if (seconds >= 5) say(`正在${action === 'prepare' ? '准备所选事项' : action === 'refresh' || query ? '查询最新待办' : '读取原办理状态'}，已等待 ${seconds} 秒。稍慢，请保留本页；无需重复提交。`);
+      if (seconds >= 5) say(`正在${action === 'prepare' ? '准备所选事项' : action === 'recovery-probe' ? '只读核对原事项' : action === 'recovery-prepare' ? '准备新的办理表单' : action === 'refresh' || query ? '查询最新待办' : '读取原办理状态'}，已等待 ${seconds} 秒。稍慢，请保留本页；无需重复提交。`);
       progress = setTimeout(tick, 1000);
     };
     progress = setTimeout(tick, 1000);
@@ -231,7 +239,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
     if (!interaction || !['pending', 'processing'].includes(interaction.state)) return null;
     try {
       const url = new URL(interaction.presentation.url, window.location.href);
-      if (url.origin !== window.location.origin || url.username || url.password || url.search || url.hash
+      if (url.origin !== window.location.origin || url.username || url.password || (url.search && url.search !== `?result=${initial.path.split('/').at(-1)}`) || url.hash
           || !/^\/flow\/(input|authorize)\/[A-Za-z0-9_-]{32,128}(?:\/present\/[A-Za-z0-9_-]{32,128})?$/.test(url.pathname)) return null;
       url.hash = window.location.hash; return url.href;
     } catch { return null; }
@@ -243,6 +251,182 @@ export function installResultView({ document, window, fetch, initial, setTimeout
           || !/^\/results\/[A-Za-z0-9_-]{43}$/.test(url.pathname)) return null;
       url.hash = window.location.hash; return url.href;
     } catch { return null; }
+  }
+  const recoveryStates = new Set(['not_checked', 'verified_complete', 'unresolved_still_pending', 'blocked',
+    'recovery_in_progress', 'recovery_succeeded', 'recovery_failed', 'recovery_unknown']);
+  const recoveryReasons = {
+    login_required:'请先在原聊天恢复 OA 登录，再只读核对原事项。', identity_changed:'当前 OA 身份与原办理不一致，请先核对登录身份。',
+    permission_required:'当前身份暂不能核对原事项，请先恢复所需权限。',
+    read_budget_exceeded:'本轮核对已到时间上限，尚不能确认结果；可以再次只读核对，不会重新提交。',
+    done_scan_unproven:'已办列表没有完整覆盖证据，尚不能确认结果；可以再次只读核对原事项。',
+    material_changed:'原事项材料已变化，请先到 OA 核对。', target_changed:'原事项或审批节点已变化，请先到 OA 核对。',
+    target_identity_changed:'原事项或审批节点已变化，请先到 OA 核对。',
+    conflicting_or_completed_evidence:'已有完成或待办、已办相互冲突的证据，请先到 OA 核对原事项。',
+    pending_coverage_incomplete:'待办列表尚未完整读取，暂不能准备新的办理。',
+    recovery_chain_unsupported:'后续办理结果也待核对，请到 OA 核对，不能连续创建新的恢复任务。',
+    recovery_evidence_invalid:'后续任务的业务结果证据尚不足，请先核对原事项。',
+  };
+  function persistRecovery() {
+    try { window.sessionStorage.setItem(recoveryStorageKey, JSON.stringify([...recoveryModels.values()]
+      .filter(model => model.command).slice(-16).map(model => ({taskId:model.taskId, command:model.command})))); } catch {}
+  }
+  function safeRecoveryCommand(value, taskId) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !['recovery-probe','recovery-prepare','recovery-open','open'].includes(value.action)) return false;
+    const body = value.body;
+    if (!body || body.taskId !== taskId || !/^[A-Za-z0-9_-]{12,128}$/.test(body.requestKey || '')) return false;
+    const keys = Object.keys(body).sort().join(',');
+    return value.action !== 'recovery-prepare' ? keys === 'requestKey,taskId' :
+      keys === 'acknowledgement,assessmentHash,assessmentId,expectedRevision,requestKey,taskId'
+      && uuid.test(body.assessmentId || '') && /^sha256:[0-9a-f]{64}$/.test(body.assessmentHash || '')
+      && Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
+      && body.acknowledgement === 'oa_unknown_new_attempt_v1';
+  }
+  try {
+    const saved = JSON.parse(window.sessionStorage.getItem(recoveryStorageKey) || '[]');
+    if (Array.isArray(saved) && saved.length <= 16) for (const entry of saved) {
+      if (uuid.test(entry?.taskId || '') && safeRecoveryCommand(entry.command, entry.taskId)) {
+        recoveryModels.set(entry.taskId, {taskId:entry.taskId, command:entry.command, assessment:null, acknowledged:false});
+      }
+    }
+  } catch {}
+  const freshAssessment = value => value && value.status === 'unresolved_still_pending' && value.canExecute === false
+    && value.canPrepare === true && uuid.test(value.assessmentId || '') && /^sha256:[0-9a-f]{64}$/.test(value.assessmentHash || '')
+    && Number.isSafeInteger(value.revision) && value.revision > 0 && Date.parse(value.expiresAt) > now();
+  function recoveryResultLabel(projection, fallback) {
+    if (!projection || !uuid.test(projection.originalTaskId || '') || projection.canExecute !== false || projection.canPrepare !== false
+        || !['verified_complete','recovery_succeeded'].includes(projection.status)) return fallback;
+    const expiry = Date.parse(projection.expiresAt);
+    const stale = projection.stale === true || Number.isFinite(expiry) && expiry <= now()
+      || projection.status === 'verified_complete' && !Number.isFinite(expiry);
+    return stale ? '上次核对已过期' : projection.status === 'recovery_succeeded' ? '后续办理已完成' : '原事项已核验完成';
+  }
+  function renderRecovery(value, target, summary = null) {
+    const projection = value?.oaPendingRecovery;
+    if (!projection || !uuid.test(projection.originalTaskId || '') || !recoveryStates.has(projection.status)
+        || projection.canExecute !== false || projection.canPrepare !== false) return;
+    const taskId = projection.originalTaskId;
+    let model = recoveryModels.get(taskId);
+    if (!model) { model = {taskId, assessment:null, acknowledged:false, command:null}; recoveryModels.set(taskId, model); }
+    model.projection = projection;
+    clearTimeout(model.timer);
+    const panel = element('section'); panel.className = 'result-recovery';
+    panel.append(element('h3', '核对原事项与后续办理'));
+    const current = element('p'), history = element('p', '原尝试的结果仍保留为待核对；只读核对和准备新表单都不会重复提交。');
+    history.className = 'muted';
+    const notice = element('p'); notice.setAttribute?.('role','status');
+    const probe = element('button'), risk = element('label'), ack = element('input'), prepareNew = element('button'), open = element('button');
+    probe.type = prepareNew.type = open.type = 'button'; ack.type = 'checkbox'; risk.className = 'result-risk';
+    risk.append(ack, element('span', '我已核对原事项，理解原提交结果仍未知、可能仍在处理，重新办理存在重复处理风险。我仅要求准备新表单，并会重新核对材料、填写意见后再明确确认。'));
+    panel.append(current, history, notice, probe, risk, prepareNew, open); target.append(panel);
+    model.view = {panel,current,history,notice,probe,risk,ack,prepareNew,open,summary};
+    probe.addEventListener('click', () => runRecovery(model, 'recovery-probe'));
+    ack.addEventListener('change', () => { if (!ack.disabled && freshAssessment(model.assessment)) model.acknowledged = ack.checked === true; updateRecovery(model); });
+    prepareNew.addEventListener('click', () => runRecovery(model, 'recovery-prepare'));
+    open.addEventListener('click', () => ['recovery_succeeded','recovery_failed','recovery_unknown'].includes(model.projection?.status)
+      ? refreshRecovery(model) : runRecovery(model, 'recovery-open'));
+    updateRecovery(model);
+  }
+  function updateRecovery(model) {
+    if (!model.view) return;
+    clearTimeout(model.timer);
+    const p = model.projection, v = model.view;
+    if (!p) return;
+    if (v.summary) v.summary.button.textContent = `${v.summary.prefix}${recoveryResultLabel(p, v.summary.fallback)}${v.summary.suffix}`;
+    const expires = Date.parse(model.assessment?.expiresAt || p.expiresAt);
+    const stale = p.stale === true || Number.isFinite(expires) && expires <= now();
+    const completed = ['verified_complete','recovery_succeeded'].includes(p.status) && !stale;
+    const ready = freshAssessment(model.assessment);
+    if (!ready && !model.command) model.acknowledged = false;
+    const canProbe = !completed && (p.canProbe === true || stale && p.availability === 'can_probe');
+    const unavailableHere = stopped || unavailable || navigated || recoveryBusy || busy || Boolean(queryPending)
+      || Boolean(pending && pending.taskId !== model.taskId);
+    const labels = {
+      not_checked:'尚未核对原事项的当前结果。', verified_complete:stale ? '上次核对曾确认原事项已完成；该证据现已过期或当前身份不可核对。' : '已根据本次 OA 记录核验原事项完成，无需重新办理。',
+      unresolved_still_pending:'原事项仍在 OA 待办中，但这不能排除原提交仍在处理。',
+      blocked:'当前证据不足，暂不能准备新的办理。', recovery_in_progress:'后续办理正在进行，请查看已有任务，避免重复准备。',
+      recovery_succeeded:stale ? '此前后续办理已核验完成；当前身份或会话需重新核对。' : '后续办理已核验完成。',
+      recovery_failed:'后续办理尚未完成，请查看已有任务的处理状态。', recovery_unknown:'后续办理结果仍待核对，请到 OA 核对，勿再次提交。',
+    };
+    v.current.textContent = labels[p.status] + (p.observedAt ? ` 核验时间：${localTime(p.observedAt)}。` :
+      p.recoveryUpdatedAt ? ` 后续任务更新时间：${localTime(p.recoveryUpdatedAt)}（不是核验时间）。` : '');
+    v.notice.textContent = model.notice || recoveryReasons[p.reason] || '';
+    if (!model.command && model.assessment && !ready && model.assessment.canPrepare === true) v.notice.textContent = '本次核对已到期，请重新只读核对原事项。';
+    if (ready && !model.command) v.notice.textContent += ` 本次核对有效至 ${localTime(model.assessment.expiresAt)}。${model.assessment.doneCoverage !== 'complete' ? '已办记录仅部分覆盖，未找到记录不能证明上次未提交。' : ''}`;
+    v.probe.textContent = model.command?.action === 'recovery-probe' ? '恢复本次只读核对' : '只读核对原事项';
+    v.probe.hidden = !canProbe && model.command?.action !== 'recovery-probe';
+    v.probe.disabled = unavailableHere || Boolean(model.command && model.command.action !== 'recovery-probe');
+    v.risk.hidden = !ready || Boolean(model.command); v.ack.checked = model.acknowledged;
+    v.ack.disabled = unavailableHere || !ready || Boolean(model.command);
+    v.prepareNew.hidden = !ready && model.command?.action !== 'recovery-prepare';
+    v.prepareNew.textContent = model.command?.action === 'recovery-prepare' ? '恢复本次新表单准备' : model.assessment?.childPreparation === 'retryable' ? '恢复同一任务材料准备' : '准备全新办理表单';
+    v.prepareNew.disabled = unavailableHere || Boolean(model.command && model.command.action !== 'recovery-prepare')
+      || (!model.command && (!ready || !model.acknowledged));
+    v.open.hidden = !uuid.test(p.recoveryTaskId || '') && model.command?.action !== 'recovery-open';
+    v.open.textContent = ['recovery_succeeded','recovery_failed','recovery_unknown'].includes(p.status) ? '刷新后续办理结果' : '查看后续办理表单';
+    v.open.disabled = unavailableHere || Boolean(model.command && model.command.action !== 'recovery-open');
+    if (!stopped && Number.isFinite(expires) && expires > now()) model.timer = setTimeout(() => updateRecovery(model), Math.min(2147483647, expires - now() + 1));
+  }
+  async function refreshRecovery(model) {
+    if (stopped || unavailable || navigated || recoveryBusy || busy || queryPending || pending && pending.taskId !== model.taskId) return;
+    const requestEpoch = epoch;
+    recoveryBusy = true; model.assessment = null; model.acknowledged = false;
+    count(); for (const item of recoveryModels.values()) updateRecovery(item);
+    try {
+      const result = await request('state', null, model.taskId);
+      if (!result || stopped || requestEpoch !== epoch) return;
+      if (result.oaPendingRecovery?.originalTaskId !== model.taskId || !recoveryStates.has(result.oaPendingRecovery.status)
+          || result.oaPendingRecovery.canExecute !== false || result.oaPendingRecovery.canPrepare !== false) throw Error('暂未取得原事项的最新结果。');
+      model.projection = result.oaPendingRecovery; model.notice = '';
+      if (model.command?.action === 'recovery-open') { model.command = null; persistRecovery(); }
+    } catch (error) { if (!stopped && requestEpoch === epoch && error.name !== 'AbortError') model.notice = error.message; }
+    finally { if (requestEpoch === epoch) { recoveryBusy = false; count(); for (const item of recoveryModels.values()) updateRecovery(item); } }
+  }
+  async function runRecovery(model, action) {
+    if (stopped || unavailable || navigated || recoveryBusy || busy || queryPending || pending && pending.taskId !== model.taskId) return;
+    if (model.command && model.command.action !== action) return;
+    updateRecovery(model);
+    const control = action === 'recovery-probe' ? model.view?.probe : action === 'recovery-prepare' ? model.view?.prepareNew : model.view?.open;
+    if (!control || control.disabled || control.hidden) return;
+    if (!model.command) {
+      const body = {taskId:model.taskId,requestKey:window.crypto.randomUUID()};
+      if (action === 'recovery-prepare') {
+        if (!model.acknowledged || !freshAssessment(model.assessment)) return;
+        Object.assign(body, {assessmentId:model.assessment.assessmentId, assessmentHash:model.assessment.assessmentHash,
+          expectedRevision:model.assessment.revision, acknowledgement:'oa_unknown_new_attempt_v1'});
+      }
+      model.command = {action,body}; persistRecovery();
+    }
+    const operationEpoch = epoch, command = model.command;
+    recoveryBusy = true; model.notice = action === 'recovery-probe' ? '正在只读核对原事项，不会重新提交。' :
+      action === 'recovery-prepare' ? '正在准备新的办理表单；仍需重新核对、填写和明确确认。' : '正在读取本端的已有办理入口。';
+    count(); for (const item of recoveryModels.values()) updateRecovery(item);
+    try {
+      const result = await request(action, command.body);
+      if (!result || stopped || operationEpoch !== epoch) return;
+      if (result.taskId !== model.taskId || result.oaPendingRecovery?.originalTaskId !== model.taskId
+          || !recoveryStates.has(result.oaPendingRecovery.status) || result.oaPendingRecovery.canExecute !== false
+          || result.oaPendingRecovery.canPrepare !== false) throw Error('原事项回执尚未确认，请恢复同一请求。');
+      if (action === 'recovery-probe') {
+        const assessment = result.assessment;
+        if (!assessment || !['verified_complete','unresolved_still_pending','blocked'].includes(assessment.status) || assessment.canExecute !== false) throw Error('核对回执尚未确认，请恢复同一核对。');
+        model.assessment = assessment; model.acknowledged = false;
+      } else if (action === 'recovery-prepare') { model.assessment = null; model.acknowledged = false; }
+      model.projection = result.oaPendingRecovery; model.command = null; model.notice = ''; persistRecovery();
+      if (action === 'recovery-open') {
+        const url = safeAction(result.interaction);
+        if (url && !['recovery_succeeded','recovery_unknown'].includes(model.projection.status)) {
+          navigated = true; window.location.replace(url);
+        } else model.notice = ['recovery_succeeded','recovery_unknown'].includes(model.projection.status) ?
+          '已显示该任务的核验结果；历史尝试与后续任务分别保留。' : '当前表单尚未就绪，请稍后查看已有后续任务，不会重复准备。';
+      }
+    } catch (error) {
+      if (!stopped && operationEpoch === epoch && error.name !== 'AbortError') {
+        model.notice = error.message || '回执尚未确认，请恢复同一请求。';
+        if (permanentError(error)) { model.command = null; model.assessment = null; model.acknowledged = false; persistRecovery(); }
+      }
+    } finally {
+      if (operationEpoch === epoch) { recoveryBusy = false; count(); for (const item of recoveryModels.values()) updateRecovery(item); }
+    }
   }
   function queryFailed(error) {
     if (permanentError(error)) { failed(error); return; }
@@ -341,7 +525,19 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       say((value.message || value.title || '正在准备材料，请稍候。') + (elapsed >= 5 ? ` 已等待 ${elapsed} 秒。` : ''));
       const url = safeAction(value.interaction);
       const terminal = value.terminal === true || terminalStates.has(value.state);
-      if (url && !terminal) { navigated = true; window.location.replace(url); return; }
+      if ((url || value.canOpen === true) && !terminal) {
+        // A user-selected task may open its existing local presentation through
+        // this explicit, idempotent endpoint. It also binds the return source.
+        pending.openRequestKey ||= window.crypto.randomUUID(); save();
+        const opened = await request('open', {taskId,requestKey:pending.openRequestKey});
+        if (!current() || !opened) return;
+        const destination = opened.taskId === taskId ? safeAction(opened.interaction) : null;
+        if (!destination) throw Error('本端办理入口尚未就绪，请重新读取原办理状态。');
+        // The acknowledged open is complete. A later source Back must show the
+        // list instead of replaying this task selection and reopening the form.
+        pending = null; save();
+        navigated = true; window.location.replace(destination); return;
+      }
       if (terminal) {
         recover.hidden = true;
         say(value.message || value.title || '任务已结束，请回原聊天查看核验结果。');
@@ -353,12 +549,21 @@ export function installResultView({ document, window, fetch, initial, setTimeout
             pending = null; waitingSince = null; save(); selection.clear(); operationId = null;
             restore(); // A fresh read, never a repeated preparation or decision.
           });
+          for (const model of recoveryModels.values()) { clearTimeout(model.timer); model.view = null; }
           resume.replaceChildren(back);
+          renderRecovery(value, resume);
         }
         return;
       }
       timer = setTimeout(poll, 1000);
-    } catch (error) { if (current() && error.name !== 'AbortError') failed(error, {read: true}); }
+    } catch (error) {
+      if (current() && error.name !== 'AbortError') {
+        if (['ACTION_SOURCE_UNAVAILABLE','ACTION_REQUEST_INVALID'].includes(error.code)) {
+          delete pending.openRequestKey; save(); recoverRead = true; recover.hidden = false; recover.disabled = false;
+          recover.textContent = '重新读取原办理状态'; say(`${error.message} 可以重新读取原任务，系统不会另建办理或重复提交。`);
+        } else failed(error, {read: true});
+      }
+    }
   }
   async function submit() {
     if (busy || stopped || unavailable || navigated || queryPending) return;
@@ -390,7 +595,8 @@ export function installResultView({ document, window, fetch, initial, setTimeout
   }
   async function restore() {
     if (unavailable) return;
-    stopped = false; epoch++; busy = !pending?.taskId; recover.disabled = busy;
+    stopped = false; epoch++; busy = !pending?.taskId; recoveryBusy = false; recover.disabled = busy;
+    for (const model of recoveryModels.values()) { model.assessment = null; model.acknowledged = false; clearTimeout(model.timer); }
     if (queryPending && !queryPending.taskId) queryRecoveryNeeded = true;
     navigated = false; readTicket++; clearTimeout(timer); clearTimeout(queryTimer); readController?.abort();
     const restoreEpoch = epoch;
@@ -409,8 +615,11 @@ export function installResultView({ document, window, fetch, initial, setTimeout
     if (queryPending?.taskId) { queryFinished = false; pollQuery(); } else submitQuery();
   });
   search?.addEventListener('input', count); typeFilter?.addEventListener('change', count); selectedOnly?.addEventListener('change', count);
-  window.addEventListener('pagehide', () => { stopped = true; epoch++; clearTimeout(timer); clearTimeout(queryTimer); clearTimeout(expiryTimer); for (const cancel of requests) cancel(); });
+  window.addEventListener('pagehide', () => { stopped = true; epoch++; clearTimeout(timer); clearTimeout(queryTimer); clearTimeout(expiryTimer);
+    for (const model of recoveryModels.values()) { clearTimeout(model.timer); model.assessment = null; model.acknowledged = false; }
+    for (const cancel of requests) cancel(); });
   window.addEventListener('pageshow', (event) => { if (event.persisted || stopped) restore(); });
+  document.addEventListener?.('agentbridge:native-resume', () => { if (!stopped) restore(); });
   render(); if (pending?.taskId) poll(); else if (queryPending?.taskId) pollQuery();
   return { restore, safeAction, safeResultUrl };
 }

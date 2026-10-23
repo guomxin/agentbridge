@@ -391,7 +391,7 @@ class TrustedFlowTests(unittest.TestCase):
         self.service.invoke.assert_not_called(); self.service.resume_interaction.assert_not_called()
         page, _ = self.open("authorize", authorization, presentation, token)
         self.assertIn(b'id="flow-continue" hidden', page.body)
-        self.assertIn(b'continued.href = next.href', page.body)
+        self.assertIn(b'continued.href = returnTo?.href || next.href', page.body)
 
     def test_unknown_failed_or_canceled_batch_cannot_offer_a_next_item(self):
         batch, authorization, presentation, token, operation, following = self.completed_batch_item()

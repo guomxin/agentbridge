@@ -35,6 +35,18 @@ class Backend:
     def query_status(self, token, task_id):
         self.calls.append(('query_status', token, task_id))
         return {'taskId': task_id, 'state': 'active', 'terminal': False}
+    def open(self, token, body):
+        self.calls.append(('open', token, body))
+        return {'taskId': body['taskId'], 'interaction': None}
+    def recovery_probe(self, token, body):
+        self.calls.append(('recovery_probe', token, body))
+        return {'taskId': body['taskId'], 'oaPendingRecovery': {'canExecute': False}}
+    def recovery_prepare(self, token, body):
+        self.calls.append(('recovery_prepare', token, body))
+        return {'taskId': body['taskId'], 'oaPendingRecovery': {'canExecute': False}}
+    def recovery_open(self, token, body):
+        self.calls.append(('recovery_open', token, body))
+        return {'taskId': body['taskId'], 'interaction': None}
 
 
 def session(app, view=TOKEN):
@@ -132,6 +144,18 @@ class ResultViewTests(unittest.TestCase):
                 self.assertEqual(request('POST', '/results/'+TOKEN+'/refresh', b'{"requestKey":"refresh-request-123"}', good)[0], 202)
                 self.assertEqual(self.backend.calls[-1], ('refresh', TOKEN, {'requestKey': 'refresh-request-123'}))
                 self.assertEqual(request('GET', '/results/'+TOKEN+'/refresh', headers=good)[0], 405)
+                for action in ('open', 'recovery-probe', 'recovery-prepare', 'recovery-open'):
+                    route = '/results/' + TOKEN + '/' + action
+                    value = {'taskId': TASK, 'requestKey': 'explicit-request-12345'}
+                    self.assertEqual(request('POST', route, json.dumps(value), good)[0], 202)
+                    self.assertEqual(self.backend.calls[-1], (action.replace('-', '_'), TOKEN, value))
+                    before = len(self.backend.calls)
+                    self.assertEqual(request('GET', route, headers=good)[0], 405)
+                    self.assertEqual(request('POST', route+'?result='+TOKEN, b'{}', good)[0], 400)
+                    for invalid in ({'Cookie': ''}, {'X-AgentBridge-Result-Token': '0'*64},
+                                    {'Origin': 'https://untrusted.example'}, {'Sec-Fetch-Site': 'cross-site'}):
+                        self.assertEqual(request('POST', route, b'{}', {**good, **invalid})[0], 403)
+                    self.assertEqual(len(self.backend.calls), before)
                 self.assertEqual(request('GET', '/results/'+TOKEN+'/state?query='+TASK, headers=good)[0], 200)
                 self.assertEqual(self.backend.calls[-1], ('query_status', TOKEN, TASK))
                 self.assertEqual(request('GET', '/results/'+TOKEN+'/state?query='+TASK+'&task='+TASK, headers=good)[0], 400)

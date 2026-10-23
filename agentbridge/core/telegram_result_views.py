@@ -12,7 +12,7 @@ from hashlib import sha256
 import json
 import re
 import secrets
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit, urlencode
 
 from agentbridge.core import actionable_results as actions
 from agentbridge.core.store_transactions import store_transaction
@@ -129,8 +129,7 @@ class ResultViewService:
         return [group for group in actions.list_actionable_results(self.service, subject, task_id)
                 if actions._date(group["expiresAt"]) > actions._now()]
 
-    @staticmethod
-    def _preparation_ids(connection, subject, endpoint, groups):
+    def _preparation_ids(self, connection, subject, endpoint, groups):
         """Only reference existing tasks from this exact private host route."""
         ids = []
         for group in groups:
@@ -147,6 +146,17 @@ class ResultViewService:
                         and command.get("endpointBindingHash") == endpoint["_binding_hash"]):
                     actions._load_command(connection, subject, task_id, command.get("commandKey"))
                     ids.append(task_id)
+                    continue
+                try:
+                    origin = self._recovery_origin(connection, subject, task_id, current=False)
+                    context = {"subject": subject, "sourceTaskId": group["sourceTaskId"],
+                               "sources": [{"operationId": group["operationId"]}]}
+                    if self._source_matches_recovery(connection, context, origin):
+                        original_id = origin["task"]["task_id"]
+                        if original_id not in ids:
+                            ids.append(original_id)
+                except (actions.ActionableResultError, KeyError, ValueError, PermissionError, RuntimeError):
+                    continue
         return ids
 
     def _reference_matches(self, connection, context, task_id, command):
@@ -256,6 +266,13 @@ class ResultViewService:
         service, subject = self.service, context["subject"]
         with service.tasks._connect() as connection:
             task = actions._owned_task(connection, subject, task_id)
+            try:
+                origin = self._recovery_origin(connection, subject, task_id, current=False)
+            except (KeyError, ValueError, PermissionError, RuntimeError):
+                origin = None
+            if origin and self._source_matches_recovery(connection, context, origin):
+                return self._recovery_status(context, origin)
+
             linked = connection.execute("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
                 "AND event_type='task.result_view.prepared' AND causation_ref=?",
                 (task_id, subject, context["tokenHash"])).fetchone()
@@ -291,10 +308,228 @@ class ResultViewService:
             if batch["state"] in _TERMINAL:
                 result.update(terminal=True, state=batch["state"], message=_status_message(batch["state"]))
         if not result["terminal"] and interaction_id and referenced:
+            record = service.interactions.get(interaction_id, user_subject=subject)
+            result["canOpen"] = record["interaction_type"] in {"business_input", "execution_authorization"}
             interaction = self._read_active_interaction(context, task_id, interaction_id)
             if interaction:
                 result["interaction"] = interaction
         return result
+
+    @staticmethod
+    def _request_body(body, keys):
+        if (not isinstance(body, dict) or set(body) != set(keys)
+                or not isinstance(body.get("taskId"), str)
+                or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", body["taskId"])
+                or not isinstance(body.get("requestKey"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_:-]{16,128}", body["requestKey"])):
+            actions._fail("ACTION_REQUEST_INVALID", "恢复或打开请求标识无效。")
+
+    def _recovery_origin(self, connection, subject, task_id, *, current):
+        from agentbridge.core.oa_pending_recovery import _origin, recovery_source_context, recovery_permit
+        task = actions._owned_task(connection, subject, task_id)
+        if json.loads(task["summary_json"]).get("oaPendingRecovery"):
+            linked = recovery_source_context(self.service, connection, subject, task_id)
+            origin = _origin(self.service, connection, subject, linked["origin"]["task"]["task_id"], current=current)
+            if current:
+                recovery_permit(self.service, subject=subject, task_id=task_id, session=origin["session"], connection=connection)
+            return origin
+        return _origin(self.service, connection, subject, task_id, current=current)
+
+    def _source_matches_recovery(self, connection, context, origin):
+        """A cross-endpoint exception is only for an attested exact OA affair."""
+        subject = context["subject"]
+        session = actions._oa_session(connection, subject)
+        if (not actions._principal(session) or actions._principal(session)
+                != actions._principal(origin["plan"].get("session_binding") or {})):
+            return False
+        for source in context["sources"]:
+            _, pending = actions._source(connection, subject, context["sourceTaskId"], source["operationId"], fresh=False)
+            if source.get("sourceHash") and actions._hash(pending) != source["sourceHash"]:
+                actions._fail("ACTION_SOURCE_CHANGED", "原待办查询内容已变化。")
+            for row in pending["items"]:
+                if row["affair_id"] != origin["target"]["affair_id"]:
+                    continue
+                try:
+                    item = actions._select(self.service, pending, [row["affair_id"]])[0]
+                except actions.ActionableResultError:
+                    continue
+                display = item["display_summary"]
+                if (display["prepare_capability"] == origin["prepare"]
+                        and display["commit_capability"] == origin["operation"]["capability_name"]):
+                    return True
+        return False
+
+    def _checked_recovery(self, context, task_id):
+        with self.service.tasks._connect() as connection:
+            origin = self._recovery_origin(connection, context["subject"], task_id, current=True)
+            if (origin["task"]["task_id"] != task_id
+                    or not self._source_matches_recovery(connection, context, origin)):
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "恢复请求不属于本入口的原事项。")
+            return origin
+
+    def _recovery_status(self, context, origin):
+        from agentbridge.core.oa_pending_recovery import pending_recovery_presentation
+        task = origin["task"]
+        result = {"taskId": task["task_id"], "state": "outcome_unknown", "terminal": True,
+            "title": task["title"], "selectedTitles": [str(origin["target"].get("title") or "OA 待办")[:500]],
+            "message": _status_message("outcome_unknown"),
+            "oaPendingRecovery": pending_recovery_presentation(self.service, subject=context["subject"], task_id=task["task_id"])}
+        batch = self.service.tasks.get_batch_for_task(parent_task_id=task["task_id"], user_subject=context["subject"])
+        if batch:
+            result["batch"] = {"schemaVersion": "agentbridge.batch-view.v1", "totalCount": batch["total_count"],
+                "currentIndex": batch["current_ordinal"], "succeededCount": batch["succeeded_count"], "state": batch["state"]}
+        return result
+
+    def recovery_probe(self, token, body):
+        from agentbridge.core.oa_pending_recovery import probe_unknown_pending
+        self._request_body(body, {"taskId", "requestKey"})
+        context = self._context(token)
+        origin = self._checked_recovery(context, body["taskId"])
+        assessment = probe_unknown_pending(self.service, subject=context["subject"], task_id=body["taskId"],
+            endpoint_id=context["endpointId"], request_key=body["requestKey"])
+        # Revalidate the private route after the bounded remote read.
+        self._context(token)
+        return {**self._recovery_status(context, origin), "assessment": assessment}
+
+    def recovery_prepare(self, token, body):
+        from agentbridge.core.oa_pending_recovery import prepare_recovery_attempt
+        self._request_body(body, {"taskId", "requestKey", "assessmentId", "assessmentHash", "expectedRevision", "acknowledgement"})
+        context = self._context(token)
+        origin = self._checked_recovery(context, body["taskId"])
+        prepared = prepare_recovery_attempt(self.service, subject=context["subject"], task_id=body["taskId"],
+            endpoint_id=context["endpointId"], request_key=body["requestKey"],
+            assessment_id=body["assessmentId"], assessment_hash=body["assessmentHash"],
+            expected_revision=body["expectedRevision"], acknowledgement=body["acknowledgement"])
+        self._context(token)
+        return {**self._recovery_status(context, origin), "preparationStatus": prepared["status"],
+            **({"recoveryTaskId": prepared["taskId"]} if prepared["taskId"] != body["taskId"] else {})}
+
+    def recovery_open(self, token, body):
+        from agentbridge.core.oa_pending_recovery import recovery_child_for_origin, recovery_permit
+        self._request_body(body, {"taskId", "requestKey"})
+        context = self._context(token)
+        origin = self._checked_recovery(context, body["taskId"])
+        child_id = recovery_child_for_origin(self.service, subject=context["subject"], task_id=body["taskId"])
+        if not child_id:
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "请先只读核对并明确确认新的办理。")
+        recovery_permit(self.service, subject=context["subject"], task_id=child_id, session=origin["session"])
+        child = self.service.tasks.get_task(child_id, user_subject=context["subject"])
+        if child["status"] in _TERMINAL:
+            return {**self._recovery_status(context, origin), "recoveryTaskId": child_id, "interaction": None}
+        interaction = self._open_task(token, context, child_id, body)
+        return {**self._recovery_status(context, origin), "recoveryTaskId": child_id, "interaction": interaction}
+
+    def open(self, token, body):
+        self._request_body(body, {"taskId", "requestKey"})
+        context = self._context(token)
+        state = self._status(context, body["taskId"])
+        if state.get("oaPendingRecovery"):
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "请通过原事项恢复入口继续。")
+        if state["terminal"]:
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "当前事项已结束，请查看结果或原聊天。")
+        return {"taskId": body["taskId"], "interaction": self._open_task(token, context, body["taskId"], body)}
+
+    def _open_task(self, token, context, task_id, body):
+        """Issue only the current endpoint's presentation after explicit POST."""
+        service, subject = self.service, context["subject"]
+        task = service.tasks.get_task(task_id, user_subject=subject)
+        interaction_id = task.get("current_interaction_id")
+        if task["status"] in _TERMINAL or not interaction_id:
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "新的办理界面尚不可打开，请查看当前任务状态。")
+        service.validate_skill_task(subject, task_id)
+        record = service.interactions.get(interaction_id, user_subject=subject)
+        if record["interaction_type"] not in {"business_input", "execution_authorization"}:
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "请回原聊天完成登录后继续。")
+        causation = "result-open:" + actions._hash({"subject": subject, "view": context["tokenHash"], "key": body["requestKey"]})
+        identity = {"taskId": task_id, "requestedTaskId": body["taskId"], "interactionId": interaction_id,
+                    "endpointBindingHash": context["endpointBindingHash"]}
+        digest = actions._hash(identity)
+        with service.tasks._connect() as connection:
+            prior = connection.execute("SELECT payload_json FROM task_events WHERE user_subject=? "
+                "AND event_type='task.result_view.opened' AND causation_ref=?", (subject, causation)).fetchall()
+            if prior and (len(prior) != 1 or json.loads(prior[0][0]).get("requestHash") != digest):
+                actions._fail("ACTION_REQUEST_INVALID", "此打开请求已绑定另一办理界面。")
+        service.present_interaction(user_subject=subject, agent_host=context["endpoint"]["agent_host"],
+            endpoint_key=context["endpoint"]["endpoint_key"], interaction_id=interaction_id, continuous_flow=True)
+        fresh = self._context(token)
+        if fresh["endpointBindingHash"] != context["endpointBindingHash"]:
+            actions._fail("ACTION_ENDPOINT_INVALID", "Telegram 会话已变化。")
+        if body["taskId"] != task_id:
+            from agentbridge.core.oa_pending_recovery import recovery_permit
+            origin = self._checked_recovery(fresh, body["taskId"])
+            recovery_permit(service, subject=subject, task_id=task_id, session=origin["session"])
+        else:
+            self._status(fresh, task_id)
+        if service.tasks.get_task(task_id, user_subject=subject).get("current_interaction_id") != interaction_id:
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "办理界面已变化，请重新打开当前事项。")
+        interaction = self._read_active_interaction(context, task_id, interaction_id)
+        if not interaction:
+            actions._fail("ACTION_SOURCE_UNAVAILABLE", "当前办理界面已不可操作，请查看任务结果。")
+        with store_transaction(service.tasks) as connection:
+            prior = connection.execute("SELECT payload_json FROM task_events WHERE user_subject=? "
+                "AND event_type='task.result_view.opened' AND causation_ref=?", (subject, causation)).fetchall()
+            if prior and (len(prior) != 1 or json.loads(prior[0][0]).get("requestHash") != digest):
+                actions._fail("ACTION_REQUEST_INVALID", "此打开请求已绑定另一办理界面。")
+            if not prior:
+                service.tasks._append_event(connection, task_id=task_id, user_subject=subject,
+                    event_type="task.result_view.opened", payload={"requestHash": digest, **identity,
+                        "viewTokenHash": context["tokenHash"], "presentationId": interaction["presentation"]["presentationId"]},
+                    causation_ref=causation, created_at=actions._now().isoformat())
+        url = urlsplit(interaction["presentation"]["url"])
+        interaction["presentation"]["url"] = urlunsplit(url._replace(query=urlencode({"result": token})))
+        return interaction
+
+    def navigation_back(self, token, *, task_id, interaction_id, endpoint_id, presentation_id):
+        """Validate a supplied return ticket without persisting or minting one."""
+        context = self._context(token)
+        if not presentation_id or endpoint_id != context["endpointId"]:
+            actions._fail("ACTION_ENDPOINT_INVALID", "返回入口与当前页面端点不一致。")
+        self._status(context, task_id)  # Includes exact source/Skill/principal checks.
+        subject = context["subject"]
+        with self.service.tasks._connect() as connection:
+            current = connection.execute("SELECT i.* FROM interactions i JOIN task_interactions t "
+                "ON t.interaction_id=i.interaction_id AND t.user_subject=i.user_subject "
+                "WHERE i.interaction_id=? AND i.user_subject=? AND t.task_id=?",
+                (interaction_id, subject, task_id)).fetchone()
+            if not current or current["interaction_type"] not in {"business_input", "execution_authorization"}:
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "返回入口不属于当前办理界面。")
+            table, id_column = (("field_submission_presentations", "submission_id")
+                if current["interaction_type"] == "business_input"
+                else ("write_authorization_presentations", "authorization_id"))
+            presentation = connection.execute(f"SELECT * FROM {table} WHERE {id_column}=? "
+                "AND presentation_id=? AND endpoint_id=? AND user_subject=? AND state IN ('active','submitted','decided')",
+                (current["resource_id"], presentation_id, endpoint_id, subject)).fetchone()
+            if not presentation or actions._date(presentation["expires_at"]) <= actions._now():
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "返回入口的当前页面凭据已不可用。")
+            # An explicit POST binds the exact source presentation. A receipt
+            # may inherit navigation only through its immutable draft decision,
+            # never merely because it shares a task or an OA affair.
+            sql = ("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
+                "AND event_type='task.result_view.opened' AND json_extract(payload_json,'$.viewTokenHash')=? "
+                "AND json_extract(payload_json,'$.interactionId')=? "
+                "AND json_extract(payload_json,'$.presentationId')=? "
+                "AND json_extract(payload_json,'$.endpointBindingHash')=? LIMIT 1")
+            row = connection.execute(sql, (task_id, subject, context["tokenHash"], interaction_id,
+                presentation_id, context["endpointBindingHash"])).fetchone()
+            if not row and current["interaction_type"] == "execution_authorization":
+                row = connection.execute("SELECT 1 "
+                    "FROM business_draft_decisions r JOIN business_drafts d ON d.draft_id=r.draft_id "
+                    "AND d.source_submission_id=r.source_submission_id AND d.task_id=r.task_id "
+                    "AND d.user_subject=r.user_subject JOIN field_submission_presentations p "
+                    "ON p.submission_id=r.source_submission_id AND p.user_subject=r.user_subject "
+                    "JOIN task_events e ON e.task_id=r.task_id AND e.user_subject=r.user_subject "
+                    "AND e.event_type='task.result_view.opened' "
+                    "AND json_extract(e.payload_json,'$.interactionId')=d.source_interaction_id "
+                    "AND json_extract(e.payload_json,'$.presentationId')=p.presentation_id "
+                    "WHERE r.task_id=? AND r.user_subject=? AND r.interaction_id=? AND r.authorization_id=? "
+                    "AND p.endpoint_id=? AND p.state IN ('active','submitted') "
+                    "AND json_extract(e.payload_json,'$.viewTokenHash')=? "
+                    "AND json_extract(e.payload_json,'$.endpointBindingHash')=? LIMIT 1",
+                    (task_id, subject, interaction_id, current["resource_id"], endpoint_id,
+                     context["tokenHash"], context["endpointBindingHash"])).fetchone()
+            if not row:
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "返回入口没有当前页面的可信打开记录。")
+        return {"kind": "result_list", "url": "/results/" + token, "label": "返回待办列表"}
 
     def _read_active_interaction(self, context, task_id, interaction_id):
         """Read an existing endpoint presentation; never create/claim/decide on GET."""

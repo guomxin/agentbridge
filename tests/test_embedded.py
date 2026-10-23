@@ -10,6 +10,12 @@ from agentbridge.auth.field_card import _document
 
 
 class EmbeddedWebAppTests(unittest.TestCase):
+    def test_native_action_labels_are_exactly_the_registered_catalog(self):
+        from agentbridge.core.business_draft_profiles import PROFILES
+        html = render_embedded_web_app_bridge(nonce="test-nonce")
+        labels = json.loads(re.search(r'actionLabels: (\[.*?\])\}\);', html)[1])
+        self.assertEqual(set(labels), {profile.submit_label for profile in PROFILES})
+
     def run_bridge(self, *, complete=False):
         rendered = render_embedded_web_app_bridge(nonce="test-nonce", close_when_complete=complete)
         script = re.search(r'<script nonce="test-nonce">(.*?)</script>', rendered, re.S)[1]

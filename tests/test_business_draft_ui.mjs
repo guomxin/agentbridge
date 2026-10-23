@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {appendReading, bindDraftField, createDraftController, createDraftTransport, mountBusinessDraft, renderEvidence, reviewDifferences, REVIEW_DESIGNS, reviewSections, safeFlowUrl} from "../agentbridge/auth/static/business_draft.mjs";
+import {appendReading, bindDraftField, createDraftController, createDraftTransport, mountBusinessDraft, renderEvidence, reviewDifferences, REVIEW_DESIGNS, reviewSections, safeFlowUrl, safeResultReturn} from "../agentbridge/auth/static/business_draft.mjs";
 import {createDocument, descendants} from "./workspace_dom_fixture.mjs";
 
 const values = {log_date: "2026-10-13", hours: "8", project: "P001", content: "本页日志"};
@@ -376,6 +376,7 @@ function mountHarness(state, {fetch} = {}) {
     node.validity = {valid: true}; node.checkValidity = () => true; nodes.set(id, node); root.append(node);
   }
   const responses = [], requests = [], timers = new Map(), events = new Map(), navigations = [];
+  const documentEvents=new Map(); document.addEventListener=(name,callback)=>documentEvents.set(name,callback);
   let timerId = 0;
   const window = {fetch: (url, options) => {
       requests.push({url, options});
@@ -385,7 +386,7 @@ function mountHarness(state, {fetch} = {}) {
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, {callback, delay}); return id; },
     clearTimeout: id => timers.delete(id), addEventListener: (name, callback) => events.set(name, callback)};
   const controller = mountBusinessDraft({state, fieldNames: Object.keys(state.values), csrfToken: 't', apiUrl: '/draft'}, document, window);
-  return {controller, document, nodes, responses, requests, timers, navigations,
+  return {controller, document, nodes, responses, requests, timers, navigations,window,events,documentEvents,
     hide: () => events.get('pagehide')(), restore: () => events.get('pageshow')({persisted: true}),
     edit(name, value) { nodes.get(name).value = value; nodes.get('draft-form').events.input({target: nodes.get(name)}); }};
 }
@@ -1013,4 +1014,35 @@ test('approval with a permanent header and hanging JSON locks without reading or
   assert.equal(h.controller.state().canEdit,false);
   await h.controller.retry();await h.controller.approve();
   assert.equal(h.requests.length,1);assert.deepEqual(h.navigations,[]);
+});
+
+test('trusted source return keeps its original bound navigation through state refresh and protects dirty input once',async()=>{
+  const ticket='r'.repeat(43),state=reviewed({...initial(),navigation:{back:{kind:'result_list',url:`/results/${ticket}`,label:'ignored'}}});
+  const h=mountHarness(state);await flush();
+  const back=descendants(h.nodes.get('draft-form')).find(node=>node.id==='agentbridge-back');
+  assert.equal(back.textContent,'返回待办列表');assert.equal(back.type,'button');
+  h.window.location.hash='#tgWebAppVersion=8.0';h.edit('content','未保存的意见');
+  h.window.confirm=()=>false;back.events.click();assert.deepEqual(h.navigations,[]);
+  let prompts=0;h.window.confirm=()=>{prompts++;return true;};back.events.click();
+  assert.equal(prompts,1);assert.deepEqual(h.navigations,[`https://trusted.example/results/${ticket}#tgWebAppVersion=8.0`]);
+  let blocked=false;h.events.get('beforeunload')({preventDefault(){blocked=true;}});assert.equal(blocked,false);
+  assert.ok(h.requests.every(item=>!item.url.endsWith('/approve')));
+});
+
+test('source return excludes external, credentials, fragments, arbitrary queries and invalid route shapes',()=>{
+  const ticket='r'.repeat(43),origin='https://trusted.example';
+  for(const url of [`https://evil.test/results/${ticket}`,`https://u:p@trusted.example/results/${ticket}`,
+    `/results/${ticket}?task=other`,`/results/${ticket}#fake`,`/flow/input/${ticket}`,'javascript:alert(1)'])
+    assert.equal(safeResultReturn({back:{kind:'result_list',url}},origin),null);
+  assert.equal(safeResultReturn({back:{kind:'chat',url:`/results/${ticket}`}},origin),null);
+  assert.equal(safeFlowUrl(`/flow/authorize/${ticket}?result=${ticket}&result=${ticket}`,origin),null);
+  assert.equal(safeFlowUrl(`/flow/authorize/${ticket}?result=${ticket}`,origin).search,`?result=${ticket}`);
+});
+
+test('native reactivation refreshes the original draft and receipt without another approval',async()=>{
+  const state=reviewed(initial()),h=mountHarness(state);await flush();
+  h.documentEvents.get('agentbridge:native-resume')();await flush();
+  assert.ok(h.requests.some(item=>item.url.endsWith('/state')));
+  assert.ok(h.requests.every(item=>!item.url.endsWith('/approve')));
+  assert.deepEqual(h.navigations,[]);
 });
