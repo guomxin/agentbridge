@@ -32,6 +32,7 @@ WORKSPACE_NODE = (
     "tests/test_workspace_request.mjs",
     "tests/test_workspace_lifecycle.mjs",
     "tests/test_workspace_forms.mjs",
+    "tests/test_workspace_quick_query.mjs",
     "tests/test_workspace_performance.mjs",
     "tests/test_workspace_projection.mjs",
     "tests/test_workspace_actionable.mjs",
