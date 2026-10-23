@@ -139,8 +139,6 @@ def execute_pending_action(
             raise contract_error("无法建立独立核验页面，尚未提交 OA 待办。") from exc
         check_read_deadline()
         scope = getattr(adapter, "capability_scope", None)
-        if callable(scope):
-            stack.enter_context(scope(reader))
         tracker = PendingSubmissionTracker()
         stack.callback(_cleanup, tracker.detach)
         tracker.attach(worker.page)
@@ -160,6 +158,11 @@ def execute_pending_action(
         last_observation = {"confirmed": False, "reason": "not_observed"}
         last_error = None
         try:
+            # Keep the action worker's validated detail cache visible until the
+            # final material recheck ends. The independent reader owns only
+            # readback; entering its scope earlier forced an avoidable fork.
+            if callable(scope):
+                stack.enter_context(scope(reader))
             deadline = time.monotonic() + max(timeout_seconds, 5)
             with read_deadline_scope(deadline, inherit=False):
                 scheduled = worker.page.evaluate(

@@ -90,6 +90,45 @@ def test_boundary_failure_closes_reader_and_detaches_observers(attempt):
     assert worker.page.handlers == {}
 
 
+def test_final_material_check_keeps_action_scope_and_reader_scope_starts_after_consumption(attempt, monkeypatch):
+    adapter, worker, plan = attempt
+    active = [worker]
+    observations = []
+    original_check = adapter.revalidate_workflow_detail
+    original_read = adapter.list_workflows
+
+    @contextmanager
+    def capability_scope(current):
+        previous, active[0] = active[0], current
+        try:
+            yield
+        finally:
+            active[0] = previous
+
+    def check(*args, **kwargs):
+        assert active[0] is worker
+        assert worker.readback_opened and worker.page.commit_payload is None
+        observations.append("materials")
+        return original_check(*args, **kwargs)
+
+    def consume():
+        assert active[0] is worker
+        assert observations == ["materials"]
+        observations.append("consumed")
+
+    def read(reader, **kwargs):
+        assert active[0] is reader is worker.readback_worker
+        assert observations == ["materials", "consumed"]
+        return original_read(reader, **kwargs)
+
+    monkeypatch.setattr(adapter, "capability_scope", capability_scope, raising=False)
+    monkeypatch.setattr(adapter, "revalidate_workflow_detail", check)
+    monkeypatch.setattr(adapter, "list_workflows", read)
+    result = approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=consume)
+    assert result["verification"]["confirmed"] is True
+    assert active[0] is worker and worker.readback_closed
+
+
 def test_missing_scheduling_acknowledgement_is_unknown_and_not_replayed(attempt, monkeypatch):
     adapter, worker, plan = attempt
     original_evaluate = worker.page.evaluate
