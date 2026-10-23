@@ -1,3 +1,4 @@
+from tests.support.pending_execution_clock import single_readback_attempt
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -227,10 +228,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
 
         with (
             patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None),
-            patch(
-                "agentbridge.adapters.seeyon_pending_execution.time.monotonic",
-                side_effect=[0, 0, 0, 0, 6],
-            ),
+            single_readback_attempt(),
             patch.object(
                 adapter,
                 "list_workflows",

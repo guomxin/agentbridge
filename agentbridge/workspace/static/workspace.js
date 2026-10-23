@@ -663,6 +663,8 @@ function ingestTimelineEntry(entry, render = true, advanceCursor = true) {
   if (entry?.entry_type === "task_event") {
     const taskId = entry.task_id || entry.payload?.taskId;
     const eventType = entry.payload?.eventType;
+    if (eventType === "task.business.progress") markWorkspaceTiming("phase_received", {
+      taskId, operationId:entry.payload.operationId, requestId:entry.payload.requestId, phase:entry.payload.phase});
     // An event updates the business container; interaction IDs remain children.
     const cardKey = `${taskId}:summary`;
     if (taskId && !state.taskCardMeta.has(cardKey)) {
@@ -1256,7 +1258,9 @@ async function prepareTargets(sourceTaskId, payload) {
   const batch = Array.isArray(payload.targetKeys) && payload.targetKeys.length > 1;
   if (batch) markWorkspaceTiming("batch_selection_sent", {requestId:payload.requestKey, taskId:sourceTaskId});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(sourceTaskId)}/prepare-selection`,
-    { method: "POST", body: payload, csrf: true, timeoutMs: 30000 });
+    { method: "POST", body: payload, csrf: true, timeoutMs: 30000 }).catch(error => {
+      if (scope.current() && !isCancellation(error)) markWorkspaceTiming("selection_failed", {requestId:payload.requestKey, taskId:sourceTaskId, status:"failed"}); throw error;
+    });
   scope.assertCurrent();
   if (typeof result?.taskId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId)) {
     throw new Error("办理准备的受理状态尚未确认，请恢复本次准备。");
@@ -1274,7 +1278,9 @@ async function probeOaPendingRecovery(taskId, payload) {
   const scope = sessionScope;
   markWorkspaceTiming("recovery_probe_sent", {requestId:payload.requestKey, taskId});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-pending-recovery/probe`,
-    {method:"POST", body:payload, csrf:true, timeoutMs:30000});
+    {method:"POST", body:payload, csrf:true, timeoutMs:30000}).catch(error => {
+      if (scope.current() && !isCancellation(error)) markWorkspaceTiming("recovery_probe_failed", {requestId:payload.requestKey, taskId, status:"failed"}); throw error;
+    });
   scope.assertCurrent();
   if (result?.canExecute === false && ["verified_complete", "unresolved_still_pending", "blocked"].includes(result.status)) {
     markWorkspaceTiming("recovery_probe_received", {requestId:payload.requestKey, taskId, status:result.status});
@@ -1286,7 +1292,9 @@ async function prepareOaPendingRecovery(taskId, payload) {
   const scope = sessionScope;
   markWorkspaceTiming("recovery_prepare_sent", {requestId:payload.requestKey, taskId});
   const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-pending-recovery/prepare`,
-    {method:"POST", body:payload, csrf:true, timeoutMs:30000});
+    {method:"POST", body:payload, csrf:true, timeoutMs:30000}).catch(error => {
+      if (scope.current() && !isCancellation(error)) markWorkspaceTiming("recovery_prepare_failed", {requestId:payload.requestKey, taskId, status:"failed"}); throw error;
+    });
   scope.assertCurrent();
   if (result?.canExecute === false && result.originalTaskId === taskId
       && ["prepared", "existing", "verified_complete"].includes(result.status)) {
@@ -1303,7 +1311,9 @@ async function queryOaPending(payload) {
   const scope = sessionScope;
   const ticket = projectionOrder.begin();
   markWorkspaceTiming("quick_query_sent", {requestId: payload.requestKey});
-  const result = await scopedApi(scope)("/api/actions/oa-pending-query", {method:"POST", body:payload, csrf:true, timeoutMs:30000});
+  const result = await scopedApi(scope)("/api/actions/oa-pending-query", {method:"POST", body:payload, csrf:true, timeoutMs:30000}).catch(error => {
+    if (scope.current() && !isCancellation(error)) markWorkspaceTiming("quick_query_failed", {requestId:payload.requestKey, status:"failed"}); throw error;
+  });
   scope.assertCurrent();
   if (typeof result?.taskId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId)) {
     throw new Error("查询受理状态尚未确认，请恢复本次查询。");

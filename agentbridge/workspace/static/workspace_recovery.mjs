@@ -9,6 +9,8 @@ const reasons = {
   still_pending: "原事项仍在 OA 待办中，但这不能排除原提交仍在处理。",
   pending_partial: "待办列表不完整，暂不能安全准备新的办理。",
   done_partial: "已办核验范围不完整，暂不能确认原事项结果。",
+  read_budget_exceeded: "本轮核对已到时间上限，尚不能确认结果；可以再次只读核对原事项，不会重新提交。",
+  done_scan_unproven: "已办列表尚未取得完整覆盖证据，不能据此确认结果；可以再次只读核对原事项。",
   identity_changed: "当前 OA 身份与原办理不一致，请先核对登录身份。",
   material_changed: "原事项材料已变化，请先到 OA 核对。",
   target_changed: "原事项或当前审批节点已变化，请先到 OA 核对。",

@@ -39,6 +39,7 @@ class PendingSubmissionTracker:
     ) -> None:
         self._authorized_confirmations = set(authorized_confirmation_fingerprints or ())
         self._page = None
+        self._request_observed = False
         self._listeners: list[tuple[str, Any]] = []
         self._responses: list[dict[str, Any]] = []
         self._runtime_errors: list[str] = []
@@ -58,6 +59,7 @@ class PendingSubmissionTracker:
         self._page = page
         try:
             for event, handler in (
+                ("request", self.observe_request),
                 ("response", self.observe_response),
                 ("pageerror", self.observe_page_error),
                 ("dialog", self.observe_dialog),
@@ -136,6 +138,18 @@ class PendingSubmissionTracker:
             parts.append("OA requested an additional confirmation; it was not authorized.")
         return " ".join(parts)[:1000]
 
+    @property
+    def request_observed(self) -> bool:
+        return self._request_observed
+
+    def observe_request(self, request) -> None:
+        try:
+            phase = _request_phase(request, str(_attribute(request, "url") or ""))
+            if phase and phase.get("phase") in {"approval_endpoint_response", "cap4_form_save"}:
+                self._request_observed = True
+        except Exception as exc:
+            self._record_observation_error(exc)
+
     def observe_response(self, response) -> None:
         if len(self._responses) >= _MAX_EVENTS:
             return
@@ -144,6 +158,8 @@ class PendingSubmissionTracker:
             phase = _request_phase(request, str(_attribute(response, "url") or ""))
             if phase is None:
                 return
+            if phase.get("phase") in {"approval_endpoint_response", "cap4_form_save"}:
+                self._request_observed = True
             status = _attribute(response, "status")
             entry: dict[str, Any] = {**phase, "status": int(status or 0)}
             if phase["phase"] == "cap4_form_save":
@@ -158,6 +174,8 @@ class PendingSubmissionTracker:
         try:
             phase = _request_phase(request, str(_attribute(request, "url") or ""))
             if phase is not None:
+                if phase.get("phase") in {"approval_endpoint_response", "cap4_form_save"}:
+                    self._request_observed = True
                 self._responses.append(
                     {**phase, "status": 0, "transport_status": "request_failed"}
                 )

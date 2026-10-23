@@ -183,6 +183,37 @@ class ControlledWriteExecutorTests(unittest.TestCase):
         self.dependencies.execution_authorization_interaction.assert_called_once()
         self.dependencies.user_grants.require_capability.assert_not_called()
 
+    def test_read_budget_expiring_inside_final_guards_rolls_back_without_consumption(self):
+        from agentbridge.browser.read_budget import ReadBudgetExceeded, read_deadline_scope
+        clock = [100.0]
+        self.install_guards()
+        def expire(_plan):
+            clock[0] = 102.0
+        self.dependencies.validate_task_plan_execution.side_effect = expire
+        with patch("agentbridge.browser.read_budget.time.monotonic", side_effect=lambda:clock[0]):
+            with read_deadline_scope(101.0):
+                with self.assertRaises(ReadBudgetExceeded):
+                    self.commit()
+        self.assertEqual(self.markers(), [])
+        self.assertEqual(self.authorizations.get(self.auth_id)["state"], "approved")
+        self.assertEqual(self.effects, [])
+
+    def test_progress_callback_is_bounded_and_cannot_replace_the_authorization_boundary(self):
+        def handler(_adapter, _worker, _plan, *, enter_commit_boundary):
+            for _ in range(100):
+                enter_commit_boundary.observe_pending_phase("waiting_business_page")
+            enter_commit_boundary.observe_pending_phase("PRIVATE_UNKNOWN_PHASE")
+            self.assertEqual(self.authorizations.get(self.auth_id)["state"], "approved")
+            enter_commit_boundary()
+            self.effects.append("write")
+            return {"verified":True}
+        with patch("agentbridge.core.business_execution_progress.record_pending_phase") as record:
+            self.commit(handler)
+        record.assert_called_once()
+        self.assertEqual(record.call_args.kwargs["phase"], "waiting_business_page")
+        self.assertEqual(self.authorizations.get(self.auth_id)["state"], "consumed")
+        self.assertEqual(self.effects, ["write"])
+
     def test_service_uses_registry_card_address_and_callback_replaced_before_call(self):
         service = CentralCapabilityService(home=self.db.parent / 'central',
             base_url='https://oa.example.test', registry=self.dependencies.registry)

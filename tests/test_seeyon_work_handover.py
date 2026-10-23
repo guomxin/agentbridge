@@ -1,3 +1,4 @@
+from tests.support.pending_execution_clock import single_readback_attempt
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -133,7 +134,7 @@ def test_incomplete_readback_is_unknown_not_success(target):
     _, _, worker, adapter = target
     plan = prepare_work_handover_approval(adapter, worker, _inputs())["plan"]
     adapter.list_workflows.return_value = {"items": [], "coverage": {"status": "partial"}}
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
+    with single_readback_attempt():
         with pytest.raises(PendingActionOutcomeUnknown, match="pending_coverage_incomplete"):
             approve_work_handover(adapter, worker, plan, enter_commit_boundary=Mock())
     adapter.list_workflows.assert_called_once()

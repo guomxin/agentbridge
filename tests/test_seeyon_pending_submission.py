@@ -8,6 +8,19 @@ from agentbridge.adapters.seeyon_pending_submission import (
 
 
 class PendingSubmissionTrackerTests(unittest.TestCase):
+    def test_request_phase_requires_a_registered_business_request(self):
+        page = FakePage()
+        tracker = PendingSubmissionTracker()
+        tracker.attach(page)
+        loading = FakeRequest("/ajax.do?managerName=sectionManager")
+        loading.post_data = "managerMethod=doProjection&arguments=private"
+        page.emit("request", loading)
+        self.assertFalse(tracker.request_observed)
+        page.emit("request", FakeRequest("/collaboration/collaboration.do?method=finishWorkItem"))
+        self.assertTrue(tracker.request_observed)
+        self.assertEqual(tracker.snapshot()["response_evidence"], [])
+        tracker.detach()
+
     def test_attaches_before_submission_and_removes_only_owned_listeners(self):
         page = FakePage()
         unrelated = lambda _: None

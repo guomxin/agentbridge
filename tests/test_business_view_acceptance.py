@@ -1,3 +1,4 @@
+from tests.support.pending_execution_clock import single_readback_attempt
 """Independent OA integration tests with actual drafts, coordinator and adapters."""
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
@@ -295,10 +296,9 @@ class BusinessViewAcceptanceTests(unittest.TestCase):
         receipt = self.approve(preview)["receipt"]
         self.fixture.oa.arm(fault)
         if bounded_clock:
-            ticks = iter([0, 0, 0, 1, 61])
-            # Only the polling deadline advances. The production executor and
-            # every actual readback/identity/coverage decision still execute.
-            with patch("agentbridge.adapters.seeyon_pending_execution.time", SimpleNamespace(monotonic=lambda: next(ticks))):
+            # Advance at the readback boundary, independent of how many lower
+            # level stages inspect the shared deadline.
+            with single_readback_attempt():
                 self.drive()
         else:
             self.drive()

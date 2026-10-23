@@ -1,3 +1,4 @@
+from tests.support.pending_execution_clock import single_readback_attempt
 """Synthetic coverage for the verified business-settlement approval contract."""
 from copy import deepcopy
 from html import escape
@@ -349,7 +350,7 @@ def test_incomplete_or_wrong_readback_is_unknown_without_second_submission(targe
     else: done["items"][0][change] = "different-identity"
     adapter.list_workflows = Mock(side_effect=lambda *_args, collection, **_kwargs: pending if collection == "pending" else done)
     boundary = Mock()
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
+    with single_readback_attempt():
         with pytest.raises(PendingActionOutcomeUnknown, match=reason):
             approve_business_settlement(adapter, worker, plan, enter_commit_boundary=boundary)
     boundary.assert_called_once()

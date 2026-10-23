@@ -9,14 +9,19 @@ import hashlib
 import hmac
 import json
 import re
+import time
 from uuid import uuid4
 
-from agentbridge.adapters.seeyon_pending_verification import verify_pending_action
+from agentbridge.adapters.seeyon_pending_verification import read_pending_done, verify_pending_action
+from agentbridge.browser.read_budget import (
+    ReadBudgetExceeded, check_read_deadline, read_deadline_scope, remaining_seconds,
+)
 from agentbridge.core.write_catalog import _TRUSTED_WRITE_COMMITS, resolve_write_function
 
 
 ACK_VERSION = "oa_unknown_new_attempt_v1"
 ASSESSMENT_TTL_SECONDS = 120
+RECOVERY_READ_BUDGET_SECONDS = 30
 PERMIT_KIND = "oa_pending_recovery_v1"
 _IDENTITY = ("affair_id", "summary_id", "process_id", "template_id", "form_app_id",
              "form_record_id", "node_policy", "node_policy_name", "body_type", "profile")
@@ -211,6 +216,7 @@ _PUBLIC_REASONS = frozenset({
     "pending_coverage_inconsistent", "done_response_invalid", "done_affair_not_found",
     "done_affair_ambiguous", "done_title_mismatch", "done_detail_affair_mismatch",
     "done_detail_identity_unavailable", "done_identity_mismatch", "frozen_identity_incomplete",
+    "done_scan_unproven", "read_budget_exceeded",
 })
 
 
@@ -340,22 +346,30 @@ def _local_verified(service, origin):
     return False
 
 
-def _observe(service, origin, adapter, worker):
+def _observe(service, origin, adapter, worker, *, deadline):
     target = origin["target"]
+    check_read_deadline(deadline=deadline)
     with worker.fork_page() as reader, adapter.capability_scope(reader):
         pending = adapter.list_workflows(reader, collection="pending", arguments={"limit": 100})
-        done = adapter.list_workflows(reader, collection="done", arguments={"limit": 1000})
+        check_read_deadline(deadline=deadline)
+        done = read_pending_done(adapter, reader, target, deadline=deadline)
         from agentbridge.adapters.seeyon_pending_verification import _rows
         pending_rows, done_rows = _rows(pending), _rows(done)
         if pending_rows is None or done_rows is None:
             return {"status": "blocked", "reason": "read_unavailable"}
+        evidence = done.get("query_evidence")
+        if isinstance(evidence, dict) and evidence.get("completionReason") not in {
+                "server_target_found", "server_source_exhausted", "server_filtered_source_exhausted",
+                "server_query_scan_budget_reached"}:
+            return {"status": "blocked", "reason": "done_scan_unproven", "doneCoverage": "partial"}
         present = any(str(row.get("affair_id") or "") == target["affair_id"] for row in pending_rows)
         done_present = any(str(row.get("affair_id") or "") == target["affair_id"] for row in done_rows)
         done_coverage = (done.get("coverage") or {}).get("status", "partial")
         if _local_verified(service, origin) or (present and done_present):
             return {"status": "blocked", "reason": "conflicting_or_completed_evidence", "doneCoverage": done_coverage}
         if not present:
-            proof = verify_pending_action(adapter, reader, target)
+            proof = verify_pending_action(adapter, reader, target, pending_snapshot=pending,
+                                          done_snapshot=done, deadline=deadline)
             return {"status": "verified_complete" if proof.get("confirmed") is True else "blocked",
                     "reason": "verified_complete" if proof.get("confirmed") is True else proof.get("reason", "not_verified"),
                     "doneCoverage": done_coverage}
@@ -367,6 +381,7 @@ def _observe(service, origin, adapter, worker):
         # opinion is never saved or used in the new card, authorization or write.
         prepared = resolve_write_function(origin["definition"]["prepare_function"])(
             adapter, reader, {"affair_id": target["affair_id"], "opinion": "恢复只读核对"})
+        check_read_deadline(deadline=deadline)
         current = prepared["plan"]["target"]
         if any(str(current.get(key) or "") != str(target.get(key) or "") for key in _IDENTITY):
             return {"status": "blocked", "reason": "target_identity_changed", "doneCoverage": done_coverage}
@@ -375,24 +390,32 @@ def _observe(service, origin, adapter, worker):
 
 
 def _live(service, origin, *, adapter=None, worker=None):
-    if adapter is not None and worker is not None:
-        return _observe(service, origin, adapter, worker)
-    session = origin["session"]
-    runtime = service._runtime_for_system("oa")
-    if runtime is None:
-        _fail("OA_RECOVERY_RUNTIME_UNAVAILABLE", "OA 只读核对暂不可用。")
-    adapter, factory = runtime
-    with service._session_lock(session["session_id"]), ExitStack() as stack:
-        state = service.session_states.load(session["session_id"])
-        if state is None:
-            _fail("OA_RECOVERY_SESSION_REQUIRED", "请先恢复原 OA 账号登录。")
-        worker = stack.enter_context(factory(session, adapter))
-        worker.restore_session_state(state)
-        stack.enter_context(adapter.capability_scope(worker))
-        probe = adapter.probe_business_draft_session(worker)
-        if str(probe.get("observed_principal_ref") or "").strip() != _principal(session):
-            _fail("OA_RECOVERY_IDENTITY_CHANGED", "实际 OA 登录与原提交身份不一致。")
-        return _observe(service, origin, adapter, worker)
+    # One observation owns one deadline, including lock wait. A commit's live
+    # recovery guard inherits any smaller remaining preflight budget.
+    with read_deadline_scope(time.monotonic() + RECOVERY_READ_BUDGET_SECONDS) as deadline:
+        if adapter is not None and worker is not None:
+            return _observe(service, origin, adapter, worker, deadline=deadline)
+        session = origin["session"]
+        runtime = service._runtime_for_system("oa")
+        if runtime is None:
+            _fail("OA_RECOVERY_RUNTIME_UNAVAILABLE", "OA 只读核对暂不可用。")
+        adapter, factory = runtime
+        with service._session_lock(session["session_id"],
+                wait_seconds=remaining_seconds(RECOVERY_READ_BUDGET_SECONDS),
+                purpose="oa_recovery_probe"), ExitStack() as stack:
+            check_read_deadline()
+            state = service.session_states.load(session["session_id"])
+            if state is None:
+                _fail("OA_RECOVERY_SESSION_REQUIRED", "请先恢复原 OA 账号登录。")
+            worker = stack.enter_context(factory(session, adapter))
+            check_read_deadline()
+            worker.restore_session_state(state)
+            stack.enter_context(adapter.capability_scope(worker))
+            probe = adapter.probe_business_draft_session(worker)
+            check_read_deadline()
+            if str(probe.get("observed_principal_ref") or "").strip() != _principal(session):
+                _fail("OA_RECOVERY_IDENTITY_CHANGED", "实际 OA 登录与原提交身份不一致。")
+            return _observe(service, origin, adapter, worker, deadline=deadline)
 
 
 def _events(connection, task_id, subject, kind, causation=None):
@@ -442,6 +465,8 @@ def probe_unknown_pending(service, *, subject, task_id, request_key, endpoint_id
         observation = _live(service, origin)
     except OaPendingRecoveryError:
         raise
+    except ReadBudgetExceeded:
+        observation = {"status": "blocked", "reason": "read_budget_exceeded"}
     except Exception:
         observation = {"status": "blocked", "reason": "read_or_contract_unavailable"}
     assessment = {**observation, "assessmentId": str(uuid4()), "revision": 1,

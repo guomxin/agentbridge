@@ -1,3 +1,4 @@
+from tests.support.pending_execution_clock import single_readback_attempt
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1060,7 +1061,7 @@ def test_all_fourteen_profiles_never_accept_target_hidden_by_partial_list(profil
                 "coverage": {"status": "partial", "hasMore": True}}
 
     monkeypatch.setattr(adapter, "list_workflows", partial_read)
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
+    with single_readback_attempt():
         with pytest.raises(outcome_error, match="pending_coverage_incomplete"):
             commit(adapter, worker, plan, enter_commit_boundary=lambda: None)
     assert observations == ["pending"]

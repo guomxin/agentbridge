@@ -9,6 +9,7 @@ import pytest
 
 from agentbridge.core.business_drafts import BusinessDraftError, BusinessDraftService
 from agentbridge.core.capability_runtime import CapabilityRejected
+from agentbridge.browser.read_budget import ReadBudgetExceeded
 from agentbridge.core.oa_pending_recovery import (
     ACK_VERSION, OaPendingRecoveryError, can_recover_pending, probe_unknown_pending,
     prepare_recovery_attempt, recovery_child_for_origin, recovery_permit,
@@ -107,6 +108,41 @@ def test_probe_is_readonly_idempotent_and_done_positive_conflict_blocks(fixture)
     second = probe(fixture, "recovery-probe-conflict")
     assert second["status"] == "blocked" and not second["canPrepare"]
     assert counts(fixture) == (1, 1, 1) and len(fixture.oa.writes) == 1
+
+
+def test_completed_probe_reuses_only_its_own_collection_observations(fixture):
+    """A probe has one collection read each; another probe must read afresh."""
+    affair_id = origin(fixture)["arguments"]["affair_id"]
+    fixture.oa.data["affairs"][affair_id]["processed"] = True
+    fixture.oa.persist()
+    adapter, _factory = fixture.service._runtime_for_system("oa")
+    with patch.object(adapter, "list_workflows", wraps=adapter.list_workflows) as reads, \
+            patch.object(adapter, "read_pending_done", wraps=adapter.read_pending_done) as done_reads:
+        first = probe(fixture, "same-observation-completed")
+        assert first["status"] == "verified_complete"
+        assert [call.kwargs["collection"] for call in reads.call_args_list] == ["pending"]
+        assert done_reads.call_count == 1
+        assert probe(fixture, "same-observation-completed") == first
+        assert reads.call_count == done_reads.call_count == 1
+        # Idempotent receipt recovery can reuse its receipt, but a new probe
+        # must observe the changed downstream state with fresh collections.
+        fixture.oa.data["affairs"][affair_id]["processed"] = False
+        fixture.oa.persist()
+        current = probe(fixture, "next-observation-pending")
+        assert current["status"] == "unresolved_still_pending"
+        assert [call.kwargs["collection"] for call in reads.call_args_list] == ["pending", "pending"]
+        assert done_reads.call_count == 2
+    assert counts(fixture) == (1, 1, 1) and len(fixture.oa.writes) == 1
+
+
+def test_probe_budget_exhaustion_remains_readonly_and_can_be_checked_again(fixture):
+    adapter, _factory = fixture.service._runtime_for_system("oa")
+    with patch.object(adapter, "read_pending_done", side_effect=ReadBudgetExceeded("test budget")):
+        result = probe(fixture, "bounded-observation-timeout")
+    assert result["status"] == "blocked" and result["reason"] == "read_budget_exceeded"
+    assert not result["canPrepare"]
+    assert counts(fixture) == (1, 1, 1) and len(fixture.oa.writes) == 1
+    assert probe(fixture, "bounded-observation-fresh")["status"] == "unresolved_still_pending"
 
 
 def test_complete_requires_same_done_identity_and_appends_evidence_without_rewriting_unknown(fixture):

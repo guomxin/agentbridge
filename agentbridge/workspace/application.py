@@ -11,6 +11,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Iterator
 from uuid import UUID, uuid4
 
@@ -374,11 +375,54 @@ class WorkspaceApplication:
                     if not batch or batch.get("totalCount") == 1:
                         result["businessTitle"] = _safe_text(title, 300)
         operation_id = task.get("current_operation_id")
+        # An in-flight commit is linked by the host only after it returns. Even
+        # when progress storage fails, its exact owned decision/input binding
+        # identifies the current attempt without inventing a phase or replay.
+        if decisions and task.get("status") not in {"succeeded", "failed", "outcome_unknown", "canceled", "expired"}:
+            with self.service.tasks._connect() as connection:
+                for decision in decisions:
+                    if decision["authorization_state"] not in {"approved", "consumed"}:
+                        continue
+                    exact_input = json.dumps({"authorization_id":decision["authorization_id"]},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    running = connection.execute("SELECT operation_id FROM operations WHERE user_subject=? AND capability_name=? "
+                        "AND capability_version=? AND input_hash=? AND status='running' AND created_at>=? ORDER BY created_at DESC LIMIT 1",
+                        (user_subject, decision["authorization_capability"], decision["authorization_version"],
+                         hashlib.sha256(exact_input.encode()).hexdigest(), decision["confirmed_at"])).fetchone()
+                    if running and (decision["authorization_state"] == "approved" or decision["commit_operation_id"] == running["operation_id"]):
+                        operation_id = running["operation_id"]
+                        break
+        from agentbridge.core.business_execution_progress import pending_progress
+        progress = pending_progress(self.service.tasks, user_subject=user_subject, task_id=task_id)
+        if progress:
+            observed_operation = self.service.operations.get(progress["operationId"])
+            previous = self.service.operations.get(operation_id) if operation_id else None
+            if previous is None or observed_operation["created_at"] >= previous["created_at"]:
+                operation_id = progress["operationId"]
         if operation_id:
             operation = self.service.operations.get(operation_id)
             if operation.get("user_subject") == user_subject:
                 execution = _public_business_execution(operation, task)
                 if execution:
+                    if operation["status"] == "running":
+                        execution.update(operationId=operation_id, requestId=operation["request_id"],
+                            operationStartedAt=operation["created_at"])
+                        if not progress or progress["operationId"] != operation_id:
+                            execution["phase"] = "awaiting_progress"
+                    if progress and progress["operationId"] == operation_id:
+                        execution.update(operationId=operation_id, requestId=operation["request_id"],
+                            operationStartedAt=operation["created_at"], actualPhase=progress["phase"],
+                            phaseStartedAt=progress["phaseStartedAt"], phaseObservedAt=progress["phaseObservedAt"],
+                            observedPhases=progress["observedPhases"])
+                        if operation["status"] == "running" and task.get("status") not in {"succeeded", "failed", "outcome_unknown", "canceled", "expired"}:
+                            execution["phase"] = {"verification_completed":"verifying_result"}.get(progress["phase"], progress["phase"])
+                        if "request_observed" in progress["observedPhases"]:
+                            execution["requestObserved"] = True
+                        if operation["status"] == "running":
+                            if "submission_invoked" in progress["observedPhases"]:
+                                execution["submissionState"] = "invoked"
+                            elif "submission_scheduled" in progress["observedPhases"]:
+                                execution["submissionState"] = "scheduled"
                     if operation_linked and any(_unconsumed_pending_attempt(operation, row) for row in decisions):
                         execution.update(phase="not_submitted", reason="pre_submit_validation_failed")
                     result["businessExecution"] = execution
@@ -387,7 +431,51 @@ class WorkspaceApplication:
                         recovery = pending_recovery_presentation(self.service, subject=user_subject, task_id=task_id)
                         result["oaPendingRecovery"] = recovery
                         result["oaPendingRecoveryAvailable"] = recovery["canProbe"]
+        result["businessTiming"] = self._business_journey_timing(user_subject, task, operation_id, progress)
         return result
+
+    def _business_journey_timing(self, subject, task, operation_id, progress):
+        """Read existing durable boundaries; never infer a missing event time."""
+        command = (task.get("summary") or {}).get("command") or {}
+        stages = [{"stage":"task_created", "observedAt":task["created_at"]}]
+        requested = _public_observation_time(command.get("requestedAt"))
+        if requested:
+            stages.append({"stage":"preparation_requested", "observedAt":requested})
+        with self.service.tasks._connect() as connection:
+            ready = connection.execute("SELECT MAX(i.created_at) FROM task_interactions t JOIN interactions i "
+                "ON i.interaction_id=t.interaction_id AND i.user_subject=t.user_subject "
+                "WHERE t.task_id=? AND t.user_subject=? AND i.interaction_type='business_input'",
+                (task["task_id"], subject)).fetchone()[0]
+            decision = connection.execute("SELECT MAX(created_at) FROM business_draft_decisions WHERE task_id=? AND user_subject=?",
+                (task["task_id"], subject)).fetchone()[0]
+        if ready:
+            stages.append({"stage":"form_ready", "observedAt":ready})
+        if decision and (not ready or decision >= ready):
+            stages.append({"stage":"decision_recorded", "observedAt":decision})
+        operation = self.service.operations.get(operation_id) if operation_id else None
+        if operation:
+            stages.append({"stage":"operation_started", "observedAt":operation["created_at"]})
+            if operation.get("finished_at"):
+                stages.append({"stage":"operation_terminal", "observedAt":operation["finished_at"]})
+        stages.extend({"stage":item["phase"], "observedAt":item["observedAt"]} for item in (progress or {}).get("stages", []))
+        expected = ["task_created"]
+        if command:
+            expected.append("preparation_requested")
+        if ready or decision:
+            expected.extend(["form_ready", "decision_recorded"])
+        from agentbridge.adapters.seeyon_pending_actions import PendingActionContractMismatch
+        from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+        pending_commits = {item["commit_capability"] for item in _TRUSTED_WRITE_DEFINITIONS.values()
+                           if item["contract_error"] is PendingActionContractMismatch}
+        if operation and (operation["capability_name"] in pending_commits or progress) and decision:
+            expected.extend(["operation_started", "waiting_business_page", "final_revalidation", "submission_scheduled", "verifying_result"])
+        if task["status"] in {"succeeded", "failed", "outcome_unknown", "canceled", "expired", "partially_succeeded"} and operation:
+            expected.append("operation_terminal")
+        present = {item["stage"] for item in stages}
+        return {"schemaVersion":"agentbridge.business-timing.v1", "taskId":task["task_id"],
+            "operationId":operation_id, "requestId":operation.get("request_id") if operation else command.get("commandKey"),
+            "clockSource":"central.wall", "status":task["status"], "stages":stages,
+            "missingStages":[stage for stage in expected if stage not in present]}
 
     def task_projections(self, account: dict, task_ids: list[str], *, versions: list[int] | None = None) -> dict:
         if not isinstance(task_ids, list) or not 1 <= len(task_ids) <= 32:
@@ -455,26 +543,43 @@ class WorkspaceApplication:
 
     def prepare_selected_results(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.actionable_results import queue_preparation
-        result = queue_preparation(self.service, account, task_id, body)
-        return self._queued_command(account, result)
+        with self._time_business_action(account, "selection", body, task_id) as timing:
+            result = queue_preparation(self.service, account, task_id, body)
+            timing["task_id"] = result["taskId"]
+            return self._queued_command(account, result)
 
     def probe_oa_pending_recovery(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.oa_pending_recovery import probe_unknown_pending
         self._validate_oa_recovery_body(body, prepare=False)
         self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
-        result = probe_unknown_pending(self.service, subject=account["user_subject"], task_id=task_id,
-            request_key=body["requestKey"], endpoint_id=account["endpoint_id"])
-        return self._public_oa_recovery(result)
+        with self._time_business_action(account, "recovery_probe", body, task_id):
+            result = probe_unknown_pending(self.service, subject=account["user_subject"], task_id=task_id,
+                request_key=body["requestKey"], endpoint_id=account["endpoint_id"])
+            return self._public_oa_recovery(result)
 
     def prepare_oa_pending_recovery(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.oa_pending_recovery import prepare_recovery_attempt
         self._validate_oa_recovery_body(body, prepare=True)
         self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
-        result = prepare_recovery_attempt(self.service, subject=account["user_subject"], task_id=task_id,
-            assessment_id=body["assessmentId"], assessment_hash=body["assessmentHash"],
-            expected_revision=body["expectedRevision"], request_key=body["requestKey"],
-            acknowledgement=body["acknowledgement"], endpoint_id=account["endpoint_id"])
-        return self._public_oa_recovery(result)
+        with self._time_business_action(account, "recovery_prepare", body, task_id) as timing:
+            result = prepare_recovery_attempt(self.service, subject=account["user_subject"], task_id=task_id,
+                assessment_id=body["assessmentId"], assessment_hash=body["assessmentHash"],
+                expected_revision=body["expectedRevision"], request_key=body["requestKey"],
+                acknowledgement=body["acknowledgement"], endpoint_id=account["endpoint_id"])
+            timing["task_id"] = result.get("taskId", task_id)
+            return self._public_oa_recovery(result)
+
+    @contextmanager
+    def _time_business_action(self, account, kind, body, task_id=None):
+        started, started_at = time.perf_counter(), datetime.now(timezone.utc).isoformat()
+        timing = {"task_id":task_id}
+        status = "failed"
+        try:
+            yield timing
+            status = "succeeded"
+        finally:
+            self.performance.record_action(account, kind, body.get("requestKey") if isinstance(body, dict) else None,
+                started=started, started_at=started_at, task_id=timing["task_id"], status=status)
 
     @staticmethod
     def _validate_oa_recovery_body(body: dict, *, prepare: bool) -> None:
@@ -507,14 +612,16 @@ class WorkspaceApplication:
 
     def query_oa_pending(self, account: dict, body: dict) -> dict:
         from agentbridge.core.quick_queries import queue_query
-        result = queue_query(self.service, account, body)
-        message_key = result.pop("userMessageKey", None)
-        response = self._queued_command(account, result)
-        if message_key:
-            entry = self.service.tasks.get_timeline_message(user_subject=account["user_subject"], message_key=message_key)
-            endpoint = self.service.tasks.get_endpoint(account["endpoint_id"], user_subject=account["user_subject"])
-            response["userMessage"] = _public_timeline_entry(entry, source=endpoint, is_origin=True)
-        return response
+        with self._time_business_action(account, "query", body) as timing:
+            result = queue_query(self.service, account, body)
+            timing["task_id"] = result["taskId"]
+            message_key = result.pop("userMessageKey", None)
+            response = self._queued_command(account, result)
+            if message_key:
+                entry = self.service.tasks.get_timeline_message(user_subject=account["user_subject"], message_key=message_key)
+                endpoint = self.service.tasks.get_endpoint(account["endpoint_id"], user_subject=account["user_subject"])
+                response["userMessage"] = _public_timeline_entry(entry, source=endpoint, is_origin=True)
+            return response
 
     def _queued_command(self, account: dict, result: dict) -> dict:
         queued_task = self.service.tasks.get_task(result["taskId"], user_subject=account["user_subject"])
@@ -1881,6 +1988,7 @@ def _public_task(task: dict) -> dict:
 
 
 _BUSINESS_READBACK_REASONS = frozenset({
+    "read_budget_exceeded", "done_scan_unproven",
     "still_pending", "pending_response_invalid", "pending_coverage_incomplete",
     "pending_coverage_inconsistent", "done_response_invalid", "done_affair_not_found",
     "done_affair_ambiguous", "done_title_mismatch", "done_detail_affair_mismatch",
@@ -2045,6 +2153,21 @@ def _public_timeline_entry(
     event_type = payload.get("eventType") if isinstance(payload, dict) else None
     if entry.get("entry_type") == "task_event" and isinstance(event_type, str) and event_type.startswith("task.oa_recovery."):
         payload = {"eventType": event_type, "taskId": entry.get("task_id")}
+    if entry.get("entry_type") == "task_event" and event_type == "task.business.progress":
+        from agentbridge.core.business_execution_progress import PENDING_PHASES
+        observation = payload.get("payload") or {}
+        if not isinstance(observation, dict):
+            observation = {}
+        payload = {"eventType":event_type, "taskId":entry.get("task_id")}
+        if observation.get("phase") in PENDING_PHASES:
+            payload["phase"] = observation["phase"]
+        for key in ("operationId", "requestId"):
+            value = observation.get(key)
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value):
+                payload[key] = value
+        observed = _public_observation_time(observation.get("observedAt"))
+        if observed:
+            payload["observedAt"] = observed
     return {
         "entry_id": entry["entry_id"],
         "sequence": entry["sequence"],

@@ -212,6 +212,29 @@ class PendingVerificationTests(unittest.TestCase):
             verify_pending_action(self.adapter, self.worker, {})
         self.assertEqual(self.adapter.calls, [])
 
+    def test_same_observation_snapshots_are_not_read_twice(self):
+        self.adapter.done["items"][0]["identity"] = deepcopy(TARGET)
+        result = verify_pending_action(self.adapter, self.worker, TARGET,
+            pending_snapshot=self.adapter.pending, done_snapshot=self.adapter.done)
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(self.adapter.calls, [])
+
+    def test_drift_or_budget_failure_invalidates_a_matching_partial_done_row(self):
+        self.adapter.done["items"][0]["identity"] = deepcopy(TARGET)
+        for reason in ("server_query_changed_during_pagination", "server_query_duplicate_rows",
+                       "server_query_time_budget_reached", "server_query_page_failed"):
+            with self.subTest(reason=reason):
+                self.adapter.done["query_evidence"] = {"completionReason": reason}
+                result = self.verify()
+                self.assertFalse(result["confirmed"])
+                self.assertEqual(result["reason"], "done_scan_unproven")
+
+    def test_controlled_done_row_resolves_directly_without_home_page_reload(self):
+        self.adapter.resolve_done_workflow_row_detail = lambda worker, source_item: (source_item, {})
+        result = self.verify()
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(self.adapter.calls, ["pending", "done"])
+
 
 if __name__ == "__main__":
     unittest.main()

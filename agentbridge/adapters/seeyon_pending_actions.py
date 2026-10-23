@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agentbridge.adapters.seeyon_pending_execution import pending_action_preflight
+
 import hashlib
 import json
 import re
@@ -1107,6 +1109,7 @@ def _resolve_validated_target(
     return profile, source, detail, signals
 
 
+@pending_action_preflight
 def _commit_pending_action(
     adapter,
     worker,

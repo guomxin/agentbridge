@@ -49,7 +49,25 @@ test("account reset clears every query and recovery mark from performance and it
     for (const stage of ["quick_query_sent","quick_query_queued","batch_selection_sent","recovery_probe_received","recovery_prepare_received"]) {
       markWorkspaceTiming(stage,{requestId:"request-1",taskId:"task-1"},clock);
     }
-    assert.equal(marks.size,5);assert.equal(Object.keys(globalThis.document.documentElement.dataset).length,5);
+    assert.equal(marks.size,5);assert.equal(Object.keys(globalThis.document.documentElement.dataset).filter(key=>key.startsWith("timing")).length,5);
+    assert.ok(JSON.parse(globalThis.document.documentElement.dataset.workspaceTimingSamples).length >= 5);
     clearWorkspaceTimings(clock);assert.equal(marks.size,0);assert.deepEqual(globalThis.document.documentElement.dataset,{});
   } finally {globalThis.document=previous;}
+});
+
+test("timing diagnostics retain failed requests, missing receipts and bounded independent samples", async () => {
+  const {workspaceTimingSnapshot,clearWorkspaceTimings}=await import("../agentbridge/workspace/static/workspace_performance.mjs");
+  const clock={mark(){},now:()=>100};clearWorkspaceTimings(clock);
+  markWorkspaceTiming("quick_query_sent",{requestId:"query-failed"},clock);
+  markWorkspaceTiming("quick_query_failed",{requestId:"query-failed",status:"failed"},clock);
+  markWorkspaceTiming("quick_query_sent",{requestId:"query-success"},clock);
+  markWorkspaceTiming("quick_query_queued",{requestId:"query-success",taskId:"result-task"},clock);
+  let samples=workspaceTimingSnapshot();
+  assert.deepEqual(samples.find(item=>item.stage==="quick_query_sent" && item.requestId==="query-failed").missingStages,["quick_query_queued"]);
+  assert.deepEqual(samples.find(item=>item.stage==="quick_query_sent" && item.requestId==="query-success").missingStages,[]);
+  assert.equal(samples.some(item=>item.status==="failed"),true);
+  assert.equal(samples.every(item=>item.monotonicMs===100),true);
+  for(let index=0;index<300;index++)markWorkspaceTiming("phase_received",{taskId:`task-${index}`,operationId:`op-${index}`,phase:"verifying_result"},clock);
+  samples=workspaceTimingSnapshot();assert.equal(samples.length,256);
+  assert.equal(samples.at(-1).operationId,"op-299");clearWorkspaceTimings(clock);assert.deepEqual(workspaceTimingSnapshot(),[]);
 });

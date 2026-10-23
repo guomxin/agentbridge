@@ -4,12 +4,16 @@ import json
 import time
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Callable
 
 from agentbridge.adapters.base import AdapterBusinessRuleRejected
 from agentbridge.adapters.seeyon_pending_submission import PendingSubmissionTracker
 from agentbridge.adapters.seeyon_pending_verification import VERIFICATION_METHOD, verify_pending_action
 from agentbridge.adapters.seeyon_submit_phases import pump_browser_events
+from agentbridge.browser.read_budget import (
+    ReadBudgetExceeded, read_deadline_scope, check_read_deadline, remaining_ms,
+)
 
 
 _READBACK_REASONS = {
@@ -22,6 +26,7 @@ _READBACK_REASONS = {
 }
 
 _READY_TIMEOUT_SECONDS = 15.0
+_PREFLIGHT_TIMEOUT_SECONDS = 60.0
 _SUBMIT_ENTRIES = {"submitClickFunc", "dealSubmitFunc", "$.content.callback.dealSubmit"}
 
 
@@ -31,8 +36,36 @@ class PendingActionNotReady(AdapterBusinessRuleRejected):
     error_code = "OA_PENDING_ACTION_NOT_READY"
 
 
+def observe_pending_phase(enter_commit_boundary, phase: str, reason: str | None = None) -> None:
+    observer = getattr(enter_commit_boundary, "observe_pending_phase", None)
+    if callable(observer):
+        try:
+            observer(phase, reason)
+        except Exception:
+            # Progress delivery is diagnostic; it cannot authorize or replay a write.
+            pass
+
+
+def pending_action_preflight(function):
+    """Cover the first detail navigation through the last material validation."""
+    @wraps(function)
+    def bounded(*args, **kwargs):
+        try:
+            with read_deadline_scope(time.monotonic() + _PREFLIGHT_TIMEOUT_SECONDS):
+                observe_pending_phase(kwargs.get("enter_commit_boundary"), "waiting_business_page")
+                result = function(*args, **kwargs)
+                # A successful write already has its own post-boundary proof; do
+                # not reapply the expired preflight deadline on return.
+                return result
+        except ReadBudgetExceeded as exc:
+            raise PendingActionNotReady("OA 提交前核对超时，尚未提交，授权未消耗。") from exc
+    return bounded
+
+
 def _readiness(page, target: dict, contract_error: type[Exception]) -> dict:
+    check_read_deadline()
     observation = page.evaluate(PENDING_READINESS_SCRIPT, target)
+    check_read_deadline()
     if not isinstance(observation, dict):
         raise PendingActionNotReady("OA 正文就绪状态不可读取，尚未提交。")
     if observation.get("identity_matches") is not True:
@@ -47,7 +80,7 @@ def wait_pending_action_ready(page, target: dict, *, contract_error: type[Except
     while True:
         try:
             observation = _readiness(page, target, contract_error)
-        except (contract_error, PendingActionNotReady):
+        except (contract_error, PendingActionNotReady, ReadBudgetExceeded):
             raise
         except Exception as exc:
             raise PendingActionNotReady("OA 正文状态读取失败，尚未提交。") from exc
@@ -68,9 +101,10 @@ def wait_pending_action_ready(page, target: dict, *, contract_error: type[Except
                 "OA 正文或提交入口未在时限内就绪，尚未提交，授权未消耗。 "
                 + json.dumps(detail, ensure_ascii=False, sort_keys=True)
             )
-        pump_browser_events(page, 100)
+        pump_browser_events(page, remaining_ms(100, deadline=deadline))
 
 
+@pending_action_preflight
 def execute_pending_action(
     adapter,
     worker,
@@ -103,9 +137,14 @@ def execute_pending_action(
                 raise ValueError("readback page must be independent")
         except Exception as exc:
             raise contract_error("无法建立独立核验页面，尚未提交 OA 待办。") from exc
+        check_read_deadline()
+        scope = getattr(adapter, "capability_scope", None)
+        if callable(scope):
+            stack.enter_context(scope(reader))
         tracker = PendingSubmissionTracker()
         stack.callback(_cleanup, tracker.detach)
         tracker.attach(worker.page)
+        observe_pending_phase(enter_commit_boundary, "final_revalidation")
         recovery_check = getattr(enter_commit_boundary, "before_pending_revalidation", None)
         if recovery_check is not None:
             recovery_check()
@@ -113,78 +152,91 @@ def execute_pending_action(
         # current materials afterwards, immediately before consumption. Never
         # navigate the action page and restart its business-body loader here.
         revalidate_target()
+        check_read_deadline()
         if _readiness(worker.page, target, contract_error).get("ready") is not True:
             raise PendingActionNotReady("OA 正文在最终核对期间重新加载，尚未提交，授权未消耗。")
+        check_read_deadline()
         enter_commit_boundary()
         last_observation = {"confirmed": False, "reason": "not_observed"}
         last_error = None
         try:
-            scheduled = worker.page.evaluate(
-                PENDING_ACTION_SCRIPT,
-                {
-                    "affair_id": target["affair_id"],
-                    "opinion": opinion,
-                    "attitude_code": attitude_code,
-                    "action_kind": action_kind,
-                    "identity": target,
-                },
-            )
-            if not isinstance(scheduled, dict) or scheduled.get("scheduled") is not True:
-                raise RuntimeError("OA did not acknowledge scheduling the submission")
-            entry = scheduled.get("submit_entry")
-            execution["dispatch"] = {"state": "scheduled", "submit_entry": entry if entry in _SUBMIT_ENTRIES else None}
             deadline = time.monotonic() + max(timeout_seconds, 5)
-            while time.monotonic() < deadline:
-                # Dispatch original-page dialogs/events while the separate reader navigates.
-                pump_browser_events(worker.page, 800)
-                try:
-                    tracker.poll()
-                except Exception:
-                    # Observation failure cannot replace an authoritative result.
-                    pass
-                try:
-                    dispatch = worker.page.evaluate(PENDING_DISPATCH_OBSERVATION_SCRIPT)
-                    if isinstance(dispatch, dict) and dispatch.get("state") in {"invoked", "not_invoked"}:
-                        execution["dispatch"]["state"] = dispatch["state"]
-                except Exception:
-                    # The submit page may have closed. Authoritative readback
-                    # still owns success; observation loss never retries a write.
-                    pass
-                try:
-                    execution["readback"]["attempts"] += 1
-                    last_observation = verify_pending_action(adapter, reader, target)
-                    execution["readback"].update({"last_observed_at": datetime.now(timezone.utc).isoformat(),
-                                                  "reason": last_observation.get("reason")})
-                    last_error = None
-                except Exception as exc:
-                    # Read-only retries never dispatch a second submission.
-                    last_error = type(exc).__name__
+            with read_deadline_scope(deadline, inherit=False):
+                scheduled = worker.page.evaluate(
+                    PENDING_ACTION_SCRIPT,
+                    {
+                        "affair_id": target["affair_id"],
+                        "opinion": opinion,
+                        "attitude_code": attitude_code,
+                        "action_kind": action_kind,
+                        "identity": target,
+                    },
+                )
+                if not isinstance(scheduled, dict) or scheduled.get("scheduled") is not True:
+                    raise RuntimeError("OA did not acknowledge scheduling the submission")
+                entry = scheduled.get("submit_entry")
+                execution["dispatch"] = {"state": "scheduled", "submit_entry": entry if entry in _SUBMIT_ENTRIES else None}
+                observe_pending_phase(enter_commit_boundary, "submission_scheduled")
+                while time.monotonic() < deadline:
+                    # Dispatch original-page dialogs/events while the separate reader navigates.
+                    pump_browser_events(worker.page, remaining_ms(800))
+                    check_read_deadline()
+                    try:
+                        tracker.poll()
+                    except Exception:
+                        # Observation failure cannot replace an authoritative result.
+                        pass
+                    try:
+                        dispatch = worker.page.evaluate(PENDING_DISPATCH_OBSERVATION_SCRIPT)
+                        if isinstance(dispatch, dict) and dispatch.get("state") in {"invoked", "not_invoked"}:
+                            execution["dispatch"]["state"] = dispatch["state"]
+                            if dispatch["state"] == "invoked":
+                                observe_pending_phase(enter_commit_boundary, "submission_invoked")
+                    except Exception:
+                        # The submit page may have closed. Authoritative readback
+                        # still owns success; observation loss never retries a write.
+                        pass
+                    if tracker.request_observed:
+                        observe_pending_phase(enter_commit_boundary, "request_observed")
+                    try:
+                        execution["readback"]["attempts"] += 1
+                        check_read_deadline()
+                        observe_pending_phase(enter_commit_boundary, "verifying_result")
+                        last_observation = verify_pending_action(adapter, reader, target, deadline=deadline)
+                        execution["readback"].update({"last_observed_at": datetime.now(timezone.utc).isoformat(),
+                                                      "reason": last_observation.get("reason")})
+                        last_error = None
+                    except Exception as exc:
+                        # Read-only retries never dispatch a second submission.
+                        last_error = type(exc).__name__
+                        if isinstance(exc, ReadBudgetExceeded) or execution["dispatch"]["state"] == "not_invoked":
+                            break
+                        continue
+                    if last_observation.get("confirmed") is True:
+                        check_read_deadline()
+                        observe_pending_phase(enter_commit_boundary, "verification_completed")
+                        return {
+                            "verification": last_observation,
+                            "submission_evidence": _snapshot(tracker),
+                            "execution": execution,
+                        }
                     if execution["dispatch"]["state"] == "not_invoked":
+                        # The final same-page guard refused to invoke OA. Keep the
+                        # consumed attempt visible, but do not burn the readback
+                        # minute or turn it into an automatic second submission.
                         break
-                    continue
-                if last_observation.get("confirmed") is True:
-                    return {
-                        "verification": last_observation,
-                        "submission_evidence": _snapshot(tracker),
-                        "execution": execution,
-                    }
-                if execution["dispatch"]["state"] == "not_invoked":
-                    # The final same-page guard refused to invoke OA. Keep the
-                    # consumed attempt visible, but do not burn the readback
-                    # minute or turn it into an automatic second submission.
-                    break
-            detail = {
-                "readback": last_observation,
-                "last_read_error": last_error,
-                "submission": _snapshot(tracker),
-                "execution": execution,
-            }
-            raise outcome_error(
-                "OA 已尝试提交，但未确认办理完成；已停止自动处理，请先核对，不要重复提交。 "
-                + _READBACK_REASONS.get(last_observation.get("reason"), "未取得完整的办理结果证据")
-                + "。 "
-                + json.dumps(detail, ensure_ascii=False, sort_keys=True)
-            )
+                detail = {
+                    "readback": last_observation,
+                    "last_read_error": last_error,
+                    "submission": _snapshot(tracker),
+                    "execution": execution,
+                }
+                raise outcome_error(
+                    "OA 已尝试提交，但未确认办理完成；已停止自动处理，请先核对，不要重复提交。 "
+                    + _READBACK_REASONS.get(last_observation.get("reason"), "未取得完整的办理结果证据")
+                    + "。 "
+                    + json.dumps(detail, ensure_ascii=False, sort_keys=True)
+                )
         except outcome_error:
             raise
         except AdapterBusinessRuleRejected:

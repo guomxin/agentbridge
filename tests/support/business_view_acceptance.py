@@ -196,6 +196,10 @@ class SyntheticOaPage:
         if arg != {"gridId": "listDone", "managerMethod": "getDoneList"}:
             raise AssertionError(f"Unexpected synthetic grid contract: {arg}")
 
+    def _done_rows(self):
+        return [{**deepcopy(fixture["source"]), "date_basis": "processed_at"}
+                for fixture in self.worker.transport.data["affairs"].values() if fixture["processed"]]
+
     def evaluate(self, _script, argument=None):
         if "agentbridge_pending_readiness" in _script:
             return {"identity_matches": True, "ready": True, "body_loaded": True,
@@ -213,11 +217,28 @@ class SyntheticOaPage:
             return signals
         if set(argument) >= {"affair_id", "opinion", "attitude_code"}:
             return self.worker.transport.submit(argument, self.worker)
+        if set(argument) == {"managerMethod", "filters", "pageNumber", "pageSize", "dateField", "dateBasis", "timeoutMs"}:
+            filters = argument["filters"]
+            if (not self.worker.is_reader or argument["managerMethod"] != "getDoneList"
+                    or argument["pageSize"] != 50 or argument["dateField"] != "dealTime"
+                    or argument["dateBasis"] != "processed_at" or not isinstance(filters, dict)
+                    or set(filters) not in ({"dumpData", "deduplication", "aiProcessing"},
+                                           {"dealDate", "dumpData", "deduplication", "aiProcessing"})
+                    or any(filters[key] != "false" for key in ("dumpData", "deduplication", "aiProcessing"))):
+                raise AssertionError("Synthetic history rejects an unsupported getDoneList contract")
+            rows = self._done_rows()
+            start, end = filters.get("dealDate", "#").split("#")
+            rows = [row for row in rows if (not start or str(row.get("date") or "")[:10] >= start)
+                    and (not end or str(row.get("date") or "")[:10] <= end)]
+            page = argument["pageNumber"]
+            if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+                raise AssertionError("Synthetic history requires a positive exact page")
+            return {"items": rows[(page - 1) * 50:page * 50], "total": len(rows),
+                    "page": page, "pages": (len(rows) + 49) // 50, "size": 50}
         if set(argument) == {"gridId", "dateFields"}:
             if not self.worker.is_reader:
                 raise AssertionError("Readback must use an independent synthetic page")
-            rows = [{**deepcopy(fixture["source"]), "date_basis": "processed_at"}
-                    for fixture in self.worker.transport.data["affairs"].values() if fixture["processed"]]
+            rows = self._done_rows()
             return {"items": rows, "total": len(rows), "page": 1}
         raise AssertionError("Synthetic DOM rejects unknown evaluate contract")
 

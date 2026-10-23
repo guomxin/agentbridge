@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agentbridge.adapters.seeyon_pending_execution import pending_action_preflight
+
 from copy import deepcopy
 from datetime import datetime
 import hashlib
@@ -448,6 +450,7 @@ def prepare_missed_punch_approval(adapter, worker, arguments: dict) -> dict:
     }
 
 
+@pending_action_preflight
 def approve_missed_punch_request(
     adapter,
     worker,

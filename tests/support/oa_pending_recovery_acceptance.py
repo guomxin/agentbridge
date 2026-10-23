@@ -11,15 +11,12 @@ from tests.test_full_business_acceptance import decide, drive
 
 
 class RecoveryPage(ReadinessPage):
-    def evaluate(self, script, argument=None):
-        if isinstance(argument, dict) and set(argument) == {"gridId", "dateFields"}:
-            response = super().evaluate(script, argument)
-            for item in self.worker.transport.data["affairs"].values():
-                if item.get("done_conflict") and not item["processed"]:
-                    response["items"].append({**deepcopy(item["source"]), "date_basis": "processed_at"})
-            response["total"] = len(response["items"])
-            return response
-        return super().evaluate(script, argument)
+    def _done_rows(self):
+        rows = super()._done_rows()
+        for item in self.worker.transport.data["affairs"].values():
+            if item.get("done_conflict") and not item["processed"]:
+                rows.append({**deepcopy(item["source"]), "date_basis": "processed_at"})
+        return rows
 
 
 class RecoveryWorker(ReadinessWorker):

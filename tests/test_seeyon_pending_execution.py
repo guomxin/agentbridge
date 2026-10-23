@@ -1,3 +1,4 @@
+from tests.support.pending_execution_clock import single_readback_attempt
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -139,7 +140,7 @@ def test_pending_absence_without_matching_done_identity_remains_unknown(attempt,
         return result
 
     monkeypatch.setattr(adapter, "list_workflows", wrong_done)
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
+    with single_readback_attempt():
         with pytest.raises(PendingActionOutcomeUnknown, match="done_identity_mismatch"):
             approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=Mock())
     assert worker.readback_closed
@@ -285,3 +286,62 @@ def test_final_guard_refusal_stops_after_one_failed_readback_without_retry(attem
         approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=Mock())
     read.assert_called_once()
     assert worker.page.pumped == [800]
+
+
+@pytest.mark.parametrize("slow_stage", ["initial_detail", "final_materials", "nested_recovery"])
+def test_preflight_budget_covers_initial_detail_and_final_guards_without_consumption(attempt, monkeypatch, slow_stage):
+    adapter, worker, plan = attempt
+    clock = [0.0]
+    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_execution.time.monotonic", lambda: clock[0])
+    boundary = Mock()
+    def slow(function):
+        def call(*args, **kwargs):
+            result = function(*args, **kwargs)
+            clock[0] = 61.0
+            return result
+        return call
+    if slow_stage == "nested_recovery":
+        boundary.before_pending_revalidation = lambda: clock.__setitem__(0, 61.0)
+    else:
+        name = "resolve_workflow_detail" if slow_stage == "initial_detail" else "revalidate_workflow_detail"
+        monkeypatch.setattr(adapter, name, slow(getattr(adapter, name)))
+    with pytest.raises(PendingActionNotReady, match="授权未消耗"):
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    boundary.assert_not_called()
+    assert worker.page.commit_payload is None
+
+
+def test_slow_successful_readback_after_deadline_remains_unknown_without_replay(attempt, monkeypatch):
+    adapter, worker, plan = attempt
+    clock = [0.0]
+    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_execution.time.monotonic", lambda: clock[0])
+    original = adapter.list_workflows
+    def late_done(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if kwargs["collection"] == "done":
+            clock[0] = 61.0
+        return result
+    monkeypatch.setattr(adapter, "list_workflows", late_done)
+    worker.page.evaluate = Mock(wraps=worker.page.evaluate)
+    boundary = Mock()
+    with pytest.raises(PendingActionOutcomeUnknown, match="ReadBudgetExceeded"):
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    boundary.assert_called_once()
+    submits = [call for call in worker.page.evaluate.call_args_list
+               if len(call.args) == 2 and isinstance(call.args[1], dict) and "opinion" in call.args[1]]
+    assert len(submits) == 1
+    assert worker.readback_closed
+
+
+def test_progress_only_describes_observed_boundaries_and_contains_no_input(attempt):
+    adapter, worker, plan = attempt
+    phases = []
+    def boundary():
+        phases.append("consumed")
+    boundary.observe_pending_phase = lambda phase, reason=None: phases.append(phase)
+    result = approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    assert result["verification"]["confirmed"] is True
+    assert phases.index("final_revalidation") < phases.index("consumed") < phases.index("submission_scheduled")
+    assert phases.index("submission_scheduled") < phases.index("submission_invoked") < phases.index("verifying_result")
+    assert phases[-1] == "verification_completed"
+    assert "request_observed" not in phases  # Synthetic page emitted no request event.

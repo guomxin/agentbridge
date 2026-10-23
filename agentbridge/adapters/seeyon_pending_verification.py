@@ -8,6 +8,8 @@ The caller owns the independent readback worker and polling/retry policy.
 
 from __future__ import annotations
 
+from agentbridge.browser.read_budget import read_deadline_scope, check_read_deadline
+
 
 VERIFICATION_METHOD = "complete_pending_absence_and_done_identity"
 
@@ -20,7 +22,32 @@ _STABLE_IDENTITY_FIELDS = (
 )
 
 
-def verify_pending_action(adapter, readback_worker, target: dict) -> dict:
+def read_pending_done(adapter, readback_worker, target: dict, *, deadline: float | None = None) -> dict:
+    """One bounded done observation, shared by readback and recovery assessment."""
+    with read_deadline_scope(deadline):
+        reader = getattr(adapter, "read_pending_done", None)
+        if callable(reader):
+            result = reader(readback_worker, target=target)
+        else:
+            # Legacy/test adapters may already expose a complete or identity-rich
+            # done snapshot. Production Seeyon always uses the controlled scan.
+            result = adapter.list_workflows(readback_worker, collection="done", arguments={"limit": 1000})
+        check_read_deadline()
+        return result
+
+
+def verify_pending_action(
+    adapter, readback_worker, target: dict, *, pending_snapshot=None,
+    done_snapshot=None, deadline: float | None = None,
+) -> dict:
+    with read_deadline_scope(deadline):
+        result = _verify_pending_action(adapter, readback_worker, target,
+                                        pending_snapshot=pending_snapshot, done_snapshot=done_snapshot)
+        check_read_deadline()
+        return result
+
+
+def _verify_pending_action(adapter, readback_worker, target: dict, *, pending_snapshot, done_snapshot) -> dict:
     """Return one observation; read failures propagate without asserting success.
 
     The currently verified pending source is the home section, not a paginated
@@ -33,9 +60,10 @@ def verify_pending_action(adapter, readback_worker, target: dict) -> dict:
     if not all(_text(target.get(name)) for name in ("summary_id", "process_id")):
         return _observation("frozen_identity_incomplete")
 
-    pending = adapter.list_workflows(
+    pending = pending_snapshot if pending_snapshot is not None else adapter.list_workflows(
         readback_worker, collection="pending", arguments={"limit": 100}
     )
+    check_read_deadline()
     rows = _rows(pending)
     if rows is None:
         return _observation("pending_response_invalid")
@@ -47,12 +75,16 @@ def verify_pending_action(adapter, readback_worker, target: dict) -> dict:
     if coverage.get("hasMore") is True or not _consistent_complete_collection(pending, rows):
         return _observation("pending_coverage_inconsistent")
 
-    done = adapter.list_workflows(
-        readback_worker, collection="done", arguments={"limit": 1000}
-    )
+    done = done_snapshot if done_snapshot is not None else read_pending_done(adapter, readback_worker, target)
+    check_read_deadline()
     done_rows = _rows(done)
     if done_rows is None:
         return _observation("done_response_invalid", pending_absence_confirmed=True)
+    evidence = done.get("query_evidence")
+    if isinstance(evidence, dict) and evidence.get("completionReason") not in {
+        "server_target_found", "server_source_exhausted", "server_filtered_source_exhausted",
+    }:
+        return _observation("done_scan_unproven", pending_absence_confirmed=True)
     matches = [row for row in done_rows if _text(row.get("affair_id")) == affair_id]
     if not matches:
         return _observation("done_affair_not_found", pending_absence_confirmed=True)
@@ -64,14 +96,20 @@ def verify_pending_action(adapter, readback_worker, target: dict) -> dict:
 
     identity = _row_identity(row)
     if not all(_text(identity.get(name)) for name in ("summary_id", "process_id")):
-        source, _detail = adapter.resolve_workflow_detail(
-            readback_worker, collection="done", affair_id=affair_id
-        )
+        resolve_row = getattr(adapter, "resolve_done_workflow_row_detail", None)
+        if callable(resolve_row):
+            source, _detail = resolve_row(readback_worker, source_item=row)
+        else:
+            source, _detail = adapter.resolve_workflow_detail(
+                readback_worker, collection="done", affair_id=affair_id
+            )
+        check_read_deadline()
         if not isinstance(source, dict) or _text(source.get("affair_id")) != affair_id:
             return _observation("done_detail_affair_mismatch", pending_absence_confirmed=True)
         if _title_mismatch(target, source):
             return _observation("done_title_mismatch", pending_absence_confirmed=True)
         signals = readback_worker.page.evaluate(_DONE_IDENTITY_SCRIPT, affair_id)
+        check_read_deadline()
         if not isinstance(signals, dict) or not all((
             signals.get("affair_matches") is True,
             signals.get("page_path") == "/seeyon/collaboration/collaboration.do",

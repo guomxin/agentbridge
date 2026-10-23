@@ -138,6 +138,43 @@ class HistoryQueryTests(unittest.TestCase):
             self.assertEqual(contract["filters"]["dateRange"]["execution"], "server")
             self.assertEqual(spec.input_schema["properties"]["limit"]["maximum"], 1000)
 
+    def test_exact_target_scan_uses_no_guessed_date_and_checks_ordering_anchor(self):
+        first = payload(rows(50, day=""), total=150)
+        second = payload(rows(50, start=50, day=""), total=150, page=2)
+        page = Mock()
+        page.evaluate.side_effect = [first, second, first]
+        result = read_filtered_history(page, collection="done", start_date=None, end_date=None,
+                                       target_affair_id="51")
+        self.assertEqual(result["query_evidence"]["completionReason"], "server_target_found")
+        self.assertFalse(result["query_evidence"]["complete"])
+        calls = [call.args[1] for call in page.evaluate.call_args_list]
+        self.assertEqual([args["pageNumber"] for args in calls], [1, 2, 1])
+        self.assertEqual(calls[0]["filters"], {"dumpData": "false", "deduplication": "false", "aiProcessing": "false"})
+
+    def test_equal_counts_with_changed_anchor_are_not_positive_presence_evidence(self):
+        first = payload(rows(50), total=100)
+        second = payload(rows(50, start=50), total=100, page=2)
+        changed = payload(rows(50, start=100), total=100)
+        page = Mock()
+        page.evaluate.side_effect = [first, second, changed]
+        result = read_filtered_history(page, collection="done", start_date=None, end_date=None,
+                                       target_affair_id="51")
+        self.assertEqual(result["query_evidence"]["completionReason"], "server_query_changed_during_pagination")
+        self.assertFalse(result["query_evidence"]["targetPresenceValidated"])
+
+    def test_late_target_response_cannot_be_accepted_after_budget(self):
+        clock = [0.0]
+        def late_page(*args):
+            clock[0] = 1
+            return payload(rows(1))
+        page = Mock()
+        page.evaluate.side_effect = late_page
+        with patch("agentbridge.adapters.seeyon_history_query.time.monotonic", lambda: clock[0]):
+            result = read_filtered_history(page, collection="done", start_date=None, end_date=None,
+                                           target_affair_id="0", deadline=.05)
+        self.assertEqual(result["query_evidence"]["completionReason"], "server_query_time_budget_reached")
+        self.assertFalse(result["query_evidence"]["targetPresenceValidated"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -473,9 +473,11 @@ class ControlledWriteExecutor:
 
         def enter_commit_boundary() -> None:
             nonlocal boundary_entered
+            from agentbridge.browser.read_budget import check_read_deadline
             self._dependencies.user_grants.require_capability(
                 context.user_subject, context.spec.name, arguments
             )
+            check_read_deadline()
             self._dependencies.write_authorizations.consume(
                 authorization_id,
                 user_subject=session["user_subject"],
@@ -491,7 +493,8 @@ class ControlledWriteExecutor:
                     user_subject=session["user_subject"], operation_id=context.operation_id,
                     validate=self._dependencies.validate_task_plan_execution,
                 ), self._dependencies.guard_pending_recovery(context=context, session=session,
-                    plan=plan, authorization=authorization, connection=connection) if self._dependencies.guard_pending_recovery else None),
+                    plan=plan, authorization=authorization, connection=connection) if self._dependencies.guard_pending_recovery else None,
+                    check_read_deadline()),
             )
             boundary_entered = True
 
@@ -499,6 +502,15 @@ class ControlledWriteExecutor:
         # identity and readiness checks. Consumption itself only rechecks the
         # immutable permit/session binding inside its transaction.
         enter_commit_boundary.before_pending_revalidation = check_recovery_before_revalidation
+        observed_pending_phases = set()
+        def observe_pending_phase(phase: str, reason: str | None = None) -> None:
+            from agentbridge.core.business_execution_progress import PENDING_PHASES, record_pending_phase
+            if phase not in PENDING_PHASES or phase in observed_pending_phases:
+                return
+            observed_pending_phases.add(phase)
+            record_pending_phase(self._dependencies.tasks, context=context, authorization=authorization,
+                                 phase=phase, reason=reason)
+        enter_commit_boundary.observe_pending_phase = observe_pending_phase
 
         commit_function = resolve_write_function(str(definition["commit_function"]))
         if not callable(commit_function):

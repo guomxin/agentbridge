@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+import time
 
 from agentbridge.core.runtime_governance import RuntimeGovernanceStore
 from agentbridge.workspace.performance import WorkspacePerformance
@@ -10,6 +11,22 @@ from agentbridge.mcp.central import _request_runtime_context
 
 
 class WorkspacePerformanceTests(unittest.TestCase):
+    def test_action_timings_keep_failed_attempts_when_the_same_request_later_recovers(self):
+        with TemporaryDirectory() as tmp:
+            store = RuntimeGovernanceStore(Path(tmp)/"runtime.db")
+            timing = WorkspacePerformance(store)
+            account = {"user_subject":"owner", "endpoint_id":"workspace-endpoint"}
+            started_at = datetime.now(timezone.utc).isoformat()
+            for status in ["failed", "failed", "succeeded"]:
+                timing.record_action(account, "recovery_probe", "safe-request-key-001",
+                    started=time.perf_counter(), started_at=started_at, task_id="task-1", status=status)
+            trace = store.trace_for_request("workspace-action:recovery_probe:safe-request-key-001", user_subject="owner")
+            with store._connect() as db:
+                spans = db.execute("SELECT status,metadata_json FROM runtime_spans WHERE trace_id=? ORDER BY status", (trace["trace_id"],)).fetchall()
+            self.assertEqual([row["status"] for row in spans], ["failed", "succeeded"])
+            self.assertEqual(trace["status"], "succeeded")
+            self.assertNotIn("opinion", str([dict(row) for row in spans]))
+
     def test_duration_dedupe_and_host_terminal_do_not_close_business_trace(self):
         with TemporaryDirectory() as tmp:
             store = RuntimeGovernanceStore(Path(tmp)/"runtime.db")

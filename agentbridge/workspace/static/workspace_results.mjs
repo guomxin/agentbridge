@@ -88,6 +88,9 @@ export function businessExecutionPresentation(result) {
   if (execution?.schemaVersion !== "agentbridge.business-execution.v1") return null;
   const labels = {
     waiting_business_page: "等待业务页面就绪", preparing_submission: "准备提交",
+    final_revalidation: "最终核对身份与材料", verifying_result: "核对 OA 结果",
+    request_observed: "已观察到 OA 提交请求",
+    awaiting_progress: "执行阶段尚未更新",
     submission_invoked: "已调用 OA 提交入口", submission_scheduled: "提交入口已排队",
     verifying: "核对 OA 结果", not_submitted: "尚未提交",
     verified: "业务结果已核验", outcome_unknown: "结果待核对", failed: "办理未完成",
@@ -104,6 +107,8 @@ export function businessExecutionPresentation(result) {
     done_detail_affair_mismatch: "已办详情与原确认事项不一致。",
     done_title_mismatch: "已办记录与原确认事项的标题不一致。",
     done_response_invalid: "未取得可核对的已办记录。",
+    read_budget_exceeded: "本轮核对已到时间上限，尚不能确认结果；可再次只读核对原事项。",
+    done_scan_unproven: "已办列表尚未取得完整覆盖证据，暂不能确认原事项结果。",
     frozen_identity_incomplete: "原事项缺少完成核验所需的流程标识。",
     body_loading: "OA 正文尚未加载就绪，本次尚未提交。",
     content_loading: "OA 材料尚未加载就绪，本次尚未提交。",
@@ -122,12 +127,23 @@ export function businessExecutionPresentation(result) {
   } else if (execution.phase === "not_submitted" && !message) {
     message = "提交前检查未通过，本次尚未提交到 OA。";
   }
-  const submission = {scheduled: "提交入口已排队，尚不能证明请求发出", invoked: "已调用原始提交入口，仍须核验业务结果",
+  const submission = execution.requestObserved === true ? "已观察到 OA 提交请求，仍须核验业务结果" : {scheduled: "提交入口已排队，尚不能证明请求发出", invoked: "已调用原始提交入口，仍须核验业务结果",
     not_invoked: "未调用提交入口", observation_unavailable: "暂未取得提交入口观察证据"}[execution.submissionState];
   return {phase, message, submission: execution.phase === "verified" ? null : submission,
     historicalSubmission: execution.phase === "verified" ? submission : null,
+    operationStartedAt:execution.operationStartedAt, phaseStartedAt:execution.phaseStartedAt,
+    phaseObservedAt:execution.phaseObservedAt,
+    running:!TERMINAL_TASK_STATES.has(result.task?.status) && Boolean(execution.operationStartedAt),
     observedAt: execution.lastObservedAt, updatedAt: execution.updatedAt,
     readOnlyQuery: result.task?.status === "outcome_unknown" && execution.readOnlyQuery === "oa_pending"};
+}
+
+export function executionWaitMessage(result, now = Date.now()) {
+  const execution = businessExecutionPresentation(result);
+  const started = Date.parse(execution?.operationStartedAt), phaseStarted = Date.parse(execution?.phaseStartedAt);
+  if (!execution?.running || !Number.isFinite(started)) return "";
+  const elapsed = Math.max(0, Math.floor((now-started)/1000)), phaseElapsed = Number.isFinite(phaseStarted) ? Math.max(0, Math.floor((now-phaseStarted)/1000)) : null;
+  return `本次执行已等待 ${elapsed} 秒${phaseElapsed === null ? " · 暂未取得当前阶段记录。" : ` · 当前阶段 ${phaseElapsed} 秒。`}${execution.phaseObservedAt ? `最近阶段更新：${formatTime(execution.phaseObservedAt)}。` : ""}可以离开此页，任务会继续处理并保留结果；请勿重复提交。`;
 }
 
 // This public projection is display-only. Fresh assessment identifiers and
@@ -164,6 +180,8 @@ export function oaRecoveryPresentation(result, now = Date.now()) {
     recovery_result_unverified:"后续任务已结束，但业务完成证据尚未核验，请先查看结果记录。",
     recovery_prepare_retryable:"同一后续任务的材料准备尚未完成，请先重新核对原事项，再恢复材料准备。",
     unsupported:"此历史任务暂不支持恢复，请到 OA 核对原事项。"};
+  reasonMessages.read_budget_exceeded = "本轮核对已到时间上限，尚不能确认结果；可再次只读核对原事项，不会重新提交。";
+  reasonMessages.done_scan_unproven = "已办列表尚未取得完整覆盖证据，不能据此确认结果；可再次只读核对原事项。";
   const expiry = Date.parse(recovery.expiresAt);
   const historicalVerification = recovery.status === "verified_complete" &&
     (recovery.stale === true || Number.isFinite(expiry) && expiry <= now);
@@ -507,6 +525,7 @@ export function eventLabel(type) {
       "task.interaction.failed": "可信交互失败",
       "task.interaction.superseded": "可信交互已更新",
       "task.operation.running": "操作执行中",
+      "task.business.progress": "业务办理阶段已更新",
       "task.analysis.progress": "正在核验并分析本人日报",
       "task.operation.succeeded": "操作成功",
       "task.operation.failed": "操作失败",

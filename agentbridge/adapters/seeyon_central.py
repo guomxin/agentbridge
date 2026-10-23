@@ -14,6 +14,9 @@ from copy import deepcopy
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from agentbridge.adapters.seeyon_history_query import read_filtered_history
+from agentbridge.browser.read_budget import (
+    ReadBudgetExceeded, check_read_deadline, remaining_seconds, remaining_ms,
+)
 from agentbridge.adapters.seeyon_pending_batch import PENDING_BATCH_PREPARE_CAPABILITY, PENDING_BATCH_INPUT_SCHEMA
 from agentbridge.core.query_contracts import HISTORY_QUERY_EVIDENCE_SCHEMA, oa_history_query_contract
 
@@ -836,8 +839,12 @@ class SeeyonCentralAdapter:
         if scope is not None and "templates" in scope:
             return deepcopy(scope["templates"])
         try:
-            response = worker.request("GET", self.template_center_url)
+            response = worker.request("GET", self.template_center_url, timeout_seconds=remaining_seconds(30))
+            check_read_deadline()
+        except ReadBudgetExceeded:
+            raise
         except Exception as exc:
+            check_read_deadline()
             raise SeeyonSessionCheckUnavailable(
                 f"OA session check request failed ({_safe_exception_code(exc)})."
             ) from exc
@@ -886,7 +893,8 @@ class SeeyonCentralAdapter:
 
     def probe_business_draft_session(self, worker) -> dict:
         """Observe the account on the authenticated home page before draft reads."""
-        worker.goto(self.base_url)
+        worker.goto(self.base_url, timeout_seconds=remaining_seconds(30))
+        check_read_deadline()
         scope = self._scope_for(worker)
         if scope is not None:
             scope["home_observed"] = True
@@ -1213,7 +1221,7 @@ class SeeyonCentralAdapter:
 
         snapshot = worker.current_snapshot(
             readiness={"kind": "oa_workflow_detail", "affair_id": affair_id, "title": str(source.get("title") or "")},
-            include_frames=True, timeout_seconds=10,
+            include_frames=True, timeout_seconds=remaining_seconds(10),
         )
         return source, self._parse_workflow_detail_snapshot(worker, snapshot, str(source.get("href") or ""))
 
@@ -1246,6 +1254,30 @@ class SeeyonCentralAdapter:
             worker, normalized_item
         )
 
+    def read_pending_done(self, worker, *, target: dict) -> dict:
+        """Internal exact-affair presence scan; no client-supplied query filters."""
+        affair_id = _validated_identifier(target.get("affair_id"), "affair_id")
+        self.list_templates(worker)
+        result = self._read_history_page(worker, "done", target_affair_id=affair_id)
+        evidence = result.get("query_evidence") or {}
+        complete = evidence.get("complete") is True
+        result["coverage"] = {
+            "status": "complete" if complete else "partial", "hasMore": not complete,
+            "completionReason": evidence.get("completionReason"),
+        }
+        return result
+
+    def resolve_done_workflow_row_detail(self, worker, *, source_item: dict) -> tuple[dict, dict]:
+        """Resolve a row from this readback's done scan without reloading page 1."""
+        affair_id = _validated_identifier(source_item.get("affair_id"), "affair_id")
+        source = dict(source_item)
+        source["affair_id"] = affair_id
+        # Ignore href from the row; the route is the registered done contract.
+        source["href"] = urljoin(self.base_url, "collaboration/collaboration.do?" + urlencode({
+            "method": "summary", "openFrom": "listDone", "affairId": affair_id, "showTab": "true",
+        }))
+        return source, self._render_workflow_source_detail(worker, source)
+
     def _fetch_workflow_collection(
         self, worker, collection: str, *, start_date: date | None = None, end_date: date | None = None
     ) -> dict:
@@ -1258,7 +1290,8 @@ class SeeyonCentralAdapter:
             return self._fetch_history_page_collection(worker, collection)
 
         section_url = self._discover_pending_section_url(worker)
-        response = worker.request("GET", section_url)
+        response = worker.request("GET", section_url, timeout_seconds=remaining_seconds(30))
+        check_read_deadline()
         status = int(response.get("status") or 0)
         final_url = str(response.get("url") or "")
         payload = response.get("json")
@@ -1281,7 +1314,8 @@ class SeeyonCentralAdapter:
         return self._read_history_page(worker, collection)
 
     def _read_history_page(
-        self, worker, collection: str, *, start_date: date | None = None, end_date: date | None = None
+        self, worker, collection: str, *, start_date: date | None = None, end_date: date | None = None,
+        target_affair_id: str | None = None,
     ) -> dict:
         contract = _HISTORY_PAGE_CONTRACTS.get(collection)
         if contract is None:
@@ -1293,7 +1327,8 @@ class SeeyonCentralAdapter:
             "collaboration/collaboration.do?"
             + urlencode({"method": contract["method"]}),
         )
-        page = worker.goto(page_url)
+        page = worker.goto(page_url, timeout_seconds=remaining_seconds(30))
+        check_read_deadline()
         if _looks_like_login_url(worker.page_url):
             raise SeeyonLoginRequired(
                 f"The central OA session expired while opening the {collection} page."
@@ -1308,18 +1343,23 @@ class SeeyonCentralAdapter:
                     "gridId": contract["grid_id"],
                     "managerMethod": contract["manager_method"],
                 },
-                timeout=12000,
+                timeout=remaining_ms(12000),
             )
+            check_read_deadline()
             extracted = read_filtered_history(
-                page, collection=collection, start_date=start_date, end_date=end_date
-            ) if start_date or end_date else page.evaluate(
+                page, collection=collection, start_date=start_date, end_date=end_date,
+                target_affair_id=target_affair_id,
+            ) if start_date or end_date or target_affair_id else page.evaluate(
                 _HISTORY_GRID_EXTRACT_SCRIPT,
                 {
                     "gridId": contract["grid_id"],
                     "dateFields": contract["date_fields"],
                 },
             )
+        except ReadBudgetExceeded:
+            raise
         except Exception as exc:
+            check_read_deadline()
             if _looks_like_login_url(worker.page_url):
                 raise SeeyonLoginRequired(
                     f"The central OA session expired while loading the {collection} page."
@@ -1327,6 +1367,7 @@ class SeeyonCentralAdapter:
             raise SeeyonReadContractMismatch(
                 f"The OA {collection} page did not expose its workflow grid."
             ) from exc
+        check_read_deadline()
         if not isinstance(extracted, dict) or not isinstance(extracted.get("items"), list):
             raise SeeyonReadContractMismatch(
                 f"The OA {collection} page returned an invalid workflow grid."
@@ -1368,7 +1409,7 @@ class SeeyonCentralAdapter:
                 }
             )
         return {
-            "source": "history_filtered_query" if start_date or end_date else "history_page_grid",
+            "source": "history_target_query" if target_affair_id else ("history_filtered_query" if start_date or end_date else "history_page_grid"),
             "count": len(items),
             "total": extracted.get("total"),
             "page": extracted.get("page"),
@@ -1612,15 +1653,18 @@ class SeeyonCentralAdapter:
             return scope["pending_route"]
         if not (scope is not None and scope.get("home_observed")
                 and worker.page_url == self.base_url):
-            worker.goto(self.base_url)
-        deadline = time.monotonic() + max(timeout_seconds, 0.1)
+            worker.goto(self.base_url, timeout_seconds=remaining_seconds(30))
+        check_read_deadline()
+        deadline = time.monotonic() + remaining_seconds(max(timeout_seconds, 0.1))
         while time.monotonic() < deadline:
+            check_read_deadline()
             if _looks_like_login_url(worker.page_url):
                 raise SeeyonLoginRequired("The central OA session expired while opening the home page.")
             section_url = _find_section_resource_url(
                 worker.resource_urls(),
                 "pendingSection",
             )
+            check_read_deadline()
             if section_url:
                 route = _section_url_with_arguments(
                     section_url,
@@ -1629,7 +1673,7 @@ class SeeyonCentralAdapter:
                 if scope is not None:
                     scope["pending_route"] = route
                 return route
-            time.sleep(0.25)
+            time.sleep(remaining_seconds(0.25))
         raise SeeyonReadContractMismatch(
             "The OA home page did not expose the pending section contract in time."
         )
@@ -1664,12 +1708,15 @@ class SeeyonCentralAdapter:
             raise SeeyonReadContractMismatch("The selected workflow does not expose a detail page.")
         try:
             snapshot = worker.rendered_snapshot(
-                detail_url, settle_ms=0, include_frames=True,
+                detail_url, settle_ms=0, include_frames=True, timeout_seconds=remaining_seconds(30),
                 readiness={"kind": "oa_workflow_detail",
                            "affair_id": str(source_item.get("affair_id") or ""),
                            "title": str(source_item.get("title") or "")},
             )
+        except ReadBudgetExceeded:
+            raise
         except TimeoutError as exc:
+            check_read_deadline()
             if _looks_like_login_url(worker.page_url):
                 raise SeeyonLoginRequired(
                     "The central OA session expired while rendering workflow detail."
@@ -1677,6 +1724,7 @@ class SeeyonCentralAdapter:
             raise SeeyonReadContractMismatch(
                 "The OA workflow detail did not expose stable, complete target materials in time."
             ) from exc
+        check_read_deadline()
         return self._parse_workflow_detail_snapshot(worker, snapshot, detail_url)
 
     def _parse_workflow_detail_snapshot(self, worker, snapshot: dict, detail_url: str) -> dict:

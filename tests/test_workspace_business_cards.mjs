@@ -444,3 +444,22 @@ test("verified completion moves prior submission observation below the current r
   assert.match(findClass(f.detail,"execution-history").textContent,/完成核验前的提交观察.*最终结论以当前业务核验结果为准/);
   assert.match(findClass(f.detail,"application-card-copy").textContent,/已取得本次业务操作的完成核验证据/);
 });
+
+test("actual execution stages show durable total and stage elapsed time, while completion retires the timer", async () => {
+  const {executionWaitMessage}=await import("../agentbridge/workspace/static/workspace_results.mjs");
+  const started=Date.parse("2026-10-23T12:00:00Z"),f=fixture();
+  const r=result(1,"running",[]);
+  r.businessExecution={schemaVersion:"agentbridge.business-execution.v1",phase:"verifying_result",actualPhase:"verifying_result",
+    operationId:"commit-current",operationStartedAt:new Date(started).toISOString(),
+    phaseStartedAt:new Date(started+5000).toISOString(),phaseObservedAt:new Date(started+5000).toISOString()};
+  assert.match(executionWaitMessage(r,started+12000),/本次执行已等待 12 秒.*当前阶段 7 秒.*可以离开此页/);
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  assert.match(findClass(f.detail,"detail-grid").textContent,/核对 OA 结果/);
+  assert.doesNotMatch(f.detail.textContent,/请求已发出|已完成|%/);
+  for(const status of ["succeeded","failed","outcome_unknown","canceled"]) {
+    r.task={...r.task,status,version:r.task.version+1};
+    r.businessExecution={...r.businessExecution,phase:status==="succeeded"?"verified":status==="outcome_unknown"?"outcome_unknown":"failed"};
+    assert.equal(executionWaitMessage(r,started+24000),"");f.renderTaskDetail(r);
+    assert.equal(findClass(f.detail,"business-wait").hidden,true);
+  }
+});

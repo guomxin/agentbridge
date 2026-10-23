@@ -3,7 +3,7 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
   taskPlanFailurePresentation, interactionLabel, interactionActionLabel,
   escapeClass, formatTime, statusLabel, eventLabel, taskInteractions,
   actionableTaskInteractions, batchItemStatusLabel, interactionStateLabel, trustedInteractionUrl,
-  TERMINAL_TASK_STATES, businessExecutionPresentation, taskResultTitle, taskPrimaryAction, oaRecoveryPresentation } from "./workspace_results.mjs";
+  TERMINAL_TASK_STATES, businessExecutionPresentation, taskResultTitle, taskPrimaryAction, oaRecoveryPresentation, executionWaitMessage } from "./workspace_results.mjs";
 
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
@@ -14,6 +14,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
+  const clocks = new Map();
+  let clockTimer = null, clockScope = null;
   state.taskFeedback ||= new Map();
   const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery, getScope,
     makeRequestKey:makeFeedbackRequestKey, openTask: async taskId => {
@@ -43,6 +45,39 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     root.append(summary, body);
     return { root, summary, body, rows: new Map() };
   };
+  function updateClock(node, result) {
+    const copy = executionWaitMessage(result);
+    node.hidden = !copy;
+    text(node, copy);
+    if (copy) clocks.set(node, result); else clocks.delete(node);
+    if (!clocks.size && clockTimer !== null) {
+      clockScope?.clearTimer(clockTimer); clockTimer = null;
+    }
+    if (clocks.size && clockTimer === null && getScope) {
+      clockScope = getScope();
+      clockScope.defer(() => { clocks.clear(); clockTimer = null; });
+      clockTimer = clockScope.interval(() => {
+        for (const [root, current] of clocks) {
+          if (root.isConnected === false) { clocks.delete(root); continue; }
+          text(root, executionWaitMessage(current));
+        }
+        if (!clocks.size) { clockScope.clearTimer(clockTimer); clockTimer = null; }
+      }, 1000);
+    }
+  }
+  function markBusinessProjection(result, root) {
+    const execution = result.businessExecution, timing = result.businessTiming;
+    if (execution?.actualPhase) markWorkspaceTiming("phase_rendered", {taskId:result.task.task_id,
+      operationId:execution.operationId, requestId:execution.requestId, phase:execution.actualPhase, status:result.task.status});
+    if (timing?.schemaVersion !== "agentbridge.business-timing.v1") return;
+    root.dataset.businessTiming = JSON.stringify(timing);
+    for (const item of timing.stages || []) {
+      if (item.stage === "form_ready") markWorkspaceTiming("form_ready", {taskId:result.task.task_id, requestId:timing.requestId});
+      if (item.stage === "decision_recorded") markWorkspaceTiming("decision_recorded", {taskId:result.task.task_id, operationId:timing.operationId, requestId:timing.requestId});
+    }
+    if (TERMINAL_TASK_STATES.has(result.task.status)) markWorkspaceTiming("result_rendered", {
+      taskId:result.task.task_id, operationId:timing.operationId, requestId:timing.requestId, status:result.task.status});
+  }
 
   const feedbackLabels = { useful: "有帮助", incorrect: "有错误", not_applicable: "不适用" };
   function feedbackModel(taskId) {
@@ -163,6 +198,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const status = element("span", "application-card-status");
     header.append(heading, status);
     const description = element("p", "application-card-copy");
+    const wait = element("p", "application-card-copy business-wait");
     const facts = { root: element("dl", "application-card-facts"), rows: new Map() };
     const active = { root: element("div", "business-interactions"), rows: new Map() };
     const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
@@ -181,9 +217,9 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       loadTaskDetail(taskId);
     });
     actions.append(progress);
-    card.append(header, description, facts.root, active.root, batch.root,
+    card.append(header, description, wait, facts.root, active.root, batch.root,
       history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, actions);
-    return { title, status, description, facts, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, progress };
+    return { title, status, description, wait, facts, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -351,13 +387,15 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     card.dataset.renderedVersion = String(task.version);
     card.dataset.sourceUpdatedAt = task.updated_at || "";
     markWorkspaceTiming("card_rendered", {taskId:task.task_id, version:Number(task.version), status:task.status});
+    markBusinessProjection(result, card);
+    updateClock(view.wait, result);
     const timelineMeta = state.taskCardMeta.get(cardKey) || state.taskCardMeta.get(`${task.task_id}:summary`) || {
       createdAt: task.created_at, sequence: 0,
     };
     state.taskCardMeta.set(cardKey, timelineMeta);
     setTimelineNode(card, {key:`task:${cardKey}`, createdAt:timelineMeta.createdAt || task.created_at, order:timelineMeta.sequence || 0});
     const active = actionableTaskInteractions(result);
-    const cardStatus = task.status || taskCardStatusForInteraction(active[0]?.state, "active");
+    const cardStatus = businessExecutionPresentation(result)?.running ? "running" : task.status || taskCardStatusForInteraction(active[0]?.state, "active");
     const queryGroup = task.summary?.workspaceQueryGroup;
     const queryTool = ["database_capabilities", "database_execute"].includes(queryGroup?.toolName);
     const legacyQuery = !queryGroup && ["独立数据库能力目录", "执行独立数据库查询与分析"].includes(task.title);
@@ -504,6 +542,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const facts = {root:element("dl", "detail-grid"), rows:new Map()};
       const outcomeNotice = element("p", "application-card-copy");
       outcomeNotice.setAttribute("role", "status");
+      const wait = element("p", "application-card-copy business-wait");
       const plan = element("div");
       const active = {root:element("div", "business-interactions"), rows:new Map()};
       const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
@@ -514,8 +553,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const recoveryPanel = element("section");
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, outcomeNotice, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, plan, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, timeline};
+      detail.append(heading, facts.root, outcomeNotice, wait, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, wait, plan, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -524,12 +563,14 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const focusWasInside = focused && detail.contains(focused);
     view.version = Number(task.version);
     view.task = task;
+    markBusinessProjection(result, detail);
+    updateClock(view.wait, result);
     const execution = businessExecutionPresentation(result);
     const recovered = oaRecoveryPresentation(result);
     const primaryAction = taskPrimaryAction(result);
     view.primaryAction = primaryAction;
     text(view.title, displayTaskTitle(taskResultTitle(result)));
-    text(view.status, recovered?.label || statusLabel(task.status));
+    text(view.status, recovered?.label || statusLabel(execution?.running ? "running" : task.status));
     view.readOnlyQuery = execution?.readOnlyQuery === true;
     view.resume.hidden = primaryAction.kind === "form";
     text(view.resume, primaryAction.label);
@@ -613,5 +654,9 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   }
 
   return { upsertTaskCard, upsertTaskCardVariant, renderTasks, renderTaskDetail, renderSkillCard, addDetail,
-    resetTaskCardControllers: () => {recovery.reset();actionable.reset();} };
+    resetTaskCardControllers: () => {
+      recovery.reset();actionable.reset();clocks.clear();
+      if (clockTimer !== null) clockScope?.clearTimer(clockTimer);
+      clockTimer = null;
+    } };
 }
