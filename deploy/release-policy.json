@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "58603683770e"
+    "29aa4e2ae2bb"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Persist the original closed-query user message atomically with its read-only intent, remove the global OA shortcut from the generic Workspace header, and add explicit evidence-bound recovery for unknown OA outcomes. Preserve original operations and consumed approvals; a new attempt requires fresh material review and final user confirmation. No schema migration or grant changes."
+  "reason": "Constrain the OA recovery acknowledgement checkbox and wrap its risk explanation within the Workspace card on desktop and narrow screens. Preserve the already deployed explicit recovery, original-message persistence and all authorization/material/business-verification boundaries. CSS only; no schema migration or grant changes."
 }

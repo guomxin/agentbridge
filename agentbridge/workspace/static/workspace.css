@@ -1755,5 +1755,6 @@ td {
 .oa-pending-recovery[hidden], .oa-pending-recovery [hidden] {display:none}
 .oa-pending-recovery p {margin:0;line-height:1.6}
 .oa-pending-recovery button {justify-self:start}
-.oa-recovery-risk {display:flex;align-items:flex-start;gap:9px;line-height:1.6;font-size:13px}
-.oa-recovery-risk input {flex:0 0 auto;margin-top:5px}
+.oa-recovery-risk {display:flex;align-items:flex-start;gap:9px;min-width:0;line-height:1.6;font-size:13px}
+.oa-recovery-risk input[type="checkbox"] {flex:0 0 1rem;width:1rem;height:1rem;min-width:1rem;padding:0;margin:3px 0 0}
+.oa-recovery-risk span {flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere}
