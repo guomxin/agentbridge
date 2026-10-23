@@ -510,15 +510,15 @@ def compare_reports(baseline, candidate):
 class SelectedPreparationWorkload(HttpWorkload):
     """Measure fresh exact selections; the preparation host is an explicit fixture.
 
-    The measured interval begins AFTER a unique query and its public choices are
-    ready. No existing prepared task is reused as a new sample. Real Workspace
+    The measured interval begins AFTER a unique affair/query and its public
+    choice are ready. No existing prepared task is reused as a new sample. Real Workspace
     CSRF/ownership/Skill/source checks and real OA preflight remain in the path.
     """
     def __init__(self, fixture):
         if set(fixture.oa.data["affairs"]) != {"latency-query-target"}:
             raise ValueError("Selected preparation samples require exactly one isolated leave affair")
         super().__init__(fixture)
-        self.source_tasks, self.source_operations, self.prepared_tasks = set(), set(), set()
+        self.source_tasks, self.source_operations, self.prepared_tasks, self.source_affairs = set(), set(), set(), set()
         self.gateway_calls = []
         original = fixture.app.gateway
         calls = self.gateway_calls
@@ -539,6 +539,16 @@ class SelectedPreparationWorkload(HttpWorkload):
 
     def selected_preparation(self):
         setup_started = time.monotonic()
+        # Each sample measures fresh preparation, rather than recovery of an
+        # undecided task for the same affair. Rotate only the synthetic pending
+        # collection before timing; historical task/source/decision ledgers stay
+        # intact and the query still has exactly one leave row in every sample.
+        affair_id = "latency-selected-" + uuid4().hex
+        self.fixture.oa.data["affairs"] = {}
+        self.fixture.oa.add_affair(affair_id, profile="leave")
+        if affair_id in self.source_affairs:
+            raise AssertionError("Each fresh preparation sample requires a distinct exact affair")
+        self.source_affairs.add(affair_id)
         source = self.fixture.add_query_case(case_key="selected-" + uuid4().hex)
         if source["task_id"] in self.source_tasks or source["operation_id"] in self.source_operations:
             raise AssertionError("Each sample must create a fresh source query task and operation")
@@ -554,6 +564,8 @@ class SelectedPreparationWorkload(HttpWorkload):
         if group["operationId"] != source["operation_id"]:
             raise AssertionError("Public query choice belongs to a different source operation")
         source_result = self.fixture.service.operations.get(source["operation_id"])["result"]
+        if [item["affair_id"] for item in source_result["items"]] != [affair_id]:
+            raise AssertionError("The source query does not contain only this sample's exact affair")
         source_hash = hashlib.sha256(json.dumps(source_result, ensure_ascii=False, sort_keys=True,
                                                separators=(",", ":")).encode()).hexdigest()
         setup_seconds = time.monotonic() - setup_started
@@ -606,6 +618,8 @@ class SelectedPreparationWorkload(HttpWorkload):
             raise AssertionError("Prepared command changed its frozen source")
         if command["capabilityName"] != "oa.leave.approval.prepare" or command["state"] != "requires_user_action":
             raise AssertionError("Prepared command is not the exact selected read-only leave preparation")
+        if command["affairIds"] != [affair_id]:
+            raise AssertionError("Prepared command reused another sample's exact affair")
         with sqlite3.connect(self.fixture.service.db_path) as connection:
             event_count = connection.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='task.prepare.requested'",
                                              (prepared_id,)).fetchone()[0]
@@ -622,7 +636,7 @@ class SelectedPreparationWorkload(HttpWorkload):
                 "replayPostSeconds": replay_seconds, "querySetupExcludedSeconds": setup_seconds,
                 "sourceProjectionSetupExcludedSeconds": source_projection, "polls": polls,
                 "sourceTaskId": source["task_id"], "sourceOperationId": source["operation_id"],
-                "preparedTaskId": prepared_id, "sourceHash": source_hash, "modelCalls": 0,
+                "preparedTaskId": prepared_id, "sourceHash": source_hash, "sourceAffairId": affair_id, "modelCalls": 0,
                 "authorizationCount": 0, "businessWriteCount": 0, "duplicateRequestSameTask": True,
                 **self.fixture.latency.since(offset)}
 

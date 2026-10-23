@@ -20,10 +20,10 @@ def settlement_run(tmp_path, monkeypatch):
 def test_settlement_success_retires_unused_cards_and_preserves_batch(settlement_run):
     fixture, _ = settlement_run
     service = fixture.service
-    old = lifecycle.source(settlement_run)
-    batch = lifecycle.source(settlement_run, batch=True)
-    winner = lifecycle.source(settlement_run)
-    result, operation = lifecycle.complete(service, winner)
+    old = lifecycle.legacy_source(settlement_run)
+    batch = lifecycle.legacy_source(settlement_run, batch=True)
+    winner = lifecycle.legacy_source(settlement_run)
+    result, operation = lifecycle.complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded", result
     assert operation["result"]["workflow_profile"] == "business_settlement"
     assert operation["result"]["verification"]["pending_absence_confirmed"] is True
@@ -39,9 +39,9 @@ def test_settlement_success_retires_unused_cards_and_preserves_batch(settlement_
 
 def test_settlement_unknown_preserves_unused_card_without_resubmission(settlement_run):
     fixture, _ = settlement_run
-    old, winner = lifecycle.source(settlement_run), lifecycle.source(settlement_run)
+    old, winner = lifecycle.legacy_source(settlement_run), lifecycle.legacy_source(settlement_run)
     fixture.oa.arm("approval_reply_lost")
-    result, _ = lifecycle.complete(fixture.service, winner)
+    result, _ = lifecycle.complete_legacy_intent(fixture.service, winner)
     assert result["status"] == "unknown", result
     lifecycle.pending(fixture.service, old)
     assert len(fixture.oa.writes) == 1

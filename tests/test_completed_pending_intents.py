@@ -27,27 +27,33 @@ def run(tmp_path):
     fixture.close()
 
 
-def source(run, *, affair=None, batch=False):
+def legacy_source(run, *, affair=None, batch=False):
+    """Reconstruct a duplicate field card left by the pre-guard release only."""
     fixture, default = run
     service = fixture.service
     task, _ = service.tasks.ensure_task(user_subject=OWNER, agent_host="openclaw", host_task_key=uuid4().hex,
         origin_endpoint_id=fixture.account["endpoint_id"], active_conversation_ref=fixture.account["openclaw_session_key"],
         title="合成奖励知会核对")
-    result = service.invoke(user_subject=OWNER, task_id=task["task_id"],
-        capability_name="oa.workflow.pending.batch.prepare" if batch else PREPARE,
-        arguments={"affair_ids": [affair or default]} if batch else {"affair_id": affair or default},
-        idempotency_key=uuid4().hex)
+    # These tests exercise migration-time duplicates, not today's creation
+    # path. Only reconstruct that historical source; execution stays guarded.
+    with patch.object(service, "_guard_pending_preparation"):
+        result = service.invoke(user_subject=OWNER, task_id=task["task_id"],
+            capability_name="oa.workflow.pending.batch.prepare" if batch else PREPARE,
+            arguments={"affair_ids": [affair or default]} if batch else {"affair_id": affair or default},
+            idempotency_key=uuid4().hex)
     assert result["status"] == "requires_user_action", result
     return {"task": task["task_id"], "input": result["nextAction"]["inputSubmissionId"],
             "interaction": result["interaction"]["interactionId"]}
 
 
-def ready(service, case):
+def legacy_ready(service, case):
+    """Reconstruct an old ready card; do not exempt later resume or retirement."""
     drafts = BusinessDraftService(service)
-    opened = drafts.open(case["input"])
-    credentials = dict(source_submission_id=case["input"], csrf_token=opened["csrfToken"], csrf_cookie=opened["csrfToken"])
-    saved = drafts.save(**credentials, expected_revision=opened["state"]["revision"], values={"opinion": "已核对合成奖励材料"})
-    preview = drafts.preview(**credentials, expected_revision=saved["revision"])
+    with patch.object(service, "_guard_pending_preparation"):
+        opened = drafts.open(case["input"])
+        credentials = dict(source_submission_id=case["input"], csrf_token=opened["csrfToken"], csrf_cookie=opened["csrfToken"])
+        saved = drafts.save(**credentials, expected_revision=opened["state"]["revision"], values={"opinion": "已核对合成奖励材料"})
+        preview = drafts.preview(**credentials, expected_revision=saved["revision"])
     return drafts, credentials, preview
 
 
@@ -56,19 +62,26 @@ def approve(drafts, credentials, preview):
         preview_id=preview["preview"]["previewId"], request_key=uuid4().hex)
 
 
-def complete(service, case):
-    drafts, credentials, preview = ready(service, case)
-    receipt = approve(drafts, credentials, preview)["receipt"]
+def legacy_decision(drafts, credentials, preview):
+    """Reconstruct a decision already recorded before duplicate guarding existed."""
+    with patch.object(drafts.service, "_guard_pending_preparation"):
+        return approve(drafts, credentials, preview)
+
+
+def complete_legacy_intent(service, case):
+    """Build a legacy decision, then run real guarded commit and reconciliation."""
+    drafts, credentials, preview = legacy_ready(service, case)
+    receipt = legacy_decision(drafts, credentials, preview)["receipt"]
     result = service.resume_interaction(user_subject=OWNER, interaction_id=receipt["interactionId"], idempotency_key=uuid4().hex)
     authorization = service.write_authorizations.get(receipt["authorizationId"])
     return result, service.operations.get(authorization["commit_operation_id"] or result["operationId"])
 
 
-def detached_source(run, *, subject=OWNER, system="oa", session=None, capability=PREPARE):
+def detached_legacy_source(run, *, subject=OWNER, system="oa", session=None, capability=PREPARE):
     """Create a valid local card contract without touching another OA account."""
     fixture, affair = run
     service = fixture.service
-    template = service.field_submissions.get(source(run)["input"])
+    template = service.field_submissions.get(legacy_source(run)["input"])
     conversation = "agent:main:synthetic:" + uuid4().hex
     endpoint, _ = service.tasks.ensure_endpoint(user_subject=subject, token_id="synthetic-token-" + uuid4().hex,
         agent_host="openclaw", endpoint_key="synthetic:" + uuid4().hex, client_type="web",
@@ -102,12 +115,12 @@ def pending(service, case):
 def test_verified_completion_retires_old_ready_card_and_all_entry_sessions(run):
     fixture, _ = run
     service = fixture.service
-    old, winner = source(run), source(run)
-    drafts, credentials, preview = ready(service, old)
+    old, winner = legacy_source(run), legacy_source(run)
+    drafts, credentials, preview = legacy_ready(service, old)
     presentation = service.field_submissions.create_presentation(old["input"], user_subject=OWNER,
         endpoint_id=fixture.account["endpoint_id"])
     assert service.field_submissions.get(old["input"])["supersession_key"] != service.field_submissions.get(winner["input"])["supersession_key"]
-    result, operation = complete(service, winner)
+    result, operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded", result
     assert operation["result"]["verification"]["confirmed"] is True
     assert len(fixture.oa.writes) == 1
@@ -134,10 +147,10 @@ def test_verified_completion_retires_old_ready_card_and_all_entry_sessions(run):
 def test_non_authoritative_outcomes_leave_the_other_intent_untouched(run, outcome):
     fixture, _ = run
     service = fixture.service
-    old, winner = source(run), source(run)
+    old, winner = legacy_source(run), legacy_source(run)
     if outcome == "unknown":
         fixture.oa.arm("approval_reply_lost")
-        result, _operation = complete(service, winner)
+        result, _operation = complete_legacy_intent(service, winner)
         assert result["status"] == "unknown"
     else:
         def handler(_adapter, _worker, plan, *, enter_commit_boundary):
@@ -146,16 +159,16 @@ def test_non_authoritative_outcomes_leave_the_other_intent_untouched(run, outcom
             enter_commit_boundary()
             return {"target": {"affair_id": plan["target"]["affair_id"]}, "verification": {"confirmed": True}}
         with patch("agentbridge.core.write_catalog.acknowledge_intellectual_property_reward", handler):
-            result, _operation = complete(service, winner)
+            result, _operation = complete_legacy_intent(service, winner)
         assert result["status"] == ("failed" if outcome == "failed" else "succeeded")
     pending(service, old)
 
 
 def test_cleanup_failure_keeps_the_committed_success_and_records_diagnostic(run):
     fixture, _ = run
-    old, winner = source(run), source(run)
+    old, winner = legacy_source(run), legacy_source(run)
     with patch("agentbridge.core.oa_pending_reconciliation.reconcile_completed_pending_intents", side_effect=RuntimeError("synthetic cleanup fault")):
-        result, operation = complete(fixture.service, winner)
+        result, operation = complete_legacy_intent(fixture.service, winner)
     assert result["status"] == operation["status"] == "succeeded"
     pending(fixture.service, old)
     with fixture.service.tasks._connect() as connection:
@@ -167,9 +180,9 @@ def test_cleanup_failure_keeps_the_committed_success_and_records_diagnostic(run)
 def test_an_already_approved_decision_is_never_retired(run):
     fixture, _ = run
     service = fixture.service
-    old, winner = source(run), source(run)
-    old_receipt = approve(*ready(service, old))["receipt"]
-    result, _operation = complete(service, winner)
+    old, winner = legacy_source(run), legacy_source(run)
+    old_receipt = legacy_decision(*legacy_ready(service, old))["receipt"]
+    result, _operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded"
     assert service.field_submissions.get(old["input"])["state"] == "submitted"
     assert service.write_authorizations.get(old_receipt["authorizationId"])["state"] == "approved"
@@ -179,7 +192,7 @@ def test_an_already_approved_decision_is_never_retired(run):
 def test_submit_winning_after_selection_is_rechecked_in_the_retirement_transaction(run):
     fixture, _ = run
     service = fixture.service
-    old, winner = source(run), source(run)
+    old, winner = legacy_source(run), legacy_source(run)
     token = service.field_submissions.issue_csrf(old["input"])
     original = service.field_submissions.supersede
     def submit_first(submission_id, **kwargs):
@@ -187,7 +200,7 @@ def test_submit_winning_after_selection_is_rechecked_in_the_retirement_transacti
             service.field_submissions.submit(submission_id, csrf_token=token, csrf_cookie=token, values={"opinion": "已阅"})
         return original(submission_id, **kwargs)
     with patch.object(service.field_submissions, "supersede", side_effect=submit_first):
-        result, _operation = complete(service, winner)
+        result, _operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded"
     assert service.field_submissions.get(old["input"])["state"] == "submitted"
     assert service.tasks.get_task(old["task"], user_subject=OWNER)["status"] != "superseded"
@@ -196,10 +209,13 @@ def test_submit_winning_after_selection_is_rechecked_in_the_retirement_transacti
 def legacy_authorization(run):
     fixture, _ = run
     service = fixture.service
-    old = detached_source(run)
+    old = detached_legacy_source(run)
     token = service.field_submissions.issue_csrf(old["input"])
     service.field_submissions.submit(old["input"], csrf_token=token, csrf_cookie=token, values={"opinion": "已阅"})
-    result = service.resume_interaction(user_subject=OWNER, interaction_id=old["interaction"], idempotency_key=uuid4().hex)
+    # The old field-to-authorization preparation belongs to historical setup;
+    # this is not the authorization's commit interaction.
+    with patch.object(service, "_guard_pending_preparation"):
+        result = service.resume_interaction(user_subject=OWNER, interaction_id=old["interaction"], idempotency_key=uuid4().hex)
     assert result["error"]["code"] == "WRITE_AUTHORIZATION_REQUIRED", result
     old["authorization"] = result["nextAction"]["authorizationId"]
     return old
@@ -208,9 +224,9 @@ def legacy_authorization(run):
 def test_unused_legacy_authorization_is_retired_but_consumed_source_is_preserved(run):
     fixture, _ = run
     service = fixture.service
-    old, winner = legacy_authorization(run), source(run)
+    old, winner = legacy_authorization(run), legacy_source(run)
     assert service.field_submissions.get(old["input"])["state"] == "consumed"
-    result, _operation = complete(service, winner)
+    result, _operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded"
     assert service.write_authorizations.get(old["authorization"])["state"] == "superseded"
     assert service.field_submissions.get(old["input"])["state"] == "consumed"
@@ -220,7 +236,7 @@ def test_unused_legacy_authorization_is_retired_but_consumed_source_is_preserved
 def test_authorization_approval_winning_after_selection_is_not_retired(run):
     fixture, _ = run
     service = fixture.service
-    old, winner = legacy_authorization(run), source(run)
+    old, winner = legacy_authorization(run), legacy_source(run)
     original = service.write_authorizations.supersede
     def approve_first(authorization_id, **kwargs):
         if authorization_id == old["authorization"]:
@@ -228,7 +244,7 @@ def test_authorization_approval_winning_after_selection_is_not_retired(run):
             service.write_authorizations.decide(authorization_id, decision="approve", csrf_token=token, csrf_cookie=token)
         return original(authorization_id, **kwargs)
     with patch.object(service.write_authorizations, "supersede", side_effect=approve_first):
-        result, _operation = complete(service, winner)
+        result, _operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded"
     assert service.write_authorizations.get(old["authorization"])["state"] == "approved"
     assert service.tasks.get_task(old["task"], user_subject=OWNER)["status"] != "superseded"
@@ -237,13 +253,13 @@ def test_authorization_approval_winning_after_selection_is_not_retired(run):
 def test_retirement_audit_failure_rolls_back_resource_draft_and_task_together(run):
     fixture, _ = run
     service = fixture.service
-    old, winner = source(run), source(run)
-    _drafts, _credentials, preview = ready(service, old)
+    old, winner = legacy_source(run), legacy_source(run)
+    _drafts, _credentials, preview = legacy_ready(service, old)
     with service.tasks._connect() as connection:
         connection.execute("CREATE TRIGGER fail_pending_retirement_audit BEFORE INSERT ON task_events "
                            "WHEN NEW.event_type='task.pending_intent.superseded' "
                            "BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END")
-    result, operation = complete(service, winner)
+    result, operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded"
     pending(service, old)
     with service.tasks._connect() as connection:
@@ -259,18 +275,18 @@ def test_retirement_audit_failure_rolls_back_resource_draft_and_task_together(ru
 def test_scope_and_inflight_exclusions(run, change):
     fixture, _ = run
     service = fixture.service
-    old, winner = source(run), source(run)
+    old, winner = legacy_source(run), legacy_source(run)
     if change in {"user", "system", "session", "action"}:
-        old = detached_source(run, **{
+        old = detached_legacy_source(run, **{
             "user": {"subject": "someone-else"}, "system": {"system": "another-system"},
             "session": {"session": "another-session"},
             "action": {"capability": "oa.intellectual_property_declaration.approval.prepare"},
         }[change])
     if change == "affair":
         add_reward_affair(fixture, "synthetic-other-reward")
-        old = source(run, affair="synthetic-other-reward")
+        old = legacy_source(run, affair="synthetic-other-reward")
     if change == "batch":
-        old = source(run, batch=True)
+        old = legacy_source(run, batch=True)
     if change == "plan":
         from tests.test_task_plan_store import TaskPlanStoreTests
         service.task_plans.create(user_subject=OWNER, parent_task_id=old["task"],
@@ -279,7 +295,7 @@ def test_scope_and_inflight_exclusions(run, change):
     with service.tasks._connect() as connection:
         if change in {"unknown", "running"}:
             connection.execute("UPDATE agent_tasks SET status=? WHERE task_id=?", ("outcome_unknown" if change == "unknown" else "running", old["task"]))
-    result, _operation = complete(service, winner)
+    result, _operation = complete_legacy_intent(service, winner)
     assert result["status"] == "succeeded"
     assert service.field_submissions.get(old["input"])["state"] == "pending"
 

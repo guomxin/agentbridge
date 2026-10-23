@@ -100,10 +100,12 @@ def main():
                     "humanThinkTimeIncluded": False, "warmupsExcluded": 0,
                     "entryBoundary": "Prepare/query enter real Central in-process; draft/card/projection calls use real loopback HTTP. No model/gateway benchmark."}
         if args.selected_preparation:
-            metadata.update(benchmarkContract="latency-selected-preparation-v1",
+            metadata.update(benchmarkContract="latency-selected-preparation-v2",
                 entryBoundary="After a fresh source query/public choice exists: real Workspace CSRF POST to queued intent, synthetic Python host preparation loop, real OA preflight, HTTP task polling and trusted draft GET. No OpenClaw private RPC/lease or model performance claim.",
                 preparationHost="Synthetic Python fixture coordinator", preparationHostPollIntervalSeconds=.05,
-                queryPreparationExcluded=True, existingPreparedTaskSamplesAllowed=False)
+                queryPreparationExcluded=True, existingPreparedTaskSamplesAllowed=False,
+                freshExactAffairPerSample=True, pendingChoicesPerSample=1,
+                syntheticPendingRotationExcluded=True)
         workload.write_metadata(fixture.home / "benchmark-runtime.json", metadata)
         if args.serve:
             threading.Thread(target=fixture.coordinate, daemon=True).start()
@@ -130,6 +132,7 @@ def main():
         if args.selected_preparation:
             result["selectionAudit"] = {"uniqueSourceTasks": len(runner.source_tasks),
                 "uniqueSourceOperations": len(runner.source_operations), "uniquePreparedTasks": len(runner.prepared_tasks),
+                "uniqueSourceAffairs": len(runner.source_affairs),
                 "uniqueSourceHashes": len({sample["sourceHash"] for sample in samples if "sourceHash" in sample}),
                 "modelCalls": sum(sample.get("modelCalls", 0) for sample in samples),
                 "gatewayMethods": sorted(set(runner.gateway_calls)),

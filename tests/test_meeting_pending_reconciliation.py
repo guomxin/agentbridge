@@ -1,4 +1,9 @@
-"""Meeting receipts retire unused copies without requiring pending disappearance."""
+"""Verified meeting receipts retire copies left by the historical entry path.
+
+Current preparation guards prevent creating these duplicates. Only synthetic
+legacy source/decision setup bypasses that guard; submission and retirement use
+the real runtime after the patch has ended.
+"""
 from copy import deepcopy
 from unittest.mock import patch
 from uuid import uuid4
@@ -11,11 +16,14 @@ from tests.support.meeting_reply_acceptance import MeetingReplyAcceptanceFixture
 
 def finish(fixture, case, attitude):
     drafts = BusinessDraftService(fixture.service)
-    opened = drafts.open(case['input_id'])
-    args = dict(source_submission_id=case['input_id'], csrf_token=opened['csrfToken'], csrf_cookie=opened['csrfToken'])
-    saved = drafts.save(**args, expected_revision=opened['state']['revision'], values={'attitude': attitude, 'feedback': ''})
-    ready = drafts.preview(**args, expected_revision=saved['revision'])
-    receipt = drafts.approve(**args, expected_revision=ready['revision'], preview_id=ready['preview']['previewId'], request_key=uuid4().hex)['receipt']
+    # Existing duplicate cards could already have produced a confirmed winner
+    # before this release. Recreate only that old setup, not its execution.
+    with patch.object(fixture.service, '_guard_pending_preparation'):
+        opened = drafts.open(case['input_id'])
+        args = dict(source_submission_id=case['input_id'], csrf_token=opened['csrfToken'], csrf_cookie=opened['csrfToken'])
+        saved = drafts.save(**args, expected_revision=opened['state']['revision'], values={'attitude': attitude, 'feedback': ''})
+        ready = drafts.preview(**args, expected_revision=saved['revision'])
+        receipt = drafts.approve(**args, expected_revision=ready['revision'], preview_id=ready['preview']['previewId'], request_key=uuid4().hex)['receipt']
     fixture.resume(receipt['interactionId'])
     auth = fixture.service.write_authorizations.get(receipt['authorizationId'])
     return fixture.service.operations.get(auth['commit_operation_id'])
@@ -25,9 +33,10 @@ def finish(fixture, case, attitude):
 def test_meeting_closes_all_unused_copies_but_preserves_batch(tmp_path, attitude):
     fixture = MeetingReplyAcceptanceFixture(tmp_path)
     try:
-        old = [fixture.add_meeting_case() for _ in range(2)]
-        batch = fixture.add_meeting_case(batch=True)
-        winner = fixture.add_meeting_case()
+        with patch.object(fixture.service, '_guard_pending_preparation'):
+            old = [fixture.add_meeting_case() for _ in range(2)]
+            batch = fixture.add_meeting_case(batch=True)
+            winner = fixture.add_meeting_case()
         operation = finish(fixture, winner, attitude)
         assert operation['status'] == 'succeeded'
         for case in old:
@@ -44,8 +53,9 @@ def test_meeting_closes_all_unused_copies_but_preserves_batch(tmp_path, attitude
 def test_inexact_meeting_receipt_never_closes_old_card(tmp_path, fault):
     fixture = MeetingReplyAcceptanceFixture(tmp_path)
     try:
-        old = fixture.add_meeting_case()
-        winner = fixture.add_meeting_case()
+        with patch.object(fixture.service, '_guard_pending_preparation'):
+            old = fixture.add_meeting_case()
+            winner = fixture.add_meeting_case()
         with patch('agentbridge.core.oa_pending_reconciliation.reconcile_completed_pending_intents', return_value=[]):
             operation = finish(fixture, winner, 'join')
         operation = deepcopy(operation)

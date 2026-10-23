@@ -5,7 +5,7 @@ import pytest
 
 from tests.support.latency_acceptance import (
     HttpWorkload, JsonHttpClient, LatencyAcceptanceFixture, LatencyContract, SelectedPreparationWorkload,
-    compare_reports, distribution,
+    compare_reports, distribution, OWNER,
 )
 
 
@@ -107,11 +107,16 @@ def test_selected_performance_samples_create_fresh_commands_without_authorizatio
         assert first["sourceTaskId"] != second["sourceTaskId"]
         assert first["sourceOperationId"] != second["sourceOperationId"]
         assert first["preparedTaskId"] != second["preparedTaskId"]
+        assert first["sourceAffairId"] != second["sourceAffairId"]
+        assert len(runner.source_affairs) == 2
         assert first["sourceHash"] != second["sourceHash"]
         assert first["duplicateRequestSameTask"] is second["duplicateRequestSameTask"] is True
         assert first["modelCalls"] == second["modelCalls"] == 0
         assert fixture.audit()["authorizationStates"] == {}
         assert fixture.audit()["decisionCount"] == fixture.audit()["downstreamWriteCount"] == 0
+        for sample in (first, second):
+            command = fixture.service.tasks.get_task(sample["preparedTaskId"], user_subject=OWNER)["summary"]["command"]
+            assert command["affairIds"] == [sample["sourceAffairId"]]
         assert fixture.coordinator_errors == []
     finally:
         fixture.stop_event.set()
