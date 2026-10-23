@@ -88,7 +88,8 @@ const { consumeChatStream } = createChatStream({
 const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending,
+  submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
+  prepareRecovery:prepareOaPendingRecovery,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -143,14 +144,12 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
-  $("#query-oa-pending").disabled = false;
-  $("#query-oa-pending").textContent = "查询 OA 待办";
   projectionQueue.reset();
   projectionOrder.reset();
   historyControls = null;
   clearWorkspaceTimings();
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
-    "syncedMessages", "taskCards", "taskFeedback", "actionableGroups", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
+    "syncedMessages", "taskCards", "taskFeedback", "oaPendingRecovery", "actionableGroups", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
     state[name].clear();
   }
   state.tasks = [];
@@ -196,25 +195,6 @@ async function bootstrap() {
 }
 
 function bindActions() {
-  let quickQueryKey = null, quickQueryScope = null;
-  $("#query-oa-pending").addEventListener("click", async event => {
-    const button = event.currentTarget, scope = sessionScope;
-    if (button.disabled) return;
-    if (quickQueryScope !== scope) { quickQueryScope = scope; quickQueryKey = null; }
-    quickQueryKey ||= crypto.randomUUID();
-    button.disabled = true; button.textContent = "正在查询待办…";
-    try {
-      await queryOaPending({requestKey:quickQueryKey});
-      scope.assertCurrent();
-      quickQueryKey = null;
-      button.textContent = "查询 OA 待办";
-    } catch (error) {
-      if (!isCancellation(error)) {
-        button.textContent = "恢复本次待办查询";
-        toast(error.message || "查询连接暂不可用，可恢复本次查询。", true);
-      }
-    } finally { if (scope === sessionScope) button.disabled = false; }
-  });
   $("#login-tab").addEventListener("click", () => switchAuth("login"));
   $("#enroll-tab").addEventListener("click", () => switchAuth("enroll"));
   $("#login-form").addEventListener("submit", login);
@@ -667,6 +647,7 @@ function ingestTimelineEntry(entry, render = true, advanceCursor = true) {
       });
       state.syncedMessages.set(entry.entry_id, item);
     }
+    item.dataset.messageKey = String(entry.message_key || "");
     setTimelineNode(item, {
       key: `timeline:${entry.entry_id}`,
       createdAt: entry.created_at,
@@ -765,6 +746,7 @@ async function loadLegacyHistory() {
       const key = historyMessageKey(message, index), hash = textHash(message.text);
       const timestamp = parseTimestampMilliseconds(message.timestamp);
       const alreadySynced = [...state.syncedMessages.values()].some(item =>
+        !String(item.dataset.messageKey || "").startsWith("workspace:quick-query:user:") &&
         item.dataset.messageRole === String(message.role || "") && item.dataset.messageTextHash === hash &&
         (!Number.isFinite(timestamp) || Math.abs(Number(item.dataset.timelineAt) - timestamp) <= 5 * 60 * 1000));
       if (alreadySynced) continue;
@@ -928,7 +910,9 @@ function reconcileOriginChatMessage(entry, render = true) {
     if (messageKey.startsWith(localPrefix)) {
       state.localMessages.delete(messageKey.slice(localPrefix.length));
     }
-    removeMatchingHistoryMessage(entry);
+    // Closed queries never enter Gateway history. The same text in that
+    // history belongs to a separate user message, not this timeline receipt.
+    if (!messageKey.startsWith("workspace:quick-query:user:")) removeMatchingHistoryMessage(entry);
     let item = state.syncedMessages.get(entry.entry_id);
     if (!item) {
       item = messageElement({
@@ -939,6 +923,7 @@ function reconcileOriginChatMessage(entry, render = true) {
       });
       state.syncedMessages.set(entry.entry_id, item);
     }
+    item.dataset.messageKey = messageKey;
     setTimelineNode(item, {
       key: `timeline:${entry.entry_id}`,
       createdAt: entry.created_at,
@@ -1278,6 +1263,26 @@ async function prepareTargets(sourceTaskId, payload) {
   return result;
 }
 
+async function probeOaPendingRecovery(taskId, payload) {
+  const scope = sessionScope;
+  const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-pending-recovery/probe`,
+    {method:"POST", body:payload, csrf:true, timeoutMs:30000});
+  scope.assertCurrent();
+  return result;
+}
+
+async function prepareOaPendingRecovery(taskId, payload) {
+  const scope = sessionScope;
+  const result = await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-pending-recovery/prepare`,
+    {method:"POST", body:payload, csrf:true, timeoutMs:30000});
+  scope.assertCurrent();
+  if (["prepared", "existing"].includes(result?.status) && typeof result.taskId === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId) && result.taskId !== taskId) {
+    scheduleTaskSync(result.taskId, "task.prepare.requested");
+  }
+  return result;
+}
+
 async function queryOaPending(payload) {
   const scope = sessionScope;
   const ticket = projectionOrder.begin();
@@ -1286,6 +1291,19 @@ async function queryOaPending(payload) {
   scope.assertCurrent();
   if (typeof result?.taskId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId)) {
     throw new Error("查询受理状态尚未确认，请恢复本次查询。");
+  }
+  if (payload.userMessage !== undefined) {
+    const entry = result.userMessage;
+    if (entry?.entry_type !== "chat_message" || entry.role !== "user" || entry.text !== payload.userMessage
+        || entry.source?.is_origin !== true || typeof entry.entry_id !== "string"
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.entry_id)
+        || !Number.isSafeInteger(entry.sequence) || entry.sequence < 1
+        || (entry.task_id != null && entry.task_id !== result.taskId)) {
+      throw new Error("原消息保存状态尚未确认，请恢复本次查询。");
+    }
+    // A direct receipt is only one timeline entry. SSE still owns the cursor
+    // so accepting it cannot skip messages or events committed before it.
+    ingestTimelineEntry(entry, true, false);
   }
   markWorkspaceTiming("quick_query_queued", {requestId:payload.requestKey, taskId:result.taskId});
   if (result.detail && projectionOrder.accept(result.detail.task?.task_id, ticket)) upsertTaskCard(result.detail);

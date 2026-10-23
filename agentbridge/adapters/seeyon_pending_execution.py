@@ -106,6 +106,9 @@ def execute_pending_action(
         tracker = PendingSubmissionTracker()
         stack.callback(_cleanup, tracker.detach)
         tracker.attach(worker.page)
+        recovery_check = getattr(enter_commit_boundary, "before_pending_revalidation", None)
+        if recovery_check is not None:
+            recovery_check()
         # Reader provisioning may take time. Re-read the original source and
         # current materials afterwards, immediately before consumption. Never
         # navigate the action page and restart its business-body loader here.

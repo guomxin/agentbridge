@@ -8,12 +8,18 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
 import { createActionableResults } from "./workspace_actionable.mjs";
+import { createOaPendingRecovery } from "./workspace_recovery.mjs";
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   state.taskFeedback ||= new Map();
+  const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery,
+    makeRequestKey:makeFeedbackRequestKey, openTask: async taskId => {
+      if (await switchView("tasks") === false) return;
+      return loadTaskDetail(taskId);
+    }});
   const actionable = createActionableResults({ document, state, prepareTargets, refreshQuery,
     openPreparation: async taskId => {
       if (await switchView("tasks") === false) return;
@@ -164,6 +170,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const feedback = createFeedbackView(taskId);
     const artifacts = element("div");
     const query = element("div");
+    const recoveryPanel = element("section");
     const actions = element("div", "application-card-actions");
     const progress = element("button", "secondary");
     progress.type = "button";
@@ -174,8 +181,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     });
     actions.append(progress);
     card.append(header, description, facts.root, active.root, batch.root,
-      history.root, artifacts, query, feedback.root, actions);
-    return { title, status, description, facts, active, batch, history, artifacts, query, feedback, progress };
+      history.root, artifacts, query, recoveryPanel, feedback.root, actions);
+    return { title, status, description, facts, active, batch, history, artifacts, query, recoveryPanel, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -379,6 +386,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     text(view.progress, cardStatus === "outcome_unknown" ? "查看核验详情" : result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
+    recovery.render(view.recoveryPanel, result);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
     return nearBottom;
   }
@@ -416,6 +424,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     let view = detailViews.get(detail);
     if (!view || view.taskId !== task.task_id || view.heading.parentNode !== detail) {
       if (view?.feedback) state.taskFeedback.get(view.taskId)?.views.delete(view.feedback);
+      if (view?.recoveryPanel) recovery.detach(view.recoveryPanel);
       detail.replaceChildren();
       const heading = element("div", "detail-heading");
       const back = element("button", "icon-command mobile-detail-back");
@@ -463,10 +472,11 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const history = disclosure("办理记录", "business-disclosure interaction-history");
       const artifacts = element("div");
       const query = element("div");
+      const recoveryPanel = element("section");
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, outcomeNotice, plan, active.root, batch.root, history.root, artifacts, query, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, facts, outcomeNotice, plan, active, batch, history, artifacts, query, feedback, timeline};
+      detail.append(heading, facts.root, outcomeNotice, plan, active.root, batch.root, history.root, artifacts, query, recoveryPanel, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, facts, outcomeNotice, plan, active, batch, history, artifacts, query, recoveryPanel, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -502,6 +512,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     updateArtifacts(view, result, false);
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
+    recovery.render(view.recoveryPanel, result);
     const nodes = [];
     for (const event of [...(result.events || [])].reverse()) {
       const key = event.event_id || `${event.event_type}:${event.created_at}`;

@@ -4,7 +4,7 @@ from datetime import timedelta
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Barrier, Thread
 from unittest import TestCase
 from unittest.mock import patch
 from uuid import uuid4
@@ -36,6 +36,10 @@ class QuickQueryTests(TestCase):
     def count(self, table):
         with self.service.tasks._connect() as connection:
             return connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    def user_messages(self):
+        return [entry for entry in self.service.tasks.list_timeline(user_subject=OWNER, entry_type="chat_message")
+            if entry["role"] == "user"]
 
     def test_queue_only_persists_intent_without_model_skill_or_operation(self):
         before = {table: self.count(table) for table in ("operations", "skill_bindings", "write_authorizations", "business_drafts")}
@@ -74,6 +78,131 @@ class QuickQueryTests(TestCase):
         self.execute(first)
         self.assertEqual(self.queue(body)["taskId"], first["taskId"])
         self.assertNotEqual(self.queue()["taskId"], first["taskId"])
+
+    def test_typed_query_persists_original_message_before_task_and_recovers_once_without_model(self):
+        body = {"requestKey": uuid4().hex, "userMessage": "查询 我的 ＯＡ 待办！"}
+        with patch.object(self.service, "invoke", side_effect=AssertionError("HTTP cannot invoke")):
+            first = self.queue(body)
+            repeated = self.queue(body)
+        self.assertEqual(first["taskId"], repeated["taskId"])
+        self.assertEqual(first["userMessageKey"], repeated["userMessageKey"])
+        messages = self.user_messages()
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["text"], body["userMessage"])
+        self.assertEqual(messages[0]["source_endpoint_id"], self.account["endpoint_id"])
+        timeline = self.service.tasks.list_timeline(user_subject=OWNER)
+        self.assertEqual(timeline[0]["entry_type"], "chat_message")
+        self.assertLess(messages[0]["sequence"], next(item["sequence"] for item in timeline if item["entry_type"] == "task_event"))
+        task = self.service.tasks.get_task(first["taskId"], user_subject=OWNER)
+        command = task["summary"]["command"]
+        self.assertEqual(command["requestIdentity"]["messageHash"], actions._hash({"text": body["userMessage"]}))
+        self.assertNotIn(body["userMessage"], json.dumps(command, ensure_ascii=False))
+        self.assertEqual(command["arguments"], {})
+        self.assertEqual(self.execute(first)["status"], "succeeded")
+        self.assertEqual(self.queue(body)["taskId"], first["taskId"])
+        self.assertEqual(len(self.user_messages()), 1)
+        self.assertEqual(self.count("agent_host_dispatches"), 0)
+        self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
+
+    def test_typed_query_message_and_intent_roll_back_together(self):
+        tables = ("agent_tasks", "task_events", "user_timeline", "notification_outbox")
+        before = {table: self.count(table) for table in tables}
+        ensure_task = self.service.tasks.ensure_task
+        def failed_after_creation(**kwargs):
+            ensure_task(**kwargs)
+            raise RuntimeError("isolated acceptance failed after task creation")
+        with patch.object(self.service.tasks, "ensure_task", side_effect=failed_after_creation), \
+                self.assertRaisesRegex(RuntimeError, "isolated acceptance"):
+            self.queue({"requestKey": uuid4().hex, "userMessage": "查看OA待办"})
+        self.assertEqual(before, {table: self.count(table) for table in tables})
+
+    def test_concurrent_typed_query_retry_creates_one_message_and_one_query(self):
+        body = {"requestKey": uuid4().hex, "userMessage": "查询 OA 待办"}
+        barrier, results, errors = Barrier(2), [], []
+        def queue_once():
+            try:
+                barrier.wait(timeout=5)
+                results.append(self.queue(body))
+            except BaseException as exc:
+                errors.append(exc)
+        threads = [Thread(target=queue_once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len({result["taskId"] for result in results}), 1)
+        self.assertEqual(len(self.user_messages()), 1)
+        self.assertEqual(self.count("agent_tasks"), 1)
+        self.assertEqual(self.count("agent_host_dispatches"), 0)
+
+    def test_same_key_cannot_change_original_text_or_switch_between_button_and_typed_query(self):
+        body = {"requestKey": uuid4().hex, "userMessage": "查看 OA 待办"}
+        self.queue(body)
+        for retry in ({**body, "userMessage": "查询OA待办"}, {**body, "userMessage": "查看OA待办"},
+                      {"requestKey": body["requestKey"]}):
+            with self.subTest(retry=retry), self.assertRaises(actions.ActionableResultError) as error:
+                self.queue(retry)
+            self.assertEqual(error.exception.code, "ACTION_REQUEST_CONFLICT")
+        button = {"requestKey": uuid4().hex}
+        self.queue(button)
+        with self.assertRaises(actions.ActionableResultError) as error:
+            self.queue({**button, "userMessage": "查看OA待办"})
+        self.assertEqual(error.exception.code, "ACTION_REQUEST_CONFLICT")
+        self.assertEqual([entry["text"] for entry in self.user_messages()], [body["userMessage"]])
+        self.assertEqual(self.count("agent_tasks"), 2)
+
+    def test_server_accepts_only_closed_personal_query_text_and_telegram_never_accepts_user_message(self):
+        for text in queries.CURRENT_OWN_OA_PENDING:
+            self.assertTrue(queries._is_current_own_pending_query(text))
+        for text in ("查看OA待办", "查询 OA 待办。", "查看我当前的OA待办事项", "查询本人当前ＯＡ待办？"):
+            self.assertTrue(queries._is_current_own_pending_query(text), text)
+        for text in ("查询昨天OA待办", "查询张三的OA待办", "查看OA待办并审批", "不要查看OA待办",
+                     "翻译：查看OA待办", "“查看OA待办”", "查看OA待办\n并提交", "查\n看OA待办",
+                     "查看OA待办（仅会议）", "查看OA待办??", "", None, {}, 3):
+            body = {"requestKey": uuid4().hex, "userMessage": text}
+            with self.subTest(text=text), self.assertRaises(actions.ActionableResultError):
+                self.queue(body)
+        with self.assertRaises(actions.ActionableResultError):
+            queries.queue_endpoint_query(self.service, OWNER, "not-used", {
+                "requestKey": uuid4().hex, "userMessage": "查看OA待办"},
+                binding_hash="not-used", source_task_id="not-used", view_hash="0" * 64)
+        self.assertEqual(self.count("agent_tasks"), 0)
+        self.assertEqual(self.user_messages(), [])
+
+    def test_typed_query_failed_read_keeps_the_original_message_on_recovery(self):
+        body = {"requestKey": uuid4().hex, "userMessage": "查看我的OA待办"}
+        queued = self.queue(body)
+        grant_permissions(self.service.user_grants, OWNER, [])
+        self.assertEqual(self.execute(queued)["error"]["code"], "ACTION_PERMISSION_DENIED")
+        self.assertEqual([entry["text"] for entry in self.user_messages()], [body["userMessage"]])
+        grant_permissions(self.service.user_grants, OWNER, ["oa.workflow.read"])
+        self.assertEqual(self.queue(body)["taskId"], queued["taskId"])
+        self.assertEqual(len(self.user_messages()), 1)
+        self.assertEqual(self.count("operations"), 0)
+
+    def test_workspace_query_response_returns_normal_public_message_and_button_does_not_invent_one(self):
+        body = {"requestKey": uuid4().hex, "userMessage": "查一下 OA 待办"}
+        # Isolate the receipt projection from the asynchronous host wakeup.
+        self.fixture.app.gateway = None
+        first = self.fixture.app.query_oa_pending(self.account, body)
+        message = first["userMessage"]
+        self.assertEqual(message["text"], body["userMessage"])
+        self.assertEqual(message["role"], "user")
+        self.assertEqual(message["source"]["client_type"], "web")
+        self.assertTrue(message["source"]["is_origin"])
+        self.assertNotIn("userMessageKey", first)
+        self.assertNotIn("source_endpoint_id", message)
+        self.assertNotIn("dedupe_key", message)
+        self.assertEqual(message, self.fixture.app.list_timeline(self.account, entry_type="chat_message")[0])
+        self.assertEqual(self.fixture.app.current(self.account)["timeline"]["items"], [message])
+        self.assertEqual(self.fixture.app.query_oa_pending(self.account, body)["userMessage"], message)
+        button = self.fixture.app.query_oa_pending(self.account, {"requestKey": uuid4().hex})
+        self.assertNotIn("userMessage", button)
+        self.assertEqual(len(self.user_messages()), 1)
+        self.assertEqual(self.count("agent_host_dispatches"), 0)
 
     def expire_session(self):
         session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
@@ -284,6 +413,17 @@ class QuickQueryTests(TestCase):
             self.assertNotIn(value["commandKey"], json.dumps(summary))
             self.assertEqual(self.count("operations"), 0)
             self.assertEqual(self.execute(value)["status"], "succeeded")
+            typed_body = {"requestKey": uuid4().hex, "userMessage": "查询我的 OA 待办。"}
+            with patch.object(self.service, "invoke", side_effect=AssertionError("POST cannot query")):
+                code, typed, _ = client.json("POST", "/api/actions/oa-pending-query", typed_body, csrf=True)
+                repeat_code, repeated, _ = client.json("POST", "/api/actions/oa-pending-query", typed_body, csrf=True)
+            self.assertEqual(code, 202, typed)
+            self.assertEqual(repeat_code, 202, repeated)
+            self.assertEqual(typed["userMessage"]["text"], typed_body["userMessage"])
+            self.assertEqual(typed["userMessage"], repeated["userMessage"])
+            self.assertEqual(typed["taskId"], repeated["taskId"])
+            self.assertNotIn("userMessageKey", typed)
+            self.assertEqual(len(self.user_messages()), 1)
         finally:
             for server in servers: server.shutdown(); server.server_close()
             for thread in threads: thread.join(timeout=5)

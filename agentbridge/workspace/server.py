@@ -560,6 +560,13 @@ def create_workspace_http_server(
                 if route.path == "/api/actions/oa-pending-query":
                     self._json(202, application.query_oa_pending(account, body))
                     return
+                recovery_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/oa-pending-recovery/(probe|prepare)", route.path)
+                if recovery_match:
+                    task_id, action = recovery_match.groups()
+                    response = application.probe_oa_pending_recovery(account, task_id, body) if action == "probe" else \
+                        application.prepare_oa_pending_recovery(account, task_id, body)
+                    self._json(200, response)
+                    return
                 preparation_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/prepare-selection", route.path)
                 if preparation_match:
                     self._json(202, application.prepare_selected_results(account, preparation_match.group(1), body))
@@ -1103,6 +1110,10 @@ def create_workspace_http_server(
             from agentbridge.core.user_grants import UserGrantConflict
             from agentbridge.core.skill_workbench import TaskFeedbackError
             from agentbridge.core.actionable_results import ActionableResultError
+            from agentbridge.core.oa_pending_recovery import OaPendingRecoveryError
+            if isinstance(exc, OaPendingRecoveryError):
+                self._json(getattr(exc, "status", 409), {"error": {"code": exc.code, "message": str(exc)}})
+                return
             if isinstance(exc, ActionableResultError):
                 self._json(getattr(exc, "status", 409), {"error": {"code": exc.code, "message": str(exc)}})
                 return

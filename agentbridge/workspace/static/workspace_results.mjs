@@ -390,7 +390,11 @@ export function parseTimestampMilliseconds(value) {
     const numeric = Number(text);
     return numeric < 100_000_000_000 ? numeric * 1_000 : numeric;
   }
-  return Date.parse(text);
+  const milliseconds = Date.parse(text);
+  // Central timestamps retain microseconds. Dropping that precision can place
+  // a task card before the user message created just before it after refresh.
+  const fraction = text.match(/T\d{2}:\d{2}:\d{2}\.(\d{4,})(?:Z|[+-]\d{2}:?\d{2})$/);
+  return milliseconds + (fraction ? Number(`0.${fraction[1].slice(3)}`) : 0);
 }
 
 export function statusLabel(status) {
@@ -432,6 +436,11 @@ export function eventLabel(type) {
       "task.failed": "任务失败",
       "task.operation.outcome_unknown": "操作结果待核对",
       "task.canceled": "任务已取消",
+      "task.oa_recovery.assessed": "已只读核对原事项",
+      "task.oa_recovery.verified_complete": "原事项办理完成已核实",
+      "task.oa_recovery.child_created": "已创建新的办理任务",
+      "task.oa_recovery.permit_issued": "新办理任务已关联原事项",
+      "task.oa_recovery.prepare_requested": "已确认重新核对材料",
       "batch.created": "批量任务已创建",
       "batch.candidates.frozen": "候选事项已冻结",
       "batch.item.started": "开始处理当前事项",

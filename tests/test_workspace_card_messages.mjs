@@ -2,9 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createResultView, completedInteractionPresentation as presentation,
   taskCardStatusMessage as batchMessage, taskCardStatusForInteraction as cardStatus,
-  taskPlanFailurePresentation as failurePresentation } from "../agentbridge/workspace/static/workspace_results.mjs";
+  taskPlanFailurePresentation as failurePresentation, parseTimestampMilliseconds } from "../agentbridge/workspace/static/workspace_results.mjs";
 import { createTaskCards } from "../agentbridge/workspace/static/workspace_cards.mjs";
 import { createDocument } from "./workspace_dom_fixture.mjs";
+
+test("refreshed timeline preserves user-before-task order within the same millisecond", () => {
+  const user = parseTimestampMilliseconds("2026-10-23T02:24:23.516143+00:00");
+  const task = parseTimestampMilliseconds("2026-10-23T02:24:23.516251+00:00");
+  assert.ok(task > user);
+  assert.equal(user, parseTimestampMilliseconds("2026-10-23T10:24:23.516143+08:00"));
+  assert.equal(parseTimestampMilliseconds("2026-10-23T02:24:23.516Z"), Date.parse("2026-10-23T02:24:23.516Z"));
+  assert.equal(parseTimestampMilliseconds("1792722263516"), 1792722263516);
+  assert.ok(Number.isNaN(parseTimestampMilliseconds("invalid")));
+});
 
 test("database CSV artifacts expose only valid authenticated download paths", () => {
   const node = (tag = "div") => ({tag, children: [], append(...items) { this.children.push(...items); }});

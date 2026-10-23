@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "bd5df0c28240"
+    "58603683770e"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Repair the OA business-body readiness regression before authorization consumption; revalidate exact identity and materials without reloading the action page, preserve native submit validation and authoritative pending/done verification. Link existing exact-principal pending/unknown actions across queries, clarify single confirmation and bounded outcome evidence, and route closed current-own Workspace query phrases through the existing read-only API. No schema migration, grant changes, or replay of consumed approvals."
+  "reason": "Persist the original closed-query user message atomically with its read-only intent, remove the global OA shortcut from the generic Workspace header, and add explicit evidence-bound recovery for unknown OA outcomes. Preserve original operations and consumed approvals; a new attempt requires fresh material review and final user confirmation. No schema migration or grant changes."
 }

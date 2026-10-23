@@ -3744,7 +3744,7 @@ class CentralCapabilityService:
                                         interaction_record=record, interaction=interaction)
         return interaction
 
-    def _guard_pending_preparation(self, *, context, session, arguments, definition):
+    def _guard_pending_preparation(self, *, context, session, arguments, definition, adapter=None, worker=None, acquire_worker=None):
         if session.get("system_id") != "oa" or not isinstance(arguments.get("affair_id"), str):
             return
         # Batch preparation uses the same exact item's capability pair as the
@@ -3756,11 +3756,25 @@ class CentralCapabilityService:
         if len(single) != 1:
             raise CapabilityRejected("OA_PENDING_CONTEXT_INVALID", "无法确定原 OA 待办的办理合同，请先核对原任务。")
         from agentbridge.core.actionable_results import oa_preparation_conflicts, ActionableResultError
+        from agentbridge.core.oa_pending_recovery import recovery_permit, guard_recovery_live, OaPendingRecoveryError
         try:
+            permit = recovery_permit(self, subject=context.user_subject, task_id=context.task_id, session=session)
+            if permit is not None:
+                if (permit["affairId"] != arguments["affair_id"] or permit["prepareCapability"] != single[0]
+                        or permit["commitCapability"] != commit):
+                    raise OaPendingRecoveryError("OA_RECOVERY_PERMIT_INVALID", "恢复许可不能用于另一事项或业务动作。")
+                live_worker = worker if worker is not None else acquire_worker() if acquire_worker else None
+                if live_worker is None or adapter is None:
+                    raise OaPendingRecoveryError("OA_RECOVERY_READ_REQUIRED", "恢复办理必须先重新核对原事项。")
+                guard_recovery_live(self, subject=context.user_subject, task_id=context.task_id,
+                                    session=session, adapter=adapter, worker=live_worker)
             conflicts = oa_preparation_conflicts(self, user_subject=session["user_subject"], session=session,
                 selections=[{"affairId": arguments["affair_id"], "prepareCapability": single[0], "commitCapability": commit}],
                 exclude_task_id=context.task_id)
-        except ActionableResultError as exc:
+            if permit is not None:
+                conflicts = [item for item in conflicts if not (item["taskId"] == permit["originTaskId"]
+                    and item["state"] == "outcome_unknown" and item["identityVerified"])]
+        except (ActionableResultError, OaPendingRecoveryError) as exc:
             raise CapabilityRejected(exc.code, str(exc)) from exc
         if conflicts:
             unresolved = any(item["state"] in {"outcome_unknown", "running"} or not item["identityVerified"] for item in conflicts)
@@ -3791,7 +3805,35 @@ class CentralCapabilityService:
             business_draft_source_context=BusinessDraftService(self).source_context,
             business_draft_successor=BusinessDraftService(self).prepare_successor,
             guard_pending_preparation=self._guard_pending_preparation,
+            guard_pending_recovery=self._guard_pending_recovery,
         ))
+
+    def _guard_pending_recovery(self, *, context, session, adapter=None, worker=None, plan=None, authorization=None, connection=None):
+        from agentbridge.core.oa_pending_recovery import recovery_permit, guard_recovery_live, OaPendingRecoveryError
+        try:
+            if connection is None:
+                with self.tasks._connect() as owned:
+                    rows = owned.execute("SELECT task_id FROM task_operations WHERE operation_id=? AND user_subject=?",
+                                         ((authorization or {}).get("prepare_operation_id"), context.user_subject)).fetchall()
+            else:
+                rows = connection.execute("SELECT task_id FROM task_operations WHERE operation_id=? AND user_subject=?",
+                                          ((authorization or {}).get("prepare_operation_id"), context.user_subject)).fetchall()
+            authority_task_id = rows[0]["task_id"] if len(rows) == 1 else None
+            permit = recovery_permit(self, subject=context.user_subject, task_id=authority_task_id,
+                                     session=session, connection=connection)
+            context_permit = recovery_permit(self, subject=context.user_subject, task_id=context.task_id,
+                                             session=session, connection=connection)
+            if (permit is not None or context_permit is not None) and authority_task_id != context.task_id:
+                raise OaPendingRecoveryError("OA_RECOVERY_PERMIT_INVALID", "恢复授权只能由原恢复任务提交。")
+            if permit is None:
+                return
+            if (context.spec.name != permit["commitCapability"] or (plan or {}).get("target", {}).get("affair_id") != permit["affairId"]):
+                raise OaPendingRecoveryError("OA_RECOVERY_PERMIT_INVALID", "恢复许可与本次提交不一致。")
+            if connection is None:
+                guard_recovery_live(self, subject=context.user_subject, task_id=context.task_id,
+                    session=session, adapter=adapter, worker=worker, target=plan["target"])
+        except OaPendingRecoveryError as exc:
+            raise CapabilityRejected(exc.code, str(exc)) from exc
 
     def _business_input_interaction(self, submission: dict) -> dict:
         schema = submission["form_schema"]
@@ -4041,7 +4083,7 @@ class CentralCapabilityService:
                             )
                     if prepare_definition is not None:
                         self._guard_pending_preparation(context=context, session=session, arguments=arguments,
-                                                        definition=prepare_definition)
+                                                        definition=prepare_definition, adapter=adapter, acquire_worker=acquire_worker)
                     dynamic_field_schema = None
                     preflight_result = None
                     if (

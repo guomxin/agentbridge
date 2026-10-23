@@ -382,6 +382,9 @@ class WorkspaceApplication:
                     if operation_linked and any(_unconsumed_pending_attempt(operation, row) for row in decisions):
                         execution.update(phase="not_submitted", reason="pre_submit_validation_failed")
                     result["businessExecution"] = execution
+                    if execution.get("readOnlyQuery") == "oa_pending" and task.get("status") == "outcome_unknown":
+                        from agentbridge.core.oa_pending_recovery import can_recover_pending
+                        result["oaPendingRecoveryAvailable"] = can_recover_pending(self.service, subject=user_subject, task_id=task_id)
         return result
 
     def task_projections(self, account: dict, task_ids: list[str], *, versions: list[int] | None = None) -> dict:
@@ -453,9 +456,63 @@ class WorkspaceApplication:
         result = queue_preparation(self.service, account, task_id, body)
         return self._queued_command(account, result)
 
+    def probe_oa_pending_recovery(self, account: dict, task_id: str, body: dict) -> dict:
+        from agentbridge.core.oa_pending_recovery import probe_unknown_pending
+        self._validate_oa_recovery_body(body, prepare=False)
+        self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
+        result = probe_unknown_pending(self.service, subject=account["user_subject"], task_id=task_id,
+            request_key=body["requestKey"], endpoint_id=account["endpoint_id"])
+        return self._public_oa_recovery(result)
+
+    def prepare_oa_pending_recovery(self, account: dict, task_id: str, body: dict) -> dict:
+        from agentbridge.core.oa_pending_recovery import prepare_recovery_attempt
+        self._validate_oa_recovery_body(body, prepare=True)
+        self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
+        result = prepare_recovery_attempt(self.service, subject=account["user_subject"], task_id=task_id,
+            assessment_id=body["assessmentId"], assessment_hash=body["assessmentHash"],
+            expected_revision=body["expectedRevision"], request_key=body["requestKey"],
+            acknowledgement=body["acknowledgement"], endpoint_id=account["endpoint_id"])
+        return self._public_oa_recovery(result)
+
+    @staticmethod
+    def _validate_oa_recovery_body(body: dict, *, prepare: bool) -> None:
+        from agentbridge.core.oa_pending_recovery import ACK_VERSION
+        fields = {"requestKey", "assessmentId", "assessmentHash", "expectedRevision", "acknowledgement"} if prepare else {"requestKey"}
+        if not isinstance(body, dict) or set(body) != fields:
+            raise ValueError("原事项核对请求字段无效。")
+        if not isinstance(body["requestKey"], str) or not re.fullmatch(r"[a-zA-Z0-9_:-]{16,128}", body["requestKey"]):
+            raise ValueError("原事项核对请求标识无效。")
+        if prepare and (not isinstance(body["assessmentId"], str)
+                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", body["assessmentId"])
+                or not isinstance(body["assessmentHash"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", body["assessmentHash"])
+                or not isinstance(body["expectedRevision"], int) or isinstance(body["expectedRevision"], bool)
+                or body["expectedRevision"] < 1 or body["acknowledgement"] != ACK_VERSION):
+            raise ValueError("请先核对原事项，并明确确认重新准备的风险。")
+
+    @staticmethod
+    def _public_oa_recovery(result: dict) -> dict:
+        # The core owns the assessment. Never expose its persisted principal,
+        # original authorization, captured materials or recovery plan here.
+        allowed = {"status", "assessmentId", "assessmentHash", "revision", "expiresAt", "reason",
+            "canPrepare", "previousOutcome", "recoveryTaskId", "taskId", "originalTaskId"}
+        public = {key: value for key, value in result.items() if key in allowed}
+        if isinstance(result.get("doneCoverage"), str) and result["doneCoverage"] in {"complete", "partial", "incomplete", "unknown"}:
+            public["doneCoverage"] = result["doneCoverage"]
+        if isinstance(result.get("childPreparation"), str) and result["childPreparation"] in {"retryable", "ready", "locked"}:
+            public["childPreparation"] = result["childPreparation"]
+        public["canExecute"] = False
+        return public
+
     def query_oa_pending(self, account: dict, body: dict) -> dict:
         from agentbridge.core.quick_queries import queue_query
-        return self._queued_command(account, queue_query(self.service, account, body))
+        result = queue_query(self.service, account, body)
+        message_key = result.pop("userMessageKey", None)
+        response = self._queued_command(account, result)
+        if message_key:
+            entry = self.service.tasks.get_timeline_message(user_subject=account["user_subject"], message_key=message_key)
+            endpoint = self.service.tasks.get_endpoint(account["endpoint_id"], user_subject=account["user_subject"])
+            response["userMessage"] = _public_timeline_entry(entry, source=endpoint, is_origin=True)
+        return response
 
     def _queued_command(self, account: dict, result: dict) -> dict:
         queued_task = self.service.tasks.get_task(result["taskId"], user_subject=account["user_subject"])
@@ -1807,6 +1864,10 @@ def _public_task(task: dict) -> dict:
     )
     result = {name: task.get(name) for name in names}
     summary = dict(task.get("summary") or {})
+    recovery = summary.pop("oaPendingRecovery", None)
+    if (isinstance(recovery, dict) and isinstance(recovery.get("originTaskId"), str)
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", recovery["originTaskId"])):
+        summary["oaPendingRecovery"] = {"originalTaskId": recovery["originTaskId"]}
     command = summary.pop("command", None)
     if isinstance(command, dict):
         summary["preparation"] = {"state": command.get("state"),
@@ -1978,6 +2039,10 @@ def _public_timeline_entry(
         and dedupe_key.startswith("message:")
         else None
     )
+    payload = entry.get("payload") or {}
+    event_type = payload.get("eventType") if isinstance(payload, dict) else None
+    if entry.get("entry_type") == "task_event" and isinstance(event_type, str) and event_type.startswith("task.oa_recovery."):
+        payload = {"eventType": event_type, "taskId": entry.get("task_id")}
     return {
         "entry_id": entry["entry_id"],
         "sequence": entry["sequence"],
@@ -1986,7 +2051,7 @@ def _public_timeline_entry(
         "task_id": entry.get("task_id"),
         "role": entry.get("role"),
         "text": entry.get("text"),
-        "payload": entry.get("payload") or {},
+        "payload": payload,
         "created_at": entry["created_at"],
         "source": {
             "client_type": client_type,

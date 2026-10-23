@@ -996,7 +996,13 @@ class BusinessDraftService:
         source_context = {"taskId": task_id, "skillBindingHash": _hash(skill) if skill else None, "plan": plan_binding, "batch": batch_binding}
         if source["form_schema"].get("_agentbridge_business_draft_context") != source_context:
             raise BusinessDraftError("DRAFT_CONTEXT_CHANGED", "原始任务、业务助手或计划关联已变化，不能继续此草稿。", status=403)
+        from agentbridge.core.oa_pending_recovery import recovery_permit, OaPendingRecoveryError, _hash as recovery_hash
+        try:
+            recovery = recovery_permit(self.service, subject=subject, task_id=task_id, session=session, connection=connection)
+        except OaPendingRecoveryError as exc:
+            raise BusinessDraftError(exc.code, str(exc), status=409) from exc
         return {"taskId": task_id, "sourceInteractionId": interaction["interaction_id"],
+                "recoveryPermitHash": recovery_hash(recovery) if recovery else None,
                 "prepareVersion": spec.version, "commitVersion": commit.version,
                 "session": {key: session.get(key) for key in ("session_id", "expected_principal_ref", "downstream_principal_ref", "last_verified_at")},
                 "skillBindingHash": _hash(skill) if skill else None, "plan": plan_binding,

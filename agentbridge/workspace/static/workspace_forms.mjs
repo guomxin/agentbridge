@@ -29,7 +29,7 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
       });
     }
     // A response timeout is uncertain: another send restores this same read.
-    const request = quickQueryRequest ||= {requestKey: crypto.randomUUID()};
+    const request = quickQueryRequest ||= {requestKey: crypto.randomUUID(), userMessage: message};
     const textarea = form.elements.message;
     const controls = [textarea, ...Array.from(form.querySelectorAll?.('button[type="submit"]') || [])];
     const disabled = controls.map(control => Boolean(control.disabled));
@@ -38,7 +38,8 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
       await queryOaPending(request);
       scope.assertCurrent();
       quickQueryRequest = null;
-      if (textarea.value.trim() === message) textarea.value = "";
+      if (textarea.value.trim() === request.userMessage) textarea.value = "";
+      else toast("已恢复上次查询，当前修改的文字尚未发送。", false, "plain-oa-query-recovered");
     } catch (error) {
       if (!isCancellation(error) && scope.current()) {
         toast(error.message || "查询暂未确认，重新发送可恢复本次查询。", true, "plain-oa-query");

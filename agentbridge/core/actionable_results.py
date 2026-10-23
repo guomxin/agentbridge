@@ -385,8 +385,21 @@ def _cross_source_preparations(service, connection, subject, pending, operation_
     if not session or not selections:
         return {}
     result = {}
-    for conflict in oa_preparation_conflicts(service, user_subject=subject, session=session, selections=selections, connection=connection):
+    conflicts = oa_preparation_conflicts(service, user_subject=subject, session=session, selections=selections, connection=connection)
+    from agentbridge.core.oa_pending_recovery import recovery_child_for_origin, OaPendingRecoveryError
+    for conflict in conflicts:
         key = keys[(conflict["affairId"], conflict["prepareCapability"], conflict["commitCapability"])]
+        if conflict["identityVerified"]:
+            try:
+                child_id = recovery_child_for_origin(service, subject=subject, task_id=conflict["taskId"], connection=connection)
+            except (OaPendingRecoveryError, KeyError, ValueError):
+                child_id = None
+            if child_id:
+                child = _owned_task(connection, subject, child_id)
+                child_state = next((row["state"] for row in conflicts if row["taskId"] == child_id and row["identityVerified"]), None)
+                result[key] = {"taskId": child_id, "state": child_state or
+                               ("preparing" if child["status"] == "active" else child["status"])}
+                continue
         result.setdefault(key, {"taskId": conflict["taskId"],
                                "state": conflict["state"] if conflict["identityVerified"] else "identity_unverified"})
     return result

@@ -4,12 +4,15 @@ The HTTP boundary only queues this closed command. No capability, arguments,
 selection, batch or write authority can be supplied by a caller. The OA pending
 Skill is deliberately not bound: its manifest excludes list-only queries. Any
 later selection still passes the existing reviewed Skill and write guards.
+Workspace may also persist the user's closed query text on its timeline; only
+its hash joins the frozen command, never the text or any model dispatch.
 """
 from __future__ import annotations
 
 from datetime import timedelta
 import json
 import re
+import unicodedata
 from uuid import uuid4
 
 from agentbridge.core import actionable_results as actions
@@ -18,16 +21,34 @@ from agentbridge.core.store_transactions import store_transaction
 COMMAND_KIND = "oa_pending_query"
 CAPABILITY = "oa.workflow.pending.list"
 QUERY_TTL_SECONDS = 600
+CURRENT_OWN_OA_PENDING = frozenset({
+    "查看oa待办", "查询oa待办", "查oa待办", "查一下oa待办",
+    "查看我的oa待办", "查询我的oa待办", "查看当前oa待办", "查询当前oa待办",
+    "查看我当前的oa待办", "查询我当前的oa待办",
+    "查看本人当前oa待办", "查询本人当前oa待办",
+    "帮我查一下oa待办", "帮我查询oa待办", "帮我查看oa待办",
+})
 
 
-def _body(body):
-    if not isinstance(body, dict) or set(body) != {"requestKey"} or not isinstance(body["requestKey"], str) \
+def _is_current_own_pending_query(message):
+    if not isinstance(message, str) or len(message) > 80:
+        return False
+    plain = unicodedata.normalize("NFKC", message).strip().replace(" ", "").replace("\t", "")
+    plain = re.sub(r"[。.!?]$", "", plain).lower()
+    return plain.removesuffix("事项") in CURRENT_OWN_OA_PENDING
+
+
+def _body(body, *, allow_user_message=False):
+    allowed = ({"requestKey"}, {"requestKey", "userMessage"}) if allow_user_message else ({"requestKey"},)
+    if not isinstance(body, dict) or set(body) not in allowed or not isinstance(body["requestKey"], str) \
             or not re.fullmatch(r"[a-zA-Z0-9_:-]{16,128}", body["requestKey"]):
-        actions._fail("ACTION_REQUEST_INVALID", "查询请求只允许包含原请求标识。")
+        actions._fail("ACTION_REQUEST_INVALID", "查询请求包含不支持的字段或无效请求标识。")
+    if "userMessage" in body and not _is_current_own_pending_query(body["userMessage"]):
+        actions._fail("ACTION_REQUEST_INVALID", "快捷查询文字必须是查询本人当前 OA 待办的固定表达。")
 
 
 def queue_query(service, account, body):
-    _body(body)
+    _body(body, allow_user_message=True)
     with store_transaction(service.tasks) as connection:
         workspace = dict(actions._account(connection, account))
         return _queue(service, account["user_subject"], workspace, body, connection)
@@ -56,6 +77,9 @@ def _queue(service, subject, workspace, body, connection):
     scope = workspace.get("_request_scope") or workspace["account_id"]
     identity = {"action": COMMAND_KIND, "endpointId": workspace["endpoint_id"],
         "sourceTaskId": workspace.get("_source_task_id"), "viewHash": workspace.get("_view_hash")}
+    message = body.get("userMessage")
+    if message is not None:
+        identity["messageHash"] = actions._hash({"text": message})
     request_hash = actions._hash({"scope": scope, "requestKey": body["requestKey"]})
     identity_hash = actions._hash(identity)
     host_key = "quick-query:" + actions._hash({"scope": scope, "requestKey": body["requestKey"]})
@@ -69,12 +93,20 @@ def _queue(service, subject, workspace, body, connection):
                 or row["active_conversation_ref"] != workspace["openclaw_session_key"]:
             actions._fail("ACTION_REQUEST_CONFLICT", "原查询请求不属于当前入口。")
         _contract(service, command)
-        return {"taskId": row["task_id"], "commandKey": command["commandKey"], "status": "existing"}
+        receipt = {"taskId": row["task_id"], "commandKey": command["commandKey"], "status": "existing"}
+        if message is not None:
+            receipt["userMessageKey"] = _append_user_message(service, subject, workspace, message, request_hash, connection)
+        return receipt
     count = connection.execute("SELECT COUNT(*) FROM agent_tasks WHERE user_subject=? AND origin_endpoint_id=? "
         "AND status IN ('active','running','waiting_user') AND json_extract(summary_json,'$.command.kind')=?",
         (subject, workspace["endpoint_id"], COMMAND_KIND)).fetchone()[0]
     if count >= 4:
         actions._fail("ACTION_PREPARATION_BUSY", "当前会话已有查询正在等待，请恢复原查询或稍后再试。")
+    message_key = None
+    if message is not None:
+        # The message precedes the task card and commits with the closed read
+        # intent. It never creates a model dispatch or a business authorization.
+        message_key = _append_user_message(service, subject, workspace, message, request_hash, connection)
     command = {"kind": COMMAND_KIND, "commandKey": str(uuid4()), "requestIdentity": identity,
         "capabilityName": CAPABILITY, "capabilityVersion": service.registry.get(CAPABILITY).version,
         "arguments": {}, "requestedAt": actions._now().isoformat(), "state": "pending"}
@@ -102,7 +134,20 @@ def _queue(service, subject, workspace, body, connection):
         event_type="task.prepare.requested", payload={"commandKey": command["commandKey"],
             "intentHash": command["intentHash"], "requestKeyHash": request_hash, "requestIdentityHash": identity_hash,
             "queryOnly": True}, causation_ref=command["commandKey"], created_at=command["requestedAt"])
-    return {"taskId": task["task_id"], "commandKey": command["commandKey"], "status": "queued"}
+    return {"taskId": task["task_id"], "commandKey": command["commandKey"], "status": "queued",
+        **({"userMessageKey": message_key} if message_key else {})}
+
+
+def _append_user_message(service, subject, workspace, message, request_hash, connection):
+    message_key = "workspace:quick-query:user:" + request_hash
+    entry, _ = service.tasks._append_timeline_message_in_connection(connection,
+        user_subject=subject, source_endpoint_id=workspace["endpoint_id"], message_key=message_key,
+        role="user", text=message)
+    if (entry["role"] != "user" or entry["text"] != message.strip()
+            or entry["source_endpoint_id"] != workspace["endpoint_id"] or entry.get("task_id") is not None
+            or entry.get("payload") != {}):
+        actions._fail("ACTION_REQUEST_CONFLICT", "原查询文字与当前请求不一致。")
+    return message_key
 
 
 def _contract(service, command):

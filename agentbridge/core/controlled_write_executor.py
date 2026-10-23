@@ -82,6 +82,7 @@ class ControlledWriteDependencies:
     business_draft_source_context: Callable[[str, str, str], dict] | None = None
     business_draft_successor: Callable[[str, str, str | None], dict | None] | None = None
     guard_pending_preparation: Callable[..., None] | None = None
+    guard_pending_recovery: Callable[..., None] | None = None
 
 
 class ControlledWriteExecutor:
@@ -108,6 +109,7 @@ class ControlledWriteExecutor:
         if self._dependencies.guard_pending_preparation:
             self._dependencies.guard_pending_preparation(
                 context=context, session=session, arguments=arguments, definition=definition,
+                adapter=adapter, worker=worker,
             )
         prepared = prepare_function(adapter, worker, arguments)
         review_changed = False
@@ -464,6 +466,11 @@ class ControlledWriteExecutor:
 
         boundary_entered = False
 
+        def check_recovery_before_revalidation() -> None:
+            if self._dependencies.guard_pending_recovery:
+                self._dependencies.guard_pending_recovery(context=context, session=session,
+                    adapter=adapter, worker=worker, plan=plan, authorization=authorization)
+
         def enter_commit_boundary() -> None:
             nonlocal boundary_entered
             self._dependencies.user_grants.require_capability(
@@ -483,9 +490,15 @@ class ControlledWriteExecutor:
                     connection, authorization_id=authorization_id,
                     user_subject=session["user_subject"], operation_id=context.operation_id,
                     validate=self._dependencies.validate_task_plan_execution,
-                )),
+                ), self._dependencies.guard_pending_recovery(context=context, session=session,
+                    plan=plan, authorization=authorization, connection=connection) if self._dependencies.guard_pending_recovery else None),
             )
             boundary_entered = True
+
+        # Shared OA pending execution calls this before its final material,
+        # identity and readiness checks. Consumption itself only rechecks the
+        # immutable permit/session binding inside its transaction.
+        enter_commit_boundary.before_pending_revalidation = check_recovery_before_revalidation
 
         commit_function = resolve_write_function(str(definition["commit_function"]))
         if not callable(commit_function):

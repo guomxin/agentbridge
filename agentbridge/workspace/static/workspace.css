@@ -1751,4 +1751,9 @@ td {
 #skill-quality-panel details { margin: 12px 0; }
 .skill-card details { margin-top: 16px; }
 .skill-card details textarea { width: 100%; box-sizing: border-box; margin: 10px 0; }
-.view-quick-actions {display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.oa-pending-recovery {display:grid;gap:10px;margin-top:16px;padding:14px;border:1px solid var(--line);border-radius:12px}
+.oa-pending-recovery[hidden], .oa-pending-recovery [hidden] {display:none}
+.oa-pending-recovery p {margin:0;line-height:1.6}
+.oa-pending-recovery button {justify-self:start}
+.oa-recovery-risk {display:flex;align-items:flex-start;gap:9px;line-height:1.6;font-size:13px}
+.oa-recovery-risk input {flex:0 0 auto;margin-top:5px}

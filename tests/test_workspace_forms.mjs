@@ -90,6 +90,31 @@ function composerFixture(options = {}) {
   return { forms, scope, state, readers, messages, warnings, ...elements };
 }
 
+test("typed query projects only its saved original message without advancing the SSE cursor", async () => {
+  const scope = createLifecycle().scope(), ingested = [], projected = [], synced = [];
+  let receipt;
+  const query = workspaceHandler('queryOaPending', 'continueTask', {
+    sessionScope: scope, projectionOrder: {begin: () => 1, accept: () => true},
+    scopedApi: () => async () => receipt, markWorkspaceTiming() {},
+    ingestTimelineEntry: (...args) => ingested.push(args), upsertTaskCard: value => projected.push(value),
+    scheduleTaskSync: id => synced.push(id),
+  });
+  const taskId = '12345678-1234-1234-1234-123456789abc';
+  const entry = {entry_id: '22345678-1234-1234-1234-123456789abc', sequence: 25,
+    entry_type: 'chat_message', role: 'user', text: '查看OA待办', task_id: null, source: {is_origin: true}};
+  const payload = {requestKey: 'original-typed-query', userMessage: entry.text};
+  for (const invalid of [undefined, {...entry, text: '其他原文'}, {...entry, role: 'assistant'},
+    {...entry, source: {is_origin: false}}, {...entry, task_id: 'another-task'}, {...entry, sequence: 0}]) {
+    receipt = {taskId, userMessage: invalid};
+    await assert.rejects(query(payload), /原消息保存状态尚未确认/);
+  }
+  assert.deepEqual(ingested, []);assert.deepEqual(projected, []);assert.deepEqual(synced, []);
+  receipt = {taskId, userMessage: entry, detail: {task: {task_id: taskId}}};
+  await query(payload);
+  assert.deepEqual(ingested, [[entry, true, false]]);
+  assert.deepEqual(synced, [taskId]);assert.equal(projected.length, 1);scope.dispose();
+});
+
 test("plain personal OA query uses the closed read once, while attachments and trial intent keep their original path", async () => {
   const reads = [], gate = deferred();
   const f = composerFixture({queryOaPending: async payload => {reads.push(payload);await gate.promise;}});
@@ -98,7 +123,8 @@ test("plain personal OA query uses the closed read once, while attachments and t
   const sending = f.forms.sendChat({preventDefault() {}, currentTarget: form});
   assert.equal(input.disabled, true);assert.equal(button.disabled, true);
   await f.forms.sendChat({preventDefault() {}, currentTarget: form});
-  assert.equal(reads.length, 1);assert.deepEqual(Object.keys(reads[0]), ["requestKey"]);
+  assert.equal(reads.length, 1);assert.deepEqual(Object.keys(reads[0]), ["requestKey", "userMessage"]);
+  assert.equal(reads[0].userMessage, "查看OA待办");
   assert.deepEqual(f.messages, []);
   gate.resolve();await sending;
   assert.equal(input.value, "");assert.equal(input.disabled, false);assert.equal(button.disabled, false);
@@ -141,6 +167,23 @@ test("a late shortcut receipt cannot clear the next account's composer or recove
   assert.notEqual(reads[0].requestKey, reads[1].requestKey);assert.deepEqual(f.warnings, []);
   newReply.resolve();await fresh;assert.equal(input.value, "");assert.equal(input.disabled, false);
   current.dispose();f.scope.dispose();
+});
+
+test("recovering a timed-out query preserves later edited words until a separate explicit send", async () => {
+  let key = 0, attempt = 0;
+  const reads = [];
+  const f = composerFixture({crypto: {randomUUID: () => `query-key-${++key}`},
+    queryOaPending: async payload => {reads.push({...payload});if (++attempt === 1) throw Error('超时');}});
+  const input = {value: '查看OA待办', disabled: false}, form = {elements: {message: input}};
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  input.value = '查询我的OA待办';
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.deepEqual(reads[1], reads[0]);assert.equal(reads[1].userMessage, '查看OA待办');
+  assert.equal(input.value, '查询我的OA待办');assert.match(f.warnings.at(-1)[0], /当前修改的文字尚未发送/);
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.notEqual(reads[2].requestKey, reads[1].requestKey);
+  assert.equal(reads[2].userMessage, '查询我的OA待办');assert.equal(input.value, '');
+  assert.deepEqual(f.messages, []);f.scope.dispose();
 });
 
 test("account disposal cancels pending image reads and ignores a reader that reports load late", async () => {
