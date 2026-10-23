@@ -1,5 +1,6 @@
 import { isCancellation, cancellationError } from "./workspace_lifecycle.mjs";
 import { skillTrialTitle, skillTrialBinding } from "./workspace_skill_trial.mjs";
+import { isCurrentOwnOaPendingQuery } from "./workspace_quick_query.mjs";
 
 const MAX_COMPOSER_IMAGES = 4;
 const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
@@ -11,9 +12,44 @@ const SUPPORTED_COMPOSER_IMAGE_TYPES = new Set([
 ]);
 
 
-export function createComposer({ document, state, $, toast, getScope, executeChatMessage, FileReader = globalThis.FileReader, crypto = globalThis.crypto }) {
+export function createComposer({ document, state, $, toast, getScope, executeChatMessage, queryOaPending, FileReader = globalThis.FileReader, crypto = globalThis.crypto }) {
   let attachmentGeneration = 0;
   let trialScope = null;
+  let quickQueryScope = null;
+  let quickQueryRequest = null;
+
+  async function sendPendingQuery(message, form) {
+    const scope = getScope();
+    scope.assertCurrent();
+    if (quickQueryScope !== scope) {
+      quickQueryScope = scope;
+      quickQueryRequest = null;
+      scope.defer(() => {
+        if (quickQueryScope === scope) { quickQueryScope = null; quickQueryRequest = null; }
+      });
+    }
+    // A response timeout is uncertain: another send restores this same read.
+    const request = quickQueryRequest ||= {requestKey: crypto.randomUUID()};
+    const textarea = form.elements.message;
+    const controls = [textarea, ...Array.from(form.querySelectorAll?.('button[type="submit"]') || [])];
+    const disabled = controls.map(control => Boolean(control.disabled));
+    controls.forEach(control => { control.disabled = true; });
+    try {
+      await queryOaPending(request);
+      scope.assertCurrent();
+      quickQueryRequest = null;
+      if (textarea.value.trim() === message) textarea.value = "";
+    } catch (error) {
+      if (!isCancellation(error) && scope.current()) {
+        toast(error.message || "查询暂未确认，重新发送可恢复本次查询。", true, "plain-oa-query");
+      }
+    } finally {
+      if (scope.current()) {
+        controls.forEach((control, index) => { control.disabled = disabled[index]; });
+        textarea.focus?.();
+      }
+    }
+  }
   function renderComposerTrial() {
     const trial = state.composerSkillTrial;
     const card = $("#composer-skill-trial");
@@ -254,6 +290,10 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
         clearComposerTrial(trial);
         if (textarea.value.trim() === message) textarea.value = "";
       }, () => clearComposerTrial(trial));
+      return;
+    }
+    if (queryOaPending && !attachments.length && isCurrentOwnOaPendingQuery(message)) {
+      await sendPendingQuery(message, form);
       return;
     }
     textarea.value = "";

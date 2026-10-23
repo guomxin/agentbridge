@@ -166,7 +166,8 @@ test("terminal or unknown child outcomes never reopen a preparation from an old 
     const result = find(row, "button", "查看结果");
     assert.equal(result.disabled, false, state);
     if (state === "outcome_unknown") assert.match(row.textContent, /不要重复提交/);
-    if (["failed", "expired", "canceled", "skipped"].includes(state)) assert.match(row.textContent, /重新查询待办/);
+    if (["expired", "canceled", "skipped"].includes(state)) assert.match(row.textContent, /重新查询待办/);
+    if (state === "failed") assert.match(row.textContent, /查看原任务.*不要重复准备或提交/);
     result.events.click();
   }
   assert.equal(opened.length, 7);

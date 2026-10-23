@@ -1,5 +1,6 @@
 """Owned query selections retain normal prepare/material/authorization paths."""
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -522,6 +523,296 @@ class ActionableResultsTests(unittest.TestCase):
             connection.rollback()
         self.assertEqual(self.count("skill_bindings"), before)
         self.assertIsNone(self.service.skills.for_task(OWNER, "synthetic-rolled-back-task"))
+
+    def fresh_query(self):
+        self.source = self.fixture.add_query_case(case_key=uuid4().hex)
+        return self.groups()[0]
+
+    def conflicts(self, queued, *, session=None, exclude=None):
+        command = self.command(queued)
+        selections = [{"affairId": entry["resource_ref"],
+                       "prepareCapability": entry["display_summary"]["prepare_capability"],
+                       "commitCapability": entry["display_summary"]["commit_capability"]}
+                      for entry in command["selectedItems"]]
+        return actions.oa_preparation_conflicts(self.service, user_subject=OWNER,
+            session=session or self.service.sessions.find(user_subject=OWNER, system_id="oa"),
+            selections=selections, exclude_task_id=exclude)
+
+    def test_fresh_query_reuses_exact_pending_affair_and_preserves_original_skill(self):
+        first = self.queue()
+        first_binding = self.service.skills.for_task(OWNER, first["taskId"])["binding_id"]
+        group = self.fresh_query()
+        self.assertEqual(group["targets"][0]["preparation"], {"taskId": first["taskId"], "state": "queued"})
+        self.assertFalse(group["targets"][0]["enabled"])
+        before = {name: self.count(name) for name in ("agent_tasks", "skill_bindings", "write_authorizations", "business_draft_decisions")}
+        repeated = self.queue()
+        self.assertEqual(repeated["taskId"], first["taskId"])
+        self.assertEqual(repeated["status"], "existing")
+        self.assertEqual(self.service.skills.for_task(OWNER, first["taskId"])["binding_id"], first_binding)
+        self.assertEqual(before, {name: self.count(name) for name in before})
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_unknown_affair_stays_blocked_after_source_expiry_and_same_principal_relogin(self):
+        first = self.queue()
+        old_source = dict(self.source)
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='outcome_unknown' WHERE task_id=?", (first["taskId"],))
+            connection.execute("UPDATE operations SET finished_at=? WHERE operation_id=?",
+                ((actions._now() - timedelta(hours=2)).isoformat(), old_source["operation_id"]))
+            connection.execute("UPDATE sessions SET authority_generation=authority_generation+2 WHERE user_subject=? AND system_id='oa'", (OWNER,))
+        group = self.fresh_query()
+        self.assertEqual(group["targets"][0]["preparation"], {"taskId": first["taskId"], "state": "outcome_unknown"})
+        self.assertFalse(group["targets"][0]["enabled"])
+        self.assertEqual(self.queue()["taskId"], first["taskId"])
+        session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
+        conflicts = self.conflicts(first, session={**session, "session_id": "new-session-same-principal"}, exclude=first["taskId"])
+        self.assertEqual([(item["taskId"], item["state"]) for item in conflicts], [(first["taskId"], "outcome_unknown")])
+        self.assertTrue(conflicts[0]["identityVerified"])
+        self.assertEqual(self.count("business_draft_decisions"), 0)
+        self.assertEqual(self.count("write_authorizations"), 0)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_cross_query_batch_rejects_overlap_but_allows_remaining_items(self):
+        first = self.queue()
+        group = self.fresh_query()
+        self.assertFalse(group["targets"][0]["enabled"])
+        self.assertTrue(group["targets"][1]["enabled"])
+        before = self.count("agent_tasks")
+        with self.assertRaises(actions.ActionableResultError) as caught:
+            self.queue(self.body((0, 1)))
+        self.assertEqual(caught.exception.code, "ACTION_TARGET_ALREADY_PREPARED")
+        self.assertEqual(self.count("agent_tasks"), before)
+        fresh = self.queue(self.body((1,)))
+        self.assertNotEqual(fresh["taskId"], first["taskId"])
+        self.assertEqual(self.count("write_authorizations"), 0)
+
+    def test_cross_query_batch_preserves_unknown_item_and_releases_unsubmitted_skipped_item(self):
+        first = self.queue(self.body((0, 1)))
+        self.execute(first)
+        self.service.tasks.fail_current_batch_item(parent_task_id=first["taskId"], user_subject=OWNER,
+            operation_id=None, expected_ordinal=1, item_state="outcome_unknown", error_code="SYNTHETIC_UNKNOWN")
+        group = self.fresh_query()
+        self.assertEqual(group["targets"][0]["preparation"]["state"], "outcome_unknown")
+        self.assertFalse(group["targets"][0]["enabled"])
+        self.assertIsNone(group["targets"][1]["preparation"])
+        self.assertTrue(group["targets"][1]["enabled"])
+        fresh = self.queue(self.body((1,)))
+        self.assertNotEqual(fresh["taskId"], first["taskId"])
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_failed_or_expired_without_submit_evidence_can_be_prepared_from_new_query(self):
+        first = self.queue()
+        for state in ("failed", "expired", "canceled"):
+            with self.subTest(state=state):
+                with self.service.tasks._connect() as connection:
+                    connection.execute("UPDATE agent_tasks SET status=? WHERE task_id=?", (state, first["taskId"]))
+                group = self.fresh_query()
+                self.assertTrue(group["targets"][0]["enabled"])
+                self.assertIsNone(group["targets"][0]["preparation"])
+                first = self.queue()
+        self.assertEqual(self.count("write_authorizations"), 0)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_same_title_or_affair_under_another_principal_does_not_merge(self):
+        first = self.queue()
+        session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
+        self.service.sessions.rebind_expected_principal(session["session_id"], expected_principal_ref="other-oa-principal", reason="fixture account rotation")
+        self.fixture.oa.data["principal"] = "other-oa-principal"
+        self.service.sessions.activate(session["session_id"], observed_principal_ref="other-oa-principal")
+        group = self.fresh_query()
+        self.assertTrue(group["targets"][0]["enabled"])
+        second = self.queue()
+        self.assertNotEqual(second["taskId"], first["taskId"])
+        self.assertEqual(self.command(second)["oaIdentity"]["principalRef"], "other-oa-principal")
+        old_session = {**self.service.sessions.find(user_subject=OWNER, system_id="oa"),
+                       "expected_principal_ref": OWNER, "downstream_principal_ref": OWNER}
+        self.assertEqual([item["taskId"] for item in self.conflicts(first, session=old_session)], [first["taskId"]])
+
+    def test_collision_never_crosses_subject_affair_or_capability(self):
+        first = self.queue()
+        selected = self.conflicts(first)[0]
+        session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
+        for mutation in ({"affairId": "different-affair"}, {"prepareCapability": "oa.efficiency_data.approval.prepare"},
+                         {"commitCapability": "oa.efficiency_data.approve"}):
+            with self.subTest(mutation=mutation):
+                selection = {key: selected[key] for key in ("affairId", "prepareCapability", "commitCapability")} | mutation
+                self.assertEqual(actions.oa_preparation_conflicts(self.service, user_subject=OWNER, session=session, selections=[selection]), [])
+        self.assertEqual(actions.oa_preparation_conflicts(self.service, user_subject="different-user",
+            session={**session, "user_subject": "different-user"}, selections=[selected]), [])
+
+    def test_own_undecided_draft_can_recheck_but_approved_or_unknown_cannot_be_excluded(self):
+        from agentbridge.core.business_drafts import BusinessDraftService
+        first = self.queue()
+        response = self.execute(first)
+        self.assertEqual(self.conflicts(first, exclude=first["taskId"]), [])
+        source_id = response["nextAction"]["inputSubmissionId"]
+        drafts = BusinessDraftService(self.service)
+        opened = drafts.open(source_id)
+        args = {"source_submission_id": source_id, "csrf_token": opened["csrfToken"], "csrf_cookie": opened["csrfToken"]}
+        saved = drafts.save(**args, expected_revision=opened["state"]["revision"], values={"opinion": "合成核验意见"})
+        ready = drafts.preview(**args, expected_revision=saved["revision"])
+        drafts.approve(**args, expected_revision=ready["revision"], preview_id=ready["preview"]["previewId"], request_key=uuid4().hex)
+        self.assertEqual(self.conflicts(first, exclude=first["taskId"])[0]["state"], "running")
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='failed' WHERE task_id=?", (first["taskId"],))
+        self.assertEqual(self.conflicts(first, exclude=first["taskId"])[0]["state"], "outcome_unknown")
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_direct_prepare_resource_is_found_without_actionable_command(self):
+        direct = self.fixture.add_pending_case("efficiency_data", case_key="direct-existing")
+        self.fresh_query()
+        target = next(item for item in self.groups()[0]["targets"] if item["workflowType"] == "efficiency_data")
+        self.assertEqual(target["preparation"], {"taskId": direct["task_id"], "state": "waiting_user"})
+        self.assertFalse(target["enabled"])
+        with self.assertRaises(actions.ActionableResultError) as caught:
+            self.queue({"operationId": self.groups()[0]["operationId"], "targetKeys": [target["targetKey"]], "requestKey": uuid4().hex})
+        self.assertEqual(caught.exception.code, "ACTION_TARGET_ALREADY_PREPARED")
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_cross_query_reuse_requires_current_grants_and_reviewed_skill(self):
+        self.queue()
+        self.fresh_query()
+        body = self.body()
+        original = self.service.skills.current
+        def newer(sid, connection=None):
+            item = deepcopy(original(sid, connection))
+            item["content_hash"] = "unreviewed-instructions"
+            return item
+        with patch.object(self.service.skills, "current", side_effect=newer), self.assertRaises(actions.ActionableResultError) as caught:
+            self.queue(body)
+        self.assertEqual(caught.exception.code, "ACTION_SKILL_CHANGED")
+        grant_permissions(self.service.user_grants, OWNER, ["oa.workflow.read"])
+        with self.assertRaises(PermissionError):
+            self.queue(body)
+
+    def test_concurrent_fresh_sources_atomically_converge_without_extra_binding(self):
+        first_source, first_body = dict(self.source), self.body()
+        self.fresh_query()
+        second_source, second_body = dict(self.source), self.body()
+        before = self.count("skill_bindings")
+        def queue(source, body):
+            return actions.queue_preparation(self.service, self.account, source["task_id"], body)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(queue, source, body) for source, body in ((first_source, first_body), (second_source, second_body))]
+            results = [future.result() for future in futures]
+        self.assertEqual(len({item["taskId"] for item in results}), 1)
+        self.assertEqual({item["status"] for item in results}, {"queued", "existing"})
+        self.assertEqual(self.count("skill_bindings"), before + 1)
+        self.assertEqual(self.count("business_draft_decisions"), 0)
+        self.assertEqual(self.count("write_authorizations"), 0)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def legacy_command(self, queued):
+        """Keep the old frozen contract/event consistent while omitting the new hint."""
+        with self.service.tasks._connect() as connection:
+            row = connection.execute("SELECT summary_json FROM agent_tasks WHERE task_id=?", (queued["taskId"],)).fetchone()
+            summary = actions.json.loads(row[0])
+            command = summary["command"]
+            command.pop("oaIdentity", None)
+            command["intentHash"] = actions._hash(actions._intent(command))
+            connection.execute("UPDATE agent_tasks SET summary_json=? WHERE task_id=?", (actions._json(summary), queued["taskId"]))
+            event = connection.execute("SELECT event_id,payload_json FROM task_events WHERE task_id=? AND event_type='task.prepare.requested'",
+                                       (queued["taskId"],)).fetchone()
+            payload = actions.json.loads(event["payload_json"])
+            payload["intentHash"] = command["intentHash"]
+            connection.execute("UPDATE task_events SET payload_json=? WHERE event_id=?", (actions._json(payload), event["event_id"]))
+
+    def test_legacy_command_without_rebind_can_match_existing_verified_principal(self):
+        first = self.queue()
+        self.legacy_command(first)
+        self.execute(first)
+        self.fresh_query()
+        target = self.groups()[0]["targets"][0]
+        self.assertEqual(target["preparation"], {"taskId": first["taskId"], "state": "waiting_user"})
+        self.assertEqual(self.queue()["taskId"], first["taskId"])
+
+    def test_legacy_unknown_without_principal_proof_blocks_without_auto_reuse(self):
+        first = self.queue()
+        self.legacy_command(first)
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='outcome_unknown' WHERE task_id=?", (first["taskId"],))
+        session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
+        self.service.sessions.rebind_expected_principal(session["session_id"], expected_principal_ref="rotated-oa-principal", reason="fixture missing historical identity")
+        self.fixture.oa.data["principal"] = "rotated-oa-principal"
+        self.service.sessions.activate(session["session_id"], observed_principal_ref="rotated-oa-principal")
+        self.fresh_query()
+        target = self.groups()[0]["targets"][0]
+        self.assertEqual(target["preparation"], {"taskId": first["taskId"], "state": "identity_unverified"})
+        self.assertFalse(target["enabled"])
+        with self.assertRaises(actions.ActionableResultError) as caught:
+            self.queue()
+        self.assertEqual(caught.exception.code, "ACTION_TARGET_ALREADY_PREPARED")
+        self.assertFalse(self.conflicts(first)[0]["identityVerified"])
+
+    def test_new_query_refresh_follows_same_affair_without_queueing_a_child(self):
+        first = self.queue()
+        original_source = self.source["task_id"]
+        self.fresh_query()
+        before = self.count("agent_tasks")
+        detail = self.fixture.app.task_detail(self.account, first["taskId"])
+        self.assertEqual(set(detail["actionableSourceTaskIds"]), {original_source, self.source["task_id"]})
+        self.assertEqual(self.count("agent_tasks"), before)
+        self.assertEqual(self.count("write_authorizations"), 0)
+
+    def test_new_single_task_persists_exact_business_title_without_using_it_as_identity(self):
+        target = self.groups()[0]["targets"][0]
+        first = self.queue()
+        task = self.service.tasks.get_task(first["taskId"], user_subject=OWNER)
+        self.assertEqual(task["title"], "核对并办理：" + target["title"])
+        self.assertEqual(self.command(first)["affairIds"], ["latency-query-target"])
+
+    def test_expired_undecided_resource_can_reprepare_but_unknown_cannot(self):
+        first = self.queue()
+        self.execute(first)
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE field_submissions SET state='expired' WHERE create_operation_id IN "
+                "(SELECT operation_id FROM task_operations WHERE task_id=?)", (first["taskId"],))
+        self.fresh_query()
+        self.assertTrue(self.groups()[0]["targets"][0]["enabled"])
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='outcome_unknown' WHERE task_id=?", (first["taskId"],))
+        self.assertFalse(self.groups()[0]["targets"][0]["enabled"])
+        self.assertEqual(self.groups()[0]["targets"][0]["preparation"]["state"], "outcome_unknown")
+
+    def test_fresh_query_proven_pre_submit_failures_remain_failed_and_bound_to_old_decision(self):
+        from tests.support.pending_readiness_acceptance import PendingReadinessAcceptanceFixture
+        from tests.test_workspace_business_outcomes import _approve
+        for mode in ("never", "identity_drift", "material_drift"):
+            with self.subTest(mode=mode), TemporaryDirectory() as temporary:
+                fixture = PendingReadinessAcceptanceFixture(Path(temporary), modes=())
+                try:
+                    service, account = fixture.service, fixture.account
+                    source = fixture.add_pending_case("efficiency_data", case_key=mode)
+                    receipt = _approve(fixture, source)["receipt"]
+                    fixture.oa.data["affairs"][source["arguments"]["affair_id"]]["readiness_case"] = mode
+                    fixture.oa.persist()
+                    response = fixture.resume(receipt["interactionId"])
+                    self.assertEqual(response["status"], "failed", response)
+                    self.assertEqual(response["error"]["code"], "OA_PENDING_ACTION_NOT_READY" if mode == "never" else "CAPABILITY_EXECUTION_FAILED")
+                    task, _ = service.tasks.ensure_task(user_subject=OWNER, agent_host="openclaw", host_task_key=uuid4().hex,
+                        origin_endpoint_id=account["endpoint_id"], active_conversation_ref=account["openclaw_session_key"], title="合成失败后只读查询")
+                    query = service.invoke(user_subject=OWNER, capability_name="oa.workflow.pending.list", arguments={},
+                        task_id=task["task_id"], idempotency_key=uuid4().hex)
+                    self.assertEqual(query["status"], "succeeded")
+                    service.finish_host_task(user_subject=OWNER, task_id=task["task_id"], outcome="succeeded", reason="synthetic_read_completed")
+                    group = actions.list_actionable_results(service, OWNER, task["task_id"])[0]
+                    target = next(item for item in group["targets"] if item["preparation"])
+                    self.assertEqual(target["preparation"], {"taskId": source["task_id"], "state": "failed"})
+                    self.assertFalse(target["enabled"])
+                    selection = [{"affairId": source["arguments"]["affair_id"],
+                        "prepareCapability": "oa.efficiency_data.approval.prepare", "commitCapability": "oa.efficiency_data.approve"}]
+                    conflicts = actions.oa_preparation_conflicts(service, user_subject=OWNER,
+                        session=service.sessions.find(user_subject=OWNER, system_id="oa"), selections=selection, exclude_task_id=source["task_id"])
+                    self.assertEqual(conflicts[0]["state"], "failed")
+                    with service.tasks._connect() as connection:
+                        connection.execute("UPDATE write_authorizations SET state='consumed',consumed_at=?,commit_operation_id=? WHERE authorization_id=?",
+                            (actions._now().isoformat(), response["operationId"], receipt["authorizationId"]))
+                    conflicts = actions.oa_preparation_conflicts(service, user_subject=OWNER,
+                        session=service.sessions.find(user_subject=OWNER, system_id="oa"), selections=selection, exclude_task_id=source["task_id"])
+                    self.assertEqual(conflicts[0]["state"], "outcome_unknown")
+                    self.assertEqual(fixture.oa.writes, [])
+                finally:
+                    fixture.close()
 
 
 if __name__ == "__main__":

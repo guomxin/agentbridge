@@ -272,7 +272,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
     if (value.taskId && value.taskId !== context.taskId) throw new Error('原查询回执不一致，请回原聊天核对。');
     queryRecoveryNeeded = false;
     if (queryRecover) queryRecover.hidden = true;
-    if (value.state === 'succeeded' && value.selectionAvailable === true) {
+    if (value.state === 'succeeded' && (value.selectionAvailable === true || value.entryAvailable === true)) {
       let view = resultView;
       if (!view) {
         // Same original read request, now retrieving its fresh opaque ticket.
@@ -345,8 +345,9 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       if (terminal) {
         recover.hidden = true;
         say(value.message || value.title || '任务已结束，请回原聊天查看核验结果。');
-        if (terminalStates.has(value.state) && !['unknown', 'outcome_unknown'].includes(value.state)) {
-          const back = element('button', '返回待办选择'); back.type = 'button';
+        if (terminalStates.has(value.state)) {
+          const back = element('button', ['unknown', 'outcome_unknown'].includes(value.state)
+            ? '返回待办列表（此项仍待核对）' : '返回待办选择'); back.type = 'button';
           back.addEventListener('click', () => {
             if (!current()) return;
             pending = null; waitingSince = null; save(); selection.clear(); operationId = null;

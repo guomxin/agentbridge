@@ -193,7 +193,7 @@ test('checking an exact source keeps the same checkbox DOM for keyboard and scre
   assert.equal(f.ids['result-prepare'].disabled,true);
 });
 
-test('a known terminal task can return to fresh choices without replay; unknown cannot', async () => {
+test('terminal and unknown tasks can return through GET while an unknown item stays disabled', async () => {
   const f=fixture({taskId:task});
   f.calls[0].resolve({state:'succeeded',terminal:true}); await flush();
   const back=f.ids['result-resume'].children.at(-1);
@@ -205,8 +205,14 @@ test('a known terminal task can return to fresh choices without replay; unknown 
   assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0);
   const u=fixture({taskId:task});
   u.calls[0].resolve({state:'outcome_unknown',terminal:true}); await flush();
-  assert.ok(u.ids['result-resume'].children.every(x=>x.textContent!=='返回待办选择'));
-  assert.equal(u.saved().taskId,task);
+  const unknownBack=u.ids['result-resume'].children.at(-1);
+  assert.equal(unknownBack.textContent,'返回待办列表（此项仍待核对）'); unknownBack.click();
+  assert.equal(u.calls[1].options.method,'GET');
+  const blocked={...u.state,groups:u.state.groups.map(group=>({...group,targets:group.targets.map(target=>({...target,
+    enabled:false,disabledReason:'原办理结果待核对，不要重复提交'}))}))};
+  u.calls[1].resolve(blocked); await flush(); u.select();
+  assert.equal(u.ids['result-prepare'].disabled,true);
+  assert.equal(u.calls.filter(call=>call.options.method==='POST').length,0);
 });
 
 test('restoration cannot enable selections after the fresh permission read failed', async () => {
@@ -339,6 +345,16 @@ test('query shortcut uses its own durable key, polls the read task and retrieves
   assert.deepEqual(f.navigations,[`https://trusted.test/results/${'z'.repeat(43)}#tgWebAppPlatform=android`]);
   assert.equal(f.savedQuery(),null);assert.equal(f.timers.size,0);
   assert.equal(f.calls.filter(call=>/\/prepare$/.test(call.url)).length,0);
+});
+
+test('a new query containing only existing unknown work opens its readonly result ticket without prepare', async () => {
+  const f=fixture(); const start=f.ids['result-refresh'].click();
+  f.calls[0].resolve({taskId:task,query:{taskId:task,state:'succeeded',terminal:true,selectionAvailable:false,entryAvailable:true},
+    resultView:{presentation:{url:`https://trusted.test/results/${'z'.repeat(43)}`}}});
+  await start;
+  assert.deepEqual(f.navigations,[`https://trusted.test/results/${'z'.repeat(43)}#tgWebAppPlatform=android`]);
+  assert.equal(f.calls.filter(call=>/\/prepare$/.test(call.url)).length,0);
+  assert.equal(f.savedQuery(),null);
 });
 
 test('lost query acknowledgement recovers the same read request independently of prepare and a new query is explicit', async () => {

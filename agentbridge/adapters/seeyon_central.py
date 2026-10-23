@@ -1191,6 +1191,32 @@ class SeeyonCentralAdapter:
             affair_id=_validated_identifier(affair_id, "affair_id"),
         )
 
+    def revalidate_workflow_detail(self, worker, *, collection: str, affair_id: str) -> tuple[dict, dict]:
+        """Re-read an authoritative source and current materials without navigating."""
+        collection = _validated_internal_collection(collection)
+        affair_id = _validated_identifier(affair_id, "affair_id")
+        scope = self._scope_for(worker)
+        if collection == "pending" and scope is not None and "pending_route" in scope:
+            # This route is frozen for this exact worker/invocation. Its HTTP
+            # projection read cannot change the active submission document.
+            parsed = self._fetch_workflow_collection(worker, collection)
+        else:
+            # Bootstrap and history collection discovery may navigate. Keep
+            # those operations off the action page even for standalone callers
+            # which have no invocation-local route cache yet.
+            with worker.fork_page() as reader, self.capability_scope(reader):
+                parsed = self._fetch_workflow_collection(reader, collection)
+        source = next((row for row in parsed.get("items", [])
+                       if str(row.get("affair_id") or "") == affair_id), None)
+        if source is None:
+            raise SeeyonReadContractMismatch("The frozen workflow is no longer in its authoritative collection.")
+
+        snapshot = worker.current_snapshot(
+            readiness={"kind": "oa_workflow_detail", "affair_id": affair_id, "title": str(source.get("title") or "")},
+            include_frames=True, timeout_seconds=10,
+        )
+        return source, self._parse_workflow_detail_snapshot(worker, snapshot, str(source.get("href") or ""))
+
     def load_sent_workflow_rows(self, worker) -> tuple[list[dict], object]:
         """Load the authoritative sent grid for governed write verification."""
         return _load_collection_rows(self, worker, collection="sent")
@@ -1651,6 +1677,9 @@ class SeeyonCentralAdapter:
             raise SeeyonReadContractMismatch(
                 "The OA workflow detail did not expose stable, complete target materials in time."
             ) from exc
+        return self._parse_workflow_detail_snapshot(worker, snapshot, detail_url)
+
+    def _parse_workflow_detail_snapshot(self, worker, snapshot: dict, detail_url: str) -> dict:
         final_url = str(snapshot.get("url") or detail_url)
         if _looks_like_login_url(final_url):
             raise SeeyonLoginRequired("The central OA session expired while rendering workflow detail.")

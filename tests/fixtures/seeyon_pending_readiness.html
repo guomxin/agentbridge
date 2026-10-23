@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh"><meta charset="utf-8"><title>合成 OA 正文就绪回归</title>
+<body><h1>合成 OA 正文就绪回归</h1><p>此页不连接 OA，不提交业务。</p>
+<script id="original-submit-entry">
+// The observed OA entry guard and validation order, with synthetic collaborators.
+function submitClickFunc() {
+  if (!_hasExecuteContentLoad) {
+    return;
+  }
+  var trackMembersObj = document.getElementById("trackRange_members");
+  if (trackMembersObj && trackMembersObj.checked) {
+    if (document.getElementById("zdgzry").value == "") {
+      $.alert(_trackTitle);
+      mainbody_callBack_failed();
+      return;
+    }
+  }
+  if (!checkSecret()) {
+    mainbody_callBack_failed();
+    return;
+  }
+  comDealSubmit();
+}
+</script></body></html>

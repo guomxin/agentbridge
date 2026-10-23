@@ -4,6 +4,7 @@ import base64
 import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import re
@@ -300,6 +301,7 @@ class WorkspaceApplication:
         from agentbridge.core.actionable_results import preparation_source_task_ids
         with self.service.tasks._connect() as connection:
             actionable_sources = preparation_source_task_ids(connection, account["user_subject"], task_id)
+        business = self._business_task_presentation(account, task, interactions)
         return {
             "task": _public_task(task),
             "actionableResults": self.actionable_results(account, task_id),
@@ -312,8 +314,75 @@ class WorkspaceApplication:
             "interaction": interaction,
             "interactions": interactions,
             "batch": workspace_batch_projection(batch),
+            **business,
             **({"artifactsHasMore": artifacts_have_more, "historyIncluded": False} if not include_history else {}),
         }
+
+    def _business_task_presentation(self, account: dict, task: dict, interactions: list[dict]) -> dict:
+        """Display durable confirmations without rewriting the original contracts.
+
+        A trusted business-view entry identifies the one-confirmation form; only
+        its task- and owner-bound decision proves that confirmation was recorded.
+        No form values, authorization IDs, error messages or source JSON escape.
+        """
+        user_subject, task_id = account["user_subject"], task["task_id"]
+        inputs = {item["interactionId"]: item for item in interactions
+                  if item.get("type") == "business_input"
+                  and item.get("display", {}).get("businessView", {}).get("schemaVersion")
+                  == "agentbridge.business-view.v1"}
+        result = {}
+        decisions, operation_linked = [], False
+        if inputs:
+            with self.service.tasks._connect() as connection:
+                rows = connection.execute(
+                    "SELECT i.interaction_id,i.resume_json,s.schema_json,d.created_at AS confirmed_at,"
+                    "d.interaction_id AS authorization_interaction_id,a.authorization_id,"
+                    "a.state AS authorization_state,a.commit_operation_id,a.consumed_at,"
+                    "a.capability_name AS authorization_capability,a.capability_version AS authorization_version "
+                    "FROM task_interactions t "
+                    "JOIN interactions i ON i.interaction_id=t.interaction_id AND i.user_subject=t.user_subject "
+                    "JOIN field_submissions s ON s.submission_id=i.resource_id AND s.user_subject=i.user_subject "
+                    "LEFT JOIN business_draft_decisions d ON d.source_submission_id=s.submission_id "
+                    "AND d.user_subject=t.user_subject AND d.task_id=t.task_id "
+                    "LEFT JOIN write_authorizations a ON a.authorization_id=d.authorization_id AND a.user_subject=d.user_subject "
+                    "WHERE t.task_id=? AND t.user_subject=? AND i.interaction_type='business_input' "
+                    "ORDER BY i.created_at DESC LIMIT 100", (task_id, user_subject)).fetchall()
+                if task.get("status") == "failed":
+                    operation_linked = connection.execute(
+                        "SELECT 1 FROM task_operations WHERE task_id=? AND user_subject=? AND operation_id=?",
+                        (task_id, user_subject, task.get("current_operation_id"))).fetchone() is not None
+            for row in rows:
+                item = inputs.get(row["interaction_id"])
+                if item is None or json.loads(row["resume_json"]).get("businessDraft") != "v1":
+                    continue
+                recorded = row["confirmed_at"] is not None
+                # A legacy submit may have used a once-capable form without a
+                # draft decision. Its completed history keeps the old meaning.
+                if recorded or item.get("state") in {"pending", "processing"}:
+                    item["confirmation"] = {"mode": "single", "state": "recorded" if recorded else "pending"}
+                if recorded:
+                    decisions.append(row)
+                    for authorization in interactions:
+                        if (authorization.get("interactionId") == row["authorization_interaction_id"]
+                                and authorization.get("type") == "execution_authorization"):
+                            authorization["confirmation"] = {"mode": "single", "state": "recorded",
+                                "sourceInteractionId": row["interaction_id"]}
+                schema = json.loads(row["schema_json"])
+                title = (schema.get("review") or {}).get("title")
+                if not result.get("businessTitle") and isinstance(title, str) and title.strip():
+                    batch = (task.get("summary") or {}).get("batch") or {}
+                    if not batch or batch.get("totalCount") == 1:
+                        result["businessTitle"] = _safe_text(title, 300)
+        operation_id = task.get("current_operation_id")
+        if operation_id:
+            operation = self.service.operations.get(operation_id)
+            if operation.get("user_subject") == user_subject:
+                execution = _public_business_execution(operation, task)
+                if execution:
+                    if operation_linked and any(_unconsumed_pending_attempt(operation, row) for row in decisions):
+                        execution.update(phase="not_submitted", reason="pre_submit_validation_failed")
+                    result["businessExecution"] = execution
+        return result
 
     def task_projections(self, account: dict, task_ids: list[str], *, versions: list[int] | None = None) -> dict:
         if not isinstance(task_ids, list) or not 1 <= len(task_ids) <= 32:
@@ -527,6 +596,11 @@ class WorkspaceApplication:
         return self.task_detail(account, task_id)
 
     def continue_task(self, account: dict, task_id: str) -> dict:
+        task = self.service.tasks.get_task(task_id, user_subject=account["user_subject"])
+        if task.get("status") == "outcome_unknown":
+            # A conversational continuation can choose a write path. Unknown
+            # outcomes only expose the separate, closed read-only query action.
+            raise ValueError("原提交结果仍待核对，请使用只读查询或到业务系统核对；不要重复提交。")
         response = self.service.resolve_host_task_continuation(
             user_subject=account["user_subject"],
             agent_host="openclaw",
@@ -1740,6 +1814,118 @@ def _public_task(task: dict) -> dict:
         if command.get("kind") in {"oa_pending_query", "oa_pending_prepare"}:
             summary["preparation"]["kind"] = command["kind"]
     result["summary"] = summary
+    return result
+
+
+_BUSINESS_READBACK_REASONS = frozenset({
+    "still_pending", "pending_response_invalid", "pending_coverage_incomplete",
+    "pending_coverage_inconsistent", "done_response_invalid", "done_affair_not_found",
+    "done_affair_ambiguous", "done_title_mismatch", "done_detail_affair_mismatch",
+    "done_detail_identity_unavailable", "done_identity_mismatch", "frozen_identity_incomplete",
+})
+_BUSINESS_READINESS_REASONS = frozenset({
+    "body_loading", "content_loading", "submit_entry_unavailable", "page_unavailable", "page_loading",
+})
+
+
+def _unconsumed_pending_attempt(operation: dict, confirmation: sqlite3.Row) -> bool:
+    """Prove this failed attempt stayed before its exact authorization boundary."""
+    from agentbridge.adapters.seeyon_pending_actions import PendingActionContractMismatch
+    from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+    pending_commits = {item["commit_capability"] for item in _TRUSTED_WRITE_DEFINITIONS.values()
+                       if item["contract_error"] is PendingActionContractMismatch}
+    if (operation.get("status") != "failed" or operation.get("error_code") != "CAPABILITY_EXECUTION_FAILED"
+            or operation.get("capability_name") not in pending_commits
+            or confirmation["authorization_state"] != "approved"
+            or confirmation["commit_operation_id"] is not None or confirmation["consumed_at"] is not None
+            or confirmation["authorization_capability"] != operation.get("capability_name")
+            or confirmation["authorization_version"] != operation.get("capability_version")):
+        return False
+    exact_input = json.dumps({"authorization_id": confirmation["authorization_id"]},
+                             ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(exact_input.encode()).hexdigest() == operation.get("input_hash")
+
+
+def _business_error_evidence(operation: dict) -> dict:
+    """Read only a bounded trailing object emitted by the controlled executor.
+
+    Historic OA errors combine prose and diagnostic JSON. Neither the prose nor
+    arbitrary nested fields are public API; callers separately whitelist values.
+    """
+    if operation.get("error_code") not in {"RESULT_UNKNOWN", "OA_PENDING_ACTION_NOT_READY"}:
+        return {}
+    message = operation.get("error_message")
+    if not isinstance(message, str) or len(message) > 65_536:
+        return {}
+    decoder = json.JSONDecoder()
+    starts = [match.start() for match in re.finditer(r"\{", message)][:8]
+    for start in starts:
+        try:
+            evidence, end = decoder.raw_decode(message, start)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(evidence, dict) and not message[end:].strip():
+            return evidence
+    return {}
+
+
+def _public_observation_time(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) > 40 or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:\+00:00|Z)", value):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        return None
+
+
+def _public_business_execution(operation: dict, task: dict) -> dict | None:
+    from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+    commits = {definition["commit_capability"] for definition in _TRUSTED_WRITE_DEFINITIONS.values()}
+    capability = operation.get("capability_name")
+    if capability not in commits:
+        return None
+    status = operation.get("status")
+    phase = {"running": "preparing_submission", "created": "preparing_submission",
+        "unknown": "outcome_unknown", "succeeded": "verified", "failed": "failed"}.get(status)
+    if operation.get("error_code") == "OA_PENDING_ACTION_NOT_READY" and status == "failed":
+        phase = "not_submitted"
+    if task.get("status") == "outcome_unknown":
+        phase = "outcome_unknown"
+    elif task.get("status") == "failed" and phase == "verified":
+        phase = "failed"
+    if phase is None:
+        return None
+    result = {"schemaVersion": "agentbridge.business-execution.v1", "phase": phase}
+    updated_at = _public_observation_time(operation.get("updated_at"))
+    if updated_at:
+        result["updatedAt"] = updated_at
+    evidence = operation.get("result") if status == "succeeded" else _business_error_evidence(operation)
+    evidence = evidence if isinstance(evidence, dict) else {}
+    execution = evidence.get("execution")
+    execution = execution if isinstance(execution, dict) else {}
+    readback = execution.get("readback", evidence.get("readback"))
+    readback = readback if isinstance(readback, dict) else {}
+    readiness = execution.get("readiness")
+    readiness = readiness if isinstance(readiness, dict) else {}
+    reason = readiness.get("reason") if phase == "not_submitted" else readback.get("reason")
+    allowed = _BUSINESS_READINESS_REASONS if phase == "not_submitted" else _BUSINESS_READBACK_REASONS
+    if isinstance(reason, str) and reason in allowed:
+        result["reason"] = reason
+    observed_at = _public_observation_time(readback.get("last_observed_at"))
+    if observed_at:
+        result["lastObservedAt"] = observed_at
+    attempts = readback.get("attempts")
+    if isinstance(attempts, int) and not isinstance(attempts, bool) and 0 <= attempts <= 1000:
+        result["observationCount"] = attempts
+    dispatch = execution.get("dispatch")
+    dispatch = dispatch if isinstance(dispatch, dict) else {}
+    if dispatch.get("state") in {"scheduled", "invoked", "not_invoked", "observation_unavailable"}:
+        result["submissionState"] = dispatch["state"]
+    # Querying current pending items is read-only and never changes the original
+    # unknown result or proves success merely because the item is absent.
+    if capability.startswith("oa.") and task.get("status") == "outcome_unknown":
+        result["readOnlyQuery"] = "oa_pending"
     return result
 
 

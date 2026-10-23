@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from typing import Callable
 
 from agentbridge.adapters.base import AdapterBusinessRuleRejected
@@ -20,6 +21,55 @@ _READBACK_REASONS = {
     "done_detail_identity_unavailable": "已办详情缺少可核对的流程标识",
 }
 
+_READY_TIMEOUT_SECONDS = 15.0
+_SUBMIT_ENTRIES = {"submitClickFunc", "dealSubmitFunc", "$.content.callback.dealSubmit"}
+
+
+class PendingActionNotReady(AdapterBusinessRuleRejected):
+    """A bounded read-only preflight ended before authorization was consumed."""
+
+    error_code = "OA_PENDING_ACTION_NOT_READY"
+
+
+def _readiness(page, target: dict, contract_error: type[Exception]) -> dict:
+    observation = page.evaluate(PENDING_READINESS_SCRIPT, target)
+    if not isinstance(observation, dict):
+        raise PendingActionNotReady("OA 正文就绪状态不可读取，尚未提交。")
+    if observation.get("identity_matches") is not True:
+        raise contract_error("OA 事项或办理节点在等待正文期间变化，尚未提交。")
+    return observation
+
+
+def wait_pending_action_ready(page, target: dict, *, contract_error: type[Exception]) -> dict:
+    """Wait for OA's business-body callback, not only DOM/material readiness."""
+    started = time.monotonic()
+    deadline = started + _READY_TIMEOUT_SECONDS
+    while True:
+        try:
+            observation = _readiness(page, target, contract_error)
+        except (contract_error, PendingActionNotReady):
+            raise
+        except Exception as exc:
+            raise PendingActionNotReady("OA 正文状态读取失败，尚未提交。") from exc
+        if observation.get("ready") is True:
+            return {
+                "state": "ready", "wait_ms": max(0, round((time.monotonic() - started) * 1000)),
+                "body_loaded": observation.get("body_loaded") is True,
+                "content_api_loaded": observation.get("content_api_loaded"),
+                "submit_entry": observation.get("submit_entry"),
+            }
+        if time.monotonic() >= deadline:
+            detail = {"execution": {
+                "readiness": {"state": "not_ready", "reason": observation.get("reason"),
+                              "wait_ms": max(0, round((time.monotonic() - started) * 1000))},
+                "dispatch": {"state": "not_invoked"},
+            }}
+            raise PendingActionNotReady(
+                "OA 正文或提交入口未在时限内就绪，尚未提交，授权未消耗。 "
+                + json.dumps(detail, ensure_ascii=False, sort_keys=True)
+            )
+        pump_browser_events(page, 100)
+
 
 def execute_pending_action(
     adapter,
@@ -33,11 +83,15 @@ def execute_pending_action(
     contract_error: type[Exception],
     outcome_error: type[Exception],
     timeout_seconds: float = 60,
+    revalidate_target: Callable[[], None],
 ) -> dict:
     """Submit once, preserving the action page until authoritative readback ends."""
     fork_page = getattr(worker, "fork_page", None)
     if not callable(fork_page):
         raise contract_error("无法建立独立核验页面，尚未提交 OA 待办。")
+    readiness = wait_pending_action_ready(worker.page, target, contract_error=contract_error)
+    execution = {"readiness": readiness, "dispatch": {"state": "not_invoked"},
+                 "readback": {"attempts": 0, "last_observed_at": None}}
     # Provision the reader before consuming authorization or dispatching submission.
     with ExitStack() as stack:
         try:
@@ -52,6 +106,12 @@ def execute_pending_action(
         tracker = PendingSubmissionTracker()
         stack.callback(_cleanup, tracker.detach)
         tracker.attach(worker.page)
+        # Reader provisioning may take time. Re-read the original source and
+        # current materials afterwards, immediately before consumption. Never
+        # navigate the action page and restart its business-body loader here.
+        revalidate_target()
+        if _readiness(worker.page, target, contract_error).get("ready") is not True:
+            raise PendingActionNotReady("OA 正文在最终核对期间重新加载，尚未提交，授权未消耗。")
         enter_commit_boundary()
         last_observation = {"confirmed": False, "reason": "not_observed"}
         last_error = None
@@ -63,10 +123,13 @@ def execute_pending_action(
                     "opinion": opinion,
                     "attitude_code": attitude_code,
                     "action_kind": action_kind,
+                    "identity": target,
                 },
             )
             if not isinstance(scheduled, dict) or scheduled.get("scheduled") is not True:
                 raise RuntimeError("OA did not acknowledge scheduling the submission")
+            entry = scheduled.get("submit_entry")
+            execution["dispatch"] = {"state": "scheduled", "submit_entry": entry if entry in _SUBMIT_ENTRIES else None}
             deadline = time.monotonic() + max(timeout_seconds, 5)
             while time.monotonic() < deadline:
                 # Dispatch original-page dialogs/events while the separate reader navigates.
@@ -77,21 +140,41 @@ def execute_pending_action(
                     # Observation failure cannot replace an authoritative result.
                     pass
                 try:
+                    dispatch = worker.page.evaluate(PENDING_DISPATCH_OBSERVATION_SCRIPT)
+                    if isinstance(dispatch, dict) and dispatch.get("state") in {"invoked", "not_invoked"}:
+                        execution["dispatch"]["state"] = dispatch["state"]
+                except Exception:
+                    # The submit page may have closed. Authoritative readback
+                    # still owns success; observation loss never retries a write.
+                    pass
+                try:
+                    execution["readback"]["attempts"] += 1
                     last_observation = verify_pending_action(adapter, reader, target)
+                    execution["readback"].update({"last_observed_at": datetime.now(timezone.utc).isoformat(),
+                                                  "reason": last_observation.get("reason")})
                     last_error = None
                 except Exception as exc:
                     # Read-only retries never dispatch a second submission.
                     last_error = type(exc).__name__
+                    if execution["dispatch"]["state"] == "not_invoked":
+                        break
                     continue
                 if last_observation.get("confirmed") is True:
                     return {
                         "verification": last_observation,
                         "submission_evidence": _snapshot(tracker),
+                        "execution": execution,
                     }
+                if execution["dispatch"]["state"] == "not_invoked":
+                    # The final same-page guard refused to invoke OA. Keep the
+                    # consumed attempt visible, but do not burn the readback
+                    # minute or turn it into an automatic second submission.
+                    break
             detail = {
                 "readback": last_observation,
                 "last_read_error": last_error,
                 "submission": _snapshot(tracker),
+                "execution": execution,
             }
             raise outcome_error(
                 "OA 已尝试提交，但未确认办理完成；已停止自动处理，请先核对，不要重复提交。 "
@@ -107,7 +190,8 @@ def execute_pending_action(
             raise outcome_error(
                 "OA 已进入提交边界，但未取得权威结果；请先核对，不要重复提交。 "
                 + json.dumps(
-                    {"error_type": type(exc).__name__, "submission": _snapshot(tracker)},
+                    {"error_type": type(exc).__name__, "submission": _snapshot(tracker),
+                     "execution": execution},
                     ensure_ascii=False, sort_keys=True,
                 )
             ) from exc
@@ -129,8 +213,59 @@ def _snapshot(tracker) -> dict:
         return {"observation_errors": ["submission_evidence_unavailable"]}
 
 
+_PENDING_READINESS_FUNCTION = r"""
+(target) => {
+  const read = (names) => {
+    for (const name of names) {
+      const element = document.querySelector(`#${name}`)
+        || document.querySelector(`[name='${name}']`);
+      const value = String(element?.value || window[name] || '').trim();
+      if (value) return value;
+    }
+    return '';
+  };
+  const actual = {
+    affair_id: read(['affairId']) || new URLSearchParams(location.search).get('affairId') || '',
+    summary_id: read(['summaryId']), process_id: read(['processId']),
+    template_id: read(['templeteId', 'templateId']), form_app_id: read(['formAppId']),
+    form_record_id: read(['formRecordid', 'formRecordId']),
+    node_policy: String(window.nodePolicy || ''), node_policy_name: String(window.nodePolicyName || ''),
+  };
+  const matches = location.pathname === '/seeyon/collaboration/collaboration.do'
+    && ['affair_id', 'summary_id', 'process_id', 'template_id', 'form_app_id',
+        'form_record_id', 'node_policy', 'node_policy_name'].every((key) =>
+      target[key] === undefined || String(actual[key]) === String(target[key] || ''));
+  let submitEntry = null;
+  if ((actual.node_policy.toLowerCase() === 'inform' || actual.node_policy_name.includes('知会'))
+      && typeof window.dealSubmitFunc === 'function') submitEntry = 'dealSubmitFunc';
+  else if (typeof window.submitClickFunc === 'function') submitEntry = 'submitClickFunc';
+  else if (typeof window.dealSubmitFunc === 'function') submitEntry = 'dealSubmitFunc';
+  else if (typeof window.$?.content?.callback?.dealSubmit === 'function') submitEntry = '$.content.callback.dealSubmit';
+  const bodyLoaded = window._hasExecuteContentLoad === true;
+  let contentLoaded = null;
+  try {
+    const frame = document.getElementById('zwIframe');
+    const api = frame?.contentWindow?.contentAPI;
+    if (typeof api?.isContentLoaded === 'function') contentLoaded = api.isContentLoaded() === true;
+  } catch (_) { contentLoaded = false; }
+  const reason = !bodyLoaded ? 'body_loading' : contentLoaded === false ? 'content_loading'
+    : !submitEntry ? 'submit_entry_unavailable' : document.readyState === 'loading' ? 'page_loading' : 'ready';
+  return {identity_matches: matches, ready: matches && reason === 'ready', reason,
+          body_loaded: bodyLoaded, content_api_loaded: contentLoaded, submit_entry: submitEntry};
+}
+"""
+
+PENDING_READINESS_SCRIPT = "/* agentbridge_pending_readiness */\n" + _PENDING_READINESS_FUNCTION
+
+PENDING_DISPATCH_OBSERVATION_SCRIPT = r"""/* agentbridge_pending_dispatch_observation */
+() => ({state: window.__agentbridgePendingDispatch?.state || 'observation_unavailable'})
+"""
+
+
 PENDING_ACTION_SCRIPT = r"""
-({ affair_id, opinion, attitude_code }) => {
+({ affair_id, opinion, attitude_code, identity }) => {
+  const checkReady = __PENDING_READINESS_FUNCTION__;
+  if (!checkReady(identity).ready) throw new Error('pending-action body is not ready before scheduling');
   const read = (names) => {
     for (const name of names) {
       const element = document.querySelector(`#${name}`)
@@ -196,7 +331,15 @@ PENDING_ACTION_SCRIPT = r"""
     submitName = '$.content.callback.dealSubmit';
   }
   if (!submit) throw new Error('pending-action submit entry is missing');
-  window.setTimeout(() => submit.call(window), 0);
+  window.__agentbridgePendingDispatch = {state: 'scheduled'};
+  window.setTimeout(() => {
+    if (!checkReady(identity).ready) {
+      window.__agentbridgePendingDispatch.state = 'not_invoked';
+      return;
+    }
+    window.__agentbridgePendingDispatch.state = 'invoked';
+    submit.call(window);
+  }, 0);
   return { scheduled: true, submit_entry: submitName };
 }
-"""
+""".replace('__PENDING_READINESS_FUNCTION__', _PENDING_READINESS_FUNCTION)

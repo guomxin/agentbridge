@@ -81,6 +81,7 @@ class ControlledWriteDependencies:
     validate_task_plan_execution: Callable[[dict], None]
     business_draft_source_context: Callable[[str, str, str], dict] | None = None
     business_draft_successor: Callable[[str, str, str | None], dict | None] | None = None
+    guard_pending_preparation: Callable[..., None] | None = None
 
 
 class ControlledWriteExecutor:
@@ -104,6 +105,10 @@ class ControlledWriteExecutor:
         if not callable(prepare_function):
             raise RuntimeError("trusted write prepare function is unavailable")
         self.assert_write_allowed(context=context, system_id=session["system_id"])
+        if self._dependencies.guard_pending_preparation:
+            self._dependencies.guard_pending_preparation(
+                context=context, session=session, arguments=arguments, definition=definition,
+            )
         prepared = prepare_function(adapter, worker, arguments)
         review_changed = False
         if field_submission is not None:

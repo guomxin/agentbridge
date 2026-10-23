@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "09cb96fd5d1e"
+    "bd5df0c28240"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Correct read-only OA query progress and empty-query status projection; accept observed PNG/JPEG MIME mislabeling only on verified OA showRTE image reads, returning the detected image type. Preserve task, account, material, size, authorization and business verification checks. No schema migration or user grant changes."
+  "reason": "Repair the OA business-body readiness regression before authorization consumption; revalidate exact identity and materials without reloading the action page, preserve native submit validation and authoritative pending/done verification. Link existing exact-principal pending/unknown actions across queries, clarify single confirmation and bounded outcome evidence, and route closed current-own Workspace query phrases through the existing read-only API. No schema migration, grant changes, or replay of consumed approvals."
 }

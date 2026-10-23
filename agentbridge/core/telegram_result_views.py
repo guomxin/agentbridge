@@ -51,7 +51,9 @@ class ResultViewService:
                     or host_context.get("tokenId") != endpoint["token_id"]):
                 actions._fail("ACTION_ENDPOINT_INVALID", "宿主身份与办理入口不一致。")
             groups = self._groups(subject, task_id)
-            if not groups or not any(item["enabled"] for group in groups for item in group["targets"]):
+            selection_available = any(item["enabled"] for group in groups for item in group["targets"])
+            existing = self._preparation_ids(connection, subject, endpoint, groups)
+            if not groups or not (selection_available or existing):
                 actions._fail("ACTION_SOURCE_UNAVAILABLE", "当前查询没有可直接办理的完整待办，请重新查询或通过对话继续。")
             if len(groups) > 16:
                 actions._fail("ACTION_SOURCE_LIMIT", "本任务包含超过16组待办查询，请在新对话中缩小查询范围后选择。")
@@ -81,7 +83,7 @@ class ResultViewService:
             "schemaVersion": SCHEMA_VERSION, "title": "选择并办理 OA 待办", "sourceTaskId": task_id,
             "presentation": {"owner": "agentbridge", "url": base + "/results/" + token,
                 "endpointId": endpoint_id, "modelMustNotCollectValues": True},
-            "expiresAt": expires, "sourceExpiresAt": source_expires, "selectionAvailable": True}}
+            "expiresAt": expires, "sourceExpiresAt": source_expires, "selectionAvailable": selection_available}}
 
     def _context(self, token):
         token_hash = _digest(token)
@@ -127,17 +129,69 @@ class ResultViewService:
         return [group for group in actions.list_actionable_results(self.service, subject, task_id)
                 if actions._date(group["expiresAt"]) > actions._now()]
 
+    @staticmethod
+    def _preparation_ids(connection, subject, endpoint, groups):
+        """Only reference existing tasks from this exact private host route."""
+        ids = []
+        for group in groups:
+            for target in group["targets"]:
+                preparation = target.get("preparation") or {}
+                task_id = preparation.get("taskId")
+                if not task_id or preparation.get("state") == "identity_unverified" or task_id in ids:
+                    continue
+                task = actions._owned_task(connection, subject, task_id)
+                command = json.loads(task["summary_json"]).get("command") or {}
+                if (task["origin_endpoint_id"] == endpoint["endpoint_id"]
+                        and task["active_conversation_ref"] == endpoint["conversation_ref"]
+                        and command.get("kind") == actions.COMMAND_KIND and command.get("originKind") == "telegram"
+                        and command.get("endpointBindingHash") == endpoint["_binding_hash"]):
+                    actions._load_command(connection, subject, task_id, command.get("commandKey"))
+                    ids.append(task_id)
+        return ids
+
+    def _reference_matches(self, connection, context, task_id, command):
+        """A fresh owned source may reference the exact same unresolved affair.
+
+        No ticket event, presentation, binding, decision or capability is created
+        by this read. Source hashes and the live OA principal are checked again.
+        """
+        wanted = {(item["resource_ref"], item["display_summary"]["prepare_capability"],
+                   item["display_summary"]["commit_capability"]) for item in command["selectedItems"]}
+        selections = []
+        for source in context["sources"]:
+            _, pending = actions._source(connection, context["subject"], context["sourceTaskId"], source["operationId"], fresh=False)
+            if actions._hash(pending) != source["sourceHash"]:
+                actions._fail("ACTION_SOURCE_CHANGED", "原查询内容已变化，请重新查询。")
+            for row in pending["items"]:
+                if row["affair_id"] not in {item[0] for item in wanted}:
+                    continue
+                try:
+                    item = actions._select(self.service, pending, [row["affair_id"]])[0]
+                except actions.ActionableResultError:
+                    continue
+                display = item["display_summary"]
+                key = (item["resource_ref"], display["prepare_capability"], display["commit_capability"])
+                if key in wanted:
+                    selections.append({"affairId": key[0], "prepareCapability": key[1], "commitCapability": key[2]})
+        session = actions._oa_session(connection, context["subject"])
+        if not session or not selections:
+            return False
+        return any(item["taskId"] == task_id and item["identityVerified"] for item in actions.oa_preparation_conflicts(
+            self.service, user_subject=context["subject"], session=session, selections=selections, connection=connection))
+
     def read(self, token):
         context = self._context(token)
         operation_ids = {source["operationId"] for source in context["sources"]}
-        groups = [group for group in self._groups(context["subject"], context["sourceTaskId"])
+        all_groups = [group for group in actions.list_actionable_results(self.service, context["subject"], context["sourceTaskId"])
             if group["operationId"] in operation_ids]
+        groups = [group for group in all_groups if actions._date(group["expiresAt"]) > actions._now()]
         with self.service.tasks._connect() as connection:
             ids = connection.execute("SELECT t.task_id FROM agent_tasks t JOIN task_events e ON e.task_id=t.task_id "
                 "AND e.user_subject=t.user_subject WHERE t.user_subject=? AND e.event_type='task.result_view.prepared' "
                 "AND e.causation_ref=? ORDER BY t.created_at DESC,t.task_id DESC LIMIT 32",
                 (context["subject"], context["tokenHash"])).fetchall()
-        preparations = [self._status(context, row[0]) for row in ids]
+            referenced = self._preparation_ids(connection, context["subject"], context["endpoint"], all_groups)
+        preparations = [self._status(context, task_id) for task_id in dict.fromkeys([*(row[0] for row in ids), *referenced])]
         selection_available = any(target["enabled"] for group in groups for target in group["targets"])
         return {"schemaVersion": SCHEMA_VERSION, "title": "选择并办理 OA 待办",
             "sourceTaskId": context["sourceTaskId"], "groups": groups, "expiresAt": context["expiresAt"],
@@ -163,7 +217,7 @@ class ResultViewService:
             view_hash=context["tokenHash"])
         state = self.query_status(token, queued["taskId"])
         result = {**queued, "query": state}
-        if state["state"] == "succeeded" and state.get("selectionAvailable"):
+        if state["state"] == "succeeded" and state.get("entryAvailable"):
             # Ticket issuance is a POST effect; read/status never issue tickets.
             result["resultView"] = self.issue(context["subject"], queued["taskId"], context["endpointId"])["resultView"]
         return result
@@ -187,9 +241,12 @@ class ResultViewService:
             actions._load_command(connection, subject, task_id, command.get("commandKey"))
             _contract(service, command)
         groups = self._groups(subject, task_id) if task["status"] == "succeeded" else []
+        with service.tasks._connect() as connection:
+            existing = self._preparation_ids(connection, subject, context["endpoint"], groups)
+        selection_available = any(target["enabled"] for group in groups for target in group["targets"])
         return {"taskId": task_id, "state": task["status"], "title": "查询 OA 待办",
             "terminal": task["status"] in _TERMINAL, "groups": groups,
-            "selectionAvailable": any(target["enabled"] for group in groups for target in group["targets"]),
+            "selectionAvailable": selection_available, "entryAvailable": selection_available or bool(existing),
             "message": "已获取新的待办查询结果。" if task["status"] == "succeeded" else _status_message(task["status"])}
 
     def status(self, token, queued_task_id):
@@ -203,13 +260,17 @@ class ResultViewService:
                 "AND event_type='task.result_view.prepared' AND causation_ref=?",
                 (task_id, subject, context["tokenHash"])).fetchone()
             command = json.loads(task["summary_json"]).get("command") or {}
-            if (not linked or task["origin_endpoint_id"] != context["endpointId"]
+            if (task["origin_endpoint_id"] != context["endpointId"]
                     or task["active_conversation_ref"] != context["endpoint"]["conversation_ref"]
-                    or command.get("sourceTaskId") != context["sourceTaskId"] or command.get("originKind") != "telegram"
-                    or command.get("operationIdSource") not in {source["operationId"] for source in context["sources"]}
+                    or command.get("kind") != actions.COMMAND_KIND or command.get("originKind") != "telegram"
                     or command.get("endpointBindingHash") != context["endpointBindingHash"]):
                 actions._fail("ACTION_SOURCE_NOT_FOUND", "办理任务不属于本入口。")
             actions._load_command(connection, subject, task_id, command.get("commandKey"))
+            original = (linked and command.get("sourceTaskId") == context["sourceTaskId"]
+                        and command.get("operationIdSource") in {source["operationId"] for source in context["sources"]})
+            referenced = self._reference_matches(connection, context, task_id, command)
+            if not original and not referenced:
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "办理任务不属于本入口的精确待办或原 OA 身份。")
             actions._binding(service, subject, task_id, command, connection)
             actions._require_grants(service, subject, command["selectedItems"])
             state = task["status"]
@@ -229,7 +290,7 @@ class ResultViewService:
                 "currentIndex": batch["current_ordinal"], "succeededCount": batch["succeeded_count"], "state": batch["state"]}
             if batch["state"] in _TERMINAL:
                 result.update(terminal=True, state=batch["state"], message=_status_message(batch["state"]))
-        if not result["terminal"] and interaction_id:
+        if not result["terminal"] and interaction_id and referenced:
             interaction = self._read_active_interaction(context, task_id, interaction_id)
             if interaction:
                 result["interaction"] = interaction
@@ -271,6 +332,10 @@ class ResultViewService:
             if (presentation is None or actions._date(presentation["expires_at"]) <= actions._now()
                     or resource["state"] != "pending" or resource["session_id"] != record["session_id"]
                     or resource["system_id"] != record["system_id"]):
+                return None
+            session = actions._oa_session(connection, subject)
+            if (session.get("state") != "active" or session.get("session_id") != record["session_id"]
+                    or not actions._principal(session)):
                 return None
             trusted = urlsplit(str(service.trusted_card_base_url or ""))
             candidate = urlsplit(presentation["card_url"])

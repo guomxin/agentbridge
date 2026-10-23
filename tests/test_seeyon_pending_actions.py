@@ -530,6 +530,8 @@ class FakeAdapter:
             raise AssertionError("unexpected pending target")
         return self.worker.fixture["source"], self.worker.fixture["detail"]
 
+    revalidate_workflow_detail = resolve_workflow_detail
+
     def list_workflows(self, worker, *, collection, arguments):
         if worker is not self.worker.readback_worker:
             raise AssertionError("readback must not navigate the submission worker")
@@ -595,6 +597,11 @@ class FakePage:
         )
 
     def evaluate(self, _script, argument=None):
+        if "agentbridge_pending_readiness" in _script:
+            return {"identity_matches": True, "ready": True, "body_loaded": True,
+                    "content_api_loaded": None, "submit_entry": "submitClickFunc", "reason": "ready"}
+        if "agentbridge_pending_dispatch_observation" in _script:
+            return {"state": "invoked" if self.commit_payload else "not_invoked"}
         if argument is None:
             return []
         if isinstance(argument, str):
@@ -1053,7 +1060,7 @@ def test_all_fourteen_profiles_never_accept_target_hidden_by_partial_list(profil
                 "coverage": {"status": "partial", "hasMore": True}}
 
     monkeypatch.setattr(adapter, "list_workflows", partial_read)
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
         with pytest.raises(outcome_error, match="pending_coverage_incomplete"):
             commit(adapter, worker, plan, enter_commit_boundary=lambda: None)
     assert observations == ["pending"]

@@ -22,6 +22,110 @@ function result(version, status, interactions) {
 const findClass = (root, name) => descendants(root).find(node => node.className.split(" ").includes(name));
 const links = root => descendants(root).filter(node => node.tag === "a" && !node.hidden);
 
+test("trusted single confirmation retains one form and one recorded decision while legacy steps stay distinct", () => {
+  const f = fixture();
+  const input = {...interaction("single"), confirmation: {mode: "single", state: "pending"},
+    message: "提交意见后还需在独立授权卡中核对精确事项"};
+  const r = result(1, "waiting_user", [input]);
+  f.upsertTaskCard(r);
+  assert.match(f.chat.textContent, /一次确认提交/);
+  assert.doesNotMatch(f.chat.textContent, /独立授权卡/);
+  r.task.version = 2; r.task.status = "running";
+  input.state = "completed"; input.confirmation.state = "recorded";
+  r.interactions.push({...interaction("authorization", "execution_authorization", "completed"),
+    confirmation: {mode: "single", state: "recorded", sourceInteractionId: "single"}});
+  f.upsertTaskCard(r);
+  const history = findClass(f.chat, "interaction-history");
+  assert.match(history.textContent, /办理记录（1）.*一次确认已记录.*无需再次授权/);
+  assert.doesNotMatch(history.textContent, /字段已提交|后续授权卡|已授权/);
+  assert.equal(links(f.chat).length, 0);
+  f.renderTaskDetail(r);
+  assert.match(f.detail.textContent, /一次确认已记录/);
+  assert.doesNotMatch(f.detail.textContent, /后续授权卡/);
+
+  delete input.confirmation; delete r.interactions[1].confirmation;
+  r.task.version = 3;
+  f.upsertTaskCard(r);
+  assert.match(history.textContent, /办理记录（2）.*字段已提交.*后续授权卡.*已授权/);
+});
+
+test("unknown outcome shows exact business title and bounded evidence with a closed read-only query action", async () => {
+  const calls = [], continued = [], views = [];
+  let finish;
+  const f = fixture({makeFeedbackRequestKey: () => "original-query-key", continueTask: (...args) => continued.push(args),
+    switchView: async name => views.push(name), refreshQuery: payload => {
+      calls.push(payload); return new Promise(resolve => { finish = resolve; });
+    }});
+  const r = result(1, "outcome_unknown", []);
+  r.businessTitle = "2026年第40、41周人工智能研发中心效能数据";
+  r.businessExecution = {schemaVersion: "agentbridge.business-execution.v1", phase: "outcome_unknown",
+    reason: "still_pending", lastObservedAt: "2026-10-23T01:02:03Z", submissionState: "invoked", readOnlyQuery: "oa_pending"};
+  f.upsertTaskCard(r);
+  assert.match(f.chat.textContent, /第40、41周.*该事项仍在 OA 待办中.*不要重复提交/s);
+  f.renderTaskDetail(r);
+  assert.match(f.detail.textContent, /最近核验/);
+  assert.match(f.detail.textContent, /已调用原始提交入口，仍须核验业务结果/);
+  const button = descendants(f.detail).find(node => node.tag === "button" && node.textContent === "只读查询 OA 待办");
+  const pending = button.events.click();
+  assert.deepEqual(calls, [{requestKey: "original-query-key"}]);
+  assert.equal(button.disabled, true);
+  f.renderTaskDetail(r);
+  assert.equal(button.disabled, true);
+  await button.events.click();
+  assert.equal(calls.length, 1);
+  finish({taskId: "readonly-query"}); await pending;
+  assert.equal(continued.length, 0);
+  assert.deepEqual(views, ["chat"]);
+  assert.match(f.detail.textContent, /查询待办不等于确认办理成功/);
+  assert.equal(r.task.status, "outcome_unknown");
+  r.task.version++;
+  r.task.summary = {batch: {state: "outcome_unknown", totalCount: 3, succeededCount: 1, failedCount: 1,
+    currentOrdinal: 2, currentItem: {ordinal: 2, display: {title: "效能数据"}}}};
+  f.upsertTaskCard(r);
+  assert.match(findClass(f.chat, "application-card-copy").textContent,
+    /成功 1 条.*结果未知 1 条.*未处理 1 条.*该事项仍在 OA 待办中/);
+});
+
+test("an uncertain read-only query restores its original request key and never calls conversational continuation", async () => {
+  const calls = []; let keys = 0;
+  const f = fixture({makeFeedbackRequestKey: () => `query-${++keys}`, continueTask: () => assert.fail("unknown resumed"),
+    refreshQuery: async payload => { calls.push(payload); throw new Error("PRIVATE_GATEWAY_ERROR"); }});
+  const r = result(1, "outcome_unknown", []);
+  r.businessExecution = {schemaVersion: "agentbridge.business-execution.v1", phase: "outcome_unknown", readOnlyQuery: "oa_pending"};
+  f.renderTaskDetail(r);
+  const button = descendants(f.detail).find(node => node.tag === "button" && node.textContent === "只读查询 OA 待办");
+  await button.events.click(); await button.events.click();
+  assert.deepEqual(calls, [{requestKey: "query-1"}, {requestKey: "query-1"}]);
+  assert.match(f.detail.textContent, /重试恢复本次查询/);
+  assert.doesNotMatch(f.detail.textContent, /PRIVATE_GATEWAY_ERROR/);
+  delete r.businessExecution; r.task.version++;
+  f.renderTaskDetail(r);
+  assert.equal(button.textContent, "请到业务系统核对");
+  assert.equal(button.disabled, true);
+});
+
+test("not-ready, failed and verified cards preserve their different submission meanings", () => {
+  const f = fixture();
+  const r = result(1, "failed", []);
+  r.businessExecution = {schemaVersion: "agentbridge.business-execution.v1", phase: "not_submitted",
+    reason: "body_loading", submissionState: "not_invoked"};
+  f.upsertTaskCard(r); f.renderTaskDetail(r);
+  assert.match(f.chat.textContent, /正文尚未加载就绪，本次尚未提交/);
+  assert.match(f.detail.textContent, /未调用提交入口/);
+  r.task.version++; r.businessExecution.reason = "page_loading";
+  f.upsertTaskCard(r);
+  assert.match(f.chat.textContent, /办理页面尚在加载，本次尚未提交/);
+  r.task.version++; r.businessExecution.reason = "pre_submit_validation_failed";
+  f.upsertTaskCard(r);
+  assert.match(f.chat.textContent, /提交前核对未通过，本次尚未提交，授权未消耗/);
+  r.task.version++; r.businessExecution = {...r.businessExecution, phase: "failed", reason: undefined};
+  f.upsertTaskCard(r);
+  assert.doesNotMatch(findClass(f.chat, "application-card-copy").textContent, /尚未提交|完成核验/);
+  r.task.version++; r.task.status = "succeeded"; r.businessExecution = {...r.businessExecution, phase: "verified"};
+  f.upsertTaskCard(r);
+  assert.match(f.chat.textContent, /已取得本次业务操作的完成核验证据/);
+});
+
 test("one business container retains its position and readable steps across input, authorization and unknown", () => {
   const f = fixture();
   f.upsertTaskCard(result(1, "waiting_user", [interaction("input")]));
@@ -43,7 +147,7 @@ test("one business container retains its position and readable steps across inpu
   assert.equal(links(card).length, 0);
   assert.match(findClass(card, "application-card-status").textContent, /结果待核对/);
   assert.match(history.textContent, /已授权/);
-  assert.equal(f.document.activeElement.textContent, "查看进度");
+  assert.equal(f.document.activeElement.textContent, "查看核验详情");
   // A late waiting-user response must never restore a used authorization link.
   f.upsertTaskCard(result(2, "waiting_user", [interaction("auth", "execution_authorization")]));
   assert.equal(links(card).length, 0);

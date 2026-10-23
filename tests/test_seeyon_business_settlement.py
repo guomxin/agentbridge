@@ -81,8 +81,8 @@ class SettlementPage(FakePage):
         self.commit_calls = []
 
     def evaluate(self, script, argument=None):
-        if isinstance(argument, dict):
-            self.commit_calls.append(deepcopy(argument))
+        if isinstance(argument, dict) and "opinion" in argument:
+            self.commit_calls.append({key: deepcopy(value) for key, value in argument.items() if key != "identity"})
         return super().evaluate(script, argument)
 
 
@@ -349,7 +349,7 @@ def test_incomplete_or_wrong_readback_is_unknown_without_second_submission(targe
     else: done["items"][0][change] = "different-identity"
     adapter.list_workflows = Mock(side_effect=lambda *_args, collection, **_kwargs: pending if collection == "pending" else done)
     boundary = Mock()
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
         with pytest.raises(PendingActionOutcomeUnknown, match=reason):
             approve_business_settlement(adapter, worker, plan, enter_commit_boundary=boundary)
     boundary.assert_called_once()

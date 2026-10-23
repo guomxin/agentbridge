@@ -68,7 +68,7 @@ test("quick query acknowledges only a valid task receipt so malformed success ke
   assert.ok(calls.every(body => body === payload));scope.dispose();
 });
 
-function composerFixture() {
+function composerFixture(options = {}) {
   const scope = createLifecycle().scope();
   const state = { composerAttachments: [] };
   const readers = [];
@@ -85,10 +85,63 @@ function composerFixture() {
   const elements = dom();
   const forms = createComposer({ ...elements, state, getScope: () => scope,
     FileReader: Reader, crypto: { randomUUID: () => String(readers.length) },
-    toast: (...args) => warnings.push(args), executeChatMessage: (...args) => messages.push(args),
+    toast: (...args) => warnings.push(args), executeChatMessage: (...args) => messages.push(args), ...options,
   });
   return { forms, scope, state, readers, messages, warnings, ...elements };
 }
+
+test("plain personal OA query uses the closed read once, while attachments and trial intent keep their original path", async () => {
+  const reads = [], gate = deferred();
+  const f = composerFixture({queryOaPending: async payload => {reads.push(payload);await gate.promise;}});
+  const input = {value: "查看OA待办", disabled: false}, button = {disabled: false};
+  const form = {elements: {message: input}, querySelectorAll: () => [button]};
+  const sending = f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(input.disabled, true);assert.equal(button.disabled, true);
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(reads.length, 1);assert.deepEqual(Object.keys(reads[0]), ["requestKey"]);
+  assert.deepEqual(f.messages, []);
+  gate.resolve();await sending;
+  assert.equal(input.value, "");assert.equal(input.disabled, false);assert.equal(button.disabled, false);
+  f.state.composerAttachments = [{id: "image", size: 1}];input.value = "查看OA待办";
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(f.messages[0][0], "查看OA待办");assert.equal(f.messages[0][2].length, 1);
+  assert.equal(reads.length, 1);
+  f.state.composerSkillTrial = {draft_id: "trial", profile: "review", expected_revision: 1};
+  input.value = "查看OA待办";
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(reads.length, 1);assert.equal(f.messages[1][3].draft_id, "trial");f.scope.dispose();
+});
+
+test("an uncertain plain query retains the same request and text until its original receipt is recovered", async () => {
+  let attempt = 0, key = 0;
+  const reads = [];
+  const f = composerFixture({crypto: {randomUUID: () => `query-key-${++key}`},
+    queryOaPending: async payload => {reads.push(payload);if (++attempt === 1) throw Error("等待应答已超时");}});
+  const input = {value: "查看OA待办", disabled: false}, form = {elements: {message: input}};
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(input.value, "查看OA待办");assert.equal(input.disabled, false);
+  assert.match(f.warnings[0][0], /超时/);assert.deepEqual(f.messages, []);
+  await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.equal(reads[0].requestKey, reads[1].requestKey);assert.equal(input.value, "");
+  input.value = "查询OA待办";await f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  assert.notEqual(reads[1].requestKey, reads[2].requestKey);f.scope.dispose();
+});
+
+test("a late shortcut receipt cannot clear the next account's composer or recovery identity", async () => {
+  let current = createLifecycle().scope(), key = 0;
+  const reads = [], oldReply = deferred(), newReply = deferred();
+  const f = composerFixture({getScope: () => current, crypto: {randomUUID: () => `query-key-${++key}`},
+    queryOaPending: async payload => {reads.push(payload);await (reads.length === 1 ? oldReply.promise : newReply.promise);}});
+  const input = {value: "查看OA待办", disabled: false}, form = {elements: {message: input}};
+  const old = f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  current.dispose();current = createLifecycle().scope();input.disabled = false;input.value = "查询OA待办";
+  const fresh = f.forms.sendChat({preventDefault() {}, currentTarget: form});
+  oldReply.resolve();await old;
+  assert.equal(input.value, "查询OA待办");assert.equal(input.disabled, true);
+  assert.notEqual(reads[0].requestKey, reads[1].requestKey);assert.deepEqual(f.warnings, []);
+  newReply.resolve();await fresh;assert.equal(input.value, "");assert.equal(input.disabled, false);
+  current.dispose();f.scope.dispose();
+});
 
 test("account disposal cancels pending image reads and ignores a reader that reports load late", async () => {
   const f = composerFixture();

@@ -3,7 +3,7 @@ import { completedInteractionPresentation, taskCardStatusForInteraction,
   taskPlanFailurePresentation, interactionLabel, interactionActionLabel,
   escapeClass, formatTime, statusLabel, eventLabel, taskInteractions,
   actionableTaskInteractions, batchItemStatusLabel, interactionStateLabel, trustedInteractionUrl,
-  TERMINAL_TASK_STATES } from "./workspace_results.mjs";
+  TERMINAL_TASK_STATES, businessExecutionPresentation, taskResultTitle } from "./workspace_results.mjs";
 
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
@@ -232,7 +232,9 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       row.root.dataset.interactionId = interaction.interactionId;
       text(row.title, interaction.title || interactionLabel(interaction.type));
       text(row.status, interactionStateLabel(interaction));
-      text(row.copy, interaction.message || "请在可信页面完成当前操作。");
+      text(row.copy, interaction.confirmation?.mode === "single" ?
+        "请填写并核对本次事项，在可信页面一次确认提交；提交后将核对业务结果。" :
+        interaction.message || "请在可信页面完成当前操作。");
       const url = trustedInteractionUrl(interaction.presentation?.url);
       row.action.hidden = !url;
       if (url) row.action.href = url;
@@ -247,7 +249,13 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
 
   function renderHistory(view, result, active) {
     const activeIds = new Set(active.map(item => item.interactionId));
-    const items = taskInteractions(result).filter(item => !activeIds.has(item.interactionId));
+    const recordedInputs = new Set(taskInteractions(result).filter(item => item.type === "business_input" &&
+      item.state === "completed" && item.confirmation?.mode === "single" && item.confirmation.state === "recorded")
+      .map(item => item.interactionId));
+    const items = taskInteractions(result).filter(item => !activeIds.has(item.interactionId) &&
+      !(item.type === "execution_authorization" && item.state === "completed" &&
+        item.confirmation?.mode === "single" && item.confirmation.state === "recorded" &&
+        recordedInputs.has(item.confirmation.sourceInteractionId)));
     text(view.summary, `办理记录（${items.length}）`);
     view.root.hidden = !items.length;
     const nodes = [];
@@ -342,7 +350,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     card.dataset.queryTurn = canGroup ? queryGroup?.turnRef || "" : "";
     card.dataset.queryStatus = cardStatus;
     card.className = `message assistant application-card ${escapeClass(cardStatus)}`;
-    text(view.title, displayTaskTitle(task.title) || "业务办理");
+    text(view.title, displayTaskTitle(taskResultTitle(result)));
     view.status.className = `application-card-status ${escapeClass(cardStatus)}`;
     const failure = taskPlanFailurePresentation(result.plan);
     const oaQuery = task.title === "List Pending OA Workflows" || task.summary?.preparation?.kind === "oa_pending_query" ||
@@ -355,16 +363,20 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     text(view.status, failure?.label || (oaQuery && cardStatus === "succeeded" ? "已查询" : statusLabel(cardStatus)));
     const selectedCount = result.actionableResults?.reduce((sum, group) => sum + group.targets.length, 0);
     if (oaQuery) text(view.title, "OA 待办查询");
-    text(view.description, failure?.message || (oaQuery && cardStatus === "succeeded" ?
-      selectedCount ? `本次查询返回 ${selectedCount} 项；具体办理状态见各事项。` : "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary)));
+    const execution = businessExecutionPresentation(result);
+    const statusCopy = oaQuery && cardStatus === "succeeded" ?
+      selectedCount ? `本次查询返回 ${selectedCount} 项；具体办理状态见各事项。` : "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary);
+    text(view.description, failure?.message || (execution?.message ?
+      task.summary?.batch ? `${statusCopy} ${execution.message}` : execution.message : statusCopy));
     const current = active[0] || result.interaction;
     updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
+      ["办理阶段", execution?.phase], ["最近核验", execution?.observedAt ? formatTime(execution.observedAt) : null],
       ["计划进度", result.plan ? taskPlanProgress(result.plan) : null]]);
     renderInteractions(view.active, result);
     renderBatch(view.batch, result.batch);
     renderHistory(view.history, result, active);
     updateArtifacts(view, result, true);
-    text(view.progress, result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
+    text(view.progress, cardStatus === "outcome_unknown" ? "查看核验详情" : result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
@@ -420,10 +432,31 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const resume = element("button", "primary");
       resume.type = "button";
       text(resume, "继续任务");
-      resume.addEventListener("click", () => continueTask(view.task, resume));
+      resume.addEventListener("click", async () => {
+        if (resume.disabled) return;
+        if (view.task?.status !== "outcome_unknown") return continueTask(view.task, resume);
+        if (!view.readOnlyQuery || typeof refreshQuery !== "function") return;
+        view.queryPending = true;
+        resume.disabled = true;
+        view.queryRequestKey ||= makeFeedbackRequestKey();
+        text(view.outcomeNotice, "正在发起只读查询，本次不会重新提交原事项。");
+        try {
+          await refreshQuery({requestKey: view.queryRequestKey});
+          view.queryRequestKey = null;
+          text(view.outcomeNotice, "已发起只读查询。原提交结果仍待核对；查询待办不等于确认办理成功。请查看最新查询卡。");
+          if (typeof switchView === "function") await switchView("chat");
+        } catch {
+          text(view.outcomeNotice, "只读查询的受理状态尚未确认，请重试恢复本次查询；不要重新提交原事项。");
+        } finally {
+          view.queryPending = false;
+          resume.disabled = view.task?.status === "outcome_unknown" && !view.readOnlyQuery;
+        }
+      });
       actions.append(resume);
       heading.append(back, copy, actions);
       const facts = {root:element("dl", "detail-grid"), rows:new Map()};
+      const outcomeNotice = element("p", "application-card-copy");
+      outcomeNotice.setAttribute("role", "status");
       const plan = element("div");
       const active = {root:element("div", "business-interactions"), rows:new Map()};
       const batch = disclosure("查看逐项结果", "business-disclosure batch-queue");
@@ -432,8 +465,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const query = element("div");
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, plan, active.root, batch.root, history.root, artifacts, query, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, facts, plan, active, batch, history, artifacts, query, feedback, timeline};
+      detail.append(heading, facts.root, outcomeNotice, plan, active.root, batch.root, history.root, artifacts, query, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, facts, outcomeNotice, plan, active, batch, history, artifacts, query, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -442,12 +475,21 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const focusWasInside = focused && detail.contains(focused);
     view.version = Number(task.version);
     view.task = task;
-    text(view.title, displayTaskTitle(task.title));
+    const execution = businessExecutionPresentation(result);
+    text(view.title, displayTaskTitle(taskResultTitle(result)));
     text(view.status, statusLabel(task.status));
+    view.readOnlyQuery = execution?.readOnlyQuery === true;
+    text(view.resume, task.status === "outcome_unknown" ?
+      view.readOnlyQuery ? "只读查询 OA 待办" : "请到业务系统核对" : "继续任务");
+    view.resume.disabled = Boolean(view.queryPending) || task.status === "outcome_unknown" && (!view.readOnlyQuery || typeof refreshQuery !== "function");
+    if (!view.queryRequestKey) text(view.outcomeNotice, execution?.message || "");
     updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
       ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
         ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],
-      ["任务编号", task.task_id], ["批量结果", task.summary?.batch ? taskCardStatusMessage(task.status, task.summary) : null]]);
+      ["任务编号", task.task_id], ["办理阶段", execution?.phase], ["提交观察", execution?.submission],
+      ["最近核验", execution?.observedAt ? formatTime(execution.observedAt) : null],
+      ["状态记录更新", execution?.updatedAt ? formatTime(execution.updatedAt) : null],
+      ["批量结果", task.summary?.batch ? taskCardStatusMessage(task.status, task.summary) : null]]);
     const planSignature = JSON.stringify(result.plan || null);
     if (planSignature !== view.planSignature) {
       view.planSignature = planSignature;

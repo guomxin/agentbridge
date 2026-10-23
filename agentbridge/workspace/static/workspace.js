@@ -92,7 +92,7 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard } = creat
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
-  document, state, $, toast, getScope: () => sessionScope, executeChatMessage,
+  document, state, $, toast, getScope: () => sessionScope, executeChatMessage, queryOaPending,
 });
 const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor } = createSkillForms({
   document, state, $, api, switchView, startTrial, clearTrial: clearComposerTrial, getScope: () => viewScope,

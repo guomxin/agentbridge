@@ -3744,6 +3744,32 @@ class CentralCapabilityService:
                                         interaction_record=record, interaction=interaction)
         return interaction
 
+    def _guard_pending_preparation(self, *, context, session, arguments, definition):
+        if session.get("system_id") != "oa" or not isinstance(arguments.get("affair_id"), str):
+            return
+        # Batch preparation uses the same exact item's capability pair as the
+        # single-item path. Other OA writes (draft creation etc.) do not collide.
+        commit = definition.get("commit_capability")
+        single = [name for name, item in _TRUSTED_WRITE_DEFINITIONS.items()
+                  if item.get("commit_capability") == commit
+                  and tuple(item.get("context_fields") or ()) == ("affair_id",)]
+        if len(single) != 1:
+            raise CapabilityRejected("OA_PENDING_CONTEXT_INVALID", "无法确定原 OA 待办的办理合同，请先核对原任务。")
+        from agentbridge.core.actionable_results import oa_preparation_conflicts, ActionableResultError
+        try:
+            conflicts = oa_preparation_conflicts(self, user_subject=session["user_subject"], session=session,
+                selections=[{"affairId": arguments["affair_id"], "prepareCapability": single[0], "commitCapability": commit}],
+                exclude_task_id=context.task_id)
+        except ActionableResultError as exc:
+            raise CapabilityRejected(exc.code, str(exc)) from exc
+        if conflicts:
+            unresolved = any(item["state"] in {"outcome_unknown", "running"} or not item["identityVerified"] for item in conflicts)
+            raise CapabilityRejected(
+                "OA_PENDING_RESULT_UNRESOLVED" if unresolved else "OA_PENDING_ALREADY_PREPARED",
+                "同一 OA 待办已有执行或结果待核对，请先核对原任务，不会创建新的授权或提交。" if unresolved
+                else "同一 OA 待办已有办理任务，请从原任务继续或查看结果。",
+            )
+
     def _controlled_writes(self) -> ControlledWriteExecutor:
         # Bind at each entry so callers replacing a registry/store/callback before
         # invocation use the current collaborators, without rebuilding any stores.
@@ -3764,6 +3790,7 @@ class CentralCapabilityService:
             validate_task_plan_execution=self.validate_task_plan_execution,
             business_draft_source_context=BusinessDraftService(self).source_context,
             business_draft_successor=BusinessDraftService(self).prepare_successor,
+            guard_pending_preparation=self._guard_pending_preparation,
         ))
 
     def _business_input_interaction(self, submission: dict) -> dict:
@@ -4012,6 +4039,9 @@ class CentralCapabilityService:
                             prepare_definition = self._pending_batch_definition(
                                 task_id=task_id, user_subject=user_subject, arguments=arguments,
                             )
+                    if prepare_definition is not None:
+                        self._guard_pending_preparation(context=context, session=session, arguments=arguments,
+                                                        definition=prepare_definition)
                     dynamic_field_schema = None
                     preflight_result = None
                     if (

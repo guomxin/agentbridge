@@ -272,6 +272,12 @@ class CentralBrowserWorker:
             return self._context.pages[0]
         return self._context.new_page()
 
+    def current_snapshot(self, *, readiness: dict, include_frames: bool = True, timeout_seconds: float = 10) -> dict:
+        """Apply the same material policy to the current page without navigating."""
+        self._require_started()
+        return _wait_for_detail_snapshot(self.page, self._validate_url, readiness,
+                                         include_frames=include_frames, timeout_seconds=timeout_seconds)
+
     @property
     def page_title(self) -> str:
         return self.page.title()
@@ -670,6 +676,11 @@ class CentralBrowserPageWorker:
     def page(self):
         self._owner._require_started()
         return self._page
+
+    def current_snapshot(self, *, readiness: dict, include_frames: bool = True, timeout_seconds: float = 10) -> dict:
+        self._owner._require_started()
+        return _wait_for_detail_snapshot(self._page, self._owner._validate_url, readiness,
+                                         include_frames=include_frames, timeout_seconds=timeout_seconds)
 
     @property
     def page_title(self) -> str:

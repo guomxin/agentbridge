@@ -229,7 +229,7 @@ class SeeyonMissedPunchTests(unittest.TestCase):
             patch("agentbridge.adapters.seeyon_missed_punch.time.sleep", return_value=None),
             patch(
                 "agentbridge.adapters.seeyon_pending_execution.time.monotonic",
-                side_effect=[0, 0, 6],
+                side_effect=[0, 0, 0, 0, 6],
             ),
             patch.object(
                 adapter,
@@ -378,6 +378,8 @@ class FakeAdapter:
         return {"items": [{"affair_id": "affair-1", "title": "【HR】补签申请单-Alice",
                            "summary_id": "summary-1", "process_id": "process-1"}]}
 
+    revalidate_workflow_detail = resolve_workflow_detail
+
 
 class FakeApprovalWorker:
     def __init__(self):
@@ -398,6 +400,11 @@ class FakeApprovalPage:
         self.pumped = []
 
     def evaluate(self, script, argument=None):
+        if "agentbridge_pending_readiness" in script:
+            return {"identity_matches": True, "ready": True, "body_loaded": True,
+                    "content_api_loaded": None, "submit_entry": "submitClickFunc", "reason": "ready"}
+        if "agentbridge_pending_dispatch_observation" in script:
+            return {"state": "invoked" if self.submitted_opinion else "not_invoked"}
         if argument is None:
             return []
         if isinstance(argument, str):

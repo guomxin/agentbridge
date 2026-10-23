@@ -510,7 +510,9 @@ test('attendance evidence preserves the source decision as read-only and full ta
   assert.match(target.textContent, /有异议/);
   assert.match(target.textContent, /<script>原文<\/script>/);
   assert.match(target.textContent, /<img src=x onerror=alert\(1\)>/);
-  assert.match(target.textContent, /附件内容未在本页读取/);
+  assert.match(target.textContent, /请打开下方支持的材料预览/);
+  assert.match(target.textContent, /未打开或不支持预览的附件内容尚未读取/);
+  assert.doesNotMatch(target.textContent, /附件内容未在本页读取/);
   assert.ok(!descendants(target).some(node => ['input', 'select', 'script', 'img', 'a'].includes(node.tag)));
   assert.equal(descendants(target).filter(node => node.tag === 'td').length, 1);
   assert.equal(descendants(target).find(node => node.dataset.reviewKind)?.dataset.reviewKind, 'attendance_confirmation');

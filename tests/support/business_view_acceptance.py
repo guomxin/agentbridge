@@ -197,6 +197,11 @@ class SyntheticOaPage:
             raise AssertionError(f"Unexpected synthetic grid contract: {arg}")
 
     def evaluate(self, _script, argument=None):
+        if "agentbridge_pending_readiness" in _script:
+            return {"identity_matches": True, "ready": True, "body_loaded": True,
+                    "content_api_loaded": True, "submit_entry": "submitClickFunc", "reason": "ready"}
+        if "agentbridge_pending_dispatch_observation" in _script:
+            return {"state": "invoked"}
         if argument is None:
             return []  # Passive submission tracker; no injected dialogs/errors.
         if isinstance(argument, str):
@@ -275,6 +280,10 @@ class SyntheticOaWorker(NetworkFreeHttpWorker):
         # real material completeness checks must not be bypassed by the fixture.
         return {"url": url, "html": "<html><body></body></html>",
                 "frames": [{"url": frame.url, "html": html} for frame in self.page.frames]}
+
+    def current_snapshot(self, **_kwargs):
+        # Snapshot current synthetic DOM only. No navigation or network occurs.
+        return self.rendered_snapshot(self.page.url)
 
     @contextmanager
     def fork_page(self):

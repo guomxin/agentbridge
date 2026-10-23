@@ -514,7 +514,7 @@ class TelegramResultViewTests(unittest.TestCase):
         self.service.finish_host_task(user_subject=OWNER, task_id=self.source["task_id"], outcome="succeeded", reason="synthetic_multi_query_completed")
         return result["operationId"]
 
-    def test_multi_source_ticket_freezes_groups_and_recovers_each_operation_separately(self):
+    def test_multi_source_ticket_freezes_groups_and_same_affair_converges_across_operations(self):
         second_operation = self.add_query_operation()
         token, _ = self.issue()
         groups = self.views.read(token)["groups"]
@@ -525,7 +525,8 @@ class TelegramResultViewTests(unittest.TestCase):
             body = {"operationId": group["operationId"], "targetKeys": [group["targets"][0]["targetKey"]], "requestKey": uuid4().hex}
             bodies.append(body)
             queued.append(self.views.prepare(token, body))
-        self.assertNotEqual(queued[0]["taskId"], queued[1]["taskId"])
+        self.assertEqual(queued[0]["taskId"], queued[1]["taskId"])
+        self.assertEqual(queued[1]["status"], "existing")
         self.assertEqual({item["taskId"] for item in self.views.read(token)["preparations"]}, {item["taskId"] for item in queued})
         for body, task in zip(bodies, queued):
             self.assertEqual(self.views.prepare(token, body)["taskId"], task["taskId"])
@@ -566,7 +567,7 @@ class TelegramResultViewTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "ACTION_SOURCE_EXPIRED")
             second = page["groups"][0]
             self.assertEqual(self.views.prepare(token, {"operationId": second_operation,
-                "targetKeys": [second["targets"][0]["targetKey"]], "requestKey": uuid4().hex})["status"], "queued")
+                "targetKeys": [second["targets"][1]["targetKey"]], "requestKey": uuid4().hex})["status"], "queued")
             self.assertEqual(self.views.status(token, queued["taskId"])["taskId"], queued["taskId"])
 
     def test_more_than_16_source_groups_is_explicitly_rejected_without_silently_truncating(self):
@@ -606,12 +607,13 @@ class TelegramResultViewTests(unittest.TestCase):
             self.execute(queued)
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
-    def test_foreign_or_other_ticket_task_status_cannot_be_read(self):
+    def test_owned_exact_affair_is_readable_from_another_ticket_but_foreign_tasks_are_not(self):
         token, _ = self.issue()
         queued = self.views.prepare(token, self.body(token))
         other, _ = self.issue()
-        with self.assertRaises(actions.ActionableResultError):
-            self.views.status(other, queued["taskId"])
+        before = self.counts()
+        self.assertEqual(self.views.status(other, queued["taskId"])["taskId"], queued["taskId"])
+        self.assertEqual(before, self.counts())
         for task_id in (self.source["task_id"], str(uuid4())):
             with self.subTest(task_id=task_id), self.assertRaises(actions.ActionableResultError):
                 self.views.status(token, task_id)
@@ -700,6 +702,111 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual({item.commit for item in PROFILES} - {row["commit_capability"] for row in _TRUSTED_WRITE_DEFINITIONS.values()}, set())
         self.assertEqual(len(self.fixture.oa.writes), 0)
         self.assertEqual(self.counts()["business_draft_decisions"], 0)
+
+
+    def test_fresh_query_recovers_original_efficiency_form_without_post_or_new_presentations(self):
+        first_token, _ = self.issue()
+        first = self.views.prepare(first_token, self.body(first_token, ("efficiency_data",)))
+        response = self.execute(first)
+        self.service.present_interaction(user_subject=OWNER, agent_host="openclaw", endpoint_key=self.endpoint["endpoint_key"],
+            interaction_id=response["interaction"]["interactionId"], continuous_flow=True)
+        self.source = self.query()
+        token, _ = self.issue()
+        before = self.counts()
+        with self.service.tasks._connect() as connection:
+            presentations = connection.execute("SELECT COUNT(*) FROM field_submission_presentations").fetchone()[0]
+        with patch.object(self.service, "invoke", side_effect=AssertionError("reference GET cannot prepare")), \
+             patch.object(self.service, "resume_interaction", side_effect=AssertionError("reference GET cannot resume")):
+            page = self.views.read(token)
+            status = self.views.status(token, first["taskId"])
+        target = next(item for item in page["groups"][0]["targets"] if item["workflowType"] == "efficiency_data")
+        self.assertFalse(target["enabled"])
+        self.assertEqual(target["preparation"]["taskId"], first["taskId"])
+        self.assertIn(first["taskId"], [item["taskId"] for item in page["preparations"]])
+        self.assertEqual(status["interaction"]["interactionId"], response["interaction"]["interactionId"])
+        self.assertIn("/flow/input/", status["interaction"]["presentation"]["url"])
+        self.assertEqual(before, self.counts())
+        with self.service.tasks._connect() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM field_submission_presentations").fetchone()[0], presentations)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_new_query_only_unknown_item_still_issues_readonly_result_entry_and_never_new_prepare(self):
+        first_token, _ = self.issue()
+        first = self.views.prepare(first_token, self.body(first_token, ("efficiency_data",)))
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE agent_tasks SET status='outcome_unknown' WHERE task_id=?", (first["taskId"],))
+        self.fixture.oa.data["affairs"] = {key: value for key, value in self.fixture.oa.data["affairs"].items()
+                                            if value["profile"] == "efficiency_data"}
+        self.source = self.query()
+        token, issued = self.issue()
+        self.assertFalse(issued["resultView"]["selectionAvailable"])
+        before = self.counts()
+        page = self.views.read(token)
+        self.assertFalse(page["selectionAvailable"])
+        self.assertEqual(page["preparations"][0]["taskId"], first["taskId"])
+        self.assertEqual(page["preparations"][0]["state"], "outcome_unknown")
+        self.assertNotIn("interaction", self.views.status(token, first["taskId"]))
+        self.assertEqual(self.views.prepare(token, self.body(token, ("efficiency_data",)))["taskId"], first["taskId"])
+        after = self.counts()
+        self.assertEqual(after["agent_tasks"], before["agent_tasks"])
+        self.assertEqual(after["write_authorizations"], 0)
+        self.assertEqual(after["business_draft_decisions"], 0)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_cross_source_original_form_survives_source_ttl_without_replacing_authority(self):
+        first_token, _ = self.issue()
+        first = self.views.prepare(first_token, self.body(first_token, ("efficiency_data",)))
+        self.execute(first)
+        self.source = self.query()
+        token, _ = self.issue()
+        before = self.counts()
+        with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)):
+            page = self.views.read(token)
+            self.assertFalse(page["groups"])
+            self.assertIn(first["taskId"], [item["taskId"] for item in page["preparations"]])
+            self.assertEqual(self.views.status(token, first["taskId"])["state"], "waiting_user")
+        self.assertEqual(before, self.counts())
+
+    def test_cross_source_batch_is_one_existing_task_and_overlap_cannot_create_second_batch(self):
+        first_token, _ = self.issue()
+        first = self.views.prepare(first_token, self.body(first_token, ("efficiency_data", "weekly_report")))
+        self.source = self.query()
+        token, _ = self.issue()
+        page = self.views.read(token)
+        self.assertEqual([item["taskId"] for item in page["preparations"]], [first["taskId"]])
+        before = self.counts()
+        with self.assertRaises(actions.ActionableResultError) as caught:
+            self.views.prepare(token, self.body(token, ("efficiency_data", "attendance_confirmation")))
+        self.assertEqual(caught.exception.code, "ACTION_TARGET_ALREADY_PREPARED")
+        self.assertEqual(before, self.counts())
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_cross_source_reference_does_not_accept_other_principal_or_foreign_affair(self):
+        first_token, _ = self.issue()
+        first = self.views.prepare(first_token, self.body(first_token, ("efficiency_data",)))
+        session = self.service.sessions.find(user_subject=OWNER, system_id="oa")
+        self.service.sessions.rebind_expected_principal(session["session_id"], expected_principal_ref="other-oa-account", reason="fixture identity switch")
+        self.fixture.oa.data["principal"] = "other-oa-account"
+        self.service.sessions.activate(session["session_id"], observed_principal_ref="other-oa-account")
+        self.source = self.query()
+        token, _ = self.issue()
+        with self.assertRaises(actions.ActionableResultError):
+            self.views.status(token, first["taskId"])
+        self.assertNotIn(first["taskId"], [item["taskId"] for item in self.views.read(token)["preparations"]])
+
+    def test_cross_source_reference_still_checks_live_endpoint_route_and_permissions(self):
+        first_token, _ = self.issue()
+        first = self.views.prepare(first_token, self.body(first_token, ("efficiency_data",)))
+        self.source = self.query()
+        token, _ = self.issue()
+        grant_permissions(self.service.user_grants, OWNER, ["oa.workflow.read", "oa.leave.approve"])
+        with self.assertRaises(PermissionError):
+            self.views.status(token, first["taskId"])
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE client_endpoints SET route_json=? WHERE endpoint_id=?",
+                (json.dumps({"channel": "telegram", "to": "2002"}), self.endpoint["endpoint_id"]))
+        with self.assertRaises(actions.ActionableResultError):
+            self.views.read(token)
 
 
 class TelegramResultViewMcpTests(unittest.TestCase):

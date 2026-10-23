@@ -1137,6 +1137,15 @@ def _commit_pending_action(
     current_target = _frozen_target(source, detail, signals, profile_key)
     _assert_frozen_target(target, current_target)
 
+    def revalidate_target():
+        current_source, current_detail = adapter.revalidate_workflow_detail(
+            worker, collection="pending", affair_id=affair_id,
+        )
+        current_signals = _validate_target(
+            profile_key, profile, current_source, current_detail, worker.page, affair_id,
+        )
+        _assert_frozen_target(target, _frozen_target(current_source, current_detail, current_signals, profile_key))
+
     outcome = execute_pending_action(
         adapter, worker, target=target, opinion=opinion,
         attitude_code=profile.get("attitude_code", ""),
@@ -1145,6 +1154,7 @@ def _commit_pending_action(
         contract_error=PendingActionContractMismatch,
         outcome_error=PendingActionOutcomeUnknown,
         timeout_seconds=timeout_seconds,
+        revalidate_target=revalidate_target,
     )
     result = {
         "schema_version": profile["result_schema"],

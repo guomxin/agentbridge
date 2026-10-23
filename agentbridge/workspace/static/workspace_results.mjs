@@ -57,6 +57,12 @@ export function trustedInteractionUrl(value) {
 export function completedInteractionPresentation(interaction) {
   if (interaction?.state !== "completed") return null;
   if (interaction.type === "business_input") {
+    if (interaction.confirmation?.mode === "single" && interaction.confirmation.state === "recorded") {
+      return {
+        label: "一次确认已记录",
+        message: "填写与授权已在同一次确认中记录，无需再次授权；办理是否完成以业务核验结果为准。",
+      };
+    }
     return {
       label: "字段已提交",
       message: "字段核对已完成，不代表业务已提交；请查看后续授权卡和任务进度。",
@@ -75,6 +81,55 @@ export function completedInteractionPresentation(interaction) {
     };
   }
   return null;
+}
+
+export function businessExecutionPresentation(result) {
+  const execution = result?.businessExecution;
+  if (execution?.schemaVersion !== "agentbridge.business-execution.v1") return null;
+  const labels = {
+    waiting_business_page: "等待业务页面就绪", preparing_submission: "准备提交",
+    submission_invoked: "已调用 OA 提交入口", submission_scheduled: "提交入口已排队",
+    verifying: "核对 OA 结果", not_submitted: "尚未提交",
+    verified: "业务结果已核验", outcome_unknown: "结果待核对", failed: "办理未完成",
+  };
+  const reasons = {
+    still_pending: "最近一次核验时，该事项仍在 OA 待办中。",
+    pending_coverage_incomplete: "待办列表未读完整，暂不能证明目标已移出待办。",
+    pending_coverage_inconsistent: "待办数量与完整性证据不一致，暂不能确认结果。",
+    pending_response_invalid: "未取得可核对的待办列表。",
+    done_affair_not_found: "事项已移出完整待办，但尚未找到同一事项的已办记录。",
+    done_affair_ambiguous: "已办记录中同一事项的匹配不唯一。",
+    done_identity_mismatch: "已办记录与原确认事项的流程标识不一致。",
+    done_detail_identity_unavailable: "已办详情缺少可核对的流程标识。",
+    done_detail_affair_mismatch: "已办详情与原确认事项不一致。",
+    done_title_mismatch: "已办记录与原确认事项的标题不一致。",
+    done_response_invalid: "未取得可核对的已办记录。",
+    frozen_identity_incomplete: "原事项缺少完成核验所需的流程标识。",
+    body_loading: "OA 正文尚未加载就绪，本次尚未提交。",
+    content_loading: "OA 材料尚未加载就绪，本次尚未提交。",
+    submit_entry_unavailable: "OA 原始提交入口尚未就绪，本次尚未提交。",
+    page_unavailable: "OA 办理页面暂不可用，本次尚未提交。",
+    page_loading: "OA 办理页面尚在加载，本次尚未提交。",
+    pre_submit_validation_failed: "提交前核对未通过，本次尚未提交，授权未消耗；请重新核对事项身份与材料。",
+  };
+  const phase = labels[execution.phase];
+  if (!phase) return null;
+  let message = reasons[execution.reason] || "";
+  if (result.task?.status === "outcome_unknown") {
+    message = `${message}${message ? " " : ""}原提交结果仍待核对；请先只读查询或到 OA 核对，核对前不要重复提交。`;
+  } else if (execution.phase === "verified") {
+    message = "已取得本次业务操作的完成核验证据。";
+  } else if (execution.phase === "not_submitted" && !message) {
+    message = "提交前检查未通过，本次尚未提交到 OA。";
+  }
+  const submission = {scheduled: "提交入口已排队，尚不能证明请求发出", invoked: "已调用原始提交入口，仍须核验业务结果",
+    not_invoked: "未调用提交入口", observation_unavailable: "暂未取得提交入口观察证据"}[execution.submissionState];
+  return {phase, message, submission, observedAt: execution.lastObservedAt, updatedAt: execution.updatedAt,
+    readOnlyQuery: result.task?.status === "outcome_unknown" && execution.readOnlyQuery === "oa_pending"};
+}
+
+export function taskResultTitle(result) {
+  return result?.businessTitle || result?.task?.title || "业务办理";
 }
 
 export function taskCardStatusForInteraction(state, fallback) {

@@ -75,6 +75,22 @@ class PendingSubmissionTrackerTests(unittest.TestCase):
             tracker.observe_response(response)
         self.assertEqual(tracker.snapshot()["response_evidence"], [])
 
+    def test_ajax_loading_is_distinguished_from_registered_business_rpc_without_leaking_body(self):
+        tracker = PendingSubmissionTracker()
+        load = FakeResponse("/ajax.do?managerName=sectionManager&token=private")
+        load.request.post_data = "managerMethod=doProjection&arguments=private-opinion"
+        tracker.observe_response(load)
+        commit = FakeResponse("/ajax.do?managerName=colManager&token=private")
+        commit.request.post_data = "managerMethod=finishWorkItem&arguments=private-opinion&csrf=private"
+        tracker.observe_response(commit)
+        evidence = tracker.snapshot()["response_evidence"]
+        self.assertEqual(evidence[0]["phase"], "ajax_response")
+        self.assertEqual(evidence[1], {"phase": "approval_endpoint_response", "endpoint": "/seeyon/ajax.do",
+                                       "operation": "finishWorkItem", "status": 200})
+        self.assertIsNone(tracker.definitive_rejection)
+        self.assertNotIn("private", str(evidence))
+        self.assertNotIn("doProjection", str(evidence))
+
     def test_failed_approval_request_remains_unknown(self):
         tracker = PendingSubmissionTracker()
         request = FakeRequest("/collaboration/collaboration.do?method=finishWorkItem&cookie=secret")

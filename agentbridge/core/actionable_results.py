@@ -137,6 +137,261 @@ def _target_key(operation_id, row):
     return _hash({"operationId": operation_id, "row": row})
 
 
+def _oa_session(connection, subject):
+    row = connection.execute("SELECT * FROM sessions WHERE user_subject=? AND system_id='oa'", (subject,)).fetchone()
+    return dict(row) if row else {}
+
+
+def _principal(binding):
+    values = [str(binding.get(key) or "").strip() for key in ("expected_principal_ref", "downstream_principal_ref")]
+    return values[0] if all(values) and values[0] == values[1] else None
+
+
+def _oa_identity(session):
+    principal = _principal(session)
+    return {"systemId": "oa", "principalRef": principal, "sessionId": session.get("session_id"),
+            "authorityGeneration": session.get("authority_generation")} if principal else None
+
+
+def _task_resources(service, connection, subject, task_id):
+    """Read only owned, integrity-checked frozen fields and authorizations."""
+    from agentbridge.core.field_submissions import _submission_from_row
+    fields, authorizations = [], []
+    for row in connection.execute(
+        "SELECT DISTINCT f.* FROM field_submissions f JOIN task_operations t ON t.operation_id=f.create_operation_id "
+        "WHERE t.task_id=? AND t.user_subject=? AND f.user_subject=? AND f.system_id='oa'", (task_id, subject, subject),
+    ):
+        service.field_submissions._verify_integrity(row, include_values=False)
+        fields.append(_submission_from_row(row, include_values=False))
+    for row in connection.execute(
+        "SELECT DISTINCT a.* FROM write_authorizations a JOIN task_operations t ON t.operation_id=a.prepare_operation_id "
+        "WHERE t.task_id=? AND t.user_subject=? AND a.user_subject=? AND a.system_id='oa'", (task_id, subject, subject),
+    ):
+        plan_json = row["plan_json"]
+        if row["plan_hash"] != "sha256:" + sha256(plan_json.encode()).hexdigest():
+            _fail("ACTION_COMMAND_INVALID", "原办理授权的冻结记录不完整，请先核对原任务。")
+        authorizations.append({**dict(row), "plan": json.loads(plan_json)})
+    return fields, authorizations
+
+
+def _recorded_principal(connection, task, command, fields, authorizations):
+    identity = command.get("oaIdentity")
+    if isinstance(identity, dict) and identity.get("systemId") == "oa" and identity.get("principalRef"):
+        return identity["principalRef"]
+    # Legacy tasks did not freeze identity on their queue command. Approved
+    # plans and draft bindings do: prefer that evidence over the live session.
+    principals = {_principal(item["plan"].get("session_binding") or {}) for item in authorizations}
+    for row in connection.execute("SELECT binding_json FROM business_drafts WHERE user_subject=? AND task_id=?",
+                                  (task["user_subject"], task["task_id"])):
+        principals.add(_principal(json.loads(row[0]).get("session") or {}))
+    principals.discard(None)
+    if len(principals) == 1:
+        return principals.pop()
+    if principals:
+        return None
+    session = _oa_session(connection, task["user_subject"])
+    created = command.get("requestedAt") or task["created_at"]
+    # A current identity can prove an old undecided entry only if this same
+    # session predates it and no principal rebind occurred afterwards.
+    if (not session or session["created_at"] > created or any(item["session_id"] != session["session_id"] for item in fields)
+            or connection.execute("SELECT 1 FROM session_events WHERE session_id=? AND source='admin_rebind' AND created_at>=?",
+                                  (session["session_id"], created)).fetchone()):
+        return None
+    return _principal(session)
+
+
+def _selection_items(command, fields, authorizations):
+    from agentbridge.core.business_draft_profiles import BY_PREPARE, profile_for_source
+    from agentbridge.core.business_drafts import BusinessDraftError
+    result = {}
+    for item in command.get("selectedItems") or []:
+        display = item.get("display_summary") or {}
+        key = (item.get("resource_ref"), display.get("prepare_capability"), display.get("commit_capability"))
+        if all(isinstance(value, str) and value for value in key):
+            result[key] = {"affairId": key[0], "prepareCapability": key[1], "commitCapability": key[2]}
+    for item in fields:
+        try:
+            profile = profile_for_source(item)
+        except (BusinessDraftError, ValueError, TypeError, KeyError):
+            profile = BY_PREPARE.get(item.get("capability_name"))
+        if profile is None:
+            continue
+        affair = (item["form_schema"].get("_agentbridge_resume_arguments") or {}).get("affair_id")
+        if isinstance(affair, str) and affair:
+            result[(affair, profile.prepare, profile.commit)] = {
+                "affairId": affair, "prepareCapability": profile.prepare, "commitCapability": profile.commit}
+    for item in authorizations:
+        plan = item["plan"]
+        affair = (plan.get("target") or {}).get("affair_id")
+        prepare = plan.get("prepare_capability")
+        if isinstance(affair, str) and affair and isinstance(prepare, str) and prepare and prepare not in {
+                PENDING_BATCH_PREPARE_CAPABILITY, "oa.missed_punch.approval.batch.prepare"}:
+            result[(affair, prepare, item["capability_name"])] = {
+                "affairId": affair, "prepareCapability": prepare, "commitCapability": item["capability_name"]}
+    return result.values()
+
+
+def _proven_pre_submit_failure(operation, authorization):
+    from agentbridge.adapters.seeyon_pending_actions import PendingActionContractMismatch
+    from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+    contracts = {item["commit_capability"] for item in _TRUSTED_WRITE_DEFINITIONS.values()
+                 if item["contract_error"] is PendingActionContractMismatch}
+    if (operation["status"] != "failed" or authorization["state"] != "approved"
+            or authorization["commit_operation_id"] is not None or authorization["consumed_at"] is not None
+            or operation["capability_name"] != authorization["capability_name"]
+            or operation["capability_version"] != authorization["capability_version"]):
+        return False
+    code = operation["error_code"]
+    if code != "OA_PENDING_ACTION_NOT_READY" and not (code == "CAPABILITY_EXECUTION_FAILED" and operation["capability_name"] in contracts):
+        return False
+    return operation["input_hash"] == _hash({"authorization_id": authorization["authorization_id"]})
+
+
+def _preparation_state(connection, task, command, selection, fields, authorizations):
+    affair, commit = selection["affairId"], selection["commitCapability"]
+    item = connection.execute(
+        "SELECT i.state,i.ordinal,b.current_ordinal FROM task_batch_items i JOIN task_batches b ON b.batch_id=i.batch_id "
+        "WHERE b.parent_task_id=? AND b.user_subject=? AND i.resource_ref=?",
+        (task["task_id"], task["user_subject"], affair),
+    ).fetchone()
+    state = item["state"] if item else task["status"]
+    related_auths = [a for a in authorizations if a["capability_name"] == commit and
+                     (a["plan"].get("target") or {}).get("affair_id") == affair]
+    commits = connection.execute(
+        "SELECT o.* FROM operations o JOIN task_operations t ON t.operation_id=o.operation_id "
+        "WHERE t.task_id=? AND t.user_subject=? AND o.user_subject=? AND o.capability_name=?",
+        (task["task_id"], task["user_subject"], task["user_subject"], commit),
+    ).fetchall()
+    if item:
+        ids = {a["commit_operation_id"] for a in related_auths if a["commit_operation_id"]}
+        identities = {(_hash({"authorization_id": a["authorization_id"]}), a["capability_version"]) for a in related_auths}
+        commits = [row for row in commits if row["operation_id"] in ids or
+                   (row["input_hash"], row["capability_version"]) in identities]
+    if state in {"unknown", "outcome_unknown"} or any(row["status"] == "unknown" for row in commits):
+        return "outcome_unknown", True
+    if any(row["status"] in {"pending", "running"} for row in commits):
+        return "running", True
+    if any(row["status"] == "succeeded" for row in commits) or state in {"succeeded", "completed"}:
+        return "succeeded", True
+    if any(_proven_pre_submit_failure(operation, authorization) for operation in commits for authorization in related_auths):
+        return "failed", True  # The old decision stays bound; this is not retry permission.
+    decided = any(a["state"] in {"approved", "consumed"} or connection.execute(
+        "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=?",
+        (a["authorization_id"], task["user_subject"]),
+    ).fetchone() for a in related_auths)
+    if state in {"failed", "expired", "canceled", "superseded", "skipped"} or task["status"] in TERMINAL_TASK_STATUSES:
+        # A terminal parent alone does not establish that no submit happened.
+        return ("outcome_unknown", True) if decided else (None, False)
+    if decided:
+        return "running", True
+    related_fields = [entry for entry in fields if
+                      (entry["form_schema"].get("_agentbridge_resume_arguments") or {}).get("affair_id") == affair]
+    if related_fields and all(entry["state"] in {"expired", "superseded"} or _date(entry["expires_at"]) <= _now()
+                              for entry in related_fields):
+        return None, False
+    if (not fields and not authorizations and command.get("state") == "pending"
+            and command.get("requestedAt") and _date(command["requestedAt"]) + timedelta(seconds=SOURCE_TTL_SECONDS) <= _now()):
+        return None, False
+    if item and item["state"] == "queued":
+        return "queued", False
+    if task["status"] in {"active", "running"}:
+        return ("queued" if command.get("state") == "pending" else "preparing"), False
+    return "waiting_user", False
+
+
+def oa_preparation_conflicts(service, *, user_subject, session, selections, exclude_task_id=None, connection=None):
+    """Find exact owned OA collisions; never execute, authorize or infer success.
+
+    Principal is the collision identity across logins; session/generation only
+    constrain the original authorization. Missing legacy identity evidence blocks
+    a collision without making its old task automatically resumable. The excluded
+    task may recheck an undecided draft, never replay its commit or unknown result.
+    """
+    if connection is None:
+        with service.tasks._connect() as owned:
+            return oa_preparation_conflicts(service, user_subject=user_subject, session=session, selections=selections,
+                                           exclude_task_id=exclude_task_id, connection=owned)
+    if session.get("user_subject") != user_subject or session.get("system_id") != "oa":
+        _fail("ACTION_ENDPOINT_INVALID", "OA 身份与当前用户不一致，请恢复原登录后核对。")
+    wanted = {(item["affairId"], item["prepareCapability"], item["commitCapability"]) for item in selections}
+    principal = _principal(session)
+    if not wanted:
+        return []
+    affairs = sorted({key[0] for key in wanted})
+    placeholders = ",".join("?" for _ in affairs)
+    # Scan each owned resource collection once. Correlating a resource EXISTS
+    # beneath every historical task is quadratic without a new schema index.
+    candidate_ids = {row[0] for row in connection.execute(
+        "SELECT task_id FROM agent_tasks WHERE user_subject=? AND json_extract(summary_json,'$.command.kind')=? "
+        f"AND EXISTS(SELECT 1 FROM json_each(summary_json,'$.command.affairIds') WHERE value IN ({placeholders}))",
+        (user_subject, COMMAND_KIND, *affairs))}
+    operation_ids = {row[0] for row in connection.execute(
+        "SELECT create_operation_id FROM field_submissions WHERE user_subject=? AND system_id='oa' "
+        f"AND json_extract(schema_json,'$._agentbridge_resume_arguments.affair_id') IN ({placeholders})",
+        (user_subject, *affairs))}
+    operation_ids.update(row[0] for row in connection.execute(
+        "SELECT prepare_operation_id FROM write_authorizations WHERE user_subject=? AND system_id='oa' "
+        f"AND json_extract(plan_json,'$.target.affair_id') IN ({placeholders})", (user_subject, *affairs)))
+    operation_ids = sorted(operation_ids)
+    for offset in range(0, len(operation_ids), 400):
+        chunk = operation_ids[offset:offset + 400]
+        candidate_ids.update(row[0] for row in connection.execute(
+            f"SELECT task_id FROM task_operations WHERE user_subject=? AND operation_id IN ({','.join('?' for _ in chunk)})",
+            (user_subject, *chunk)))
+    rows = []
+    candidate_ids = sorted(candidate_ids)
+    for offset in range(0, len(candidate_ids), 400):
+        chunk = candidate_ids[offset:offset + 400]
+        rows.extend(connection.execute(
+            f"SELECT * FROM agent_tasks WHERE user_subject=? AND task_id IN ({','.join('?' for _ in chunk)})",
+            (user_subject, *chunk)).fetchall())
+    rows.sort(key=lambda row: (row["created_at"], row["task_id"]), reverse=True)
+    conflicts = []
+    for task in rows:
+        command = json.loads(task["summary_json"]).get("command") or {}
+        if command.get("kind") == COMMAND_KIND:
+            _, command = _load_command(connection, user_subject, task["task_id"], command.get("commandKey"))
+        fields, authorizations = _task_resources(service, connection, user_subject, task["task_id"])
+        matching = [item for item in _selection_items(command, fields, authorizations)
+                    if (item["affairId"], item["prepareCapability"], item["commitCapability"]) in wanted]
+        if not matching:
+            continue
+        recorded = _recorded_principal(connection, task, command, fields, authorizations)
+        if principal and recorded and principal != recorded:
+            continue
+        for item in matching:
+            state, boundary = _preparation_state(connection, task, command, item, fields, authorizations)
+            if state is None or task["task_id"] == exclude_task_id and not boundary:
+                continue
+            conflicts.append({**item, "taskId": task["task_id"], "state": state,
+                              "identityVerified": bool(principal and recorded and principal == recorded)})
+    priority = {"outcome_unknown": 0, "running": 1, "succeeded": 2, "waiting_user": 3, "preparing": 4, "queued": 5}
+    return sorted(conflicts, key=lambda item: priority.get(item["state"], 9))
+
+
+def _cross_source_preparations(service, connection, subject, pending, operation_id):
+    selections, keys = [], {}
+    for row in pending["items"]:
+        try:
+            item = _select(service, pending, [row["affair_id"]])[0]
+        except ActionableResultError:
+            continue
+        display = item["display_summary"]
+        selection = {"affairId": row["affair_id"], "prepareCapability": display["prepare_capability"],
+                     "commitCapability": display["commit_capability"]}
+        selections.append(selection)
+        keys[(selection["affairId"], selection["prepareCapability"], selection["commitCapability"])] = _target_key(operation_id, row)
+    session = _oa_session(connection, subject)
+    if not session or not selections:
+        return {}
+    result = {}
+    for conflict in oa_preparation_conflicts(service, user_subject=subject, session=session, selections=selections, connection=connection):
+        key = keys[(conflict["affairId"], conflict["prepareCapability"], conflict["commitCapability"])]
+        result.setdefault(key, {"taskId": conflict["taskId"],
+                               "state": conflict["state"] if conflict["identityVerified"] else "identity_unverified"})
+    return result
+
+
 def _source_preparations(connection, subject, source_task_id, operation_id):
     """Project owned, frozen preparation records; never infer a write result."""
     rows = connection.execute(
@@ -179,7 +434,7 @@ def _source_preparations(connection, subject, source_task_id, operation_id):
 
 
 def preparation_source_task_ids(connection, subject, task_id):
-    """Expose only a validated owned source for refreshing an existing card."""
+    """Refresh owned queries showing an exact affair; never enqueue new work."""
     task = _owned_task(connection, subject, task_id)
     command = json.loads(task["summary_json"]).get("command") or {}
     if command.get("kind") != COMMAND_KIND:
@@ -189,7 +444,21 @@ def preparation_source_task_ids(connection, subject, task_id):
         _owned_task(connection, subject, command["sourceTaskId"])
     except (ActionableResultError, KeyError):
         return []
-    return [command["sourceTaskId"]] if command["sourceTaskId"] != task_id else []
+    result = [command["sourceTaskId"]] if command["sourceTaskId"] != task_id else []
+    affairs = command.get("affairIds") or []
+    if not affairs:
+        return result
+    placeholders = ",".join("?" for _ in affairs)
+    # This is only an invalidation hint. Each query's next projection applies
+    # its own fresh identity, grants, exact profile and source validation.
+    rows = connection.execute(
+        "SELECT DISTINCT t.task_id,t.created_at FROM agent_tasks t JOIN task_operations l ON l.task_id=t.task_id "
+        "AND l.user_subject=t.user_subject JOIN operations o ON o.operation_id=l.operation_id AND o.user_subject=t.user_subject "
+        "WHERE t.user_subject=? AND o.capability_name='oa.workflow.pending.list' AND o.status='succeeded' "
+        f"AND EXISTS(SELECT 1 FROM json_each(o.result_json,'$.items') WHERE json_extract(value,'$.affair_id') IN ({placeholders})) "
+        "ORDER BY t.created_at DESC LIMIT 128", (subject, *affairs),
+    ).fetchall()
+    return list(dict.fromkeys([*result, *(row["task_id"] for row in rows if row["task_id"] != task_id)]))
 
 
 def list_actionable_results(service, subject, source_task_id):
@@ -221,7 +490,8 @@ def list_actionable_results(service, subject, source_task_id):
                 except ActionableResultError:
                     continue
                 expired = True
-            preparations = _source_preparations(connection, subject, source_task_id, entry[0])
+            preparations = _source_preparations(connection, subject, source_task_id, entry[0]) | \
+                _cross_source_preparations(service, connection, subject, pending, entry[0])
             # Retain historical progress only for queries that actually led to
             # preparation. Expiry never creates another actionable window.
             if expired and not preparations:
@@ -243,6 +513,13 @@ def list_actionable_results(service, subject, source_task_id):
                     target["disabledReason"] = str(exc) if not isinstance(exc, PermissionError) else "当前没有办理此类待办的权限。"
                 if target["preparation"]:
                     target["enabled"] = False
+                    progress_reason = (
+                        "此事项的办理结果待核对，请查看原聊天或原任务，不要重复提交。"
+                        if target["preparation"]["state"] == "outcome_unknown" else
+                        "原办理身份需要核对，请从原聊天查看已有任务；不会新建重复办理。"
+                        if target["preparation"]["state"] == "identity_unverified" else
+                        "此事项已有办理任务，请从原聊天继续办理或查看结果。")
+                    target["disabledReason"] = " ".join(filter(None, [target["disabledReason"], progress_reason]))
                 elif expired:
                     target.update(enabled=False, disabledReason="待办查询已超过10分钟，请重新查询后办理。")
                 targets.append(target)
@@ -434,6 +711,25 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
     _require_grants(service, subject, selected)
     profile = "single" if len(selected) == 1 else "batch"
     item = _reviewed_current_skill(service, subject, profile, connection)
+    session = _oa_session(connection, subject)
+    identity = _oa_identity(session)
+    if not identity:
+        _fail("ACTION_IDENTITY_UNVERIFIED", "OA 登录身份尚未核实，请恢复登录并重新查询待办。")
+    selections = [{"affairId": entry["resource_ref"],
+                   "prepareCapability": entry["display_summary"]["prepare_capability"],
+                   "commitCapability": entry["display_summary"]["commit_capability"]} for entry in selected]
+    conflicts = oa_preparation_conflicts(service, user_subject=subject, session=session, selections=selections, connection=connection)
+    if conflicts:
+        existing = conflicts[0]
+        if len(selected) == 1 and existing["identityVerified"]:
+            old_task = _owned_task(connection, subject, existing["taskId"])
+            old_command = json.loads(old_task["summary_json"]).get("command") or {}
+            if old_command.get("kind") == COMMAND_KIND:
+                _, old_command = _load_command(connection, subject, existing["taskId"], old_command.get("commandKey"))
+                _binding(service, subject, existing["taskId"], old_command, connection)
+                _require_grants(service, subject, old_command["selectedItems"])
+                return {"taskId": existing["taskId"], "commandKey": old_command["commandKey"], "status": "existing"}
+        _fail("ACTION_TARGET_ALREADY_PREPARED", "所选事项已有办理或结果待核对，请查看原任务；不会新建重复办理。")
     binding_id = service.skills.bind(subject, SKILL_ID, profile, expected_version=item["manifest"]["version"], connection=connection)
     binding = service.skills.binding(subject, binding_id, connection)
     bundle = skill_bundle(binding)
@@ -444,13 +740,14 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
         "selectedItems": selected, "affairIds": affair_ids, "capabilityName": capability,
         "capabilityVersion": service.registry.get(capability).version, "arguments": arguments,
         "skillBindingId": binding_id, "skillHash": item["content_hash"], "loadedResources": bundle["loaded_resources"],
-        "instructionsHash": _hash(bundle["content"]), "requestedAt": _now().isoformat(), "state": "pending"}
+        "instructionsHash": _hash(bundle["content"]), "requestedAt": _now().isoformat(), "state": "pending", "oaIdentity": identity}
     if workspace.get("_telegram"):
         command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"])
     command["intentHash"] = _hash(_intent(command))
     task, _ = service.tasks.ensure_task(user_subject=subject, agent_host="openclaw", host_task_key=host_key,
         origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],
-        title=(f"核对并办理{len(selected)}项OA待办" if profile == "batch" else "核对并办理OA待办"),
+        title=(f"核对并办理{len(selected)}项OA待办" if profile == "batch" else
+               "核对并办理：" + str(selected[0]["display_summary"]["title"])[:450]),
         summary={"command": command}, connection=connection)
     service.skills.attach(subject, task["task_id"], binding_id, connection=connection)
     if workspace.get("_telegram"):
@@ -535,6 +832,9 @@ def execute_preparation(service, subject, task_id, command_key, *, runtime_conte
                 if existing is None:
                     if task["status"] not in {"active", "running", "waiting_user"} or command.get("state") != "pending":
                         _fail("ACTION_COMMAND_NOT_PENDING", "办理任务已结束，不能再次创建准备操作。")
+                    session = _oa_session(connection, subject)
+                    if command.get("oaIdentity") and command["oaIdentity"] != _oa_identity(session):
+                        _fail("ACTION_IDENTITY_CHANGED", "OA 登录身份或会话已变化，请重新查询后核对原办理。")
                     _, pending = _source(connection, subject, command["sourceTaskId"], command["operationIdSource"])
                     if _hash(pending) != command["sourceHash"] or _select(service, pending, command["affairIds"]) != command["selectedItems"]:
                         _fail("ACTION_SOURCE_CHANGED", "原查询目标与冻结记录不一致，请重新查询。")

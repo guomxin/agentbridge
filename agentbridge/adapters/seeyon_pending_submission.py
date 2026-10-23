@@ -261,8 +261,17 @@ def _request_phase(request, url: str) -> dict[str, str] | None:
             entry["operation"] = "finishWorkItem"
         return entry
     if parsed.path.endswith("/ajax.do"):
-        # An AJAX manager method is not a documented final approval contract.
-        # Retain only the fixed endpoint; form data can contain user text/tokens.
+        # A recognized dispatch is useful evidence, never a final business
+        # outcome. Copy no arbitrary manager/method, URL, arguments or user text.
+        query = parse_qs(parsed.query)
+        body = _attribute(request, "post_data")
+        fields = parse_qs(body) if isinstance(body, str) and len(body) <= 65536 else {}
+        manager = query.get("managerName", fields.get("managerName", [""]))[0]
+        method = fields.get("managerMethod", query.get("managerMethod", [""]))[0]
+        if (manager, method) == ("colManager", "finishWorkItem"):
+            return {"phase": "approval_endpoint_response", "endpoint": "/seeyon/ajax.do",
+                    "operation": "finishWorkItem"}
+        # Other AJAX may be ordinary late-loading reads and is unclassified.
         return {"phase": "ajax_response", "endpoint": "/seeyon/ajax.do"}
     return None
 

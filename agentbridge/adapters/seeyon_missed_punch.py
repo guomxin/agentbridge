@@ -468,6 +468,13 @@ def approve_missed_punch_request(
     _assert_approval_target(
         dict(plan.get("target") or {}), _approval_target(source, detail, signals)
     )
+
+    def revalidate_target():
+        current_source, current_detail = adapter.revalidate_workflow_detail(
+            worker, collection="pending", affair_id=affair_id,
+        )
+        current_signals = _validate_approval_target(current_source, current_detail, worker.page, affair_id)
+        _assert_approval_target(dict(plan["target"]), _approval_target(current_source, current_detail, current_signals))
     outcome = execute_pending_action(
         adapter, worker, target=dict(plan["target"]), opinion=opinion,
         attitude_code="agree", action_kind="approval",
@@ -475,6 +482,7 @@ def approve_missed_punch_request(
         contract_error=MissedPunchContractMismatch,
         outcome_error=MissedPunchOutcomeUnknown,
         timeout_seconds=timeout_seconds,
+        revalidate_target=revalidate_target,
     )
     return {
         "schema_version": "agentbridge.oa_missed_punch_approval_result.v1",

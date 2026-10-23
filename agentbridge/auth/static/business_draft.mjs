@@ -570,13 +570,13 @@ export function renderEvidence(document, target, review, kind = "") {
     const title = document.createElement("h3"); title.textContent = "附件名称";
     const list = document.createElement("ul");
     for (const attachment of review.attachments) { const item = document.createElement("li"); item.textContent = String(attachment?.name || "未命名附件"); list.append(item); }
-    const note = document.createElement("p"); note.textContent = "此处仅列出源页面中的附件名称，附件内容未在本页读取。";
+    const note = document.createElement("p"); note.textContent = "此处列出源页面中的附件名称；需要阅读内容时，请打开下方支持的材料预览。未打开或不支持预览的附件内容尚未读取。";
     attachments.append(title, list, note); section.append(attachments);
   }
   if (review?.completeness || review?.truncated === true) {
     const note = document.createElement("p"); note.className = "material-completeness";
     const complete = review?.completeness?.status === "complete" && review?.truncated !== true;
-    note.textContent = complete ? "已读取当前受控页面的材料；此状态不包含附件正文或源系统未展开的历史。" :
+    note.textContent = complete ? "已读取当前受控页面的材料。附件正文请按需打开材料预览；未预览的附件和源系统未展开的历史不在此读取范围内。" :
       "当前材料尚未完整核对，请查看读取状态并补全材料后继续。";
     if (!complete) note.setAttribute("role", "status");
     for (const reason of Array.isArray(review?.completeness?.reasons) ? review.completeness.reasons : []) {

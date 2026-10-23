@@ -10,7 +10,7 @@ from agentbridge.adapters.seeyon_pending_actions import (
     approve_efficiency_data,
     prepare_efficiency_data_approval,
 )
-from agentbridge.adapters.seeyon_pending_execution import PendingSubmissionTracker
+from agentbridge.adapters.seeyon_pending_execution import PendingSubmissionTracker, PendingActionNotReady
 from tests.test_seeyon_pending_actions import FakeAdapter, FakeWorker, _fixture, _inputs
 
 
@@ -49,7 +49,8 @@ def test_delayed_submit_and_transient_read_errors_retry_reads_without_resubmitti
     assert worker.page.pumped == [800, 800, 800]
     boundary.assert_called_once()
     submissions = [call for call in worker.page.evaluate.call_args_list
-                   if len(call.args) == 2 and isinstance(call.args[1], dict)]
+                   if len(call.args) == 2 and isinstance(call.args[1], dict)
+                   and "opinion" in call.args[1]]
     assert len(submissions) == 1
     assert worker.readback_closed
     assert worker.page.handlers == {}
@@ -93,7 +94,7 @@ def test_missing_scheduling_acknowledgement_is_unknown_and_not_replayed(attempt,
     original_evaluate = worker.page.evaluate
 
     def evaluate(script, argument=None):
-        if isinstance(argument, dict):
+        if isinstance(argument, dict) and "opinion" in argument:
             worker.page.commit_payload = argument
             return {"scheduled": False}
         return original_evaluate(script, argument)
@@ -138,8 +139,149 @@ def test_pending_absence_without_matching_done_identity_remains_unknown(attempt,
         return result
 
     monkeypatch.setattr(adapter, "list_workflows", wrong_done)
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
         with pytest.raises(PendingActionOutcomeUnknown, match="done_identity_mismatch"):
             approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=Mock())
     assert worker.readback_closed
     assert worker.page.handlers == {}
+
+
+def readiness_case(attempt, monkeypatch, *, ready_after=1, drift=None):
+    adapter, worker, plan = attempt
+    clock = {"now": 0.0, "reads": 0, "ready": False}
+    original = worker.page.evaluate
+
+    def evaluate(script, argument=None):
+        if "agentbridge_pending_readiness" in script:
+            clock["reads"] += 1
+            clock["ready"] = ready_after is not None and clock["reads"] >= ready_after
+            return {"identity_matches": not (drift == "identity" and clock["reads"] > 1),
+                    "ready": clock["ready"], "body_loaded": clock["ready"],
+                    "content_api_loaded": clock["ready"], "submit_entry": "submitClickFunc",
+                    "reason": "ready" if clock["ready"] else "body_loading"}
+        if isinstance(argument, dict) and "opinion" in argument:
+            assert clock["ready"], "OA submit must not be called before its business-body callback"
+        return original(script, argument)
+
+    def pump(milliseconds):
+        worker.page.pumped.append(milliseconds)
+        clock["now"] += milliseconds / 1000
+        if drift == "material":
+            worker.fixture["detail"]["fields"][0]["value"] = "changed during body load"
+
+    monkeypatch.setattr(worker.page, "evaluate", Mock(side_effect=evaluate))
+    monkeypatch.setattr(worker.page, "wait_for_timeout", pump)
+    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_execution.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr("agentbridge.adapters.seeyon_pending_execution._READY_TIMEOUT_SECONDS", .25)
+    return adapter, worker, plan, clock
+
+
+def test_late_body_callback_waits_before_single_authorization_and_submission(attempt, monkeypatch):
+    adapter, worker, plan, clock = readiness_case(attempt, monkeypatch, ready_after=3)
+    revalidate = Mock(wraps=adapter.revalidate_workflow_detail)
+    monkeypatch.setattr(adapter, "revalidate_workflow_detail", revalidate)
+    boundary = Mock(side_effect=lambda: clock["ready"] or pytest.fail("consumed before ready"))
+    result = approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    boundary.assert_called_once()
+    revalidate.assert_called_once()
+    assert worker.page.pumped[:2] == [100, 100]
+    assert result["execution"]["readiness"]["wait_ms"] == 200
+    assert result["execution"]["dispatch"]["state"] == "invoked"
+    assert result["execution"]["readback"]["attempts"] == 1
+    assert result["verification"]["confirmed"] is True
+    assert len([call for call in worker.page.evaluate.call_args_list
+                if len(call.args) == 2 and isinstance(call.args[1], dict) and "opinion" in call.args[1]]) == 1
+
+
+def test_body_never_ready_is_bounded_without_consuming_or_readback(attempt, monkeypatch):
+    adapter, worker, plan, clock = readiness_case(attempt, monkeypatch, ready_after=None)
+    boundary = Mock()
+    with pytest.raises(PendingActionNotReady, match="尚未提交") as captured:
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    assert captured.value.error_code == "OA_PENDING_ACTION_NOT_READY"
+    assert .25 <= clock["now"] < .5
+    boundary.assert_not_called()
+    assert worker.page.commit_payload is None
+    assert adapter.pending_reads == 0
+    assert not worker.readback_opened
+
+
+@pytest.mark.parametrize("drift", ["identity", "material"])
+def test_identity_or_material_drift_during_body_wait_blocks_before_consumption(attempt, monkeypatch, drift):
+    adapter, worker, plan, _clock = readiness_case(attempt, monkeypatch, ready_after=2, drift=drift)
+    boundary = Mock()
+    with pytest.raises(PendingActionContractMismatch):
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    boundary.assert_not_called()
+    assert worker.page.commit_payload is None
+    assert adapter.pending_reads == 0
+
+
+def test_final_guard_refusal_does_not_burn_a_minute_or_retry_submission(attempt, monkeypatch):
+    adapter, worker, plan = attempt
+    original = worker.page.evaluate
+
+    def evaluate(script, argument=None):
+        if "agentbridge_pending_dispatch_observation" in script:
+            return {"state": "not_invoked"}
+        return original(script, argument)
+
+    monkeypatch.setattr(worker.page, "evaluate", Mock(side_effect=evaluate))
+    def still_pending(_reader, **_kwargs):
+        adapter.pending_reads += 1
+        return {"items": [worker.fixture["source"]], "coverage": {"status": "complete"}}
+    monkeypatch.setattr(adapter, "list_workflows", still_pending)
+    boundary = Mock()
+    with pytest.raises(PendingActionOutcomeUnknown, match='"state": "not_invoked"'):
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    boundary.assert_called_once()
+    assert adapter.pending_reads == 1
+    assert worker.page.pumped == [800]
+
+
+def test_body_reloads_during_reader_creation_without_consumption_and_cleans_up(attempt, monkeypatch):
+    adapter, worker, plan = attempt
+    original = worker.page.evaluate
+    reader_created = False
+
+    @contextmanager
+    def slow_reader():
+        nonlocal reader_created
+        reader_created = True
+        try:
+            yield worker.readback_worker
+        finally:
+            worker.readback_closed = True
+
+    def evaluate(script, argument=None):
+        if "agentbridge_pending_readiness" in script and reader_created:
+            return {"identity_matches": True, "ready": False, "reason": "body_loading"}
+        return original(script, argument)
+
+    monkeypatch.setattr(worker, "fork_page", slow_reader)
+    monkeypatch.setattr(worker.page, "evaluate", evaluate)
+    boundary = Mock()
+    with pytest.raises(PendingActionNotReady, match="尚未提交"):
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=boundary)
+    boundary.assert_not_called()
+    assert worker.readback_closed
+    assert worker.page.handlers == {}
+    assert worker.page.commit_payload is None
+
+
+def test_final_guard_refusal_stops_after_one_failed_readback_without_retry(attempt, monkeypatch):
+    adapter, worker, plan = attempt
+    original = worker.page.evaluate
+
+    def evaluate(script, argument=None):
+        if "agentbridge_pending_dispatch_observation" in script:
+            return {"state": "not_invoked"}
+        return original(script, argument)
+
+    monkeypatch.setattr(worker.page, "evaluate", evaluate)
+    read = Mock(side_effect=RuntimeError("read unavailable"))
+    monkeypatch.setattr(adapter, "list_workflows", read)
+    with pytest.raises(PendingActionOutcomeUnknown, match='"last_read_error": "RuntimeError"'):
+        approve_efficiency_data(adapter, worker, plan, enter_commit_boundary=Mock())
+    read.assert_called_once()
+    assert worker.page.pumped == [800]

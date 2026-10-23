@@ -295,7 +295,7 @@ class BusinessViewAcceptanceTests(unittest.TestCase):
         receipt = self.approve(preview)["receipt"]
         self.fixture.oa.arm(fault)
         if bounded_clock:
-            ticks = iter([0, 1, 61])
+            ticks = iter([0, 0, 0, 1, 61])
             # Only the polling deadline advances. The production executor and
             # every actual readback/identity/coverage decision still execute.
             with patch("agentbridge.adapters.seeyon_pending_execution.time", SimpleNamespace(monotonic=lambda: next(ticks))):

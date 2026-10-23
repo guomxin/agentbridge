@@ -168,7 +168,7 @@ def test_incomplete_pending_readback_cannot_prove_success(target):
     _, _, worker, adapter = target
     plan = prepare_flight_application_approval(adapter, worker, _inputs())["plan"]
     adapter.list_workflows.return_value = {"items": [], "coverage": {"status": "partial"}}
-    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 61]):
+    with patch("agentbridge.adapters.seeyon_pending_execution.time.monotonic", side_effect=[0, 0, 0, 0, 61]):
         with pytest.raises(PendingActionOutcomeUnknown, match="pending_coverage_incomplete"):
             approve_flight_application(adapter, worker, plan, enter_commit_boundary=Mock())
 
