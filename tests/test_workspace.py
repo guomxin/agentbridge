@@ -3355,7 +3355,13 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertNotIn('"任务状态已更新",', script)
         self.assertIn("childElementCount > 2", script)
         self.assertIn("application-card", stylesheet)
-        self.assertIn('text(resume, "继续任务")', script)
+        # Main actions follow the current result projection; a terminal task
+        # must not regain the former unconditional conversational continuation.
+        self.assertNotIn('text(resume, "继续任务")', script)
+        self.assertIn("const primaryAction = taskPrimaryAction(result);", script)
+        self.assertIn("text(view.resume, primaryAction.label);", script)
+        self.assertIn('view.resumeLink.hidden = primaryAction.kind !== "form";', script)
+        self.assertIn('if (primaryAction.kind === "form") view.resumeLink.href = primaryAction.url;', script)
         self.assertIn("/continue`,", script)
         self.assertIn("detail-heading-actions", stylesheet)
 

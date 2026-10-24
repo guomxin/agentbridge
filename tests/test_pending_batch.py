@@ -29,6 +29,28 @@ def pending(rows):
     return {"items": rows, "count": len(rows), "coverage": {"status": "complete"}}
 
 
+def unit_pending_preflight(_adapter, _worker, arguments, profile):
+    """Complete read-only material and identity fixture for coordinator tests."""
+    affair_id = arguments["affair_id"]
+    return {
+        "matched": True, "profile": profile, "affair_id": affair_id,
+        "review_fingerprint": "sha256:unit-material-" + affair_id,
+        "review": {
+            "title": "合成待办材料",
+            "fields": [{"label": "事项", "value": affair_id}],
+            "completeness": {"status": "complete", "scope": "synthetic_unit_fixture"},
+        },
+        "_content_target": {
+            "profile": profile, "affair_id": affair_id,
+            "summary_id": "summary-" + affair_id, "process_id": "process-" + affair_id,
+            "template_id": "template-" + profile, "form_app_id": "form-app-" + profile,
+            "form_record_id": "form-record-" + affair_id,
+            "node_policy": "inform" if profile == "weekly_report" else "审批",
+            "body_type": "FORM",
+        },
+    }
+
+
 @pytest.fixture
 def run(tmp_path, monkeypatch):
     service = make_service(tmp_path)
@@ -51,11 +73,11 @@ def run(tmp_path, monkeypatch):
         if "approval" in definition.get("prepare_function", "") or definition.get("prepare_function") == "prepare_weekly_report_acknowledgement":
             monkeypatch.setattr("agentbridge.core.write_catalog." + definition["prepare_function"], prepare)
             monkeypatch.setattr("agentbridge.core.write_catalog." + definition["commit_function"], commit)
-    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action", lambda *_a, **_kw: None)
-    # Coordinator-only workers have no OA DOM. The missed-punch workflow now
-    # reads materials before creating its field card, including after restart.
+    # Coordinator-only workers have no OA DOM; both entry points still supply
+    # the complete material and frozen identity contract, including on restart.
+    monkeypatch.setattr("agentbridge.core.write_catalog.preflight_pending_action", unit_pending_preflight)
     monkeypatch.setattr("agentbridge.core.write_catalog.preflight_missed_punch_approval",
-                        helpers._unit_missed_punch_preflight)
+                        unit_pending_preflight)
     monkeypatch.setattr(service.adapter, "list_workflows", lambda *_a, **_kw: pending(rows))
     return service, tid, rows, prepared, committed
 
@@ -81,6 +103,8 @@ def test_five_mixed_items_advance_once_and_survive_restart(run, tmp_path, monkey
         assert field["batch"]["currentOrdinal"] == ordinal
         form = service.field_submissions.get(field["nextAction"]["inputSubmissionId"])["form_schema"]
         assert f"第 {ordinal}/5 条" in form["title"]
+        assert form["review"]["completeness"]["status"] == "complete"
+        assert form["_agentbridge_content_identity"]["identity"]["affair_id"] == f"affair-{ordinal}"
         auth = authorize(service, field)
         authorization = service.write_authorizations.get(auth["nextAction"]["authorizationId"])
         assert f"第 {ordinal}/5 条" in authorization["summary"]["title"]

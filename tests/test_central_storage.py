@@ -46,6 +46,10 @@ class CentralStorageTests(unittest.TestCase):
                     ['trigger', 'immutable_business_draft_preview'],
                     ['trigger', 'immutable_business_draft_decision'],
                     ['index', 'business_drafts_expiry'],
+                    ['table', 'private_business_draft_contents'],
+                    ['index', 'private_business_draft_contents_scope'],
+                    ['index', 'private_business_draft_contents_retention'],
+                    ['index', 'private_business_draft_contents_expiry'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))
