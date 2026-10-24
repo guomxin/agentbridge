@@ -4155,6 +4155,28 @@ class CentralCapabilityService:
                         if review_fingerprint:
                             schema["_agentbridge_review_fingerprint"] = review_fingerprint
                         dynamic_field_schema = schema
+                    if (prepare_definition is not None and task_id
+                            and prepare_definition.get("field_schema") is not None
+                            and not str(arguments.get("input_submission_id") or "").strip()):
+                        from agentbridge.core.business_draft_profiles import profile_for_definition
+                        from agentbridge.core.business_content_identity import (
+                            has_instance_identity, principal_binding, read_content_identity,
+                        )
+                        content_profile = profile_for_definition(capability_name, prepare_definition)
+                        if content_profile is not None:
+                            schema = deepcopy(dynamic_field_schema or prepare_definition["field_schema"])
+                            schema["_agentbridge_content_principal"] = principal_binding(session)
+                            if has_instance_identity(content_profile):
+                                try:
+                                    marker = read_content_identity(adapter, acquire_worker(), profile=content_profile,
+                                        arguments=arguments, preflight_result=preflight_result)
+                                except prepare_definition["contract_error"] as exc:
+                                    raise CapabilityRejected("WORKFLOW_NOT_SUPPORTED", str(exc)) from exc
+                                if marker is not None:
+                                    schema["_agentbridge_content_identity"] = marker
+                                if preflight_result is None:
+                                    self.session_states.save(session["session_id"], worker.capture_session_state())
+                            dynamic_field_schema = schema
                     if capability_name == PENDING_BATCH_PREPARE_CAPABILITY:
                         schema = deepcopy(dynamic_field_schema or prepare_definition["field_schema"])
                         schema["title"] += f"（第 {arguments['batch_ordinal']}/{arguments['batch_total']} 条）"

@@ -67,9 +67,11 @@ def _group_controls(controls: dict[str, str], *, kind: str, review_kind: str) ->
 
 
 def business_draft_target(path: str) -> tuple[str, str | None, str] | None:
+    if "?" in path and "/draft/content-" in path:
+        return None
     match = re.fullmatch(
         r"/flow/input/([A-Za-z0-9_-]{32,128})(?:/present/([A-Za-z0-9_-]{32,128}))?"
-        r"/draft/(state|values|options|preview|approve)", path.split("?", 1)[0],
+        r"/draft/(state|values|options|preview|approve|content-restore|content-discard)", path.split("?", 1)[0],
     )
     return (match[1], match[2], match[3]) if match else None
 
@@ -152,6 +154,8 @@ class BusinessDraftApplication:
                 "preview": {"expectedRevision"},
                 "options": {"expectedRevision"},
                 "approve": {"expectedRevision", "previewId", "requestKey"},
+                "content-restore": {"expectedRevision", "contentId", "contentVersion", "requestKey"},
+                "content-discard": {"expectedRevision", "contentId", "contentVersion", "requestKey"},
             }.get(action)
             if (not isinstance(payload, dict) or expected_keys is None or set(payload) != expected_keys
                     or type(payload["expectedRevision"]) is not int or payload["expectedRevision"] < 0):
@@ -168,6 +172,14 @@ class BusinessDraftApplication:
                 value = self.backend.preview(**arguments)
             elif action == "options":
                 value = self.backend.options(**arguments)
+            elif action in {"content-restore", "content-discard"}:
+                if (not isinstance(payload["contentId"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", payload["contentId"])
+                        or type(payload["contentVersion"]) is not int or payload["contentVersion"] < 1
+                        or not isinstance(payload["requestKey"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", payload["requestKey"])):
+                    raise ValueError("invalid retained content request")
+                method = self.backend.restore_content if action == "content-restore" else self.backend.discard_content
+                value = method(**arguments, content_id=payload["contentId"], content_version=payload["contentVersion"],
+                    request_key=payload["requestKey"])
             else:
                 if not all(isinstance(payload[key], str) and 1 <= len(payload[key]) <= 128
                            for key in ("previewId", "requestKey")):
@@ -317,6 +329,10 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   #draft-form,#draft-evidence,#card-title {{scroll-margin-top:80px}}
   .draft-expiry,.field-count,#draft-submit-hint {{font-size:12px;color:var(--muted);line-height:1.6}}
   .draft-expiry.urgent {{color:var(--warning-ink);background:var(--warning-bg);padding:10px}}
+  .draft-content {{margin:16px 0;padding:14px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px}}
+  .draft-content p {{font-size:13px;line-height:1.7;overflow-wrap:anywhere}}
+  .draft-content .draft-actions {{display:flex;flex-wrap:wrap;gap:10px}}
+  .draft-content-confirmation {{margin-top:14px;padding:14px;border:2px solid var(--teal);border-radius:10px;background:var(--paper);color:var(--ink)}}
   .draft-submit-bar {{position:sticky;bottom:0;background:var(--paper,#fff);border-top:1px solid var(--line);padding:12px 0 max(12px,env(safe-area-inset-bottom));z-index:3}}
   #draft-submit-hint {{display:block;margin-bottom:8px}} .draft-submit-bar button {{margin:0}}
   .draft-field-summary {{padding:12px;border:1px solid var(--warning-border);background:var(--warning-bg);color:var(--warning-ink);border-radius:6px;font-size:13px;line-height:1.8}}
@@ -342,6 +358,14 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   <div id="draft-evidence" class="draft-evidence"{' hidden' if not has_evidence else ''}>{evidence}</div>
   <section id="draft-material-previews" aria-label="材料文件预览" hidden></section>
   <form id="draft-form" method="post" action="{escape(path)}">
+    <section id="draft-content" class="draft-content" aria-label="保留的填写内容" hidden>
+      <strong>填写内容与办理有效期</strong><p id="draft-content-saved"></p><p id="draft-content-candidate"></p>
+      <div class="draft-actions"><button id="draft-content-restore" class="secondary" type="button" hidden>恢复填写内容并重新检查</button><button id="draft-content-discard" class="secondary" type="button" hidden>删除此事项的保留内容</button></div>
+      <section id="draft-content-confirmation" class="draft-content-confirmation" aria-labelledby="draft-content-confirm-title" aria-describedby="draft-content-confirm-message" hidden>
+        <strong id="draft-content-confirm-title"></strong><p id="draft-content-confirm-message" role="status"></p>
+        <div class="draft-actions"><button id="draft-content-cancel" class="secondary" type="button">取消</button><button id="draft-content-confirm" class="secondary" type="button">确认</button></div>
+      </section>
+    </section>
     <div id="draft-field-summary" class="draft-field-summary" hidden></div>{form_controls}
     <p id="draft-status" class="draft-status" role="status" aria-live="polite">正在读取草稿</p>
     <p id="draft-error" class="form-error" role="alert" hidden></p>

@@ -316,6 +316,7 @@ test("explicit logout waits for the editor decision before destroying account st
     const scope = createLifecycle().scope(), decision = deferred(), changes = [], state = {account: {username: 'alice'}};
     const logout = workspaceHandler('logout', 'switchView', {
       sessionScope: scope, viewScope: scope.child(), state, canLeaveSkillEditor: () => decision.promise,
+      viewState:{clear:()=>changes.push('clear-reading')},readingScroll:{dispose:()=>changes.push('dispose-reading')},
       stopWorkspaceObservers: () => changes.push('observers'), lifecycle: createLifecycle(),
       resetWorkspaceState: () => changes.push('reset'), showAuth: () => changes.push('auth'),
       setBusy() {}, $: () => ({}), api: async () => changes.push('logout'), location: {reload: () => changes.push('reload')},
@@ -324,7 +325,7 @@ test("explicit logout waits for the editor decision before destroying account st
     assert.deepEqual(changes, []);
     assert.equal(scope.current(), true);
     decision.resolve(discard); await pending;
-    assert.deepEqual(changes, discard ? ['observers', 'reset', 'auth', 'logout', 'reload'] : []);
+    assert.deepEqual(changes, discard ? ['clear-reading','dispose-reading','observers', 'reset', 'auth', 'logout', 'reload'] : []);
     assert.equal(scope.current(), !discard);
     assert.equal(state.account === null, discard);
     scope.dispose();

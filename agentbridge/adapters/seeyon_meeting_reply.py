@@ -162,7 +162,7 @@ def meeting_review(target):
 
 def preflight_meeting_reply(adapter, worker, arguments, profile='meeting_reply'):
     target = _resolve(adapter, worker, arguments.get('affair_id'))
-    return {'matched': True, 'profile': profile, 'review': meeting_review(target),
+    return {'matched': True, 'profile': profile, 'review': meeting_review(target), '_content_target': target,
             'review_fingerprint': _hash(target)}
 
 

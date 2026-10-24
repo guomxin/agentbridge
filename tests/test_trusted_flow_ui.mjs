@@ -9,6 +9,22 @@ const state = (extra = {}) => ({state: 'processing', title: '提交与核验中'
   terminal: false, stateVersion: signature, ...extra});
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+test('Workspace warning continuation follows the exact server presentation while back keeps configured root',async()=>{
+  const navigation={back:{kind:'workspace',url:'http://127.0.0.1:54119/workspace/'}};
+  const f=fixture({navigation});f.calls[0].resolve(state({state:'review_ready',nextUrl:`/flow/authorize/${opaque}`}));await f.controller.done;
+  assert.deepEqual(f.navigations,[`https://trusted.example/flow/authorize/${opaque}`]);
+  assert.equal(f.nodes['agentbridge-back'].href,'http://127.0.0.1:54119/workspace/');
+  assert.ok(f.calls.every(call=>call.options.method==='GET'));
+});
+test('Workspace batch continuation opens the verified next item only by explicit link and drops Telegram lifecycle data',async()=>{
+  const f=fixture({navigation:{back:{kind:'workspace',url:'http://127.0.0.1:54119/workspace/'}}});
+  const path=`/flow/input/${opaque}/present/${opaque}`;
+  f.calls[0].resolve(state({state:'completed',terminal:true,continueUrl:path,batch:{completedCount:1,totalCount:2,nextOrdinal:2,nextTitle:'第二项'}}));await f.controller.done;
+  assert.equal(f.nodes['flow-continue'].href,`https://trusted.example${path}`);
+  assert.equal(f.nodes['flow-continue'].textContent,'核对下一项');assert.equal(f.nodes['flow-continue'].hidden,false);
+  assert.deepEqual(f.navigations,[]);assert.ok(f.calls.every(call=>call.options.method==='GET'));
+});
+
 function fixture({respectAbort = true, navigation} = {}) {
   const nodes = Object.fromEntries(['flow-title','flow-message','flow-recovery','flow-batch','flow-continue','agentbridge-back'].map(id =>
     [id, {textContent: '', hidden: true, removeAttribute(name) { delete this[name]; }}]));

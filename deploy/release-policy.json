@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "29aa4e2ae2bb"
+    "6344947f987c"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Constrain the OA recovery acknowledgement checkbox and wrap its risk explanation within the Workspace card on desktop and narrow screens. Preserve the already deployed explicit recovery, original-message persistence and all authorization/material/business-verification boundaries. CSS only; no schema migration or grant changes."
+  "dataCompatibility": "reviewed-schema-transition",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "974b1c40cbac3ae37eb9df2edf824cf80b0316df924bb9b0c3ef38d19e1e1603",
+      "afterSha256": "2184e9830bb849648356d99f653687ef84b15a19720cb7f13d507fc415ca489d"
+    }
+  },
+  "reason": "Reviewed additive private input-content retention table and indexes, isolated from execution tickets and authorization. Existing four-database objects and user_version remain unchanged. Source-bound restore requires fresh identity/material checks and a new explicit business decision. Preserve grants, original unknown receipts, authorization consumption and authoritative business verification. No automatic database rollback after a schema change."
 }

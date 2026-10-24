@@ -10,6 +10,7 @@ import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
 import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot, enqueueActionableSources } from "./workspace_projection.mjs";
+import { createWorkspaceViewState, createReadingScroll, createPreparationHandoff } from './workspace_navigation.mjs';
 
 const state = {
   account: null,
@@ -70,6 +71,15 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const lifecycle = createLifecycle();
 let sessionScope = lifecycle.scope();
 let viewScope = sessionScope.child();
+let readingScroll = null;
+let initialReading = null;
+let viewStorage; try { viewStorage = window.sessionStorage; } catch {}
+const viewState = createWorkspaceViewState({storage:viewStorage,getAccountId:() => state.account?.accountId});
+const preparationHandoff = createPreparationHandoff({getScope:() => sessionScope,
+  read:(taskId,scope) => scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}`),
+  navigate:url => { if (readingScroll) viewState.saveReading(readingScroll.snapshot()); window.location.assign(url); },
+  openResult:async taskId => { if (await switchView('tasks') !== false) await loadTaskDetail(taskId); },
+});
 const { api, fetchChatStreamResponse } = createWorkspaceRequests({
   document, getScope: () => sessionScope,
   addLiveProgress: (...args) => addLiveProgress(...args),
@@ -90,6 +100,7 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTas
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
   submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
   prepareRecovery:prepareOaPendingRecovery, getScope:() => sessionScope,
+  openPreparation:(taskId,options) => preparationHandoff.start(taskId,options), viewState,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -118,7 +129,7 @@ const projectionQueue = createProjectionQueue({
     if (state.activeView === "tasks" && state.selectedTaskId === detail.task.task_id) loadTaskDetail(detail.task.task_id);
   },
   retire: retireTaskCard,
-  render: renderChatTimeline,
+  render: () => { renderChatTimeline(); scrollChat(); },
   onError: error => { if (!isCancellation(error)) toast(`更新任务失败：${friendlyError(error)}`, true, "task-projections"); },
   onOverflow: () => scheduleChatRefresh(100, 1),
   timers: { setTimeout: (fn, ms) => sessionScope.timeout(fn, ms), clearTimeout: id => lifecycle.clearTimer(id) },
@@ -126,6 +137,7 @@ const projectionQueue = createProjectionQueue({
 
 document.addEventListener("DOMContentLoaded", bootstrap);
 window.addEventListener("pagehide", () => {
+  if (readingScroll) viewState.saveReading(readingScroll.snapshot());
   stopWorkspaceObservers();
   sessionScope.dispose();
 });
@@ -378,6 +390,9 @@ async function enterWorkspace(account) {
   const accountScope = sessionScope;
   resetWorkspaceState();
   state.account = account;
+  initialReading = viewState.reading();
+  readingScroll?.dispose();
+  readingScroll = createReadingScroll({container:$('#chat-messages'),notice:$('#chat-new-content'),save:value => viewState.saveReading(value)});
   $("#auth-view").hidden = true;
   $("#app-view").hidden = false;
   $("#account-name").textContent = account.username;
@@ -394,6 +409,7 @@ async function enterWorkspace(account) {
 async function logout() {
   const scope = sessionScope;
   if (!await canLeaveSkillEditor() || !scope.current()) return;
+  viewState.clear(); readingScroll?.dispose(); readingScroll = null;
   stopWorkspaceObservers();
   sessionScope.dispose();
   sessionScope = lifecycle.scope();
@@ -413,6 +429,7 @@ async function switchView(view, permit) {
   if (view === state.activeView && view === "skills") return true;
   const previousScope = viewScope;
   if (!await canLeaveSkillEditor(permit) || !previousScope.current()) return false;
+  if (view !== 'chat') preparationHandoff.cancel();
   if (view !== state.activeView) {
     viewScope.dispose();
     viewScope = sessionScope.child();
@@ -532,7 +549,7 @@ async function loadChat() {
     dismissTerminalLiveMessages();
     restoreActiveDispatches(snapshot.dispatches?.items || []);
     renderChatTimeline();
-    if (initial) container.scrollTop = container.scrollHeight;
+    if (initial) { readingScroll?.restore(initialReading); initialReading = null; }
     markWorkspaceTiming("chat_loaded");
   } catch (error) {
     if (isCancellation(error)) return;
@@ -858,7 +875,7 @@ async function executeChatMessage(
   });
   state.localMessages.set(idempotencyKey, local);
   renderChatTimeline();
-  scrollChat();
+  scrollChat({force:true});
   setBusy(form, true);
   const live = ensureLiveMessage(idempotencyKey);
   live.requestMessage = message;
@@ -1139,9 +1156,8 @@ function agentFailureMessage(value, safeToRetry, state) {
   return text || "智能体未能完成本次处理。";
 }
 
-function scrollChat() {
-  const container = $("#chat-messages");
-  container.scrollTop = container.scrollHeight;
+function scrollChat(options) {
+  readingScroll?.update(options);
 }
 
 async function hydrateSkillCards({ render = true, scope = sessionScope } = {}) {

@@ -43,9 +43,12 @@ export function safeFlowUrl(value, origin) {
 }
 
 export function safeResultReturn(navigation, origin) {
-  if (navigation?.back?.kind !== 'result_list') return null;
+  const kind = navigation?.back?.kind;
+  if (!['result_list','workspace'].includes(kind)) return null;
   try {
-    const url = new URL(navigation.back.url, origin);
+    const url = kind === 'workspace' ? new URL(navigation.back.url) : new URL(navigation.back.url, origin);
+    if (kind === 'workspace') return ['http:','https:'].includes(url.protocol) && !url.username && !url.password
+      && !url.search && !url.hash ? url : null;
     return url.origin === origin && !url.username && !url.password && !url.search && !url.hash
       && /^\/results\/[A-Za-z0-9_-]{43}$/.test(url.pathname) ? url : null;
   } catch { return null; }
@@ -54,7 +57,8 @@ export function safeResultReturn(navigation, origin) {
 /** A timeout ends this browser wait, never the server operation or its original decision key. */
 export function createDraftTransport({window, apiUrl, csrfToken, onProgress = () => {}, now = Date.now}) {
   const waiting = new Set();
-  const limits = {state: 15000, values: 15000, options: 30000, preview: 45000, approve: 30000};
+  const limits = {state: 15000, values: 15000, options: 30000, preview: 45000, approve: 30000,
+    'content-restore':45000,'content-discard':15000};
   async function request(action, payload) {
     const controller = new AbortController(), started = now();
     let timer, progress, finished = false, cancelWait, responseStatus;
@@ -121,26 +125,30 @@ export function createDraftController({initial, request, readValues, writeValues
   let optionsAttempt = -1;
   let reviewChanged = hasReviewChanged(initial);
   let active = true, lifecycle = 0, restoring = false, needsRead = false, decisionInFlight = false;
+  let contentBusy = false, contentRequest = null, roomChoiceRequired = false;
   const live = epoch => active && lifecycle === epoch;
 
   const allowed = action => !permanentlyLocked && current.allowedActions.includes(action);
   const optionsFresh = () => viewKind !== "meeting_room" || Boolean(current.options &&
     current.options.revision === current.revision && Date.parse(current.options.expiresAt) > now() &&
     ["start_time", "end_time"].every(name => localDateTime(current.options.dependsOn?.[name]) === localDateTime(readValues()[name])));
-  const roomValid = () => viewKind !== "meeting_room" || optionsFresh() &&
+  const roomValid = () => viewKind !== "meeting_room" || !roomChoiceRequired && optionsFresh() &&
     Boolean(current.options.items?.some(item => item.value === readValues().room && item.available));
   const materialReady = () => {
     const review = current.preview?.summary || current.ui?.review;
     return review?.truncated !== true && (!review?.completeness || review.completeness.status === "complete");
   };
-  const ready = () => active && !restoring && !needsRead && saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
+  const contentAvailable = () => active && !restoring && !needsRead && !contentBusy && !contentRequest && !conflict && !saving && !previewing && !optionsLoading && !deciding && allowed('save') && Date.parse(current.expiresAt)>now();
+  const ready = () => active && !contentBusy && !contentRequest && !restoring && !needsRead && saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
     materialReady() && allowed("approve") && current.preview?.revision === current.revision &&
     Date.parse(current.preview.expiresAt) > now();
-  const view = () => ({current, dirty: saved !== edit, saving, previewing, optionsLoading,
+  const view = () => ({current, dirty: saved !== edit, saving, previewing, optionsLoading,contentBusy,contentPending:contentRequest?.action,roomChoiceRequired,
+    canRestoreContent:contentAvailable() && Boolean(current.contentDraft?.restore),
+    canDiscardContent:contentAvailable() && Boolean(current.contentDraft?.restore || current.contentDraft?.saved),
     optionsFresh: optionsFresh(), materialReady: materialReady(), reviewChanged, conflict, message,
     fieldErrors, locked: permanentlyLocked || deciding, uncertain: deciding && !permanentlyLocked,
-    canApprove: ready(), canEdit: active && allowed("save") && !deciding,
-    canRetry: !conflict && !permanentlyLocked && (Boolean(message) || needsRead || restoring) && !saving && !previewing && !optionsLoading && !decisionInFlight});
+    canApprove: ready(), canEdit: active && allowed("save") && !deciding && !contentBusy && !contentRequest,
+    canRetry: !conflict && !permanentlyLocked && (Boolean(message) || needsRead || restoring || contentRequest) && !contentBusy && !saving && !previewing && !optionsLoading && !decisionInFlight});
   function emit() { if (active) render(view()); }
   function accept(next) {
     if (!next || !Number.isInteger(next.version) || !Number.isInteger(next.revision) ||
@@ -169,7 +177,7 @@ export function createDraftController({initial, request, readValues, writeValues
     if (error.code === 'REQUEST_TIMEOUT') needsRead = true;
   }
   async function preview(force = false) {
-    if (!active || restoring || needsRead || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
+    if (!active || contentBusy || contentRequest || restoring || needsRead || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
         (!force && (previewAttempt === edit || ready()))) return;
     const epoch = lifecycle;
     const revision = current.revision;
@@ -196,7 +204,7 @@ export function createDraftController({initial, request, readValues, writeValues
     }
   }
   async function loadOptions(force = false) {
-    if (!active || restoring || needsRead || viewKind !== "meeting_room" || optionsLoading || previewing || saving || conflict || deciding ||
+    if (!active || contentBusy || contentRequest || restoring || needsRead || viewKind !== "meeting_room" || optionsLoading || previewing || saving || conflict || deciding ||
         !allowed("options") || saved !== edit || !optionsValid() ||
         (!force && (optionsFresh() || optionsAttempt === current.revision))) return;
     const epoch = lifecycle;
@@ -226,10 +234,10 @@ export function createDraftController({initial, request, readValues, writeValues
     await loadOptions(force);
     if (live(epoch)) await preview(force);
   }
-  async function save() {
-    if (!active || restoring || needsRead || saving || conflict || deciding || !allowed("save")) return;
+  async function save({prepareAfter = true} = {}) {
+    if (!active || contentBusy || contentRequest || restoring || needsRead || saving || conflict || deciding || !allowed("save")) return;
     const epoch = lifecycle;
-    if (saved === edit) { await prepare(); return; }
+    if (saved === edit) { if (prepareAfter) await prepare(); return; }
     saving = true;
     message = "";
     fieldErrors = {};
@@ -247,19 +255,19 @@ export function createDraftController({initial, request, readValues, writeValues
       succeeded = true;
     } catch (error) { if (live(epoch)) fail(error); }
     finally { saving = false; if (live(epoch)) emit(); }
-    if (live(epoch) && succeeded) await prepare();
+    if (live(epoch) && succeeded && prepareAfter) await prepare();
   }
   async function poll({restore = false} = {}) {
     if (!active) return;
     if (!restore && restoring) { emit(); return; }
-    if (!restore && (saving || permanentlyLocked)) return;
+    if (contentBusy || !restore && (saving || permanentlyLocked)) return;
     const epoch = lifecycle;
     const previousPreview = current.preview;
     try {
       const result = await request("state");
-      if (!live(epoch) || (!restore && saving) || result.version < current.version) return;
+      if (!live(epoch) || contentBusy || (!restore && saving) || result.version < current.version) return;
       const changed = result.revision !== current.revision;
-      if (accept(result) && changed && !permanentlyLocked) {
+      if (accept(result) && changed && !permanentlyLocked && !contentRequest) {
         conflict = current;
         message = "另一页面更新了草稿。本页输入已保留，请核对差异后继续。";
       }
@@ -335,27 +343,69 @@ export function createDraftController({initial, request, readValues, writeValues
     if (fresh === true) needsRead = false;
     // Unsent edits remain in the same DOM. A known revision is required
     // before autosaving; an uncertain decision is only read, never replayed.
-    if (fresh === true && !conflict && !permanentlyLocked && !deciding) {
+    if (fresh === true && !conflict && !permanentlyLocked && !deciding && !contentRequest) {
       previewAttempt = -1;
       optionsAttempt = -1;
       await save();
     }
     emit();
   }
+  async function contentOperation(action, retry = false) {
+    if (!active || permanentlyLocked || contentBusy || deciding) return;
+    if (!retry) {
+      if (!contentAvailable()) return;
+      await save({prepareAfter:false});
+      if (!contentAvailable() || saved !== edit) return;
+      const candidate = action === 'content-restore' ? current.contentDraft?.restore : current.contentDraft?.restore || current.contentDraft?.saved;
+      if (!candidate) return;
+      contentRequest = {action,payload:{expectedRevision:current.revision,contentId:candidate.contentId,
+        contentVersion:candidate.version,requestKey:makeKey()}};
+    }
+    if (!contentRequest) return;
+    const command = contentRequest, epoch = lifecycle;
+    contentBusy = true; message = ''; emit();
+    let completed = false;
+    try {
+      const result = await request(command.action,command.payload);
+      if (!live(epoch)) return;
+      if (accept(result) && !permanentlyLocked) {
+        if (command.action === 'content-restore') {
+          writeValues(current.values); saved = ++edit;
+          roomChoiceRequired = viewKind === 'meeting_room';
+          previewAttempt = optionsAttempt = -1; conflict = null;
+        }
+        message = command.action === 'content-restore' ? (viewKind === 'meeting_room' ? '已恢复填写内容；会议室需重新选择，尚未确认提交。' : '已恢复填写内容；正在重新检查当前材料，尚未确认提交。') : '已删除此事项的保留内容。本页输入不变；后续编辑会再次保存。';
+        needsRead = false; completed = true;
+      }
+      contentRequest = null;
+    } catch (error) {
+      if (!live(epoch)) return;
+      fail(error);
+      if (error.status >= 400 && error.status < 500 && ![408,425,429].includes(error.status)) contentRequest = null;
+      else message = '草稿操作应答尚未确认。请恢复本次草稿操作；不会确认或提交业务。';
+    } finally { contentBusy = false; if (live(epoch)) emit(); }
+    if (completed && live(epoch) && command.action === 'content-restore') await prepare(true);
+  }
   return {
     state: view,
-    edit() {
-      if (!active || !allowed("save") || deciding) return;
+    edit(name) {
+      if (!active || contentBusy || contentRequest || !allowed("save") || deciding) return;
+      if (name === 'room') roomChoiceRequired = false;
       edit += 1;
       message = needsRead || restoring ? "本页输入已保留，请重新检查最新草稿后继续。" : "";
       fieldErrors = {};
       emit();
     },
     save, preview, loadOptions, poll, approve,
+    restoreContent:() => contentOperation('content-restore'), discardContent:() => contentOperation('content-discard'),
     suspend() { active = false; lifecycle++; },
     restore: restorePage,
     async retry() {
       if (!active || permanentlyLocked) return;
+      if (contentRequest) {
+        if (await poll({restore:true}) === true && !permanentlyLocked) {needsRead = false; restoring = false; await contentOperation(contentRequest.action,true);}
+        return;
+      }
       if (restoring || needsRead) { await restorePage(); return; }
       if (decision) {
         // Read the durable original receipt before an explicit same-key recovery.
@@ -646,6 +696,7 @@ export function mountBusinessDraft(config, document, window) {
   // Only the initial server-validated source may own this navigation. Polls
   // cannot replace it with a different source or a client-supplied return URL.
   const returnTo = safeResultReturn(config.state.navigation, window.location.origin);
+  const workspaceReturn = config.state.navigation?.back?.kind === 'workspace';
   const materials = node("draft-material-previews") && typeof createMaterialPreviews === "function" ?
     createMaterialPreviews({document, window, target:node("draft-material-previews"), apiUrl:config.apiUrl, csrfToken:config.csrfToken}) : null;
   const readValues = () => Object.fromEntries(fieldNames.map(name => [name, fields[name].value]));
@@ -656,6 +707,7 @@ export function mountBusinessDraft(config, document, window) {
   let lastOptions = config.state.options;
   let saveTimer, pollTimer;
   let stopped = false, pageEpoch = 0, navigationApproved = false;
+  let contentIntent = null;
   let statusCopy = '';
   let displayedReview = config.state.preview?.summary || config.state.ui?.review || {};
   let materialDiff = null;
@@ -671,7 +723,7 @@ export function mountBusinessDraft(config, document, window) {
       if (!stopped) paintStatus();
     }});
   function edited(name) {
-    touched.add(name); controller.edit();
+    touched.add(name); controller.edit(name);
     window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => void controller.save(), 450);
   }
@@ -696,16 +748,53 @@ export function mountBusinessDraft(config, document, window) {
       }
       entry.title.textContent = item.label;
       entry.status.textContent = !view.optionsFresh ? "时段已变更或检查已到期" : item.available ? "可用" : "当前不可用";
-      entry.input.checked = fields.room.value === item.value;
+      entry.input.checked = !view.roomChoiceRequired && fields.room.value === item.value;
       entry.input.disabled = !view.canEdit || !view.optionsFresh || !item.available || view.optionsLoading;
     }
     const selected = options?.selected?.value === fields.room.value ? options.selected : items.find(item => item.value === fields.room.value);
     const unavailable = Boolean(fields.room.value) && (!view.optionsFresh || !items.some(item => item.value === fields.room.value && item.available));
     node("room-selected").hidden = !unavailable;
     setText("room-selected", `原选择：${selected?.label || roomLabels.get(fields.room.value) || "先前选择的会议室"}。${view.optionsFresh ? selected?.reason || "该选择已不可用，请重新选择会议室。" : "新时段尚未确认，旧选择不会自动替换。"}`);
-    setText("room-status", view.optionsLoading ? "正在查询此时段的空闲会议室…" : !view.optionsFresh ?
+    setText("room-status", view.optionsLoading ? "正在查询此时段的空闲会议室…" : view.roomChoiceRequired ? '已恢复填写内容；会议室需在当前可用房源中重新选择。' : !view.optionsFresh ?
       "请填写有效起止时间；保存后重新查询候选会议室。" : items.some(item => item.available) ?
       "请选择一个可用会议室。时间变化后会重新检查。" : "此时段没有可用会议室，请调整时间。");
+  }
+  function contentConfirmationAvailable(view) {
+    const candidate = contentIntent?.action === 'restore' ? view.current.contentDraft?.restore :
+      view.current.contentDraft?.restore || view.current.contentDraft?.saved;
+    return Boolean(contentIntent && candidate && candidate.contentId === contentIntent.contentId &&
+      candidate.version === contentIntent.version && (contentIntent.action === 'restore' ? view.canRestoreContent : view.canDiscardContent));
+  }
+  function paintContentConfirmation(view) {
+    const panel = node('draft-content-confirmation');
+    if (!panel) return;
+    panel.hidden = !contentIntent;
+    node('draft-content-restore').disabled = !view.canRestoreContent || Boolean(contentIntent);
+    node('draft-content-discard').disabled = !view.canDiscardContent || Boolean(contentIntent);
+    node('draft-submit').disabled = !view.canApprove || Boolean(contentIntent);
+    form.dataset.agentbridgeBusy = String(Boolean(contentIntent) || view.saving || view.previewing || view.optionsLoading || view.uncertain || view.contentBusy || Boolean(view.contentPending));
+    if (contentIntent) {
+      const restore = contentIntent.action === 'restore', allowed = contentConfirmationAvailable(view);
+      setText('draft-content-confirm-title',restore ? '确认恢复填写内容' : '确认删除保留内容');
+      setText('draft-content-confirm-message',!allowed ? '草稿或保留内容状态已变化，请取消并重新检查后再选择。' : restore
+        ? '当前修改会先保存，再用这份保留内容替换当前输入，并重新读取和核对材料。这一步不会授权或提交业务。'
+        : '将删除此事项的全部保留内容。本页已填写的内容不会清空，之后主动编辑会再次保存。这一步不会授权或提交业务。');
+      setText('draft-content-confirm',restore ? '确认恢复内容' : '确认删除保留内容');
+      node('draft-content-confirm').disabled = !allowed;
+    }
+    if (window.CustomEvent) document.dispatchEvent(new window.CustomEvent('agentbridge:draft-state'));
+  }
+  function cancelContentConfirmation() {
+    const action = contentIntent?.action; contentIntent = null;
+    paintContentConfirmation(controller.state());
+    node(action === 'restore' ? 'draft-content-restore' : 'draft-content-discard')?.focus();
+  }
+  function showContentConfirmation(action) {
+    const view = controller.state();
+    if (stopped || contentIntent || !(action === 'restore' ? view.canRestoreContent : view.canDiscardContent)) return;
+    const candidate = action === 'restore' ? view.current.contentDraft.restore : view.current.contentDraft.restore || view.current.contentDraft.saved;
+    contentIntent = {action,contentId:candidate.contentId,version:candidate.version};
+    paintContentConfirmation(view); node('draft-content-cancel')?.focus();
   }
   const controller = createDraftController({
     initial: config.state, readValues, fieldNames, viewKind,
@@ -721,8 +810,8 @@ export function mountBusinessDraft(config, document, window) {
       if (stopped) return false;
       const next = safeFlowUrl(receipt.flowUrl, window.location.origin);
       if (!next) return false;
-      if (returnTo) next.searchParams.set('result', returnTo.pathname.split('/').at(-1));
-      next.hash = window.location.hash;
+      if (returnTo && !workspaceReturn) next.searchParams.set('result', returnTo.pathname.split('/').at(-1));
+      if (!workspaceReturn) next.hash = window.location.hash;
       window.location.replace(next.href);
     },
     render(view) {
@@ -764,13 +853,27 @@ export function mountBusinessDraft(config, document, window) {
           `本页可办理至 ${new Date(expires).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit"})}；填写自动保存，确认后才执行。`;
       }
       renderRooms(view);
+      const retained = view.current.contentDraft, contentPanel = node('draft-content');
+      if (contentPanel) {
+        contentPanel.hidden = !retained || Boolean(view.current.receipt);
+        const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN') : '时间未知';
+        setText('draft-content-saved',retained?.saved ? `填写内容已保留：${date(retained.saved.savedAt)}；保留至 ${date(retained.saved.expiresAt)}。` : '当前没有已保留的内容副本。未保存的输入仅留在本页。');
+        const candidate = retained?.restore;
+        setText('draft-content-candidate',candidate ? `找到${candidate.scope === 'same_item' ? '同一事项' : '本任务'}之前填写的内容（${date(candidate.savedAt)}），保留至 ${date(candidate.expiresAt)}。恢复会替换当前输入，并重新检查当前材料；不会沿用旧授权。` : '内容保留期独立于本页办理有效期。页面或授权到期后，需从原任务重新打开；保留内容不会延长办理权限。');
+        node('draft-content-restore').hidden = !candidate;
+        node('draft-content-restore').disabled = !view.canRestoreContent;
+        node('draft-content-discard').hidden = !candidate && !retained?.saved;
+        node('draft-content-discard').disabled = !view.canDiscardContent;
+        setText('draft-content-discard','删除此事项的保留内容');
+      }
       node("draft-submit").disabled = !view.canApprove;
       node("draft-retry").hidden = !view.canRetry;
-      setText("draft-retry", view.uncertain ? "恢复本次确认" : "重新检查");
+      setText("draft-retry", view.contentPending ? '恢复本次草稿操作' : view.uncertain ? "恢复本次确认" : "重新检查");
       setText("draft-error", view.message);
       node("draft-error").hidden = !view.message;
       node("draft-material-change").hidden = !view.reviewChanged;
       statusCopy = view.locked ? (view.current.receipt ? "已确认，正在接续办理" : view.uncertain ? "正在确认提交状态" : "此草稿已停止编辑") :
+        view.contentBusy ? (view.contentPending === 'content-restore' ? '正在读取当前材料并恢复填写内容' : '正在删除此事项的保留内容') : view.contentPending ? '草稿操作回执待核对' :
         view.conflict ? "需要核对另一页面的修改" : view.saving ? "正在保存草稿" : view.dirty ? "有修改，正在准备检查" :
         view.optionsLoading ? "正在查询空闲会议室" : view.previewing ? (viewKind === "work_log" ? "正在解析项目并检查重复日志" : "正在核对申请信息") :
         !view.materialReady ? "原始材料尚未完整核对，暂不能确认提交" :
@@ -829,34 +932,48 @@ export function mountBusinessDraft(config, document, window) {
         }
       }
       form.dataset.agentbridgeDirty = String(view.dirty && !view.locked);
-      form.dataset.agentbridgeBusy = String(view.saving || view.previewing || view.optionsLoading || view.uncertain);
+      form.dataset.agentbridgeBusy = String(view.saving || view.previewing || view.optionsLoading || view.uncertain || view.contentBusy || Boolean(view.contentPending));
       form.dataset.agentbridgeLocked = String(view.locked);
+      paintContentConfirmation(view);
       if (window.CustomEvent) document.dispatchEvent(new window.CustomEvent('agentbridge:draft-state'));
     },
   });
   if (returnTo) {
     const back = document.createElement('button'); back.id = 'agentbridge-back'; back.type = 'button';
-    back.className = 'secondary draft-return'; back.textContent = '返回待办列表';
+    back.className = 'secondary draft-return'; back.textContent = workspaceReturn ? '返回 Workspace' : '返回待办列表';
     back.addEventListener('click', () => {
       if (stopped) return;
       const view = controller.state();
       if (view.dirty && !view.locked && (typeof window.confirm !== 'function' ||
-          !window.confirm('本页还有未保存的输入。返回可能丢失这些输入，已开始的任务会继续。确认返回待办列表？'))) return;
+          !window.confirm('本页还有未保存的输入。返回可能丢失这些输入，已开始的任务会继续。确认返回？'))) return;
       navigationApproved = true;
-      const target = new URL(returnTo.href); target.hash = window.location.hash;
+      const target = new URL(returnTo.href); if (!workspaceReturn) target.hash = window.location.hash;
       window.location.replace(target.href);
     });
     form.append(back);
   }
   form.addEventListener("input", event => { if (fieldNames.includes(event.target.name)) edited(event.target.name); });
-  form.addEventListener("submit", event => { event.preventDefault(); void controller.approve(); });
+  form.addEventListener("submit", event => { event.preventDefault(); if (!contentIntent) void controller.approve(); });
   node("draft-retry").addEventListener("click", () => void controller.retry());
   node("draft-use-server").addEventListener("click", () => void controller.adoptServer());
   node("draft-keep-local").addEventListener("click", () => void controller.keepLocal());
+  node('draft-content-restore')?.addEventListener('click',() => showContentConfirmation('restore'));
+  node('draft-content-discard')?.addEventListener('click',() => showContentConfirmation('discard'));
+  node('draft-content-cancel')?.addEventListener('click',cancelContentConfirmation);
+  node('draft-content-confirmation')?.addEventListener('keydown',event => {
+    if (event.key === 'Escape' && contentIntent) { event.preventDefault(); cancelContentConfirmation(); }
+  });
+  node('draft-content-confirm')?.addEventListener('click',() => {
+    if (!contentConfirmationAvailable(controller.state())) return;
+    const action = contentIntent.action; contentIntent = null;
+    window.clearTimeout(saveTimer); paintContentConfirmation(controller.state());
+    void (action === 'restore' ? controller.restoreContent() : controller.discardContent());
+  });
   window.addEventListener("beforeunload", event => {
     if (!navigationApproved && controller.state().dirty && !controller.state().locked) { event.preventDefault(); event.returnValue = ""; }
   });
   window.addEventListener("pagehide", () => {
+    contentIntent = null;
     stopped = true; pageEpoch++;
     window.clearTimeout(saveTimer); window.clearTimeout(pollTimer);
     controller.suspend();

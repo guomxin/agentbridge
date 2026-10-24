@@ -12,12 +12,12 @@ export function mountTrustedFlow(config, environment = {}) {
   const batch = document.getElementById('flow-batch');
   const continued = document.getElementById('flow-continue');
   let returnTo = null;
+  const workspaceReturn = config.navigation?.back?.kind === 'workspace';
   try {
-    const candidate = new URL(config.navigation?.back?.url, location.origin);
-    if (config.navigation?.back?.kind === 'result_list' && candidate.origin === location.origin
-        && !candidate.username && !candidate.password && !candidate.search && !candidate.hash
-        && /^\/results\/[A-Za-z0-9_-]{43}$/.test(candidate.pathname)) {
-      returnTo = candidate; returnTo.hash = location.hash;
+    const candidate = workspaceReturn ? new URL(config.navigation.back.url) : new URL(config.navigation?.back?.url, location.origin);
+    if (!candidate.username && !candidate.password && !candidate.search && !candidate.hash &&
+        (workspaceReturn ? ['https:','http:'].includes(candidate.protocol) : config.navigation?.back?.kind === 'result_list' && candidate.origin === location.origin && /^\/results\/[A-Za-z0-9_-]{43}$/.test(candidate.pathname))) {
+      returnTo = candidate; if (!workspaceReturn) returnTo.hash = location.hash;
       const back = document.getElementById('agentbridge-back');
       if (back) back.href = returnTo.href;
     }
@@ -76,7 +76,7 @@ export function mountTrustedFlow(config, environment = {}) {
       : /^\/flow\/input\/[A-Za-z0-9_-]{32,128}(?:\/present\/[A-Za-z0-9_-]{32,128})?$/;
     if (next.origin !== location.origin || next.username || next.password || !path.test(next.pathname)
         || next.search || next.hash) throw new Error('invalid continuation');
-    next.hash = location.hash;
+    if (!workspaceReturn) next.hash = location.hash;
     return next;
   }
 
@@ -160,17 +160,18 @@ export function mountTrustedFlow(config, environment = {}) {
           const next = nextUrl(state.nextUrl, 'authorize');
           terminal = true;
           stop();
-          // A warning can introduce a different authorization presentation.
-          // The source list must explicitly open that exact new interaction.
-          location.replace(returnTo?.href || next.href);
+          // Telegram's source token belongs to the previous presentation;
+          // Workspace can follow this server-issued endpoint presentation.
+          location.replace(!workspaceReturn && returnTo ? returnTo.href : next.href);
           return;
         }
         if (state.continueUrl && state.state === 'completed') {
           const next = nextUrl(state.continueUrl, 'input');
-          // A new batch item needs its own endpoint presentation. Return to
-          // the validated source so its explicit open issues the correct one.
-          continued.href = returnTo?.href || next.href;
-          if (returnTo) continued.textContent = '返回待办列表继续下一项';
+          // Workspace receives the next item's exact endpoint presentation.
+          // Telegram must reopen it through the bound result source.
+          continued.href = !workspaceReturn && returnTo ? returnTo.href : next.href;
+          if (returnTo && !workspaceReturn) continued.textContent = '返回待办列表继续下一项';
+          else continued.textContent = '核对下一项';
           continued.hidden = false;
         }
         if (state.terminal === true) { terminal = true; stop(); return; }

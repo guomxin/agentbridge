@@ -6464,6 +6464,7 @@ def serve_central_mcp(
             service=service,
             field_application=field_application,
             action_application=action_application,
+            workspace_base_url=workspace_config.public_base_url if workspace_config else None,
         ),
         download_application=download_application,
         timeline_attachment_application=timeline_attachment_application,

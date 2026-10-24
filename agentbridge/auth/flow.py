@@ -11,6 +11,7 @@ import re
 import secrets
 import threading
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from agentbridge.auth.card import AuthCardResponse
 from agentbridge.auth.business_draft_card import BusinessDraftApplication
@@ -42,10 +43,14 @@ def flow_target(path: str) -> tuple[str, str, str | None, bool] | None:
 
 
 class TrustedFlowApplication:
-    def __init__(self, *, service, field_application, action_application, draft_application=None) -> None:
+    def __init__(self, *, service, field_application, action_application, draft_application=None,
+                 workspace_base_url: str | None = None) -> None:
         self.reader = TrustedFlowReader(service)
         self.applications = {"input": field_application, "authorize": action_application}
         self.draft_application = draft_application or BusinessDraftApplication(service=service)
+        # This is deployment configuration, never a request parameter, referrer,
+        # endpoint route or stored business field. The link contains no capability.
+        self.workspace_root = _workspace_root(workspace_base_url)
         self._status_secret = secrets.token_bytes(32)
         self._wait_lock = threading.Lock()
         self._wait_owners = {}
@@ -72,7 +77,7 @@ class TrustedFlowApplication:
                  secure_cookie: bool, csrf_cookie: str, result_token: str | None = None) -> AuthCardResponse:
         try:
             context = self.reader.context(kind, resource_id, presentation_id)
-            navigation = None
+            navigation = self._workspace_navigation(context)
             if result_token is not None:
                 from agentbridge.core.telegram_result_views import ResultViewService
                 navigation = {"back": ResultViewService(self.reader.service).navigation_back(result_token,
@@ -82,15 +87,16 @@ class TrustedFlowApplication:
                 context.resource["state"] == "pending"
                 or self.draft_application.has_decision(resource_id)
             ):
-                return self.draft_application.get_card(resource_id, presentation_id=presentation_id,
+                response = self.draft_application.get_card(resource_id, presentation_id=presentation_id,
                     secure_cookie=secure_cookie, csrf_cookie=csrf_cookie, navigation=navigation)
+                return self._with_back(response, self._workspace_home()) if response.status >= 400 else response
             if context.resource["state"] == "pending":
                 if not context.actionable:
                     raise TrustedFlowDenied("batch item is no longer actionable")
                 response = self.applications[kind].get_card(
                     resource_id, presentation_id=presentation_id, secure_cookie=secure_cookie,
                 )
-                return self._adapt(response, kind, resource_id, presentation_id)
+                return self._adapt(response, kind, resource_id, presentation_id, navigation=navigation)
             try:
                 self.reader.authenticate(context, token=csrf_cookie, cookie=csrf_cookie)
             except TrustedFlowDenied:
@@ -115,13 +121,14 @@ class TrustedFlowApplication:
             if not context.actionable:
                 raise TrustedFlowDenied("batch item is no longer actionable")
             self.reader.authenticate(context, token=csrf_cookie, cookie=csrf_cookie)
+            navigation = self._workspace_navigation(context)
             response = self.applications[kind].submit_card(
                 resource_id, presentation_id=presentation_id, body=body,
                 content_type=content_type, csrf_cookie=csrf_cookie,
             )
             if response.status == 200:
-                return self._waiting(kind, resource_id, presentation_id, csrf_cookie)
-            return self._adapt(response, kind, resource_id, presentation_id)
+                return self._waiting(kind, resource_id, presentation_id, csrf_cookie, navigation=navigation)
+            return self._adapt(response, kind, resource_id, presentation_id, navigation=navigation)
         except _UNAVAILABLE_ERRORS:
             return self._unavailable()
 
@@ -230,14 +237,46 @@ class TrustedFlowApplication:
 
     @staticmethod
     def _adapt(response: AuthCardResponse, kind: str, resource_id: str,
-               presentation_id: str | None) -> AuthCardResponse:
+               presentation_id: str | None, *, navigation: dict | None = None) -> AuthCardResponse:
         original = f"/{kind}/{resource_id}" + (f"/present/{presentation_id}" if presentation_id else "")
         continued = "/flow" + original
         headers = dict(response.headers)
         if "Set-Cookie" in headers:
             headers["Set-Cookie"] = headers["Set-Cookie"].replace(f"Path={original};", f"Path={continued};", 1)
         body = response.body.replace(f'action="{original}"'.encode(), f'action="{continued}"'.encode(), 1)
-        return AuthCardResponse(response.status, headers, body)
+        return TrustedFlowApplication._with_back(AuthCardResponse(response.status, headers, body), navigation)
+
+    def _workspace_home(self) -> dict | None:
+        return ({"back": {"kind": "workspace", "url": self.workspace_root, "label": "返回 Workspace"}}
+                if self.workspace_root else None)
+
+    def _workspace_navigation(self, context) -> dict | None:
+        """Read the exact presentation's currently registered Workspace binding.
+
+        A task can have presentations in several clients. Its origin, the user's
+        other Workspace account, and a web-looking endpoint key are not proof
+        that this presentation was opened in Workspace.
+        """
+        if not self.workspace_root or not context.presentation_id or not context.endpoint_id:
+            return None
+        with self.reader.service.workspace._connect() as connection:
+            row = connection.execute(
+                "SELECT a.account_id FROM workspace_accounts a JOIN client_endpoints e "
+                "ON e.endpoint_id=a.endpoint_id AND e.user_subject=a.user_subject "
+                "WHERE a.user_subject=? AND a.endpoint_id=? AND a.state='active' AND e.state='active' "
+                "AND e.agent_host='openclaw' AND e.client_type IN ('web','webchat') "
+                "AND e.account_id=a.account_id AND e.external_subject=a.account_id "
+                "AND e.endpoint_key=a.endpoint_key AND e.conversation_ref=a.openclaw_session_key",
+                (context.resource["user_subject"], context.endpoint_id),
+            ).fetchone()
+        return self._workspace_home() if row else None
+
+    @staticmethod
+    def _with_back(response: AuthCardResponse, navigation: dict | None) -> AuthCardResponse:
+        if navigation is None or b'id="agentbridge-back"' in response.body:
+            return response
+        return AuthCardResponse(response.status, dict(response.headers), response.body.replace(
+            b"</main>", (_back_link(navigation) + "</main>").encode(), 1))
 
     @staticmethod
     def _waiting(kind: str, resource_id: str, presentation_id: str | None,
@@ -247,8 +286,7 @@ class TrustedFlowApplication:
         # All configuration values are opaque IDs, never business fields. Escape
         # '<' nonetheless, so the script cannot terminate via future callers.
         config = json.dumps({"statusUrl": path + "/status", "token": token, "navigation": navigation}).replace("<", "\\u003c")
-        back = (f'<a id="agentbridge-back" href="{escape(navigation["back"]["url"])}">返回待办列表</a>'
-                if navigation else "")
+        back = _back_link(navigation)
         script = _WAITING_SCRIPT.read_text(encoding="utf-8").replace(
             "export function mountTrustedFlow", "function mountTrustedFlow", 1,
         )
@@ -285,6 +323,28 @@ mountTrustedFlow({config});
         return AuthCardResponse(status, headers, json.dumps(value, ensure_ascii=False).encode())
 
     def _unavailable(self) -> AuthCardResponse:
-        return self.applications["input"]._message_response(
+        return self._with_back(self.applications["input"]._message_response(
             status=403, title="办理页面不可用", message="请从原任务重新打开有效入口。", tone="error",
-        )
+        ), self._workspace_home())
+
+
+def _workspace_root(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or any(character.isspace() or ord(character) < 32
+                                                    for character in value) or "\\" in value:
+        raise ValueError("Workspace return URL must be a configured http(s) root")
+    parsed = urlsplit(value)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or "?" in value or "#" in value):
+        raise ValueError("Workspace return URL must not contain credentials, query or fragment")
+    parsed.port  # Reject malformed/out-of-range ports before creating any link.
+    return urlunsplit((parsed.scheme, parsed.netloc.lower(), parsed.path.rstrip("/") + "/", "", ""))
+
+
+def _back_link(navigation: dict | None) -> str:
+    if not navigation:
+        return ""
+    back = navigation["back"]
+    return (f'<a id="agentbridge-back" href="{escape(back["url"])}" referrerpolicy="no-referrer">'
+            f'{escape(back.get("label") or "返回待办列表")}</a>')

@@ -162,7 +162,42 @@ class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
         if seed and not self.meta["full_cases"]:
             for profile in ALL_PENDING_PROFILES:
                 self.add_pending_case(profile)
+        self._recover_prepared_tasks()
         write_metadata(self.meta_path, self.meta)
+
+    def _register_prepared_tasks(self, task_ids):
+        """Persist only coordinator membership; never synthesize a decision."""
+        with self.lock:
+            known = {case["task_id"] for case in self.meta["draft_cases"]}
+            added = False
+            for task_id in task_ids:
+                if task_id not in known:
+                    self.meta["draft_cases"].append({"task_id": task_id})
+                    known.add(task_id)
+                    added = True
+            if added:
+                write_metadata(self.meta_path, self.meta)
+
+    def _recover_prepared_tasks(self):
+        """Recover old fixture indexes from actual owned input/task bindings.
+
+        A previous fixture version forgot to persist dynamically selected tasks.
+        The marked synthetic home and its real Central ledger remain authoritative;
+        startup only rebuilds the local coordinator index. Normal resume still
+        checks the current interaction, authorization and downstream evidence.
+        """
+        with self.service.tasks._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT t.task_id FROM agent_tasks t "
+                "JOIN task_operations o ON o.task_id=t.task_id AND o.user_subject=t.user_subject "
+                "JOIN field_submissions f ON f.create_operation_id=o.operation_id AND f.user_subject=t.user_subject "
+                "JOIN interactions i ON i.resource_id=f.submission_id AND i.user_subject=t.user_subject "
+                "AND i.interaction_type='business_input' "
+                "JOIN task_interactions ti ON ti.task_id=t.task_id AND ti.interaction_id=i.interaction_id "
+                "AND ti.user_subject=t.user_subject "
+                "WHERE t.user_subject=? AND t.status IN ('active','waiting_user','running') "
+                "ORDER BY t.task_id", (OWNER,)).fetchall()
+        self._register_prepared_tasks(row["task_id"] for row in rows)
 
     def _coordinate_preparations(self):
         """The isolated host drives opaque intents; production uses L3 leases."""
@@ -174,9 +209,7 @@ class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
                         runtime_context={"endpointId": self.account["endpoint_id"], "hostType": "openclaw",
                             "hostInstanceId": "synthetic-host-coordinator"})
                     if result.get("interaction"):
-                        with self.lock:
-                            if not any(case["task_id"] == command["taskId"] for case in self.meta["draft_cases"]):
-                                self.meta["draft_cases"].append({"task_id": command["taskId"]})
+                        self._register_prepared_tasks([command["taskId"]])
                 except Exception as exc:
                     self.coordinator_errors.append(type(exc).__name__ + ": " + str(exc))
                     self.coordinator_errors[:] = self.coordinator_errors[-10:]

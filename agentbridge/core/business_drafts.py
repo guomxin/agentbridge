@@ -20,6 +20,7 @@ from time import perf_counter
 from agentbridge.adapters.base import AdapterBusinessRuleRejected, AdapterLoginRequired
 from agentbridge.adapters.taihua import TaihuaDuplicateWorkLog
 from agentbridge.core.business_draft_profiles import BY_PREPARE, BATCH_PREPARES, profile_for_source, meeting_times, review_payload, room_choice
+from agentbridge.core import business_content_drafts
 from agentbridge.core.capability_runtime import CapabilityContext
 from agentbridge.core.commit_notifications import track_transaction, transaction_committed, transaction_closed
 from agentbridge.core.draft_read_scheduler import DRAFT_READS, DraftReadBusy, SharedDraftReadFailure
@@ -100,6 +101,7 @@ class BusinessDraftStore:
                     body_json TEXT NOT NULL, expires_at TEXT NOT NULL
                 );
             """)
+            business_content_drafts.initialize(connection)
         self.cleanup()
 
     @contextmanager
@@ -127,11 +129,13 @@ class BusinessDraftStore:
                                "(SELECT draft_id FROM business_drafts WHERE state IN ('finalized','expired'))", (now,))
             connection.execute("DELETE FROM business_draft_options WHERE expires_at<=? OR draft_id IN "
                                "(SELECT draft_id FROM business_drafts WHERE state IN ('finalized','expired'))", (now,))
+            business_content_drafts.cleanup(connection, datetime.fromisoformat(now))
 
 
 class BusinessDraftService:
     def __init__(self, service):
         self.service, self.store = service, service.business_drafts
+        self.contents = business_content_drafts.BusinessContentDrafts(service)
 
     def has_decision(self, source_submission_id):
         """Entry selection only; callers must authenticate the source separately."""
@@ -248,7 +252,125 @@ class BusinessDraftService:
             connection.execute("UPDATE business_drafts SET revision=revision+1,version=version+1,state='editing', "
                 "values_json=?,preview_id=NULL,updated_at=? WHERE draft_id=?", (_json(values), self.store.clock().isoformat(), draft["draft_id"]))
             connection.execute("DELETE FROM business_draft_previews WHERE draft_id=?", (draft["draft_id"],))
+            self.contents.save(connection, source, self._draft(connection, source_submission_id), values, now=self.store.clock())
             return self._view(connection, self._draft(connection, source_submission_id), presentation_id, endpoint)
+
+    def _content_request(self, connection, source, draft, *, action, content_id, content_version, request_key, revision):
+        if (not isinstance(content_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", content_id)
+                or type(content_version) is not int or content_version < 1
+                or not isinstance(request_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_key)):
+            raise BusinessDraftError("DRAFT_CONTENT_REQUEST_INVALID", "保留内容请求无效。")
+        request_hash = _hash({"source": source["submission_id"], "key": request_key})
+        payload = {"requestHash": request_hash, "action": action,
+            "bodyHash": _hash([content_id, content_version, revision])}
+        previous = connection.execute("SELECT payload_json FROM task_events WHERE task_id=? AND user_subject=? "
+            "AND event_type='task.business_content.changed' AND causation_ref=?",
+            (draft["task_id"], source["user_subject"], request_hash)).fetchone()
+        if previous and json.loads(previous[0]) != payload:
+            raise BusinessDraftError("DRAFT_CONTENT_REQUEST_CONFLICT", "此请求已用于另一版本，请重新读取页面。", status=409)
+        return payload, previous is not None
+
+    def _record_content_request(self, connection, source, draft, payload):
+        self.service.tasks._append_event(connection, task_id=draft["task_id"], user_subject=source["user_subject"],
+            event_type="task.business_content.changed", payload=payload, causation_ref=payload["requestHash"],
+            created_at=self.store.clock().isoformat())
+
+    def restore_content(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie,
+                        expected_revision, content_id, content_version, request_key):
+        """Copy private text only after authenticating a new source and reading its materials."""
+        with store_transaction(self.store) as connection:
+            source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+            binding = self._authority(connection, source, interaction, task_id)
+            payload, replay = self._content_request(connection, source, draft, action="restore", content_id=content_id,
+                content_version=content_version, request_key=request_key, revision=expected_revision)
+            if replay:
+                return self._view(connection, draft, presentation_id, endpoint)
+            self._editable(connection, draft, source, expected_revision, presentation_id, endpoint)
+            retained = dict(self.contents.candidate(connection, source, draft, content_id=content_id,
+                content_version=content_version, now=self.store.clock(), restoring=True))
+            values = self.contents.values(source, retained)
+            if profile_for_source(source).view_kind == "meeting_room":
+                # A previous candidate is not a current room selection. This
+                # persists across reloads, unlike a browser-only warning flag.
+                values["room"] = ""
+            started_version = draft["version"]
+
+        def validate():
+            with store_transaction(self.store) as connection:
+                current_source, current_interaction, _, current_endpoint, current = self._checked(
+                    connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+                self._editable(connection, current, current_source, expected_revision, presentation_id, current_endpoint)
+                if current["version"] != started_version or self._authority(connection, current_source, current_interaction, task_id) != binding:
+                    self._conflict(connection, current, presentation_id, current_endpoint)
+                self.contents.candidate(connection, current_source, current, content_id=content_id,
+                    content_version=content_version, now=self.store.clock(), restoring=True)
+
+        def read(adapter, worker, session):
+            from agentbridge.core.business_content_identity import read_content_identity, validated_identity, has_instance_identity
+            from agentbridge.core.write_catalog import resolve_write_function
+            profile = profile_for_source(source)
+            arguments = source["form_schema"].get("_agentbridge_resume_arguments") or {}
+            identity = read_content_identity(adapter, worker, profile=profile, arguments=arguments)
+            frozen = validated_identity(profile, source["form_schema"].get("_agentbridge_content_identity"))
+            if (has_instance_identity(profile) and identity is None) or frozen is not None and identity != frozen:
+                raise BusinessDraftError("DRAFT_CONTENT_TARGET_CHANGED", "当前事项身份或材料已变化，未恢复任何字段。", status=409)
+            definition = _TRUSTED_WRITE_DEFINITIONS[profile.prepare]
+            schema_function = definition.get("field_schema_function")
+            if not has_instance_identity(profile) and schema_function:
+                seed = {**arguments, **{field["name"]: field.get("value", field.get("default"))
+                    for field in source["form_schema"]["fields"] if field["name"] in {"start_time", "end_time"}}}
+                schema = resolve_write_function(schema_function)(adapter, worker, seed,
+                    **({"allow_empty": True} if profile.view_kind == "meeting_room" else {}))
+                # Dynamic choices are read afresh, never restored from a saved
+                # preview. The following normal preview still checks all input.
+                if not isinstance(schema, dict):
+                    raise BusinessDraftError("DRAFT_CONTENT_MATERIAL_UNAVAILABLE", "当前填写材料不可用，未恢复任何字段。", status=409)
+            return None
+
+        try:
+            self._read_downstream(source, read, validate=validate)
+        except BusinessDraftError:
+            raise
+        except Exception as error:
+            raise self._read_error(error) from error
+        with store_transaction(self.store) as connection:
+            source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+            current_binding = self._authority(connection, source, interaction, task_id)
+            payload, replay = self._content_request(connection, source, draft, action="restore", content_id=content_id,
+                content_version=content_version, request_key=request_key, revision=expected_revision)
+            if replay:
+                return self._view(connection, draft, presentation_id, endpoint)
+            self._editable(connection, draft, source, expected_revision, presentation_id, endpoint)
+            if draft["version"] != started_version or binding != current_binding:
+                self._conflict(connection, draft, presentation_id, endpoint)
+            current_retained = self.contents.candidate(connection, source, draft, content_id=content_id,
+                content_version=content_version, now=self.store.clock(), restoring=True)
+            if dict(current_retained) != retained:
+                raise BusinessDraftError("DRAFT_CONTENT_CHANGED", "保留内容已变化，请重新读取页面。", status=409)
+            connection.execute("UPDATE business_drafts SET revision=revision+1,version=version+1,state='editing',values_json=?,"
+                "preview_id=NULL,updated_at=? WHERE draft_id=?", (_json(values), self.store.clock().isoformat(), draft["draft_id"]))
+            connection.execute("DELETE FROM business_draft_previews WHERE draft_id=?", (draft["draft_id"],))
+            connection.execute("DELETE FROM business_draft_options WHERE draft_id=?", (draft["draft_id"],))
+            draft = self._draft(connection, source_submission_id)
+            self.contents.save(connection, source, draft, values, now=self.store.clock(), retained=retained)
+            self._record_content_request(connection, source, draft, payload)
+            return self._view(connection, draft, presentation_id, endpoint)
+
+    def discard_content(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie,
+                        expected_revision, content_id, content_version, request_key):
+        with store_transaction(self.store) as connection:
+            source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+            self._authority(connection, source, interaction, task_id)
+            payload, replay = self._content_request(connection, source, draft, action="discard", content_id=content_id,
+                content_version=content_version, request_key=request_key, revision=expected_revision)
+            if replay:
+                return self._view(connection, draft, presentation_id, endpoint)
+            self._editable(connection, draft, source, expected_revision, presentation_id, endpoint)
+            self.contents.candidate(connection, source, draft, content_id=content_id,
+                content_version=content_version, now=self.store.clock(), restoring=False)
+            self.contents.delete_scope(connection, source, draft)
+            self._record_content_request(connection, source, draft, payload)
+            return self._view(connection, draft, presentation_id, endpoint)
 
     def preview(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie, expected_revision):
         with store_transaction(self.store) as connection:
@@ -611,6 +733,7 @@ class BusinessDraftService:
                                (now.isoformat(), draft["draft_id"]))
             connection.execute("DELETE FROM business_draft_previews WHERE draft_id=?", (draft["draft_id"],))
             connection.execute("DELETE FROM business_draft_options WHERE draft_id=?", (draft["draft_id"],))
+            self.contents.delete_finalized(connection, source, draft)
             return self._view(connection, self._draft(connection, source_submission_id), presentation_id, endpoint)
 
     def _prepare(self, source, task_id, values, *, priority=False, validate=None):
@@ -1058,7 +1181,8 @@ class BusinessDraftService:
             "state": draft["state"] if draft["state"] != "ready" or valid else "editing", "expiresAt": draft["expires_at"],
             "values": json.loads(draft["values_json"]), "allowedActions": [] if receipt or draft["state"] == "expired" else ["save", "preview"] + (["approve"] if valid else []),
             "preview": None, "receipt": None, "ui": profile.ui(source["form_schema"]),
-            "options": self._option_body(connection, draft) if profile.view_kind == "meeting_room" else None, "batch": None}
+            "options": self._option_body(connection, draft) if profile.view_kind == "meeting_room" else None, "batch": None,
+            "contentDraft": self.contents.view(connection, source, draft, now=self.store.clock())}
         batch_context = source["form_schema"].get("_agentbridge_business_draft_context", {}).get("batch")
         if batch_context:
             batch = connection.execute("SELECT total_count,state FROM task_batches WHERE batch_id=?", (batch_context["batchId"],)).fetchone()

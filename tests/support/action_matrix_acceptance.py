@@ -27,7 +27,7 @@ from agentbridge.adapters.smartlight import SmartlightCentralAdapter
 from agentbridge.core.business_draft_profiles import BY_PREPARE
 from agentbridge.core import write_catalog
 from tests.support.business_draft_acceptance import HTTP_ORIGIN, NetworkFreeHttpWorker, OWNER
-from tests.support.full_business_acceptance import FullBusinessAcceptanceFixture, FullOaTransport, FullOaWorker
+from tests.support.full_business_acceptance import FullBusinessAcceptanceFixture, FullOaTransport, FullOaWorker, FullOaPage
 from tests.support.interaction_acceptance import write_metadata
 from tests.test_smartlight_adapter import FakeSmartlightWorker
 
@@ -59,6 +59,45 @@ class MatrixOaTransport(FullOaTransport):
             payload = {"id_temp": "synthetic-meeting-content", "currentUser": {"id": "synthetic-user", "name": OWNER}}
             return {"status": 200, "url": url, "json": payload, "text": json.dumps(payload)}
         return super().request(method, url, body=body, **kwargs)
+
+
+class MatrixOaPage(FullOaPage):
+    """Expose only the registered sent-list/precheck IO used by content identity.
+
+    The production identity parser and eligibility checks remain intact. This
+    does not replace the matrix's explicitly synthetic prepare/commit boundary.
+    """
+    def wait_for_function(self, script, *, arg=None, **kwargs):
+        if arg is None and "window.colManager" in script and "window.CallerResponder" in script:
+            if parse_qs(urlparse(self.url).query).get("method") != ["listSent"]:
+                raise AssertionError("Synthetic sent-grid readiness requires its exact page")
+            return
+        return super().wait_for_function(script, arg=arg, **kwargs)
+
+    def evaluate(self, script, argument=None):
+        if isinstance(argument, dict) and "manager_method" in argument:
+            if (argument != {"manager_method": "getSentList", "page_size": 100, "max_pages": 20}
+                    or parse_qs(urlparse(self.url).query).get("method") != ["listSent"]):
+                raise AssertionError("Synthetic matrix rejects unknown collection IO")
+            self.worker.transport.data["calls"].append({"method": "DOM", "action": "getSentList"})
+            self.worker.transport.persist()
+            return deepcopy(self.worker.transport.data.get("sent", []))
+        if isinstance(argument, dict) and set(argument) == {"affair_id", "summary_id"}:
+            matches = [row for row in self.worker.transport.data.get("sent", [])
+                       if row["affairId"] == argument["affair_id"] and row["summaryId"] == argument["summary_id"]]
+            if (len(matches) != 1 or "checkIsCanRepeal" not in script
+                    or parse_qs(urlparse(self.url).query).get("method") != ["listSent"]):
+                raise AssertionError("Synthetic matrix rejects mismatched revoke precheck")
+            self.worker.transport.data["calls"].append({"method": "DOM", "action": "revokeEligibility"})
+            self.worker.transport.persist()
+            return deepcopy(self.worker.transport.data["revoke_eligibility"][argument["affair_id"]])
+        return super().evaluate(script, argument)
+
+
+class MatrixOaWorker(FullOaWorker):
+    def __init__(self, transport, *, is_reader=False):
+        super().__init__(transport, is_reader=is_reader)
+        self.page = MatrixOaPage(self)
 
 
 class MatrixSmartlightTransport:
@@ -117,7 +156,7 @@ class ActionMatrixAcceptanceFixture(FullBusinessAcceptanceFixture):
         super().__init__(home, seed=False)
         self.patches = ExitStack()
         self.oa = MatrixOaTransport(self.home / "synthetic-oa-views.json")
-        self.service._worker_factories_by_system["oa"] = lambda *_: FullOaWorker(self.oa)
+        self.service._worker_factories_by_system["oa"] = lambda *_: MatrixOaWorker(self.oa)
         self.matrix_path = self.home / "synthetic-action-matrix.json"
         self.matrix = json.loads(self.matrix_path.read_text()) if self.matrix_path.exists() else {"effects": [], "fault": None}
         self.smartlight = MatrixSmartlightTransport(self.home / "synthetic-smartlight.json")
@@ -195,8 +234,24 @@ class ActionMatrixAcceptanceFixture(FullBusinessAcceptanceFixture):
             arguments = {"start_time": "2026-10-21 10:00", "end_time": "2026-10-21 11:00"}
         elif capability == "oa.meeting_room.application.cancel.prepare":
             arguments = {"application_id": "synthetic-cancel-" + key}
+            # Source-time private-content identity now reads My Applications.
+            # Supply the raw response for the actual parser/eligibility checks.
+            self.oa.data["applications"].append({"roomAppId": arguments["application_id"],
+                "roomId": "synthetic-cancel-room", "roomName": "合成待撤销会议室", "meetingId": "", "meetingName": "",
+                "description": "合成独立申请", "startDatetime": 1792562400000, "endDatetime": 1792566000000,
+                "appStatus": 0, "appStatusName": "待审核", "usedStatusDisplay": 0})
+            self.oa.persist()
         elif capability == "oa.workflow.revoke.prepare":
             arguments = {"affair_id": "synthetic-revoke-" + key}
+            self.oa.data.setdefault("sent", []).append({"affairId": arguments["affair_id"],
+                "summaryId": "synthetic-summary", "processId": "synthetic-process", "subject": "合成已发流程",
+                "createDate": "2026-10-15", "currentNodesInfo": "合成处理人", "bodyType": "20",
+                "templeteId": "synthetic-revoke-template", "formAppId": "synthetic-revoke-form",
+                "formRecordid": "synthetic-revoke-record-" + key, "flowFinished": False,
+                "state": 0, "subState": 0, "subStateName": "", "summaryState": 0, "affairState": 2})
+            self.oa.data.setdefault("revoke_eligibility", {})[arguments["affair_id"]] = {
+                "ready": True, "secret_message": "", "repeal_message": "", "affair_message": ""}
+            self.oa.persist()
         elif capability.startswith("smartlight."):
             arguments = {"alarm_id": "synthetic-alarm-" + key}
             self.smartlight.add_alarm(arguments["alarm_id"], submitted=capability == FIELDLESS[1])

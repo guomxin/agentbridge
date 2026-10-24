@@ -11,7 +11,7 @@ import { createActionableResults } from "./workspace_actionable.mjs";
 import { createOaPendingRecovery } from "./workspace_recovery.mjs";
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   const clocks = new Map();
@@ -22,11 +22,11 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       if (await switchView("tasks") === false) return;
       return loadTaskDetail(taskId);
     }});
-  const actionable = createActionableResults({ document, state, prepareTargets, refreshQuery, getScope,
-    openPreparation: async taskId => {
+  const actionable = createActionableResults({ document, state, prepareTargets, refreshQuery, getScope, viewState,
+    openPreparation: openPreparation || (async taskId => {
       if (await switchView("tasks") === false) return;
       return loadTaskDetail(taskId);
-    } });
+    }) });
   let feedbackViewId = 0;
   const element = (tag, className = "") => {
     const node = document.createElement(tag);
@@ -345,9 +345,9 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     if (!task?.task_id) return;
     const batchId = result.batch?.batchId || task.summary?.batch?.batchId;
     const cardKey = batchId ? `${task.task_id}:batch:${batchId}` : `${task.task_id}:summary`;
-    const nearBottom = upsertTaskCardVariant(result, cardKey);
+    upsertTaskCardVariant(result, cardKey);
     if (render) renderChatTimeline();
-    if (nearBottom) scrollChat();
+    if (render) scrollChat();
   }
 
   function upsertTaskCardVariant(result, cardKey) {

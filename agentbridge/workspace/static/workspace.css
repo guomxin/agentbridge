@@ -958,7 +958,7 @@ code {
   width: min(850px, 100%);
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 1fr 82px;
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: 10px;
   align-items: end;
   margin: 0 auto;
@@ -1223,8 +1223,12 @@ code {
 }
 
 .send-button {
-  height: 54px;
+  white-space: nowrap;
+  min-width: 4em;
+  min-height: 54px;
+  height: auto;
 }
+.chat-new-content {flex:0 0 auto;align-self:center;margin:8px 0;white-space:normal;}
 
 .task-layout {
   min-height: 0;
@@ -1730,7 +1734,7 @@ td {
   }
 
   .composer {
-    grid-template-columns: 1fr 70px;
+    grid-template-columns: minmax(0, 1fr) max-content;
   }
 }
 

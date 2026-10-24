@@ -63,6 +63,25 @@ const preparedGroup = (state, taskId = "child-task") => ({...group(), targets: g
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const rows = root => descendants(root).filter(node => node.className === "actionable-result-row");
 
+test('restored view preferences are filtered through the fresh source and cannot restore disabled selection authority',()=>{
+  const document=createDocument(),root=document.createElement('div'),saved=[];
+  const ui=createActionableResults({document,state:{},viewState:{getSource:()=>({search:'周报',type:'',onlySelected:false,selected:['one','two','unknown','removed']}),setSource:(key,value)=>saved.push([key,value])}});
+  ui.render(root,[{...group(),targets:group().targets.map(item=>({...item,enabled:item.targetKey==='two'}))}]);
+  assert.deepEqual(saved.at(-1)[1].selected,['two']);
+  assert.equal(rows(root)[0].hidden,true);assert.equal(rows(root)[1].hidden,false);
+  assert.equal(find(rows(root)[1],'input').checked,true);
+});
+
+test('single and batch acknowledgements hand off once with current response and expose cancellation on the original card',async()=>{
+  const document=createDocument(),root=document.createElement('div'),opened=[];let cancelCount=0;
+  const ui=createActionableResults({document,state:{},makeRequestKey:()=>'batch',prepareTargets:async()=>({taskId:'child',detail:{task:{task_id:'child',status:'running'}}}),
+    openPreparation:(id,options)=>{opened.push([id,options]);options.onProgress('正在准备',true);return ()=>{cancelCount++;options.onProgress('已停止自动打开',false);};}});
+  ui.render(root,[group()]);find(root,'button','选择当前可办 2 项').events.click();find(root,'button','准备已选事项（2）').events.click();await flush();
+  assert.equal(opened.length,1);assert.equal(opened[0][1].automatic,true);assert.equal(opened[0][1].detail.task.task_id,'child');
+  const cancel=find(root,'button','取消自动打开');assert.equal(cancel.hidden,false);cancel.events.click();assert.equal(cancelCount,1);assert.equal(cancel.hidden,true);
+  assert.match(root.textContent,/已停止自动打开/);
+});
+
 test("explicit available selection respects search and keeps unsupported items visible and counted", async () => {
   const document=createDocument(), root=document.createElement("div"), calls=[];
   const ui=createActionableResults({document,state:{},makeRequestKey:()=>"filtered",prepareTargets:async (...args)=>{calls.push(args);return {taskId:"new"};}});
@@ -148,7 +167,9 @@ test("accepted preparation advances through server review and submission states 
     button.events.click();
   }
   assert.equal(calls.length, 1);
-  assert.deepEqual(opened, ["original-child", "original-child", "original-child", "original-child"]);
+  // The accepted selection starts a trusted-form handoff once, followed by the
+  // four explicit progress/result actions. It never makes another preparation.
+  assert.deepEqual(opened, ["original-child", "original-child", "original-child", "original-child", "original-child"]);
 });
 
 test("terminal or unknown child outcomes never reopen a preparation from an old query", () => {

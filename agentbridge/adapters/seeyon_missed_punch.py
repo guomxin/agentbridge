@@ -400,6 +400,7 @@ def preflight_missed_punch_approval(
         "profile": profile_key,
         "affair_id": str(source.get("affair_id") or affair_id),
         "review_fingerprint": target["review_fingerprint"],
+        "_content_target": target,
         "review": {
             "title": str(source.get("title") or summary["title"]),
             "effect": summary["effect"],

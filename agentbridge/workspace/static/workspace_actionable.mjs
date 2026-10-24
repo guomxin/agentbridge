@@ -4,7 +4,7 @@ import { formatTime } from "./workspace_results.mjs";
 // A selected result records preparation intent only. Approval remains on the
 // existing trusted page, with one explicit decision for each business item.
 export function createActionableResults({ document, state, prepareTargets,
-  openPreparation, refreshQuery, now = () => Date.now(),
+  openPreparation, refreshQuery, viewState, now = () => Date.now(),
   makeRequestKey = () => crypto.randomUUID(), getScope, timers = globalThis }) {
   state.actionableGroups ||= new Map();
   const node = (tag, className = "", text = "") => {
@@ -19,6 +19,8 @@ export function createActionableResults({ document, state, prepareTargets,
       model = { selected: new Set(), accepted: new Map(), views: new Set(), pending: false,
         request: null, status: "", group, search: "", type: "", onlySelected: false, refreshRequest: null,
         scope:getScope?.(), disposed:false };
+      const stored = viewState?.getSource(key);
+      if (stored) Object.assign(model,{...stored,selected:new Set(stored.selected)});
       state.actionableGroups.set(key, model);
       model.scope?.defer(() => { model.disposed = true; clearExpiry(model); });
     }
@@ -91,10 +93,16 @@ export function createActionableResults({ document, state, prepareTargets,
     if (!target) return;
     const preparation = preparationFor(model, target);
     if (preparation) {
-      if (preparation.taskId && typeof openPreparation === "function") openPreparation(preparation.taskId);
+      if (preparation.taskId && typeof openPreparation === "function") handoff(model,preparation.taskId);
       return;
     }
     if (canPrepare(model, target)) void submit(model, [key]);
+  }
+  function handoff(model,taskId,detail,automatic = false) {
+    if (model.disposed || model.scope && !model.scope.current()) return;
+    model.cancelHandoff = openPreparation?.(taskId,{detail,automatic,onProgress(message,waiting) {
+      model.status = message; model.handoff = waiting; model.handoffNotice = true; update(model);
+    }});
   }
   async function submit(model, keys) {
     keys = model.request?.targetKeys || keys;
@@ -108,8 +116,11 @@ export function createActionableResults({ document, state, prepareTargets,
         targetKeys: [...model.request.targetKeys] });
       if (!result?.taskId) throw new Error("准备应答尚未确认，请恢复本次准备。");
       let awaitingProjection = false;
+      let superseded = false;
       for (const key of model.request.targetKeys) {
         const target = model.group.targets.find(item => item.targetKey === key);
+        if (target?.preparation && (target.preparation.taskId !== result.taskId ||
+            !['queued','preparing','waiting_user','running'].includes(target.preparation.state))) superseded = true;
         if (!target?.preparation) {
           model.accepted.set(key, result.taskId);
           awaitingProjection = true;
@@ -118,6 +129,7 @@ export function createActionableResults({ document, state, prepareTargets,
       }
       model.request = null;
       model.status = awaitingProjection ? "已记录准备请求，请在新任务核对材料并确认。" : "";
+      if (!superseded && typeof openPreparation === 'function') handoff(model,result.taskId,result.detail,true);
     } catch (error) {
       model.status = error.message || "准备应答尚未确认，请恢复本次准备。";
       if ([400, 403, 404, 409, 422].includes(error.status)) model.request = null;
@@ -140,6 +152,8 @@ export function createActionableResults({ document, state, prepareTargets,
     }
     const targets = new Map(group.targets.map(t => [t.targetKey, t]));
     for (const key of model.selected) if (!targets.has(key) || !canPrepare(model, targets.get(key))) model.selected.delete(key);
+    viewState?.setSource(`${group.sourceTaskId}:${group.operationId}`,{search:model.search,type:model.type,
+      onlySelected:model.onlySelected,selected:[...model.selected]});
     for (const view of model.views) {
       const children = [];
       const types = [...new Set(group.targets.map(t => t.workflowLabel).filter(Boolean))];
@@ -187,6 +201,7 @@ export function createActionableResults({ document, state, prepareTargets,
       }
       reconcileChildren(view.list, children);
       view.status.textContent = model.status;
+      view.cancelHandoff.hidden = !model.handoff;
       const available = group.targets.filter(t => visible(model, t) && canPrepare(model, t));
       const continuing = group.targets.filter(t => preparationFor(model, t)).length;
       const unavailable = group.targets.filter(t => !canPrepare(model, t) && !preparationFor(model, t)).length;
@@ -223,6 +238,8 @@ export function createActionableResults({ document, state, prepareTargets,
     const refreshButton = node("button", "secondary", "重新查询待办");
     selectAll.type = clear.type = submitButton.type = refreshButton.type = "button";
     const status = node("p", "actionable-result-status"); status.setAttribute("role", "status");
+    const cancelHandoff = node('button','secondary','取消自动打开'); cancelHandoff.type = 'button'; cancelHandoff.hidden = true;
+    cancelHandoff.addEventListener('click',() => model.cancelHandoff?.());
     selectAll.addEventListener("click", () => {
       if (selectAll.disabled) return;
       for (const target of model.group.targets) if (visible(model, target) && canPrepare(model, target)) model.selected.add(target.targetKey);
@@ -234,8 +251,8 @@ export function createActionableResults({ document, state, prepareTargets,
     clear.addEventListener("click", () => { if (!clear.disabled) { model.selected.clear(); update(model); } });
     refreshButton.addEventListener("click", () => { if (!refreshButton.disabled) void refresh(model); });
     submitButton.addEventListener("click", () => submit(model, [...model.selected]));
-    actions.append(selectAll, clear, submitButton, refreshButton); root.append(title, explanation, filters, count, expiry, list, empty, actions, status);
-    const view = { root, list, rows: new Map(), selectAll, clear, refresh: refreshButton, submit: submitButton, status, search, type, onlySelected, count, expiry, empty };
+    actions.append(selectAll, clear, submitButton, refreshButton,cancelHandoff); root.append(title, explanation, filters, count, expiry, list, empty, actions, status);
+    const view = { root, list, rows: new Map(), selectAll, clear, refresh: refreshButton, submit: submitButton, status, search, type, onlySelected, count, expiry, empty,cancelHandoff };
     view.model = model;
     model.views.add(view); update(model);
     return view;
@@ -261,7 +278,7 @@ export function createActionableResults({ document, state, prepareTargets,
       // Server projections own the durable child state. The accepted map only
       // bridges a returned task ID until its first authoritative projection.
       for (const target of group.targets) if (target.preparation) view.model.accepted.delete(target.targetKey);
-      if (!view.model.pending && !view.model.request && !view.model.refreshRequest) view.model.status = "";
+      if (!view.model.pending && !view.model.request && !view.model.refreshRequest && !view.model.handoffNotice) view.model.status = "";
       update(view.model); children.push(view.root);
     }
     for (const [key, view] of container._actionableViews) {

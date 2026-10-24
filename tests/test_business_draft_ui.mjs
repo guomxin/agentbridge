@@ -368,6 +368,8 @@ function mountHarness(state, {fetch} = {}) {
   const nodes = new Map(); document.getElementById = id => nodes.get(id);
   const root = document.createElement('main');
   for (const id of ['draft-form', 'draft-status', 'draft-error', 'draft-submit', 'draft-retry', 'draft-conflict',
+    'draft-content','draft-content-saved','draft-content-candidate','draft-content-restore','draft-content-discard',
+    'draft-content-confirmation','draft-content-confirm-title','draft-content-confirm-message','draft-content-cancel','draft-content-confirm',
     'draft-use-server', 'draft-keep-local', 'draft-review', 'draft-evidence', 'draft-material-change',
     'review-fields', 'review-effect', 'review-project', 'review-project-code', 'review-duplicate', 'review-content',
     'room-options', 'room-status', 'room-selected', ...Object.keys(state.values),
@@ -1045,4 +1047,149 @@ test('native reactivation refreshes the original draft and receipt without anoth
   assert.ok(h.requests.some(item=>item.url.endsWith('/state')));
   assert.ok(h.requests.every(item=>!item.url.endsWith('/approve')));
   assert.deepEqual(h.navigations,[]);
+});
+
+const retained = () => ({retentionHours:24,requiresFreshCheck:true,saved:null,
+  restore:{contentId:'old-content',version:3,savedAt:'2026-10-23T12:00:00Z',expiresAt:'2099-01-01T00:00:00Z',scope:'same_item'}});
+test('explicit content restore saves local edits first, replaces only after fresh response, then regenerates preview without approval',async()=>{
+  let backend=reviewed({...initial(),contentDraft:retained()});
+  const h=harness(async(action,payload)=>{
+    if(action==='values') backend={...backend,revision:backend.revision+1,version:backend.version+1,values:payload.values,preview:null,allowedActions:['save','preview']};
+    if(action==='content-restore') backend={...backend,revision:backend.revision+1,version:backend.version+1,values:{...values,content:'之前保存的内容'},preview:null,options:null,allowedActions:['save','preview']};
+    if(action==='preview') backend=reviewed(backend);
+    return backend;
+  },backend);
+  h.change({content:'当前未保存的修改'});await h.controller.restoreContent();
+  assert.deepEqual(h.calls.map(item=>item.action),['values','content-restore','preview']);
+  assert.equal(h.calls[1].payload.expectedRevision,1);assert.equal(h.calls[1].payload.contentVersion,3);
+  assert.equal(h.local().content,'之前保存的内容');assert.equal(h.controller.state().dirty,false);
+  assert.equal(h.controller.state().canApprove,true);assert.deepEqual(h.receipts,[]);
+});
+test('content restore never bypasses a save conflict or substitutes local values after a denied restore',async()=>{
+  const state=reviewed({...initial(),contentDraft:retained()});
+  const h=harness(async()=>{throw Object.assign(new Error('conflict'),{status:409,code:'DRAFT_REVISION_CONFLICT',current:{...state,revision:1,version:2}});},state);
+  h.change({content:'保留本页'});await h.controller.restoreContent();
+  assert.deepEqual(h.calls.map(item=>item.action),['values']);assert.equal(h.local().content,'保留本页');assert.ok(h.controller.state().conflict);
+  const denied=harness(async()=>{throw Object.assign(new Error('expired'),{status:410});},state);
+  await denied.controller.restoreContent();assert.equal(denied.local().content,values.content);assert.equal(denied.controller.state().locked,true);
+});
+test('lost content restore response reads on resume and retries only explicitly with the immutable original command',async()=>{
+  let backend=reviewed({...initial(),contentDraft:retained()}),posts=0;
+  const h=harness(async(action)=>{
+    if(action==='content-restore' && posts++===0) {
+      backend={...backend,version:2,revision:1,values:{...values,content:'已恢复'},preview:null,allowedActions:['save','preview']};
+      throw new Error('reply lost');
+    }
+    if(action==='preview') backend=reviewed(backend);
+    return backend;
+  },backend);
+  await h.controller.restoreContent();assert.equal(h.controller.state().canApprove,false);assert.equal(h.controller.state().canEdit,false);
+  const first=h.calls[0].payload;
+  h.controller.suspend();await h.controller.restore();assert.equal(posts,1);assert.equal(h.local().content,values.content);
+  await h.controller.retry();
+  assert.equal(posts,2);assert.deepEqual(h.calls.filter(item=>item.action==='content-restore').map(item=>item.payload),[first,first]);
+  assert.equal(h.local().content,'已恢复');assert.equal(h.calls.some(item=>item.action==='approve'),false);
+});
+test('discarding a retained copy does not clear inputs and pending/expired sources cannot restore content',async()=>{
+  const state=reviewed({...initial(),contentDraft:retained()});
+  const h=harness(async()=>({...state,version:2,contentDraft:{...retained(),restore:null}}),state);
+  await h.controller.discardContent();assert.equal(h.local().content,values.content);assert.deepEqual(h.calls.map(item=>item.action),['content-discard']);
+  const expired=harness(async()=>{throw new Error('unexpected');},{...state,expiresAt:'2000-01-01T00:00:00Z'});
+  assert.equal(expired.controller.state().canRestoreContent,false);await expired.controller.restoreContent();assert.deepEqual(expired.calls,[]);
+  const terminal=harness(async()=>{throw new Error('unexpected');},{...state,state:'finalized'});
+  await terminal.controller.discardContent();assert.deepEqual(terminal.calls,[]);
+});
+test('lost discard response retries the same explicit deletion without changing current inputs or approving',async()=>{
+  let backend=reviewed({...initial(),contentDraft:retained()}),attempts=0;
+  const h=harness(async(action)=>{
+    if(action==='content-discard' && attempts++===0) {
+      backend={...backend,version:2,contentDraft:{...retained(),restore:null,saved:null}};
+      throw new Error('lost acknowledgement');
+    }
+    return backend;
+  },backend);
+  await h.controller.discardContent();const command=h.calls[0].payload;
+  h.controller.suspend();await h.controller.restore();assert.equal(attempts,1);
+  await h.controller.retry();assert.equal(attempts,2);
+  assert.deepEqual(h.calls.filter(call=>call.action==='content-discard').map(call=>call.payload),[command,command]);
+  assert.deepEqual(h.local(),values);assert.equal(h.controller.state().current.contentDraft.restore,null);
+  assert.ok(h.calls.every(call=>call.action!=='approve' && call.action!=='values'));
+});
+test('restored meeting room content requires a new explicit selection even if the old room is still available',async()=>{
+  let backend=reviewed({...optionsFor(meeting()),contentDraft:retained()});backend.values.room='token-1';
+  const h=harness(async(action)=>{
+    if(action==='content-restore') backend={...backend,version:backend.version+1,revision:backend.revision+1,preview:null,options:null,allowedActions:['save','options','preview']};
+    if(action==='options') backend=optionsFor(backend);
+    if(action==='preview') backend=reviewed(backend);
+    return backend;
+  },backend);
+  await h.controller.restoreContent();assert.equal(h.controller.state().roomChoiceRequired,true);assert.equal(h.controller.state().canApprove,false);
+  assert.deepEqual(h.calls.map(item=>item.action),['content-restore','options']);
+});
+test('clicking a fresh room after content restore saves the explicit choice and enables a newly checked decision',async()=>{
+  let backend=reviewed({...optionsFor(meeting()),contentDraft:retained()});backend.values.room='token-1';
+  const h=mountHarness(backend,{fetch:async(url,options)=>{
+    const payload=options.body ? JSON.parse(options.body) : null;
+    if(url.endsWith('/content-restore')) backend={...backend,revision:backend.revision+1,version:backend.version+1,preview:null,options:null,allowedActions:['save','options','preview']};
+    if(url.endsWith('/values')) backend={...backend,revision:backend.revision+1,version:backend.version+1,values:payload.values,preview:null,options:null,allowedActions:['save','options','preview']};
+    if(url.endsWith('/options')) backend=optionsFor(backend);
+    if(url.endsWith('/preview')) backend=reviewed(backend);
+    return {ok:true,json:async()=>backend};
+  }});await flush();await h.controller.restoreContent();
+  const radio=descendants(h.nodes.get('room-options')).find(node=>node.tag==='input');
+  assert.equal(radio.checked,false);assert.equal(h.controller.state().canApprove,false);
+  radio.checked=true;radio.events.change();await h.controller.save();
+  assert.equal(h.controller.state().roomChoiceRequired,false);assert.equal(h.controller.state().canApprove,true);
+  assert.ok(h.requests.some(item=>item.url.endsWith('/values')));assert.ok(h.requests.every(item=>!item.url.endsWith('/approve')));
+});
+test('content panel uses an accessible inline confirmation with no requests on opening or cancellation',async()=>{
+  const state=reviewed({...initial(),contentDraft:retained()}),h=mountHarness(state);await flush();
+  assert.match(h.nodes.get('draft-content-candidate').textContent,/同一事项.*恢复会替换当前输入/);
+  h.window.confirm=()=>{throw new Error('Native dialog must not be used');};
+  const before=h.requests.length;h.nodes.get('draft-content-restore').events.click();await flush();
+  assert.equal(h.nodes.get('draft-content-confirmation').hidden,false);
+  assert.match(h.nodes.get('draft-content-confirm-message').textContent,/不会授权或提交业务/);
+  assert.equal(h.document.activeElement,h.nodes.get('draft-content-cancel'));
+  assert.equal(h.nodes.get('draft-submit').disabled,true);assert.equal(h.nodes.get('draft-form').dataset.agentbridgeBusy,'true');
+  h.nodes.get('draft-form').events.submit({preventDefault(){}});await flush();assert.equal(h.requests.length,before);
+  h.nodes.get('draft-content-cancel').events.click();assert.equal(h.nodes.get('draft-content-confirmation').hidden,true);
+  assert.equal(h.document.activeElement,h.nodes.get('draft-content-restore'));assert.equal(h.requests.length,before);
+  h.nodes.get('draft-content-restore').events.click();h.nodes.get('draft-content-confirm').events.click();await flush();
+  assert.equal(h.requests.filter(item=>item.url.endsWith('/content-restore')).length,1);
+  assert.ok(h.requests.every(item=>!item.url.endsWith('/approve')));
+});
+test('inline discard requires its own confirm, supports Escape and does not authorize or clear inputs',async()=>{
+  const state=reviewed({...initial(),contentDraft:retained()}),h=mountHarness(state);await flush();
+  const before=h.requests.length;h.nodes.get('draft-content-discard').events.click();
+  assert.match(h.nodes.get('draft-content-confirm-message').textContent,/全部保留内容.*不会清空/);
+  h.nodes.get('draft-content-confirmation').events.keydown({key:'Escape',preventDefault(){}});
+  assert.equal(h.nodes.get('draft-content-confirmation').hidden,true);assert.equal(h.requests.length,before);
+  h.nodes.get('draft-content-discard').events.click();h.nodes.get('draft-content-confirm').events.click();await flush();
+  assert.equal(h.requests.filter(item=>item.url.endsWith('/content-discard')).length,1);
+  assert.equal(h.nodes.get('content').value,values.content);assert.ok(h.requests.every(item=>!item.url.endsWith('/approve')));
+});
+test('inline confirmation cannot silently target a changed retained copy and is forgotten on page restoration',async()=>{
+  const state=reviewed({...initial(),contentDraft:retained()}),h=mountHarness(state);await flush();
+  h.nodes.get('draft-content-restore').events.click();
+  h.responses.push({...state,version:state.version+1,contentDraft:{...retained(),restore:{...retained().restore,contentId:'replacement'}}});
+  await h.controller.poll();assert.equal(h.nodes.get('draft-content-confirm').disabled,true);
+  h.nodes.get('draft-content-confirm').events.click();await flush();assert.ok(h.requests.every(item=>!item.url.endsWith('/content-restore')));
+  h.hide();h.restore();await flush();assert.equal(h.nodes.get('draft-content-confirmation').hidden,true);
+  assert.ok(h.requests.every(item=>!item.url.endsWith('/approve') && !item.url.endsWith('/content-restore')));
+});
+test('server-configured Workspace return supports deployment root, protects dirty input and drops native launch data',async()=>{
+  const state=reviewed({...initial(),navigation:{back:{kind:'workspace',url:'http://127.0.0.1:54119/workspace/'}}});
+  const h=mountHarness(state);await flush();h.window.location.hash='#tgWebAppData=private';
+  const back=descendants(h.nodes.get('draft-form')).find(node=>node.id==='agentbridge-back');assert.equal(back.textContent,'返回 Workspace');
+  h.edit('content','未保存');h.window.confirm=()=>false;back.events.click();assert.deepEqual(h.navigations,[]);
+  h.window.confirm=()=>true;back.events.click();assert.deepEqual(h.navigations,['http://127.0.0.1:54119/workspace/']);
+  for(const url of ['/workspace/','javascript:alert(1)','https://u:p@workspace.test/','https://workspace.test/?next=x','https://workspace.test/#x'])
+    assert.equal(safeResultReturn({back:{kind:'workspace',url}},'https://trusted.example'),null);
+});
+test('Workspace decision receipt carries neither Telegram result token nor launch hash',async()=>{
+  const state=reviewed({...initial(),navigation:{back:{kind:'workspace',url:'https://workspace.example/'}}});
+  const receipt={flowUrl:`/flow/authorize/${'r'.repeat(43)}`};
+  const h=mountHarness(state,{fetch:async url=>({ok:true,json:async()=>url.endsWith('/approve') ? {...state,version:state.version+1,receipt,state:'approved',allowedActions:[]} : state})});
+  h.window.location.hash='#tgWebAppData=private';await h.controller.approve();
+  assert.deepEqual(h.navigations,[`https://trusted.example${receipt.flowUrl}`]);
 });

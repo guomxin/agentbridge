@@ -129,3 +129,43 @@ def test_matrix_workers_reject_external_requests(matrix_fixture):
             transport.request("POST", "https://example.com/anything")
     with pytest.raises(RuntimeError, match="disabled"):
         matrix_fixture._deny_worker()
+
+
+@pytest.mark.parametrize("capability", ["oa.meeting_room.application.cancel.prepare", "oa.workflow.revoke.prepare",
+                                       "smartlight.alarm.remark.update.prepare"])
+def test_retained_content_freezes_actual_readonly_instance_identity(matrix_fixture, capability):
+    fixture = matrix_fixture
+    case = fixture.add_matrix_case(capability)
+    source = fixture.service.field_submissions.get(case["input_id"])
+    identity = source["form_schema"]["_agentbridge_content_identity"]["identity"]
+    if capability == "oa.meeting_room.application.cancel.prepare":
+        assert identity == {"application_id": case["arguments"]["application_id"], "room_id": "synthetic-cancel-room"}
+        assert any(call["action"] == "getMyApps" for call in fixture.oa.data["calls"])
+    elif capability == "oa.workflow.revoke.prepare":
+        assert identity["affair_id"] == case["arguments"]["affair_id"]
+        assert identity["process_id"] == "synthetic-process"
+        assert {"getSentList", "revokeEligibility"} <= {call["action"] for call in fixture.oa.data["calls"]}
+    else:
+        assert identity["alarmId"] == case["arguments"]["alarm_id"]
+    assert effects(fixture) == 0
+    with sqlite3.connect(fixture.service.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM write_authorizations").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("capability", ["oa.meeting_room.application.cancel.prepare", "oa.workflow.revoke.prepare"])
+def test_identity_fixture_keeps_real_eligibility_rejection(matrix_fixture, capability):
+    from agentbridge.core.business_content_identity import read_content_identity
+    from agentbridge.core.business_draft_profiles import BY_PREPARE
+    from tests.support.action_matrix_acceptance import MatrixOaWorker
+    fixture = matrix_fixture
+    case = fixture.add_matrix_case(capability)
+    if capability == "oa.meeting_room.application.cancel.prepare":
+        fixture.oa.data["applications"][-1]["meetingId"] = "linked-to-real-meeting-shape"
+        message = "linked to a meeting"
+    else:
+        fixture.oa.data["revoke_eligibility"][case["arguments"]["affair_id"]]["repeal_message"] = "synthetic permission withdrawn"
+        message = "synthetic permission withdrawn"
+    fixture.oa.persist()
+    with MatrixOaWorker(fixture.oa) as worker, pytest.raises(RuntimeError, match=message):
+        read_content_identity(fixture.service.adapter, worker, profile=BY_PREPARE[capability], arguments=case["arguments"])
+    assert effects(fixture) == 0
