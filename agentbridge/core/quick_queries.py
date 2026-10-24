@@ -54,7 +54,7 @@ def queue_query(service, account, body):
         return _queue(service, account["user_subject"], workspace, body, connection)
 
 
-def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, source_task_id, view_hash):
+def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, source_task_id, view_hash, remaining_context=None):
     """Called after the result-view ticket authenticates its original source."""
     _body(body)
     if not isinstance(view_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", view_hash):
@@ -69,6 +69,8 @@ def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, s
             "openclaw_session_key": endpoint["conversation_ref"], "_telegram": True,
             "_binding_hash": binding_hash, "_request_scope": endpoint_id,
             "_source_task_id": source_task_id, "_view_hash": view_hash}
+        if remaining_context is not None:
+            workspace["_remaining_context"] = remaining_context
         return _queue(service, subject, workspace, body, connection)
 
 
@@ -77,6 +79,11 @@ def _queue(service, subject, workspace, body, connection):
     scope = workspace.get("_request_scope") or workspace["account_id"]
     identity = {"action": COMMAND_KIND, "endpointId": workspace["endpoint_id"],
         "sourceTaskId": workspace.get("_source_task_id"), "viewHash": workspace.get("_view_hash")}
+    remaining = workspace.get("_remaining_context")
+    if remaining is not None:
+        from agentbridge.core.oa_batch_remaining import validate_context
+        validate_context(service, connection, subject, remaining)
+        identity["remainingContextHash"] = actions._hash(remaining)
     message = body.get("userMessage")
     if message is not None:
         identity["messageHash"] = actions._hash({"text": message})
@@ -110,13 +117,16 @@ def _queue(service, subject, workspace, body, connection):
     command = {"kind": COMMAND_KIND, "commandKey": str(uuid4()), "requestIdentity": identity,
         "capabilityName": CAPABILITY, "capabilityVersion": service.registry.get(CAPABILITY).version,
         "arguments": {}, "requestedAt": actions._now().isoformat(), "state": "pending"}
+    if remaining is not None:
+        command["remainingContext"] = remaining
     if workspace.get("_telegram"):
         command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"],
             sourceTaskId=workspace["_source_task_id"], viewHash=workspace["_view_hash"])
     command["intentHash"] = actions._hash(actions._intent(command))
     task, _ = service.tasks.ensure_task(user_subject=subject, agent_host="openclaw", host_task_key=host_key,
         origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],
-        title="查询 OA 待办", summary={"command": command}, connection=connection)
+        title=f"重新查询原批次剩余{len(remaining['targets'])}项" if remaining else "查询 OA 待办",
+        summary={"command": command}, connection=connection)
     if workspace.get("_telegram"):
         subscription = connection.execute("SELECT subscription_id,event_filters_json FROM task_subscriptions "
             "WHERE task_id=? AND endpoint_id=? AND user_subject=? AND state='active'",
@@ -154,6 +164,20 @@ def _contract(service, command):
     if command.get("kind") != COMMAND_KIND or command.get("capabilityName") != CAPABILITY \
             or command.get("arguments") != {} or command.get("capabilityVersion") != service.registry.get(CAPABILITY).version:
         actions._fail("ACTION_COMMAND_INVALID", "快捷查询合同已变化，请发起新的查询。")
+
+
+def _origin(service, connection, subject, task, command):
+    if command.get("originKind") == "telegram":
+        endpoint = actions._telegram_endpoint(connection, subject, task["origin_endpoint_id"])
+        if endpoint["_binding_hash"] != command.get("endpointBindingHash") \
+                or endpoint["conversation_ref"] != task["active_conversation_ref"]:
+            actions._fail("ACTION_ENDPOINT_INVALID", "原 Telegram 查询会话已变化。")
+    else:
+        account = connection.execute("SELECT * FROM workspace_accounts WHERE endpoint_id=? AND user_subject=?",
+            (task["origin_endpoint_id"], subject)).fetchone()
+        if account is None or account["openclaw_session_key"] != task["active_conversation_ref"]:
+            actions._fail("ACTION_ENDPOINT_INVALID", "原 Workspace 查询会话已变化。")
+        actions._account(connection, dict(account))
 
 
 def _continued_operation(service, subject, task_id, command, original):
@@ -238,23 +262,26 @@ def execute_query(service, subject, task_id, command_key, *, runtime_context):
             task, command = actions._load_command(connection, subject, task_id, command_key)
             if context.get("endpointId") != task["origin_endpoint_id"]:
                 actions._fail("ACTION_ENDPOINT_INVALID", "快捷查询必须由原会话协调。")
-            if command.get("originKind") == "telegram":
-                endpoint = actions._telegram_endpoint(connection, subject, task["origin_endpoint_id"])
-                if endpoint["_binding_hash"] != command.get("endpointBindingHash") \
-                        or endpoint["conversation_ref"] != task["active_conversation_ref"]:
-                    actions._fail("ACTION_ENDPOINT_INVALID", "原 Telegram 查询会话已变化。")
-            else:
-                account = connection.execute("SELECT * FROM workspace_accounts WHERE endpoint_id=? AND user_subject=?",
-                    (task["origin_endpoint_id"], subject)).fetchone()
-                if account is None or account["openclaw_session_key"] != task["active_conversation_ref"]:
-                    actions._fail("ACTION_ENDPOINT_INVALID", "原 Workspace 查询会话已变化。")
-                actions._account(connection, dict(account))
+            _origin(service, connection, subject, task, command)
         try:
             _contract(service, command)
             service.user_grants.require_capability(subject, CAPABILITY)
+            if command.get("remainingContext") and command.get("state") == "failed":
+                return {"status":"failed", "taskId":task_id, "reused":True,
+                    "error":command.get("error") or {"code":"BATCH_REMAINING_UNAVAILABLE", "message":"原剩余查询已结束，请重新核对原批次。"}, "result":None}
             existing = actions._existing_operation(service, subject, task_id, command)
             if existing is not None:
                 existing = _continued_operation(service, subject, task_id, command, existing)
+            if command.get("remainingContext"):
+                from agentbridge.core.oa_batch_remaining import probe_query_identity
+                with service.tasks._connect() as connection:
+                    observed = connection.execute("SELECT payload_json FROM task_events WHERE task_id=? AND user_subject=? "
+                        "AND event_type='task.batch_remaining.observed' AND causation_ref=?", (task_id, subject, command_key)).fetchall()
+                expected = {"contextHash":actions._hash(command["remainingContext"]),
+                    "operationId":existing["operation_id"] if existing else None,
+                    "resultHash":actions._hash(existing.get("result")) if existing else None}
+                if not existing or len(observed) != 1 or json.loads(observed[0][0]) != expected:
+                    probe_query_identity(service, subject, task_id, command)
             if existing is None:
                 if task["status"] not in {"active", "running", "waiting_user"} or command["state"] != "pending":
                     actions._fail("ACTION_COMMAND_NOT_PENDING", "查询已结束，请查看原结果或发起新查询。")
@@ -272,24 +299,48 @@ def execute_query(service, subject, task_id, command_key, *, runtime_context):
                 if task["status"] in {"active", "running", "waiting_user"}:
                     service.observe_host_task(user_subject=subject, task_id=task_id, operation_ids=[existing["operation_id"]],
                         interaction_ids=[interaction["interactionId"]] if interaction.get("interactionId") else [])
+            if command.get("remainingContext") and response.get("status") == "requires_user_action":
+                actions._fail("BATCH_REMAINING_IDENTITY_CHANGED", "原 OA 登录已失效，请先恢复原账号，再重新查询剩余事项。")
             response = _login_response(service, subject, task_id, command, response, context)
             if (response.get("status") == "requires_user_action" and not response.get("interaction")
                     and (response.get("error") or {}).get("code") == "LOGIN_REQUIRED"):
                 actions._fail("ACTION_LOGIN_UNAVAILABLE", "原查询登录恢复尚未完成，请查看连接状态后重新查询。")
-            actions._record_result(service, subject, task_id, command_key, response)
+            remaining_report = None
+            if command.get("remainingContext") and response.get("status") == "succeeded":
+                from agentbridge.core.oa_batch_remaining import observe_query_result
+                with store_transaction(service.tasks) as connection:
+                    remaining_report = observe_query_result(service, subject, task_id, command, response, connection=connection)
+                    actions._record_result(service, subject, task_id, command_key, response, connection=connection)
+                    service.tasks.complete_task(user_subject=subject, task_id=task_id,
+                        reason="explicit_oa_remaining_query_verified", causation_ref=command_key, connection=connection)
+            else:
+                actions._record_result(service, subject, task_id, command_key, response)
             if response.get("status") == "succeeded":
-                service.finish_host_task(user_subject=subject, task_id=task_id, outcome="succeeded",
-                    reason="explicit_oa_pending_query_completed", causation_ref=command_key)
+                if not command.get("remainingContext"):
+                    service.finish_host_task(user_subject=subject, task_id=task_id, outcome="succeeded",
+                        reason="explicit_oa_pending_query_completed", causation_ref=command_key)
                 response = {**response, "queryResult": {"kind": COMMAND_KIND, "taskId": task_id,
                     "endpointId": task["origin_endpoint_id"], "count": len((response.get("result") or {}).get("items") or []),
-                    "complete": ((response.get("result") or {}).get("coverage") or {}).get("status") == "complete"}}
+                    "complete": ((response.get("result") or {}).get("coverage") or {}).get("status") == "complete",
+                    **({"remaining":remaining_report, "count":remaining_report["matchedCount"]} if remaining_report else {})}}
             return response
         except (actions.ActionableResultError, PermissionError) as exc:
             code = getattr(exc, "code", "ACTION_PERMISSION_DENIED")
             message = str(exc) if not isinstance(exc, PermissionError) else "查询权限已变化，请重新连接或联系管理员。"
             response = {"status": "failed", "taskId": task_id, "error": {"code": code, "message": message}, "result": None}
-            actions._record_result(service, subject, task_id, command_key, response)
-            if task["status"] in {"active", "running", "waiting_user"}:
-                service.fail_host_task(user_subject=subject, task_id=task_id, error_code=code, message=message,
-                    causation_ref=command_key)
+            if command.get("remainingContext"):
+                with store_transaction(service.tasks) as connection:
+                    current, recorded = actions._load_command(connection, subject, task_id, command_key)
+                    # Revocation after an attested completion blocks current
+                    # access; it does not rewrite the historical read outcome.
+                    if recorded.get("state") != "succeeded":
+                        actions._record_result(service, subject, task_id, command_key, response, connection=connection)
+                        if current["status"] in {"active", "running", "waiting_user"}:
+                            service.tasks.fail_task(user_subject=subject, task_id=task_id, error_code=code, message=message,
+                                causation_ref=command_key, connection=connection)
+            else:
+                actions._record_result(service, subject, task_id, command_key, response)
+                if service.tasks.get_task(task_id, user_subject=subject)["status"] in {"active", "running", "waiting_user"}:
+                    service.fail_host_task(user_subject=subject, task_id=task_id, error_code=code, message=message,
+                        causation_ref=command_key)
             return response

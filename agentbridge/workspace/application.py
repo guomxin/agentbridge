@@ -303,6 +303,7 @@ class WorkspaceApplication:
         with self.service.tasks._connect() as connection:
             actionable_sources = preparation_source_task_ids(connection, account["user_subject"], task_id, service=self.service)
         business = self._business_task_presentation(account, task, interactions)
+        from agentbridge.core.oa_batch_remaining import remaining_presentation
         return {
             "task": _public_task(task),
             "actionableResults": self.actionable_results(account, task_id),
@@ -315,6 +316,7 @@ class WorkspaceApplication:
             "interaction": interaction,
             "interactions": interactions,
             "batch": workspace_batch_projection(batch),
+            **({"oaBatchRemaining":remaining_presentation(self.service, account["user_subject"], task_id)} if batch else {}),
             **business,
             **({"artifactsHasMore": artifacts_have_more, "historyIncluded": False} if not include_history else {}),
         }
@@ -622,6 +624,13 @@ class WorkspaceApplication:
                 endpoint = self.service.tasks.get_endpoint(account["endpoint_id"], user_subject=account["user_subject"])
                 response["userMessage"] = _public_timeline_entry(entry, source=endpoint, is_origin=True)
             return response
+
+    def query_oa_batch_remaining(self, account: dict, task_id: str, body: dict) -> dict:
+        from agentbridge.core.oa_batch_remaining import queue_remaining_query
+        with self._time_business_action(account, "query", body) as timing:
+            queued = queue_remaining_query(self.service, account, task_id, body)
+            timing["task_id"] = queued["taskId"]
+            return self._queued_command(account, queued)
 
     def _queued_command(self, account: dict, result: dict) -> dict:
         queued_task = self.service.tasks.get_task(result["taskId"], user_subject=account["user_subject"])

@@ -281,3 +281,14 @@ test("a read-only completion without a valid evidence expiry remains historical 
   const row=rows(root)[0];assert.equal(row.dataset.preparationState,"outcome_unknown");
   assert.match(row.textContent,/核对已过期/);assert.equal(find(row,"input").disabled,true);
 });
+
+test('remaining query preserves original ordinals and permits selection only from its server-filtered targets',async()=>{
+ const document=createDocument(),root=document.createElement('div'),calls=[];
+ const ui=createActionableResults({document,state:{},makeRequestKey:()=>'remaining-selection',prepareTargets:async(...args)=>{calls.push(args);return {taskId:'new'};}});
+ const value={...group(),targets:[group().targets[0]],remaining:{requestedCount:3,matchedCount:1,missingCount:1,changedCount:1,
+ items:[{ordinal:3,title:'仍匹配',state:'matched'},{ordinal:4,title:'不在待办',state:'missing'},{ordinal:5,title:'变更',state:'changed'}]}};
+ ui.render(root,[value]);assert.match(root.textContent,/剩余 3 项.*匹配 1 项.*未找到 1 项.*资格变化 1 项/);
+ assert.match(root.textContent,/原第 4 项.*未在当前待办找到/);assert.equal(rows(root).length,1);
+ find(root,'button','选择当前可办 1 项').events.click();find(root,'button','准备已选事项（1）').events.click();await flush();
+ assert.deepEqual(calls,[['source',{operationId:'operation',targetKeys:['one'],requestKey:'remaining-selection'}]]);
+});

@@ -201,6 +201,10 @@ export function createActionableResults({ document, state, prepareTargets,
       }
       reconcileChildren(view.list, children);
       view.status.textContent = model.status;
+      const scope = group.remaining;
+      view.remaining.hidden = !scope;
+      view.remaining.textContent = scope ? `本轮只核对原批次剩余 ${scope.requestedCount || 0} 项：匹配 ${scope.matchedCount || 0} 项，当前待办未找到 ${scope.missingCount || 0} 项，资格变化 ${scope.changedCount || 0} 项。未找到不代表已成功；仅匹配项可重新选择。` : '';
+      if(scope) for(const item of (scope.items || []).slice(0,100)) view.remaining.append(node('p','',`原第 ${item.ordinal} 项 · ${item.title || '事项'} · ${{matched:'可重新核对',missing:'未在当前待办找到',changed:'当前资格已变化'}[item.state] || '待核对'}`));
       view.cancelHandoff.hidden = !model.handoff;
       const available = group.targets.filter(t => visible(model, t) && canPrepare(model, t));
       const continuing = group.targets.filter(t => preparationFor(model, t)).length;
@@ -232,6 +236,7 @@ export function createActionableResults({ document, state, prepareTargets,
     const selectedLabel = node("label"); selectedLabel.append(onlySelected, node("span", "", "只看已选"));
     filters.append(search, type, selectedLabel);
     const count = node("p", "actionable-result-count"), expiry = node("p", "actionable-result-expiry");
+    const remaining = node('div','batch-remaining-summary');
     const empty = node("p", "", "没有符合筛选条件的事项；可修改搜索或类型。"); empty.hidden = true;
     const list = node("div", "actionable-results-list"), actions = node("div", "application-card-actions");
     const selectAll = node("button", "secondary"), clear = node("button", "secondary", "清除选择"), submitButton = node("button", "primary");
@@ -251,8 +256,8 @@ export function createActionableResults({ document, state, prepareTargets,
     clear.addEventListener("click", () => { if (!clear.disabled) { model.selected.clear(); update(model); } });
     refreshButton.addEventListener("click", () => { if (!refreshButton.disabled) void refresh(model); });
     submitButton.addEventListener("click", () => submit(model, [...model.selected]));
-    actions.append(selectAll, clear, submitButton, refreshButton,cancelHandoff); root.append(title, explanation, filters, count, expiry, list, empty, actions, status);
-    const view = { root, list, rows: new Map(), selectAll, clear, refresh: refreshButton, submit: submitButton, status, search, type, onlySelected, count, expiry, empty,cancelHandoff };
+    actions.append(selectAll, clear, submitButton, refreshButton,cancelHandoff); root.append(title, explanation,remaining, filters, count, expiry, list, empty, actions, status);
+    const view = { root, list, rows: new Map(), selectAll, clear, refresh: refreshButton, submit: submitButton, status, search, type, onlySelected, count, expiry, empty,cancelHandoff,remaining };
     view.model = model;
     model.views.add(view); update(model);
     return view;

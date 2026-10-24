@@ -361,7 +361,7 @@ test('material overview keeps key reason excerpt while expanded groups retain ev
   assert.equal(result.groups.find(([name]) => name === '补充材料')[1][0].value, '<script>纯文本</script>');
 });
 
-function mountHarness(state, {fetch} = {}) {
+function mountHarness(state, {fetch, configure} = {}) {
   const document = createDocument(), create = document.createElement;
   document.createElement = tag => { const node = create(tag); node.querySelectorAll = selector =>
     descendants(node).filter(item => selector === 'details[open]' && item.tag === 'details' && item.open); return node; };
@@ -386,7 +386,9 @@ function mountHarness(state, {fetch} = {}) {
     },
     location: {origin: 'https://trusted.example', hash: '', replace: url => navigations.push(url)},
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, {callback, delay}); return id; },
-    clearTimeout: id => timers.delete(id), addEventListener: (name, callback) => events.set(name, callback)};
+    clearTimeout: id => timers.delete(id), addEventListener: (name, callback) => events.set(name, callback),
+    removeEventListener: (name, callback) => {if (events.get(name) === callback) events.delete(name);}};
+  configure?.(document, window);
   const controller = mountBusinessDraft({state, fieldNames: Object.keys(state.values), csrfToken: 't', apiUrl: '/draft'}, document, window);
   return {controller, document, nodes, responses, requests, timers, navigations,window,events,documentEvents,
     hide: () => events.get('pagehide')(), restore: () => events.get('pageshow')({persisted: true}),
@@ -516,7 +518,8 @@ test('attendance evidence preserves the source decision as read-only and full ta
   assert.match(target.textContent, /请打开下方支持的材料预览/);
   assert.match(target.textContent, /未打开或不支持预览的附件内容尚未读取/);
   assert.doesNotMatch(target.textContent, /附件内容未在本页读取/);
-  assert.ok(!descendants(target).some(node => ['input', 'select', 'script', 'img', 'a'].includes(node.tag)));
+  assert.ok(!descendants(target).some(node => ['input', 'select', 'script', 'img'].includes(node.tag)));
+  assert.ok(descendants(target).filter(node => node.tag === 'a').every(node => /^#review-/.test(node.href)));
   assert.equal(descendants(target).filter(node => node.tag === 'td').length, 1);
   assert.equal(descendants(target).find(node => node.dataset.reviewKind)?.dataset.reviewKind, 'attendance_confirmation');
 });
@@ -544,7 +547,8 @@ test('all OA designs display projected paragraphs lists and tables without sourc
     assert.equal(nodes.filter(node => node.tag === 'li').length, 2);
     assert.equal(nodes.find(node => node.tag === 'td').attributes.colspan, '2');
     assert.ok(nodes.some(node => node.className === 'reading-table' && node.tabIndex === 0));
-    assert.ok(!nodes.some(node => ['script', 'img', 'iframe', 'a', 'form', 'input', 'button'].includes(node.tag)));
+    assert.ok(!nodes.some(node => ['script', 'img', 'iframe', 'form', 'input', 'button'].includes(node.tag)));
+    assert.ok(nodes.filter(node => node.tag === 'a').every(node => /^#review-/.test(node.href)));
   }
 });
 
@@ -606,8 +610,8 @@ test('weekly report and handover layouts retain full source material and distinc
   assert.deepEqual(descendants(target).filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId), ['a', 'b']);
 });
 
-test('all eighteen named materials expose their existing key facts without editable decisions', () => {
-  assert.equal(Object.keys(REVIEW_DESIGNS).length, 18);
+test('all registered review layouts expose their existing key facts without editable decisions', () => {
+  assert.equal(Object.keys(REVIEW_DESIGNS).length, 24);
   for (const [kind, design] of Object.entries(REVIEW_DESIGNS)) {
     const document = createDocument(), target = document.createElement('div');
     target.querySelectorAll = () => [];
@@ -1192,4 +1196,31 @@ test('Workspace decision receipt carries neither Telegram result token nor launc
   const h=mountHarness(state,{fetch:async url=>({ok:true,json:async()=>url.endsWith('/approve') ? {...state,version:state.version+1,receipt,state:'approved',allowedActions:[]} : state})});
   h.window.location.hash='#tgWebAppData=private';await h.controller.approve();
   assert.deepEqual(h.navigations,[`https://trusted.example${receipt.flowUrl}`]);
+});
+
+test('material anchor clearance follows actual wrapped navigation height and releases its observer while hidden',async()=>{
+ let height=63.2;const measured=[],observers=[];
+ const h=mountHarness(reviewed(initial()),{configure(document,window){
+  const nav={getBoundingClientRect:()=>({height})};document.querySelector=selector=>selector==='.draft-nav'?nav:null;
+  document.documentElement={style:{setProperty:(name,value)=>measured.push([name,value])}};
+  window.ResizeObserver=class {constructor(callback){this.callback=callback;observers.push(this);}observe(target){this.target=target;}disconnect(){this.disconnected=true;}};
+ }});
+ assert.deepEqual(measured.at(-1),['--draft-nav-clearance','80px']);assert.equal(observers.length,1);
+ height=132;observers[0].callback();assert.deepEqual(measured.at(-1),['--draft-nav-clearance','148px']);
+ const count=measured.length;observers[0].callback();assert.equal(measured.length,count);
+ h.hide();assert.equal(observers[0].disconnected,true);assert.equal(h.events.has('resize'),false);
+ height=170;observers[0].callback();assert.equal(measured.length,count);
+ h.restore();await flush();assert.deepEqual(measured.at(-1),['--draft-nav-clearance','186px']);assert.equal(observers.length,2);
+ h.hide();assert.equal(observers[1].disconnected,true);
+});
+
+test('older WebViews measure navigation again on resize and ignore unavailable geometry',()=>{
+ let height=80;const measured=[];
+ const h=mountHarness(reviewed(initial()),{configure(document){
+  document.querySelector=()=>({getBoundingClientRect:()=>({height})});
+  document.documentElement={style:{setProperty:(_name,value)=>measured.push(value)}};
+ }});
+ assert.equal(measured.at(-1),'96px');height=140;h.events.get('resize')();assert.equal(measured.at(-1),'156px');
+ const count=measured.length;height=NaN;h.events.get('resize')();assert.equal(measured.length,count);
+ h.hide();assert.equal(h.events.has('resize'),false);
 });

@@ -26,6 +26,13 @@ from tests.test_seeyon_pending_actions import ALL_PENDING_PROFILES, _fixture
 from tests.test_seeyon_work_handover import HandoverFrame, snapshot as handover_snapshot
 from tests.test_seeyon_flight_application import FlightFrame, snapshot as flight_snapshot
 from tests.test_seeyon_missed_punch import FakeAdapter as MissedAdapter, FakeApprovalPage
+from tests.test_seeyon_business_settlement import SettlementFrame, snapshot as settlement_snapshot
+from tests.test_seeyon_quarterly_performance import PerformanceFrame, snapshot as performance_snapshot
+from tests.test_seeyon_intellectual_property_reward import RewardFrame, snapshot as reward_snapshot
+
+# Preserve ALL_PENDING_PROFILES as the historical 14-type benchmark contract.
+FULL_REVIEW_PROFILES = (*ALL_PENDING_PROFILES, "business_settlement", "quarterly_performance",
+                        "intellectual_property_reward")
 
 
 def _preview_png():
@@ -59,7 +66,31 @@ def _preview_pdf():
 
 
 def oa_case(profile, affair_id):
-    if profile == "missed_punch":
+    if profile in {"business_settlement", "quarterly_performance", "intellectual_property_reward"}:
+        from agentbridge.adapters import seeyon_business_settlement as settlement
+        from agentbridge.adapters import seeyon_quarterly_performance as performance
+        from agentbridge.adapters import seeyon_intellectual_property_reward as reward
+        module, snapshot, title = {
+            "business_settlement": (settlement, settlement_snapshot,
+                "【报销】业务结算单-合成申请人-2026-10-22-报销并付款-155.00-个人账户-合成收款人"),
+            "quarterly_performance": (performance, performance_snapshot, "【绩效】部门季度绩效考核汇总-合成部门"),
+            "intellectual_property_reward": (reward, reward_snapshot, "【知识产权】知识产权奖励审批单-合成申请"),
+        }[profile]
+        fixture = deepcopy(_fixture("standard_collaboration"))
+        fixture.update(profile=profile, row_snapshot=snapshot())
+        fixture["source"]["title"] = title
+        fixture["detail"]["fields"] = [{"name": module.FIELD_LABELS[field["id"]], "value": field["value"]}
+            for field in fixture["row_snapshot"]["fields"]]
+        if profile == "quarterly_performance":
+            fixture["detail"]["fields"].extend([{"name": "等级名称", "value": "原始季度绩效等级规则"},
+                {"name": "姓名", "value": "合成员工明细"}])
+        elif profile == "intellectual_property_reward":
+            fixture["detail"]["fields"].append({"name": "姓名", "value": "合成申请人"})
+        fixture["signals"].update(node_policy="报销审批" if profile == "business_settlement" else "inform",
+            node_policy_name="报销审批" if profile == "business_settlement" else "知会",
+            attitude_codes=["agree", "disagree"] if profile == "business_settlement" else [])
+        fixture["signals"]["identity"].update(template_id=module.TEMPLATE_ID, form_app_id=module.FORM_APP_ID, body_type="20")
+    elif profile == "missed_punch":
         source, detail = MissedAdapter().resolve_workflow_detail(None, collection="pending", affair_id="affair-1")
         fixture = {"profile": profile, "source": source, "detail": detail,
                    "signals": FakeApprovalPage().evaluate("", "affair-1")}
@@ -106,6 +137,10 @@ class FullOaPage(SyntheticOaPage):
                 return [HandoverFrame(fixture["row_snapshot"])]
             if fixture["profile"] == "flight_application":
                 return [FlightFrame(fixture["row_snapshot"])]
+            frame = {"business_settlement": SettlementFrame, "quarterly_performance": PerformanceFrame,
+                     "intellectual_property_reward": RewardFrame}.get(fixture["profile"])
+            if frame:
+                return [frame(fixture["row_snapshot"])]
         return super().frames
 
 
@@ -228,6 +263,8 @@ class FullBusinessAcceptanceFixture(BusinessViewAcceptanceFixture):
             "missed_punch": "oa.missed_punch.approval.prepare",
             "attendance_confirmation": "oa.attendance_confirmation.prepare",
             "weekly_report": "oa.weekly_report.acknowledgement.prepare",
+            "quarterly_performance": "oa.quarterly_performance.acknowledgement.prepare",
+            "intellectual_property_reward": "oa.intellectual_property_reward.acknowledgement.prepare",
         }.get(profile, f"oa.{profile}.approval.prepare")
         assert capability in _TRUSTED_WRITE_DEFINITIONS
         affair_id = f"synthetic-{profile}-{case_key}"

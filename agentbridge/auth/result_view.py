@@ -14,10 +14,11 @@ from agentbridge.auth.field_card import _document, _security_headers
 
 
 _SCRIPT = Path(__file__).with_name("static") / "result_view.mjs"
+_BATCH_SCRIPT = Path(__file__).with_name("static") / "batch_view.mjs"
 
 
 def result_view_target(path):
-    match = re.fullmatch(r"/results/([A-Za-z0-9_-]{32,128})(?:/(state|prepare|refresh|open|recovery-probe|recovery-prepare|recovery-open))?", path.split("?", 1)[0])
+    match = re.fullmatch(r"/results/([A-Za-z0-9_-]{32,128})(?:/(state|prepare|refresh|open|recovery-probe|recovery-prepare|recovery-open|remaining-query))?", path.split("?", 1)[0])
     return (match[1], match[2] or "page") if match else None
 
 
@@ -89,7 +90,8 @@ class TrustedResultViewApplication:
 <p class="muted">关闭或返回仅离开页面，不会取消任务。若需取消，请回到原聊天要求取消对应任务。</p>
 </section></main>'''
             body += f'<script nonce="{nonce}" type="application/json" id="result-data">{data}</script>'
-            body += f'<script nonce="{nonce}" type="module">{_SCRIPT.read_text()}</script>'
+            script = _BATCH_SCRIPT.read_text() + _SCRIPT.read_text().replace("import {renderBatchChecklist} from './batch_view.mjs';", "")
+            body += f'<script nonce="{nonce}" type="module">{script}</script>'
             body += f'''<style nonce="{nonce}">
               .result-choice {{ display:flex; align-items:center; gap:12px; min-height:48px; padding:10px 0; cursor:pointer; }}
               .result-choice input[type=checkbox] {{ width:24px; height:24px; min-height:24px; flex:0 0 24px; margin:0; }}
@@ -155,7 +157,7 @@ class TrustedResultViewApplication:
                 value = json.loads(body)
             except (ValueError, UnicodeError):
                 return self.json(400, {"error": {"code": "INVALID_JSON", "message": "请求内容无效。"}})
-            if action not in {"prepare", "refresh", "open", "recovery-probe", "recovery-prepare", "recovery-open"}:
+            if action not in {"prepare", "refresh", "open", "recovery-probe", "recovery-prepare", "recovery-open", "remaining-query"}:
                 return self.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}})
             return self.json(202, getattr(self.backend, action.replace("-", "_"))(view_token, value))
         except Exception as error:

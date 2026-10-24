@@ -329,7 +329,7 @@ def create_auth_http_server(
                 if len(body) != content_length:
                     self.close_connection = True
                     self._send(result_application.json(400, {"error": {"code": "INVALID_LENGTH", "message": "请求内容不完整。"}}))
-                elif action not in {"prepare", "refresh", "open", "recovery-probe", "recovery-prepare", "recovery-open"}:
+                elif action not in {"prepare", "refresh", "open", "recovery-probe", "recovery-prepare", "recovery-open", "remaining-query"}:
                     self._send(result_application.json(405, {"error": {"code": "METHOD_NOT_ALLOWED", "message": "请求方法不支持。"}}))
                 elif urlparse(self.path).query:
                     self._send(result_application.json(400, {"error": {"code": "INVALID_QUERY", "message": "办理请求无效。"}}))

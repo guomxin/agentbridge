@@ -7,7 +7,7 @@ const task = '12345678-1234-1234-1234-123456789abc';
 const opaque = 'a'.repeat(43);
 
 function fixture(saved = null, {extraState = {}, savedQuery = null} = {}) {
-  function node(tag = '') { return {tag, children: [], listeners: {}, dataset:{}, textContent: '', hidden: false,
+  function node(tag = '') { return {tag, children: [], listeners: {}, dataset:{}, style:{}, attributes:{}, setAttribute(name,value){this.attributes[name]=value;}, textContent: '', hidden: false,
     append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
     addEventListener(name, fn) { this.listeners[name] = fn; }, click() { return this.listeners.click?.(); }}; }
   const ids = Object.fromEntries(['result-groups','result-title','result-status','result-count','result-prepare','result-recover','result-resume',
@@ -622,4 +622,61 @@ test('conflicting or completed evidence explains the bounded reason without enab
   const panel=recoveryPanel(f);
   assert.equal(panel.children[3].textContent,'已有完成或待办、已办相互冲突的证据，请先到 OA 核对原事项。');
   assert.equal(panel.children[6].hidden,true);panel.children[6].click();assert.equal(f.calls.length,0);
+});
+
+const remainingPreparation=(overrides={})=>({taskId:task,state:'outcome_unknown',terminal:true,
+ batch:{totalCount:3,succeededCount:1,items:[{ordinal:1,title:'已成功',state:'succeeded'},
+ {ordinal:2,title:'未知项',state:'outcome_unknown',isCurrent:true},{ordinal:3,title:'剩余项',state:'queued'}]},
+ oaBatchRemaining:{available:true,batchVersion:7,remainingCount:1},...overrides});
+const findRemaining=f=>f.ids['result-resume'].children.find(n=>n.tag==='button'&&n.textContent.startsWith('重新查询并核对剩余'));
+
+test('Telegram stopped batch shows independent item outcomes and explicitly queries only the server-defined remainder',async()=>{
+ const f=fixture(null,{extraState:{preparations:[remainingPreparation()]}});
+ const checklist=f.ids['result-resume'].children.find(n=>n.tag==='section');
+ const list=checklist.children[0].children[2];
+ assert.match(list.children[0].textContent,/已核验完成/);assert.match(list.children[1].textContent,/当前项.*结果待核对/);
+ assert.match(list.children[2].textContent,/尚未处理/);
+ findRemaining(f).click();assert.equal(f.calls.length,1);assert.match(f.calls[0].url,/\/remaining-query$/);
+ const body=JSON.parse(f.calls[0].options.body);
+ assert.deepEqual(body,{taskId:task,requestKey:'request-1234567890',expectedBatchVersion:7});
+ assert.equal(f.ids['result-prepare'].disabled,true);assert.equal(findRemaining(f).disabled,true);
+ findRemaining(f).click();assert.equal(f.calls.length,1);
+ f.calls[0].reject(Error('lost receipt'));await flush();
+ assert.equal(f.ids['result-query-recover'].hidden,false);f.ids['result-query-recover'].click();
+ assert.equal(f.calls[1].options.body,f.calls[0].options.body);assert.match(f.calls[1].url,/\/remaining-query$/);
+ f.calls[1].reject(Error('still offline'));await flush();assert.deepEqual(f.navigations,[]);
+});
+
+test('Telegram remaining query restores through GET then obtains a new ticket only by the original explicit POST',async()=>{
+ const query='22345678-1234-1234-1234-123456789abc',ticket='z'.repeat(43);
+ const body={taskId:task,requestKey:'original-remaining-key',expectedBatchVersion:7};
+ const f=fixture(null,{extraState:{preparations:[remainingPreparation()]},savedQuery:{action:'remaining-query',body,taskId:query}});
+ assert.equal(f.calls[0].options.method,'GET');assert.match(f.calls[0].url,/state\?query=/);
+ f.calls[0].resolve({taskId:query,state:'succeeded',terminal:true,selectionAvailable:true});await flush();
+ assert.match(f.calls[1].url,/\/remaining-query$/);assert.deepEqual(JSON.parse(f.calls[1].options.body),body);
+ f.calls[1].resolve({taskId:query,resultView:{presentation:{url:`https://trusted.test/results/${ticket}`}}});await flush();
+ assert.deepEqual(f.navigations,[`https://trusted.test/results/${ticket}#tgWebAppPlatform=android`]);assert.equal(f.savedQuery(),null);
+ assert.equal(f.calls.filter(c=>/\/prepare$|\/recovery-prepare$|\/open$/.test(c.url)).length,0);
+});
+
+test('remaining query metadata never makes unknown or successful items selectable and malformed saved commands cannot widen scope',()=>{
+ for(const value of [{available:false,batchVersion:1,remainingCount:2},{available:true,batchVersion:0,remainingCount:2},
+  {available:true,batchVersion:1,remainingCount:0}]) {
+  const f=fixture(null,{extraState:{preparations:[remainingPreparation({oaBatchRemaining:value})]}});
+  assert.equal(findRemaining(f),undefined);assert.equal(f.calls.length,0);
+ }
+ const f=fixture(null,{savedQuery:{action:'remaining-query',body:{taskId:task,requestKey:'tampered-command-key',expectedBatchVersion:7,targetKeys:['x']}}});
+ assert.equal(f.calls.length,0);assert.equal(f.ids['result-query-recover'].hidden,true);
+});
+
+test('remaining result distinguishes matched, missing and changed original ordinals without selecting unavailable items',()=>{
+ const f=fixture(null,{extraState:{groups:[{operationId:'scoped-op',remaining:{requestedCount:3,matchedCount:1,missingCount:1,changedCount:1,
+ items:[{ordinal:3,title:'仍在待办',state:'matched'},{ordinal:4,title:'已离开待办',state:'missing'},{ordinal:5,title:'节点变化',state:'changed'}]},
+ targets:[{targetKey:'a'.repeat(64),title:'仍在待办',enabled:true}]}]}});
+ const group=f.ids['result-groups'].children[0];
+ const text=group.children.filter(n=>n.tag==='p').map(n=>n.textContent).join(' ');
+ assert.match(text,/剩余 3 项.*匹配 1 项.*当前待办未找到 1 项.*资格变化 1 项.*未找到不代表已成功/);
+ assert.doesNotMatch(text,/已不在当前待办|身份或资格变化/);
+ assert.match(text,/原第 4 项.*不代表办理成功/);
+ assert.equal(group.children.filter(n=>n.tag==='label').length,1);assert.equal(f.calls.length,0);
 });

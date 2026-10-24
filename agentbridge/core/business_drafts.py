@@ -1185,8 +1185,12 @@ class BusinessDraftService:
             "contentDraft": self.contents.view(connection, source, draft, now=self.store.clock())}
         batch_context = source["form_schema"].get("_agentbridge_business_draft_context", {}).get("batch")
         if batch_context:
-            batch = connection.execute("SELECT total_count,state FROM task_batches WHERE batch_id=?", (batch_context["batchId"],)).fetchone()
-            result["batch"] = {"ordinal": batch_context["ordinal"], "totalCount": batch["total_count"], "state": batch["state"]} if batch else None
+            from agentbridge.core.task_projections import trusted_batch_projection
+            batch_row = connection.execute("SELECT * FROM task_batches WHERE batch_id=? AND user_subject=?", (batch_context["batchId"], source["user_subject"])).fetchone()
+            batch = self.service.tasks._batch_snapshot(connection, batch_row, include_resource_refs=False) if batch_row else None
+            result["batch"] = trusted_batch_projection(batch)
+            if result["batch"]:
+                result["batch"]["ordinal"] = batch_context["ordinal"]
         if profile.view_kind == "meeting_room" and result["allowedActions"]:
             result["allowedActions"].append("options")
         if result["ui"].get("review"):

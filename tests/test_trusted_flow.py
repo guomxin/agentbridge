@@ -382,8 +382,13 @@ class TrustedFlowTests(unittest.TestCase):
             self.assertEqual(view["state"], "completed")
             self.assertNotIn("nextUrl", view)
             self.assertTrue(view["continueUrl"].startswith(f'/flow/input/{following["submission_id"]}/present/'))
-            self.assertEqual(view["batch"], {"completedCount": 1, "totalCount": 2,
-                "nextOrdinal": 2, "nextTitle": "第二项待独立核对"})
+            self.assertEqual({key: view["batch"][key] for key in
+                ("completedCount", "totalCount", "nextOrdinal", "nextTitle")},
+                {"completedCount": 1, "totalCount": 2, "nextOrdinal": 2, "nextTitle": "第二项待独立核对"})
+            self.assertEqual([item["state"] for item in view["batch"]["items"]], ["succeeded", "waiting_user"])
+            self.assertEqual([item["isCurrent"] for item in view["batch"]["items"]], [False, True])
+            for item in view["batch"]["items"]:
+                self.assertEqual(set(item), {"ordinal", "title", "workflowLabel", "state", "isCurrent"})
             next_presentation = self.service.field_submissions.get_presentation(following["submission_id"],
                 view["continueUrl"].split("/")[-1])
             self.assertEqual(next_presentation["endpoint_id"], self.endpoint_id)

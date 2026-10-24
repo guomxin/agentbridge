@@ -1,4 +1,5 @@
 /** Trusted-page state only. Business values never leave this origin or persist in browser storage. */
+import {renderBatchChecklist} from './batch_view.mjs';
 export const DRAFT_FIELDS = ["log_date", "hours", "project", "content"];
 const LOCKED_STATES = new Set(["approved", "finalized", "expired", "superseded", "canceled", "unavailable"]);
 const isLocked = state => Boolean(state.receipt) || LOCKED_STATES.has(state.state);
@@ -445,9 +446,15 @@ const KEY_REVIEW_LABELS = new Set(["事项", "申请人", "发起人", "姓名",
 
 // These layouts select existing evidence; they never calculate or invent business facts.
 export const REVIEW_DESIGNS = {
+  work_log: {title: "工作日志核对", family: "document", keys: ["日志日期", "工时", "所属项目", "日志内容"]},
+  meeting: {title: "会议安排", family: "journey", keys: ["会议主题", "会议室", "开始时间", "结束时间", "参会人"]},
+  meeting_room_application: {title: "会议室使用安排", family: "journey", keys: ["用途", "会议室", "开始时间", "结束时间"]},
+  meeting_room_cancel: {title: "会议室撤销核对", family: "journey", keys: ["会议室", "开始时间", "结束时间", "撤销原因"]},
+  workflow_revoke: {title: "流程撤销核对", family: "document", keys: ["事项", "发起时间", "当前待办人", "撤销附言"]},
+  alarm_remark: {title: "告警备注核对", family: "document", keys: ["告警设备", "告警类型", "告警 ID", "原备注", "新备注"]},
   meeting_reply: {title: "会议邀请", family: "document", keys: ["会议主题", "开始时间", "结束时间", "地点", "发起人", "主持人", "记录人", "回复人", "当前回执", "参会意向", "回复说明"]},
   missed_punch: {title: "补签申请", family: "time", keys: ["申请人", "开始时间", "补签原因", "事由说明"]},
-  efficiency_data: {title: "效能数据材料", family: "document", keys: []},
+  efficiency_data: {title: "效能数据材料", family: "document", keys: ["统计周期", "周期", "部门", "部门名称", "指标名称", "指标值"]},
   travel_expense: {title: "差旅报销材料", family: "expense", keys: ["姓名", "应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项", "关联出差申请单"]},
   business_trip: {title: "出差行程", family: "journey", keys: ["申请人", "出差始发地", "出差目的地", "出差开始时间", "出差结束时间", "出差工具", "出差天数", "出差小时数", "出差事由"]},
   business_settlement: {title: "业务结算单材料", family: "expense", keys: ["流水号", "姓名", "发起部门", "日期", "结算方式", "费用归属部门", "结算实体", "费用归属事项", "应付金额合计", "账户类型", "收款账户名称", "收款账号", "收款账户开户行"]},
@@ -465,26 +472,83 @@ export const REVIEW_DESIGNS = {
   standard_collaboration: {title: "协同事项材料", family: "document", keys: []},
 };
 
+// The focus groups only select exact source labels. A title, an image or a
+// numeric-looking string is never parsed into a new business fact.
+export const REVIEW_FOCUS = {
+  work_log: [["日期与工时", ["日志日期", "工时"]], ["项目与内容", ["所属项目", "日志内容"]]],
+  meeting: [["会议与参会范围", ["会议主题", "参会人"]], ["时段与场地", ["开始时间", "结束时间", "会议室"]]],
+  meeting_room_application: [["用途与场地", ["用途", "会议室"]], ["使用时段", ["开始时间", "结束时间"]]],
+  meeting_room_cancel: [["原申请时段", ["会议室", "开始时间", "结束时间"]], ["撤销说明", ["撤销原因"]]],
+  workflow_revoke: [["原流程", ["事项", "发起时间", "当前待办人"]], ["撤销说明", ["撤销附言"]]],
+  alarm_remark: [["原告警", ["告警设备", "告警类型", "告警 ID"]], ["备注变更", ["原备注", "新备注"]]],
+  meeting_reply: [["会议与时段", ["会议主题", "开始时间", "结束时间", "地点"]], ["本人回执", ["回复人", "当前回执", "参会意向", "回复说明"]]],
+  efficiency_data: [["统计周期", ["统计周期", "周期"]], ["所属部门", ["部门", "部门名称"]], ["明确提供的指标", ["指标名称", "指标值"]]],
+  travel_expense: [["金额与费用归属", ["应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项"]], ["人员与关联申请", ["姓名", "关联出差申请单"]]],
+  business_trip: [["行程与交通", ["出差始发地", "出差目的地", "出差工具"]], ["时段与口径", ["出差开始时间", "出差结束时间", "出差天数", "出差小时数"]], ["出差事由", ["出差事由"]]],
+  business_settlement: [["账面金额与归属", ["应付金额合计", "费用归属部门", "费用归属事项", "结算实体"]], ["收款对象", ["账户类型", "收款账户名称", "收款账号", "收款账户开户行"]]],
+  labor_contract_renewal: [["员工与期限", ["员工信息", "合同期限"]], ["原续签意见", ["综合评价", "续签建议", "综合评价指导意见"]]],
+  intellectual_property_declaration: [["申报与权属", ["申报名称", "知识产权类型", "权属类型", "权属单位"]], ["申请主体", ["申请人", "申请部门", "发明/设计人"]]],
+  intellectual_property_reward: [["原奖项与金额", ["奖项名称", "奖励金额", "奖励事由"]], ["人员与部门", ["申请人", "所属部门", "团队负责人", "团队负责人部门"]]],
+  overtime: [["申请与实际时段", ["申请开始时间", "申请结束时间", "实际开始时间", "实际结束时间"]], ["申请事由", ["姓名", "加班事由"]]],
+  leave: [["假别与时段", ["请假类型", "开始时间", "结束时间"]], ["天数与小时口径", ["请假天数", "请假小时"]], ["请假事由", ["申请人", "事由"]]],
+  missed_punch: [["补签时段", ["开始时间", "结束时间"]], ["补签说明", ["申请人", "补签原因", "事由说明"]]],
+  resignation: [["人员与日期", ["员工", "所属部门", "岗位", "入职时间", "申请离职时间"]], ["原申请说明", ["离职原因"]]],
+  work_handover: [["交接责任", ["移交人", "移交人部门", "监交人"]], ["交接安排", ["交接日期", "交接类别"]]],
+  flight_application: [["申请人员与日期", ["申请人", "部门", "申请日期"]]],
+  attendance_confirmation: [["员工与统计月份", ["员工与月份"]], ["原出勤统计", ["出勤统计"]], ["当前确认结论", ["OA 当前确认结论"]]],
+  weekly_report: [["周报与周期", ["周报名称", "年度"]], ["本周说明", ["本周说明"]]],
+  quarterly_performance: [["原考评范围", ["考评人", "部门名称", "复核截止日期"]], ["原评级口径", ["A等级占比", "B等级占比"]]],
+  standard_collaboration: [["事项与发起人", ["事项", "发起人", "日期"]]],
+};
+
+export function reviewSourceFields(review) {
+  const result = [];
+  const add = (fields, prefix) => (Array.isArray(fields) ? fields : []).forEach((field, index) => {
+    if (!field || typeof field !== 'object' || !String(field.label ?? '').trim()) return;
+    result.push({...field, label:String(field.label).trim(), value:String(field.value ?? ''), sourceAnchor:`${prefix}-${index}`});
+  });
+  add(review?.fields, 'review-field');
+  (Array.isArray(review?.groups) ? review.groups : []).forEach((group, index) => add(group?.fields, `review-group-${index}-field`));
+  (Array.isArray(review?.sections) ? review.sections : []).forEach((section, index) => {
+    if (section?.kind === 'facts') add(section.fields, `review-section-${index}-field`);
+  });
+  return result;
+}
+
+export function reviewFocus(review, kind) {
+  // Source projections may repeat a fact in overview and original sections.
+  // Collapse only identical summary entries; all original rows remain below.
+  const seen = new Set();
+  const fields = reviewSourceFields(review).filter(field => {
+    const key = JSON.stringify([field.label, field.value]);
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+  return (Object.hasOwn(REVIEW_FOCUS, kind) ? REVIEW_FOCUS[kind] : []).map(([title, labels]) => ({title,
+    fields:fields.filter(field => labels.includes(field.label) && field.value.trim()),
+    missing:!fields.some(field => labels.includes(field.label) && field.value.trim())}));
+}
+
 export function reviewSections(review, kind = "") {
   const overview = [], groups = new Map();
   const design = Object.hasOwn(REVIEW_DESIGNS, kind) ? REVIEW_DESIGNS[kind] : null;
   const keys = design ? new Set(["事项", "发起人", "日期", ...design.keys]) : KEY_REVIEW_LABELS;
   const addGroup = (name, item) => { if (!groups.has(name)) groups.set(name, []); groups.get(name).push(item); };
-  const normalize = fields => (Array.isArray(fields) ? fields : []).filter(item => item && typeof item === "object")
-    .map(item => ({...item, label: String(item.label ?? "").trim(), value: String(item.value ?? "").trim()}))
+  const normalize = (fields, prefix) => (Array.isArray(fields) ? fields : []).map((item, index) => item && typeof item === "object"
+    ? {...item, sourceAnchor:`${prefix}-${index}`, label: String(item.label ?? "").trim(), value: String(item.value ?? "").trim()} : null).filter(Boolean)
     .filter(item => item.label && item.value);
-  for (const item of normalize(review?.fields)) {
+  for (const item of normalize(review?.fields, 'review-field')) {
     const group = /^(航段\d+|工作明细\d+|财务明细\d+)\s*·/.exec(item.label);
     const long = item.value.length > 180 || item.value.split("\n").length > 3;
     if (group) addGroup(group[1], item);
     else if (keys.has(item.label)) {
-      overview.push(long ? {...item, reading: undefined, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
+      overview.push(long ? {...item, sourceAnchor:undefined, fullAnchor:item.sourceAnchor, reading: undefined, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
       if (long) addGroup(item.label + " · 全文", item);
     } else addGroup(long ? item.label : "其他申请信息", item);
   }
   if (!overview.length && groups.has("其他申请信息")) overview.push(...groups.get("其他申请信息").splice(0, 6));
-  for (const group of Array.isArray(review?.groups) ? review.groups : []) {
-    for (const item of normalize(group?.fields)) addGroup(String(group.title || "申请明细"), item);
+  for (const [index, group] of (Array.isArray(review?.groups) ? review.groups : []).entries()) {
+    for (const item of normalize(group?.fields, `review-group-${index}-field`)) addGroup(String(group.title || "申请明细"), item);
   }
   return {overview, groups: [...groups].filter(([, fields]) => fields.length)};
 }
@@ -494,7 +558,7 @@ const READING_TAGS = new Set(["p", "h2", "br", "ul", "ol", "li", "table", "thead
 
 // The server projects source HTML into a closed reading tree. Never parse HTML
 // here or copy source attributes: even an invalid projection stays inert text.
-export function appendReading(document, target, text, reading) {
+export function appendReading(document, target, text, reading, onTable = () => {}) {
   if (!reading) { target.textContent = String(text ?? ""); return; }
   let budget = 20000;
   const valid = (item, depth = 0) => {
@@ -521,6 +585,7 @@ export function appendReading(document, target, text, reading) {
     if (item.tag === "table") {
       const scroll = document.createElement("div"); scroll.className = "reading-table";
       scroll.tabIndex = 0; scroll.setAttribute("aria-label", "正文表格"); scroll.append(element); parent.append(scroll);
+      onTable(scroll);
     } else parent.append(element);
   };
   for (const item of reading.nodes) append(root, item);
@@ -531,13 +596,15 @@ export function appendReading(document, target, text, reading) {
   target.append(root);
 }
 
-function appendReviewRows(document, target, fields, wrapped = true) {
+function appendReviewRows(document, target, fields, wrapped = true, register = () => {}, linkTo = null) {
   for (const item of fields) {
     const row = wrapped ? document.createElement("div") : target;
     if (wrapped) row.className = "review-row";
+    if (item.sourceAnchor) register(item.sourceAnchor, row);
     const label = document.createElement("dt"), value = document.createElement("dd");
     label.textContent = String(item.label ?? ""); appendReading(document, value, item.value, item.reading);
     row.append(label, value);
+    if (item.fullAnchor && linkTo) value.append(linkTo(item.fullAnchor, '定位完整原字段'));
     if (wrapped) target.append(row);
   }
 }
@@ -557,24 +624,69 @@ export function renderEvidence(document, target, review, kind = "") {
   const effect = document.createElement("p"); effect.className = "review-effect"; effect.textContent = review?.effect || "";
   const facts = document.createElement("dl"); facts.className = "review-key-facts";
   const weeklySections = (review?.sections || []).filter(item => ["current-week", "next-week"].includes(item?.id));
-  const weeklyValues = new Set(weeklySections.flatMap(item => item.fields || []).map(item => String(item.value || "").trim()));
-  const weeklyLabels = new Set(weeklySections.flatMap(item => item.fields || []).map(item => String(item.label || "").trim()));
-  const duplicatedWeekly = item => kind === "weekly_report" && (weeklyLabels.has(item.label) || weeklyValues.has(item.value));
-  appendReviewRows(document, facts, overview.filter(item => !duplicatedWeekly(item)));
-  section.append(kicker, heading, effect, facts);
+  const originalFields = reviewSourceFields(review);
+  const canonical = new Map();
+  if (kind === 'weekly_report') {
+    for (const field of originalFields.filter(item => item.sourceAnchor.startsWith('review-field-'))) {
+      const source = originalFields.find(item => item.sourceAnchor.startsWith('review-section-') && item.label === field.label && item.value === field.value);
+      if (source) canonical.set(field.sourceAnchor, source.sourceAnchor);
+    }
+  }
+  const sourceNodes = new Map();
+  const register = (id, node) => { node.id = id; if (!Number.isInteger(node.tabIndex) || node.tabIndex < 0) node.tabIndex = -1; sourceNodes.set(id, node); };
+  const linkTo = (id, label) => {
+    id = canonical.get(id) || id;
+    const link = document.createElement('a'); link.href = `#${id}`; link.textContent = label;
+    link.addEventListener('click', event => {
+      const destination = sourceNodes.get(id) || document.getElementById?.(id);
+      if (!destination) return;
+      event.preventDefault();
+      for (let parent = destination; parent; parent = parent.parentElement || parent.parentNode) {
+        if (String(parent.tagName || parent.tag).toLowerCase() === 'details') parent.open = true;
+      }
+      destination.scrollIntoView?.({block:'start',behavior:'auto'}); destination.focus?.({preventScroll:true});
+    });
+    return link;
+  };
+  const focus = document.createElement('section'); focus.className = 'review-focus'; focus.setAttribute('aria-label','材料核对要点');
+  for (const group of reviewFocus(review, kind)) {
+    const box = document.createElement('div'), title = document.createElement('h3'); title.textContent = group.title; box.append(title);
+    if (group.missing) {
+      const missing = document.createElement('p'); missing.className = 'review-missing';
+      missing.textContent = '原材料未提供独立字段，请查看下方原文或原图。'; box.append(missing);
+    } else {
+      for (const field of group.fields) {
+        const item = document.createElement('p');
+        item.textContent = kind === 'weekly_report' ? `${field.label} ` : `${field.label}：${field.value.length > 160 ? field.value.slice(0,160) + '…' : field.value} `;
+        item.append(linkTo(field.sourceAnchor, '查看原字段')); box.append(item);
+      }
+    }
+    focus.append(box);
+  }
+  const directory = document.createElement('nav'); directory.className = 'material-directory'; directory.setAttribute('aria-label','原始材料目录');
+  const directoryTitle = document.createElement('h3'); directoryTitle.textContent = '原始材料目录'; directory.append(directoryTitle);
+  const directoryItems = document.createElement('div'); directory.append(directoryItems);
+  let directoryCount = 0;
+  const addDirectory = (id, title) => { directoryItems.append(linkTo(id,title)); directoryCount++; };
+  const duplicatedWeekly = item => canonical.has(item.sourceAnchor || item.fullAnchor);
+  appendReviewRows(document, facts, overview.filter(item => !duplicatedWeekly(item)), true, register, linkTo);
+  section.append(kicker, heading, effect, focus, directory, facts);
   for (const [name, fields] of groups) {
     const visibleFields = fields.filter(item => !duplicatedWeekly(item));
     if (!visibleFields.length) continue;
     const detail = document.createElement("details"); detail.className = "review-group";
     detail.dataset.group = name; detail.open = opened.get(name) || false;
     const summary = document.createElement("summary"); summary.textContent = `${name} · ${visibleFields.length} 项`;
-    const rows = document.createElement("dl"); appendReviewRows(document, rows, visibleFields);
+    const rows = document.createElement("dl"); appendReviewRows(document, rows, visibleFields, true, register, linkTo);
     detail.append(summary, rows); section.append(detail);
   }
   let weeklyGrid = null;
-  for (const material of Array.isArray(review?.sections) ? review.sections : []) {
+  for (const [materialIndex, material] of (Array.isArray(review?.sections) ? review.sections : []).entries()) {
     if (!material || !["facts", "text", "table"].includes(material.kind)) continue;
     const detail = document.createElement("details"); detail.className = `review-group material-${material.kind}`;
+    const sectionId = `review-section-${materialIndex}`; register(sectionId, detail);
+    const materialCount = material.kind === 'table' ? ` · ${Array.isArray(material.rows) ? material.rows.length : 0} 行` : '';
+    addDirectory(sectionId, String(material.title || '原始材料') + materialCount);
     detail.dataset.group = `material:${String(material.id || material.title || "")}`;
     const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs", "reward-information", "reward-allocations", "settlement-information", "settlement-expenses", "settlement-payments"].includes(material.id) ||
       material.id === "body" && design?.family === "document" && (kind !== "weekly_report" || !weeklySections.length);
@@ -582,7 +694,8 @@ export function renderEvidence(document, target, review, kind = "") {
     const summary = document.createElement("summary"); summary.textContent = String(material.title || "原始材料");
     detail.append(summary);
     if (material.kind === "facts") {
-      const rows = document.createElement("dl"); appendReviewRows(document, rows, Array.isArray(material.fields) ? material.fields : []); detail.append(rows);
+      const rows = document.createElement("dl");
+      appendReviewRows(document, rows, (Array.isArray(material.fields) ? material.fields : []).map((field, index) => field && ({...field,sourceAnchor:`${sectionId}-field-${index}`})).filter(Boolean), true, register, linkTo); detail.append(rows);
     } else if (material.kind === "text") {
       if (!primary && String(material.text || "").length > 1800) {
         const excerpt = document.createElement("p"); excerpt.className = "material-excerpt";
@@ -590,7 +703,10 @@ export function renderEvidence(document, target, review, kind = "") {
         section.append(excerpt);
       }
       const text = document.createElement(material.reading ? "div" : "pre"); text.className = "material-body"; text.tabIndex = 0;
-      appendReading(document, text, material.text, material.reading); detail.append(text);
+      let tableIndex = 0;
+      appendReading(document, text, material.text, material.reading, table => {
+        const id = `${sectionId}-table-${++tableIndex}`; register(id, table); addDirectory(id, `${material.title || '正文'} · 原表 ${tableIndex}`);
+      }); detail.append(text);
       if (String(material.text || "").length > 1800) {
         const expand = document.createElement("button"); expand.type = "button"; expand.className = "secondary material-reading-toggle";
         let expanded = false; expand.textContent = "展开长文连续阅读"; expand.setAttribute("aria-expanded", "false");
@@ -607,8 +723,18 @@ export function renderEvidence(document, target, review, kind = "") {
       const header = document.createElement("tr");
       for (const column of columns) { const cell = document.createElement("th"); cell.scope = "col"; cell.textContent = String(column.label || column.key); header.append(cell); }
       head.append(header);
-      for (const row of Array.isArray(material.rows) ? material.rows : []) {
+      const rowIndex = document.createElement('details'); rowIndex.className = 'material-row-index';
+      rowIndex.dataset.group = `row-index:${materialIndex}`; rowIndex.open = opened.get(rowIndex.dataset.group) || false;
+      const rowSummary = document.createElement('summary'), rowLinks = document.createElement('div');
+      const sourceRows = Array.isArray(material.rows) ? material.rows : [];
+      rowSummary.textContent = `定位原始明细行（${sourceRows.length} 行）`; rowIndex.append(rowSummary,rowLinks);
+      for (const [rowNumber, row] of sourceRows.entries()) {
         const line = document.createElement("tr"); line.dataset.rowId = String(row?.id || "");
+        const rowId = `${sectionId}-row-${rowNumber}`; register(rowId,line);
+        if (rowNumber < 200) {
+          const description = columns.slice(0,2).map(column => String(row?.cells?.[column.key] ?? '').slice(0,60)).join(' · ');
+          rowLinks.append(linkTo(rowId, `第 ${rowNumber+1} 行${description ? '：'+description : ''}`));
+        }
         for (const column of columns) {
           const cell = document.createElement("td");
           appendReading(document, cell, row?.cells?.[column.key], row?.readings?.[column.key]); line.append(cell);
@@ -617,13 +743,27 @@ export function renderEvidence(document, target, review, kind = "") {
       }
       table.append(head, body); const scroll = document.createElement("div"); scroll.className = "material-table";
       scroll.tabIndex = 0; scroll.setAttribute("aria-label", String(material.title || "原始明细表"));
-      scroll.append(table); detail.append(scroll);
+      scroll.append(table);
+      if (sourceRows.length > 200) {
+        const note = document.createElement('p'); note.textContent = '定位目录列出前 200 行；下方原表保留全部已读取行。'; rowIndex.append(note);
+      }
+      if (sourceRows.length) detail.append(rowIndex);
+      detail.append(scroll);
     }
     if (kind === "weekly_report" && ["current-week", "next-week"].includes(material.id)) {
       if (!weeklyGrid) { weeklyGrid = document.createElement("div"); weeklyGrid.className = "material-primary-grid"; section.append(weeklyGrid); }
       weeklyGrid.append(detail);
     } else section.append(detail);
   }
+  const previewIds = new Set();
+  for (const preview of Array.isArray(review?.materialPreviews) ? review.materialPreviews.slice(0,128) : []) {
+    if (!preview || !/^[a-f0-9]{64}$/.test(preview.id) || previewIds.has(preview.id) ||
+        !['image','pdf','archive','file'].includes(preview.kind) || !['available','unavailable'].includes(preview.state)) continue;
+    previewIds.add(preview.id);
+    addDirectory(`material-preview-${preview.id}`, `${String(preview.name || '未命名材料').slice(0,500)} · ${preview.state === 'available' ? '按需预览' : '暂不支持预览'}`);
+  }
+  if (!directoryCount) directory.hidden = true;
+  if (!focus.childElementCount) focus.hidden = true;
   if (Array.isArray(review?.attachments) && review.attachments.length) {
     const attachments = document.createElement("section"); attachments.className = "material-attachments";
     const title = document.createElement("h3"); title.textContent = "附件名称";
@@ -707,6 +847,34 @@ export function mountBusinessDraft(config, document, window) {
   let lastOptions = config.state.options;
   let saveTimer, pollTimer;
   let stopped = false, pageEpoch = 0, navigationApproved = false;
+  const draftNavigation = document.querySelector?.('.draft-nav');
+  let navigationObserver = null, navigationClearance = null;
+  function measureNavigation() {
+    if (stopped || !draftNavigation) return;
+    const height = draftNavigation.getBoundingClientRect?.().height ?? draftNavigation.offsetHeight;
+    if (!Number.isFinite(height) || height <= 0) return;
+    const clearance = `${Math.ceil(height) + 16}px`;
+    if (clearance !== navigationClearance) {
+      document.documentElement?.style?.setProperty('--draft-nav-clearance', clearance);
+      navigationClearance = clearance;
+    }
+  }
+  function observeNavigation() {
+    if (!draftNavigation) return;
+    measureNavigation();
+    if (typeof window.ResizeObserver === 'function') {
+      try { navigationObserver = new window.ResizeObserver(measureNavigation); navigationObserver.observe(draftNavigation); }
+      catch { navigationObserver?.disconnect(); navigationObserver = null; }
+    }
+    // Older WebViews still update on viewport changes, font readiness and render.
+    window.addEventListener('resize', measureNavigation);
+    const epoch = pageEpoch;
+    document.fonts?.ready?.then(() => { if (epoch === pageEpoch) measureNavigation(); }, () => {});
+  }
+  function suspendNavigation() {
+    navigationObserver?.disconnect(); navigationObserver = null;
+    window.removeEventListener?.('resize', measureNavigation);
+  }
   let contentIntent = null;
   let statusCopy = '';
   let displayedReview = config.state.preview?.summary || config.state.ui?.review || {};
@@ -815,6 +983,7 @@ export function mountBusinessDraft(config, document, window) {
       window.location.replace(next.href);
     },
     render(view) {
+      renderBatchChecklist(document,node('draft-batch-list'),view.current.batch);
       const problems = [];
       for (const name of fieldNames) {
         fields[name].disabled = !view.canEdit;
@@ -912,7 +1081,10 @@ export function mountBusinessDraft(config, document, window) {
         }
         if (materialDiff?.total > 20) { const note = document.createElement("p"); note.textContent = `共 ${materialDiff.total} 处变化，此处显示前 20 处，请核对下方完整材料。`; diffTarget.append(note); }
       }
-      if (viewKind === "approval" || view.current.ui?.review) renderEvidence(document, node("draft-evidence"), currentReview, view.current.ui?.reviewKind || "");
+      const hasSourceReview = Boolean(currentReview && (currentReview.title || currentReview.fields?.length || currentReview.groups?.length || currentReview.sections?.length));
+      if (node('draft-evidence')) node('draft-evidence').hidden = !hasSourceReview;
+      if (node('draft-evidence-link')) node('draft-evidence-link').hidden = !hasSourceReview;
+      if (hasSourceReview) renderEvidence(document, node("draft-evidence"), currentReview, view.current.ui?.reviewKind || "");
       node("draft-review").hidden = !summary;
       if (summary) {
         setText("review-effect", summary.effect || view.current.ui?.effect || "执行已核对的本次操作");
@@ -935,6 +1107,7 @@ export function mountBusinessDraft(config, document, window) {
       form.dataset.agentbridgeBusy = String(view.saving || view.previewing || view.optionsLoading || view.uncertain || view.contentBusy || Boolean(view.contentPending));
       form.dataset.agentbridgeLocked = String(view.locked);
       paintContentConfirmation(view);
+      measureNavigation();
       if (window.CustomEvent) document.dispatchEvent(new window.CustomEvent('agentbridge:draft-state'));
     },
   });
@@ -975,6 +1148,7 @@ export function mountBusinessDraft(config, document, window) {
   window.addEventListener("pagehide", () => {
     contentIntent = null;
     stopped = true; pageEpoch++;
+    suspendNavigation();
     window.clearTimeout(saveTimer); window.clearTimeout(pollTimer);
     controller.suspend();
     materials?.suspend();
@@ -984,6 +1158,7 @@ export function mountBusinessDraft(config, document, window) {
     if (!event.persisted || !stopped) return;
     stopped = false;
     const epoch = ++pageEpoch;
+    observeNavigation();
     void controller.restore().finally(() => {
       if (!stopped && pageEpoch === epoch && !controller.state().locked) pollTimer = window.setTimeout(poll, 2500);
     });
@@ -1006,6 +1181,7 @@ export function mountBusinessDraft(config, document, window) {
     }
   }
   controller.start();
+  observeNavigation();
   pollTimer = window.setTimeout(poll, 2500);
   return controller;
 }

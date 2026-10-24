@@ -560,6 +560,10 @@ def create_workspace_http_server(
                 if route.path == "/api/actions/oa-pending-query":
                     self._json(202, application.query_oa_pending(account, body))
                     return
+                remaining_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/oa-batch-remaining/query", route.path)
+                if remaining_match:
+                    self._json(202, application.query_oa_batch_remaining(account, remaining_match.group(1), body))
+                    return
                 recovery_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/oa-pending-recovery/(probe|prepare)", route.path)
                 if recovery_match:
                     task_id, action = recovery_match.groups()

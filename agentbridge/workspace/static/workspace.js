@@ -101,6 +101,7 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTas
   submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
   prepareRecovery:prepareOaPendingRecovery, getScope:() => sessionScope,
   openPreparation:(taskId,options) => preparationHandoff.start(taskId,options), viewState,
+  queryRemaining:queryOaBatchRemaining,
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
@@ -162,7 +163,7 @@ function resetWorkspaceState() {
   historyControls = null;
   clearWorkspaceTimings();
   for (const name of ["liveMessages", "activeStreams", "historyMessages", "localMessages",
-    "syncedMessages", "taskCards", "taskFeedback", "oaPendingRecovery", "actionableGroups", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
+    "syncedMessages", "taskCards", "taskFeedback", "oaPendingRecovery", "batchRemaining", "actionableGroups", "skillCards", "taskCardMeta", "queryGroupOpen", "taskSyncTimers", "toasts"]) {
     state[name].clear();
   }
   state.tasks = [];
@@ -1302,6 +1303,24 @@ async function probeOaPendingRecovery(taskId, payload) {
     markWorkspaceTiming("recovery_probe_received", {requestId:payload.requestKey, taskId, status:result.status});
   }
   return result;
+}
+
+async function queryOaBatchRemaining(taskId,payload) {
+  const scope=sessionScope, ticket=projectionOrder.begin();
+  markWorkspaceTiming('quick_query_sent',{requestId:payload.requestKey,taskId});
+  try {
+    const result=await scopedApi(scope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-batch-remaining/query`,
+      {method:'POST',body:payload,csrf:true,timeoutMs:30000});
+    scope.assertCurrent();
+    if(typeof result?.taskId!=='string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.taskId)) throw new Error('查询受理状态尚未确认，请恢复同一次查询。');
+    markWorkspaceTiming('quick_query_queued',{requestId:payload.requestKey,taskId:result.taskId});
+    if(result.detail && projectionOrder.accept(result.detail.task?.task_id,ticket)) upsertTaskCard(result.detail);
+    scheduleTaskSync(result.taskId,'task.queued');
+    return result;
+  } catch(error) {
+    if(scope.current() && !isCancellation(error)) markWorkspaceTiming('quick_query_failed',{requestId:payload.requestKey,taskId,status:'failed'});
+    throw error;
+  }
 }
 
 async function prepareOaPendingRecovery(taskId, payload) {

@@ -9,14 +9,16 @@ import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
 import { createActionableResults } from "./workspace_actionable.mjs";
 import { createOaPendingRecovery } from "./workspace_recovery.mjs";
+import {createBatchRemaining} from './workspace_batch_remaining.mjs';
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery, probeRecovery, prepareRecovery, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   const clocks = new Map();
   let clockTimer = null, clockScope = null;
   state.taskFeedback ||= new Map();
+  const remaining = createBatchRemaining({document,state,queryRemaining,getScope,makeKey:makeFeedbackRequestKey});
   const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery, getScope,
     makeRequestKey:makeFeedbackRequestKey, openTask: async taskId => {
       if (await switchView("tasks") === false) return;
@@ -36,6 +38,12 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   const text = (node, value) => {
     const next = String(value ?? "");
     if (node.textContent !== next) node.textContent = next;
+  };
+  const remainingQueryCopy = result => {
+    const scopes=(result.actionableResults || []).map(group=>group.remaining).filter(Boolean);
+    if(!scopes.length) return '';
+    const count=field=>scopes.reduce((sum,item)=>sum+(Number.isSafeInteger(item[field]) ? item[field] : 0),0);
+    return `本轮核对原批次剩余 ${count('requestedCount')} 项：仍匹配 ${count('matchedCount')} 项，当前待办未找到 ${count('missingCount')} 项，资格变化 ${count('changedCount')} 项。仅仍匹配项可重新选择；未找到不代表已成功。`;
   };
   const disclosure = (label, className) => {
     const root = element("details", className);
@@ -208,6 +216,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const artifacts = element("div");
     const query = element("div");
     const recoveryPanel = element("section");
+    const remainingPanel = element('section');
     const actions = element("div", "application-card-actions");
     const progress = element("button", "secondary");
     progress.type = "button";
@@ -218,8 +227,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     });
     actions.append(progress);
     card.append(header, description, wait, facts.root, active.root, batch.root,
-      history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, actions);
-    return { title, status, description, wait, facts, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, progress };
+      history.root, executionHistory.root, artifacts, query, recoveryPanel,remainingPanel, feedback.root, actions);
+    return { title, status, description, wait, facts, active, batch, history, executionHistory, artifacts, query, recoveryPanel,remainingPanel, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -422,11 +431,12 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     }
     text(view.status, recovered?.label || failure?.label || (oaQuery && cardStatus === "succeeded" ? "已查询" : statusLabel(cardStatus)));
     const selectedCount = result.actionableResults?.reduce((sum, group) => sum + group.targets.length, 0);
-    if (oaQuery) text(view.title, "OA 待办查询");
+    const scopedQueryCopy=remainingQueryCopy(result);
+    if (oaQuery) text(view.title, scopedQueryCopy ? '原批次剩余事项查询' : "OA 待办查询");
     const execution = businessExecutionPresentation(result);
     const statusCopy = oaQuery && cardStatus === "succeeded" ?
       selectedCount ? `本次查询返回 ${selectedCount} 项；具体办理状态见各事项。` : "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary);
-    text(view.description, recovered?.message || failure?.message || (execution?.message ?
+    text(view.description, recovered?.message || failure?.message || scopedQueryCopy || (execution?.message ?
       task.summary?.batch ? `${statusCopy} ${execution.message}` : execution.message : statusCopy));
     const current = active[0] || result.interaction;
     updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
@@ -441,6 +451,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
     recovery.render(view.recoveryPanel, result);
+    remaining.render(view.remainingPanel,result);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
     return nearBottom;
   }
@@ -479,6 +490,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     if (!view || view.taskId !== task.task_id || view.heading.parentNode !== detail) {
       if (view?.feedback) state.taskFeedback.get(view.taskId)?.views.delete(view.feedback);
       if (view?.recoveryPanel) recovery.detach(view.recoveryPanel);
+      if (view?.remainingPanel) remaining.detach(view.remainingPanel);
       detail.replaceChildren();
       const heading = element("div", "detail-heading");
       const back = element("button", "icon-command mobile-detail-back");
@@ -551,10 +563,11 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const artifacts = element("div");
       const query = element("div");
       const recoveryPanel = element("section");
+      const remainingPanel = element('section');
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, outcomeNotice, wait, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, recoveryPanel, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, wait, plan, active, batch, history, executionHistory, artifacts, query, recoveryPanel, feedback, timeline};
+      detail.append(heading, facts.root, outcomeNotice, wait, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, recoveryPanel,remainingPanel, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, wait, plan, active, batch, history, executionHistory, artifacts, query, recoveryPanel,remainingPanel, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -581,7 +594,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     else view.resumeLink.removeAttribute("href");
     view.queryAction.hidden = !view.readOnlyQuery || Boolean(recovered?.completed);
     view.queryAction.disabled = Boolean(view.queryPending) || !view.readOnlyQuery || typeof refreshQuery !== "function";
-    if (!view.queryRequestKey) text(view.outcomeNotice, recovered?.message || execution?.message || taskCardStatusMessage(task.status, task.summary));
+    if (!view.queryRequestKey) text(view.outcomeNotice, recovered?.message || remainingQueryCopy(result) || execution?.message || taskCardStatusMessage(task.status, task.summary));
     updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
       ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
         ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],
@@ -603,6 +616,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     updateFeedback(view.feedback, result);
     actionable.render(view.query, result.actionableResults);
     recovery.render(view.recoveryPanel, result);
+    remaining.render(view.remainingPanel,result);
     const nodes = [];
     for (const event of [...(result.events || [])].reverse()) {
       const key = event.event_id || `${event.event_type}:${event.created_at}`;
@@ -655,7 +669,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
 
   return { upsertTaskCard, upsertTaskCardVariant, renderTasks, renderTaskDetail, renderSkillCard, addDetail,
     resetTaskCardControllers: () => {
-      recovery.reset();actionable.reset();clocks.clear();
+      recovery.reset();remaining.reset();actionable.reset();clocks.clear();
       if (clockTimer !== null) clockScope?.clearTimer(clockTimer);
       clockTimer = null;
     } };

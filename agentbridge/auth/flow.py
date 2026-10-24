@@ -28,6 +28,7 @@ from agentbridge.core.commit_notifications import current_version, wait_for_chan
 _UNAVAILABLE_ERRORS = (KeyError, ValueError, PermissionError, FieldSubmissionIntegrityError,
                        InteractionIntegrityError, TaskIntegrityError, WriteAuthorizationIntegrityError)
 _WAITING_SCRIPT = Path(__file__).with_name("static").joinpath("flow_waiting.mjs")
+_BATCH_SCRIPT = Path(__file__).with_name("static").joinpath("batch_view.mjs")
 _MAX_STATUS_WAIT_SECONDS = 20
 _STATUS_RECHECK_SECONDS = 2
 _PEER_CHECK_SECONDS = .2
@@ -287,7 +288,7 @@ class TrustedFlowApplication:
         # '<' nonetheless, so the script cannot terminate via future callers.
         config = json.dumps({"statusUrl": path + "/status", "token": token, "navigation": navigation}).replace("<", "\\u003c")
         back = _back_link(navigation)
-        script = _WAITING_SCRIPT.read_text(encoding="utf-8").replace(
+        script = _BATCH_SCRIPT.read_text(encoding="utf-8").replace("export function renderBatchChecklist", "function renderBatchChecklist", 1) + _WAITING_SCRIPT.read_text(encoding="utf-8").replace("import {renderBatchChecklist} from './batch_view.mjs';", "").replace(
             "export function mountTrustedFlow", "function mountTrustedFlow", 1,
         )
         body = rf"""
@@ -302,6 +303,7 @@ class TrustedFlowApplication:
   <p class="status-copy" id="flow-message" role="status" aria-live="polite">请保留此页，原任务将继续办理。</p>
   <p class="status-copy" id="flow-recovery"></p>
   <p class="status-copy" id="flow-batch" hidden></p>
+  <section id="flow-batch-list" hidden></section>
   <a id="flow-continue" hidden>核对下一项</a>
   {back}
   <noscript><p>请启用 JavaScript 后刷新此页查看办理状态；页面不会自行提交业务。</p></noscript>

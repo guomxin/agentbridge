@@ -534,12 +534,23 @@ def list_actionable_results(service, subject, source_task_id):
                 expired = True
             preparations = _source_preparations(connection, subject, source_task_id, entry[0]) | \
                 _cross_source_preparations(service, connection, subject, pending, entry[0])
+            from agentbridge.core.oa_batch_remaining import source_scope
+            remaining = None
+            visible_rows = pending["items"]
+            try:
+                scoped = source_scope(service, connection, subject, source_task_id, pending, operation_id=entry[0])
+                if scoped is not None:
+                    visible_rows, remaining = scoped
+            except (ActionableResultError, PermissionError) as exc:
+                visible_rows = []
+                remaining = {"blocked":True, "reason":str(exc) if not isinstance(exc, PermissionError) else "查询权限已变化。",
+                    "requestedCount":0, "matchedCount":0, "missingCount":0, "changedCount":0, "items":[]}
             # Retain historical progress only for queries that actually led to
             # preparation. Expiry never creates another actionable window.
             if expired and not preparations:
                 continue
             targets = []
-            for row in pending["items"]:
+            for row in visible_rows:
                 target = {"targetKey": _target_key(entry[0], row),
                     **{key: str(row.get(key) or "")[:500] for key in ("title", "sender", "date", "category")},
                     "workflowType": None, "workflowLabel": "暂未支持的待办", "enabled": False, "disabledReason": None,
@@ -568,7 +579,7 @@ def list_actionable_results(service, subject, source_task_id):
             finished = _date(operation["finished_at"])
             groups.append({"sourceTaskId": source_task_id, "operationId": entry[0], "title": "OA 待办",
                 "fetchedAt": finished.isoformat(), "expiresAt": (finished + timedelta(seconds=SOURCE_TTL_SECONDS)).isoformat(),
-                "coverage": "complete", "targets": targets})
+                "coverage": "complete", "targets": targets, **({"remaining":remaining} if remaining is not None else {})})
     return groups
 
 
@@ -746,6 +757,10 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
     if any(key not in by_key for key in body["targetKeys"]):
         _fail("ACTION_TARGET_UNAVAILABLE", "所选事项不属于这次待办查询，请重新选择。")
     affair_ids = [by_key[key] for key in body["targetKeys"]]
+    from agentbridge.core.oa_batch_remaining import source_scope
+    scoped = source_scope(service, connection, subject, source_task_id, pending, operation_id=body["operationId"])
+    if scoped is not None and set(affair_ids) - {row["affair_id"] for row in scoped[0]}:
+        _fail("BATCH_REMAINING_SELECTION_INVALID", "只能选择这次重新核对后仍匹配的未触达事项。")
     prepared = _source_preparations(connection, subject, source_task_id, body["operationId"])
     if any(key in prepared for key in body["targetKeys"]):
         _fail("ACTION_TARGET_ALREADY_PREPARED", "所选事项已有办理任务，请查看原任务；重新办理前请重新查询待办。")
@@ -808,8 +823,8 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
     return {"taskId": task["task_id"], "commandKey": command["commandKey"], "status": "queued"}
 
 
-def _record_result(service, subject, task_id, command_key, response):
-    with store_transaction(service.tasks) as connection:
+def _record_result(service, subject, task_id, command_key, response, *, connection=None):
+    with store_transaction(service.tasks, connection) as connection:
         task, command = _load_command(connection, subject, task_id, command_key)
         summary = json.loads(task["summary_json"])
         command["state"] = str(response.get("status") or "failed")
@@ -878,6 +893,11 @@ def execute_preparation(service, subject, task_id, command_key, *, runtime_conte
                     if command.get("oaIdentity") and command["oaIdentity"] != _oa_identity(session):
                         _fail("ACTION_IDENTITY_CHANGED", "OA 登录身份或会话已变化，请重新查询后核对原办理。")
                     _, pending = _source(connection, subject, command["sourceTaskId"], command["operationIdSource"])
+                    from agentbridge.core.oa_batch_remaining import source_scope
+                    scoped = source_scope(service, connection, subject, command["sourceTaskId"], pending,
+                        operation_id=command["operationIdSource"])
+                    if scoped is not None and set(command["affairIds"]) - {row["affair_id"] for row in scoped[0]}:
+                        _fail("BATCH_REMAINING_SELECTION_INVALID", "原批次剩余范围已变化，未创建新的办理。")
                     if _hash(pending) != command["sourceHash"] or _select(service, pending, command["affairIds"]) != command["selectedItems"]:
                         _fail("ACTION_SOURCE_CHANGED", "原查询目标与冻结记录不一致，请重新查询。")
                     binding = _reviewed_current_skill(service, subject,

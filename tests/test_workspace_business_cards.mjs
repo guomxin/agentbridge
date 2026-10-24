@@ -463,3 +463,16 @@ test("actual execution stages show durable total and stage elapsed time, while c
     assert.equal(findClass(f.detail,"business-wait").hidden,true);
   }
 });
+
+test('scoped remaining query summary overrides a full OA read count in both card and detail',()=>{
+ const f=fixture(),r=result(1,'succeeded',[]);
+ r.task.title='查询OA待办';r.task.summary={message:'本次查询返回 14 项'};
+ r.actionableResults=[{sourceTaskId:'source',operationId:'op',remaining:{requestedCount:4,matchedCount:2,missingCount:1,changedCount:1},targets:[
+  {targetKey:'one',title:'剩余一',enabled:true},{targetKey:'two',title:'剩余二',enabled:true}]}];
+ f.upsertTaskCard(r);f.renderTaskDetail(r);
+ const copy=findClass(f.chat,'application-card-copy');
+ assert.match(f.chat.textContent,/原批次剩余事项查询/);
+ assert.match(copy.textContent,/剩余 4 项.*仍匹配 2 项.*未找到 1 项.*资格变化 1 项/);
+ assert.doesNotMatch(copy.textContent,/返回 14/);assert.doesNotMatch(f.detail.textContent,/返回 14/);
+ assert.match(f.detail.textContent,/未找到不代表已成功/);
+});

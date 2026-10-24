@@ -62,6 +62,9 @@ def workspace_batch_projection(batch: Mapping[str, Any] | None) -> dict | None:
                 "itemId": item["item_id"],
                 "ordinal": int(item["ordinal"]),
                 "state": item["state"],
+                "title": str((item.get("display_summary") or {}).get("title") or "OA 待办")[:500],
+                "workflowLabel": _batch_workflow_label(item),
+                "isCurrent": int(item["ordinal"]) == current,
                 "display": {
                     key: value for key in ("title", "sender", "date", "category")
                     if isinstance(value := (item.get("display_summary") or {}).get(key), str)
@@ -74,6 +77,25 @@ def workspace_batch_projection(batch: Mapping[str, Any] | None) -> dict | None:
             for item in batch.get("items") or []
         ],
     }
+
+
+def _batch_workflow_label(item):
+    from agentbridge.core.actionable_results import _LABELS
+    return _LABELS.get((item.get("display_summary") or {}).get("profile"), "OA 待办")
+
+
+def trusted_batch_projection(batch):
+    """A content-free queue list shared by trusted forms, receipts and Telegram."""
+    if batch is None:
+        return None
+    return {"schemaVersion":"agentbridge.batch-view.v1", "batchId":batch["batch_id"],
+        "state":batch["state"], "version":batch["version"], "currentOrdinal":batch["current_ordinal"],
+        "currentIndex":batch["current_ordinal"], "ordinal":batch["current_ordinal"],
+        "completedCount":batch["succeeded_count"], "succeededCount":batch["succeeded_count"],
+        "failedCount":batch["failed_count"], "skippedCount":batch["skipped_count"], "totalCount":batch["total_count"],
+        "items":[{"ordinal":item["ordinal"], "title":str((item.get("display_summary") or {}).get("title") or "OA 待办")[:500],
+            "workflowLabel":_batch_workflow_label(item), "state":item["state"], "isCurrent":item["ordinal"] == batch["current_ordinal"]}
+            for item in batch.get("items") or []]}
 
 def _endpoint_from_row(row: Mapping[str, Any]) -> dict:
     value = dict(row)

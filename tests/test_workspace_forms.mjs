@@ -1112,3 +1112,20 @@ test("leaving a replacement preview cancels its late target response and prevent
   assert.doesNotMatch(f.$("#skill-candidate-preview").innerHTML, /确认替换/);
   assert.equal(f.calls.some(c => c.action === "adopt"), false);
 });
+
+test('remaining query handler keeps request identity and failed denominator without projecting malformed receipts',async()=>{
+ const scope=createLifecycle().scope(),marks=[],projected=[],synced=[],calls=[];let receipt={taskId:'invalid'};
+ const query=workspaceHandler('queryOaBatchRemaining','prepareOaPendingRecovery',{
+  sessionScope:scope,projectionOrder:{begin:()=>4,accept:()=>true},scopedApi:()=>async(url,options)=>{calls.push([url,options]);return receipt;},
+  markWorkspaceTiming:(stage,data)=>marks.push([stage,data]),upsertTaskCard:value=>projected.push(value),scheduleTaskSync:id=>synced.push(id),
+  isCancellation:()=>false,
+ });
+ const taskId='11111111-1111-1111-1111-111111111111',payload={requestKey:'same-remaining-query',expectedBatchVersion:7};
+ await assert.rejects(query(taskId,payload),/恢复同一次查询/);assert.deepEqual(synced,[]);
+ assert.equal(marks.at(-1)[0],'quick_query_failed');
+ receipt={taskId:'22222222-2222-2222-2222-222222222222',detail:{task:{task_id:'22222222-2222-2222-2222-222222222222'}}};
+ await query(taskId,payload);assert.equal(synced.length,1);assert.equal(projected.length,1);
+ assert.equal(marks.at(-1)[0],'quick_query_queued');assert.equal(calls[0][1].body,payload);assert.equal(calls[1][1].body,payload);
+ assert.match(calls[0][0],/oa-batch-remaining\/query$/);assert.equal(calls[0][1].csrf,true);
+ scope.dispose();
+});

@@ -18,6 +18,7 @@ from agentbridge.core import actionable_results as actions
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.trusted_flow_presentation import continuous_flow_presentation
 from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES, BATCH_STATES, ACTIVE_BATCH_STATES
+from agentbridge.core.task_projections import trusted_batch_projection
 
 SCHEMA_VERSION = "agentbridge.result-view.v1"
 TICKET_TTL_SECONDS = 3600
@@ -53,7 +54,7 @@ class ResultViewService:
             groups = self._groups(subject, task_id)
             selection_available = any(item["enabled"] for group in groups for item in group["targets"])
             existing = self._preparation_ids(connection, subject, endpoint, groups)
-            if not groups or not (selection_available or existing):
+            if not groups or not (selection_available or existing or any(group.get("remaining") for group in groups)):
                 actions._fail("ACTION_SOURCE_UNAVAILABLE", "当前查询没有可直接办理的完整待办，请重新查询或通过对话继续。")
             if len(groups) > 16:
                 actions._fail("ACTION_SOURCE_LIMIT", "本任务包含超过16组待办查询，请在新对话中缩小查询范围后选择。")
@@ -232,6 +233,21 @@ class ResultViewService:
             result["resultView"] = self.issue(context["subject"], queued["taskId"], context["endpointId"])["resultView"]
         return result
 
+    def remaining_query(self, token, body):
+        from agentbridge.core.oa_batch_remaining import queue_endpoint_remaining_query
+        self._request_body(body, {"taskId", "requestKey", "expectedBatchVersion"})
+        context = self._context(token)
+        # Reuse exact original-ticket/source/route checks. Merely knowing an
+        # owned task id does not grant a Telegram ticket a new batch context.
+        self._status(context, body["taskId"])
+        queued = queue_endpoint_remaining_query(self.service, context, body["taskId"],
+            {key:body[key] for key in ("requestKey", "expectedBatchVersion")})
+        state = self.query_status(token, queued["taskId"])
+        result = {**queued, "query":state}
+        if state["state"] == "succeeded" and state.get("entryAvailable"):
+            result["resultView"] = self.issue(context["subject"], queued["taskId"], context["endpointId"])["resultView"]
+        return result
+
     def query_status(self, token, task_id):
         from agentbridge.core.quick_queries import COMMAND_KIND, _contract
         context = self._context(token)
@@ -254,9 +270,9 @@ class ResultViewService:
         with service.tasks._connect() as connection:
             existing = self._preparation_ids(connection, subject, context["endpoint"], groups)
         selection_available = any(target["enabled"] for group in groups for target in group["targets"])
-        return {"taskId": task_id, "state": task["status"], "title": "查询 OA 待办",
+        return {"taskId": task_id, "state": task["status"], "title": task["title"],
             "terminal": task["status"] in _TERMINAL, "groups": groups,
-            "selectionAvailable": selection_available, "entryAvailable": selection_available or bool(existing),
+            "selectionAvailable": selection_available, "entryAvailable": selection_available or bool(existing) or any(group.get("remaining") for group in groups),
             "message": "已获取新的待办查询结果。" if task["status"] == "succeeded" else _status_message(task["status"])}
 
     def status(self, token, queued_task_id):
@@ -303,8 +319,9 @@ class ResultViewService:
             interaction_id = task["current_interaction_id"]
         batch = service.tasks.get_batch_for_task(parent_task_id=task_id, user_subject=subject)
         if batch:
-            result["batch"] = {"schemaVersion": "agentbridge.batch-view.v1", "totalCount": batch["total_count"],
-                "currentIndex": batch["current_ordinal"], "succeededCount": batch["succeeded_count"], "state": batch["state"]}
+            from agentbridge.core.oa_batch_remaining import remaining_presentation
+            result["batch"] = trusted_batch_projection(batch)
+            result["oaBatchRemaining"] = remaining_presentation(service, subject, task_id)
             if batch["state"] in _TERMINAL:
                 result.update(terminal=True, state=batch["state"], message=_status_message(batch["state"]))
         if not result["terminal"] and interaction_id and referenced:
@@ -376,8 +393,9 @@ class ResultViewService:
             "oaPendingRecovery": pending_recovery_presentation(self.service, subject=context["subject"], task_id=task["task_id"])}
         batch = self.service.tasks.get_batch_for_task(parent_task_id=task["task_id"], user_subject=context["subject"])
         if batch:
-            result["batch"] = {"schemaVersion": "agentbridge.batch-view.v1", "totalCount": batch["total_count"],
-                "currentIndex": batch["current_ordinal"], "succeededCount": batch["succeeded_count"], "state": batch["state"]}
+            from agentbridge.core.oa_batch_remaining import remaining_presentation
+            result["batch"] = trusted_batch_projection(batch)
+            result["oaBatchRemaining"] = remaining_presentation(self.service, context["subject"], task["task_id"])
         return result
 
     def recovery_probe(self, token, body):

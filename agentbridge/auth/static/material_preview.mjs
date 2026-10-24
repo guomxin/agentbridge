@@ -73,6 +73,7 @@ async function responseBytes(response) {
 
 export function createMaterialPreviews({document, window, target, apiUrl, csrfToken, timeoutMs = 30000, renderPdf = renderPdfMaterial}) {
   const records = new Map(); let signature = "", epoch = 0;
+  const readingPositions = new Map();
   const base = new URL(apiUrl, window.location.origin);
   const allowedBase = base.origin === window.location.origin && !base.search && !base.hash && base.pathname.endsWith("/draft");
   const make = (tag, text, className) => {
@@ -96,7 +97,7 @@ export function createMaterialPreviews({document, window, target, apiUrl, csrfTo
   }
   function suspend() {
     epoch++; for (const record of records.values()) close(record);
-    records.clear(); signature = ""; target.replaceChildren(); target.hidden = true;
+    records.clear(); readingPositions.clear(); signature = ""; target.replaceChildren(); target.hidden = true;
   }
   function current(record, pageEpoch, generation) { return epoch === pageEpoch && record.generation === generation && records.get(record.item.id) === record; }
 
@@ -120,7 +121,14 @@ export function createMaterialPreviews({document, window, target, apiUrl, csrfTo
     } else {
       const abort = new window.AbortController();
       record.disposers.add(() => abort.abort());
+      const positionKey = `${record.item.id}:${item.id}`;
       const renderer = await renderPdf({document, window, target: destination, bytes: item.bytes, isCurrent: check,
+        initialView:readingPositions.get(positionKey),onViewState:value => {
+          if (!check()) return;
+          readingPositions.set(positionKey,{page:value.page,fitWidth:value.fitWidth,zoom:value.zoom,textOpen:value.textOpen,
+            scrollTop:value.scrollTop,scrollLeft:value.scrollLeft});
+          while(readingPositions.size>128) readingPositions.delete(readingPositions.keys().next().value);
+        },
         signal: abort.signal, onStatus: message => { if (check()) status.textContent = String(message); }});
       if (check()) record.disposers.add(() => renderer.destroy());
       else await renderer.destroy();
@@ -220,6 +228,7 @@ export function createMaterialPreviews({document, window, target, apiUrl, csrfTo
     target.append(make("h3", "图片与附件预览"), make("p", "按需获取材料。预览不会提交业务，也不会自动将未打开的材料标为已核对。", "material-preview-note"));
     for (const item of items) {
       const section = make("section", undefined, "material-preview-item"), name = make("h4", item.name);
+      section.id = `material-preview-${item.id}`; section.tabIndex = -1;
       const status = make("p", item.state === "available" ? "尚未读取" : item.reason, "material-preview-status"); status.setAttribute("role", "status");
       const open = button(item.kind === "archive" ? "获取附件包" : "打开预览"), closeButton = button("关闭预览");
       open.setAttribute("aria-label", `预览：${item.name}`);

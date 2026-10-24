@@ -88,6 +88,18 @@ test("PDF is rendered from bytes by the bounded local renderer and disposed on c
   await h.click("关闭预览"); assert.equal(destroyed, 1); assert.equal(calls[0].signal.aborted, true);
 });
 
+test('material anchors do not fetch and PDF reopening retains only whitelisted reading metadata until suspension',async()=>{
+  const views=[];const h=harness(async()=>binary(pdf,'application/pdf'),{renderPdf:async args=>{
+    views.push(args.initialView);args.onViewState({page:2,fitWidth:false,zoom:1.5,textOpen:true,scrollTop:20,scrollLeft:0,text:'private text',query:'private query'});
+    return {destroy(){}};
+  }});
+  h.controller.render({materialPreviews:[entry('a','pdf')]});
+  const anchor=descendants(h.target).find(node=>node.id===`material-preview-${'a'.repeat(64)}`);assert.equal(anchor.tabIndex,-1);assert.equal(h.calls.length,0);
+  await h.click('打开预览');await h.click('关闭预览');await h.click('重新获取预览');
+  assert.deepEqual(views[1],{page:2,fitWidth:false,zoom:1.5,textOpen:true,scrollTop:20,scrollLeft:0});
+  h.controller.suspend();h.controller.render({materialPreviews:[entry('a','pdf')]});await h.click('打开预览');assert.equal(views[2],undefined);
+});
+
 test("close, manifest change and page suspension revoke all Blob URLs", async () => {
   const h = harness(); h.controller.render({materialPreviews: [entry()]}); await h.click("打开预览");
   await h.click("关闭预览"); assert.equal(h.revoked.length, 1);

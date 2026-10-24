@@ -1,4 +1,5 @@
 // The bearer and CSRF proof stay within this trusted same-origin document.
+import {renderBatchChecklist} from './batch_view.mjs';
 export function installResultView({ document, window, fetch, initial, setTimeout, clearTimeout, now = Date.now }) {
   const byId = (id) => document.getElementById(id);
   const root = byId('result-groups');
@@ -10,7 +11,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
   const search = byId('result-search'), typeFilter = byId('result-type'), selectedOnly = byId('result-selected-only');
   let state = initial.state, selection = new Set(), operationId = null;
   let pending = null, busy = false, stopped = false, epoch = 0, timer = null, readController = null;
-  let readTicket = 0, navigated = false, choices = [], resumeButtons = [];
+  let readTicket = 0, navigated = false, choices = [], resumeButtons = [], remainingButtons = [];
   let unavailable = false, recoverRead = false, waitingSince = null;
   let queryPending = null, queryFinished = false, queryRecoveryNeeded = false, groupActions = [], queryTimer = null, expiryTimer = null;
   const requests = new Set();
@@ -45,8 +46,11 @@ export function installResultView({ document, window, fetch, initial, setTimeout
   }
   try { queryPending = JSON.parse(window.sessionStorage.getItem(queryStorageKey) || 'null'); } catch {}
   if (queryPending && (typeof queryPending !== 'object' || Array.isArray(queryPending)
-      || Object.keys(queryPending).some(key => !['taskId', 'body'].includes(key))
-      || !queryPending.body || Object.keys(queryPending.body).join(',') !== 'requestKey'
+      || Object.keys(queryPending).some(key => !['taskId', 'body','action'].includes(key))
+      || queryPending.action !== undefined && queryPending.action !== 'remaining-query'
+      || !queryPending.body || (queryPending.action === 'remaining-query'
+        ? Object.keys(queryPending.body).sort().join(',') !== 'expectedBatchVersion,requestKey,taskId' || !uuid.test(queryPending.body.taskId || '') || !Number.isSafeInteger(queryPending.body.expectedBatchVersion) || queryPending.body.expectedBatchVersion<1
+        : Object.keys(queryPending.body).join(',') !== 'requestKey')
       || !/^[A-Za-z0-9_-]{12,128}$/.test(queryPending.body.requestKey || '')
       || queryPending.taskId !== undefined && !uuid.test(queryPending.taskId))) queryPending = null;
   // A selection being prepared always owns this page. Never start a read shortcut
@@ -88,6 +92,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       choice.label.hidden = !visible; choice.detail.hidden = !visible;
     }
     for (const button of resumeButtons) button.disabled = blocked();
+    for (const button of remainingButtons) button.disabled = blocked();
     for (const entry of groupActions) {
       const visible = choices.filter(choice => choice.operationId === entry.operationId && matches(choice));
       const available = visible.filter(eligible);
@@ -121,8 +126,14 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       for (const [key, label] of types) { const option = element('option', label); option.value = key; typeFilter.append(option); }
       typeFilter.value = types.has(selected) ? selected : '';
     }
+    remainingButtons=[];
     for (const group of state.groups || []) {
       const section = element('section'); section.append(element('h2', group.title || 'OA 待办'));
+      if(group.remaining) {
+        const remaining=group.remaining;
+        section.append(element('p',`本轮仅核对原批次剩余 ${remaining.requestedCount || 0} 项：匹配 ${remaining.matchedCount || 0} 项，当前待办未找到 ${remaining.missingCount || 0} 项，资格变化 ${remaining.changedCount || 0} 项。未找到不代表已成功；只有仍匹配的事项可重新选择。`));
+        for(const item of (remaining.items || []).slice(0,100)) section.append(element('p',`原第 ${item.ordinal} 项 · ${item.title || '事项'} · ${{matched:'可重新核对',missing:'未在当前待办找到，不代表办理成功',changed:'当前资格已变化，暂不可直接办理'}[item.state] || '待核对'}`));
+      }
       section.append(element('p', `来源查询时间：${localTime(group.fetchedAt)}；办理选择有效至：${localTime(group.expiresAt)}`));
       const select = element('button'); select.type = 'button'; select.className = 'result-select-current';
       const empty = element('p', '当前筛选没有匹配事项。'); empty.hidden = true;
@@ -172,6 +183,17 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       });
       resumeButtons.push(button);
       resume.append(button);
+      if(batch?.items?.length) {const checklist=element('section');resume.append(checklist);renderBatchChecklist(document,checklist,batch);}
+      const remaining=item.oaBatchRemaining;
+      if(remaining?.available===true && Number.isSafeInteger(remaining.batchVersion) && remaining.batchVersion>0 && Number.isSafeInteger(remaining.remainingCount) && remaining.remainingCount>0) {
+        const explanation=element('p','仅重新查询这些未开始的原事项。已成功项不重提；结果待核对项需单独核对，后续仍须逐项确认。');
+        const query=element('button',`重新查询并核对剩余 ${remaining.remainingCount} 项`);query.type='button';remainingButtons.push(query);
+        query.addEventListener('click',()=>{
+          if(stopped || blocked() || !uuid.test(item.taskId)) return;
+          queryPending={action:'remaining-query',body:{taskId:item.taskId,requestKey:window.crypto.randomUUID(),expectedBatchVersion:remaining.batchVersion}};
+          queryFinished=false;waitingSince=now();saveQuery();void submitQuery();
+        });resume.append(explanation,query);
+      }
       renderRecovery(item, resume, {button,prefix:summaryPrefix,suffix:progress,fallback:stateLabel(item.state)});
     }
     recover.hidden = unavailable || (!recoverRead && (!pending?.body || Boolean(pending.taskId)));
@@ -190,7 +212,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
     const tick = () => {
       if (finished || stopped || epoch !== requestEpoch) return;
       const seconds = Math.floor((now() - (waitingSince ?? started)) / 1000);
-      if (seconds >= 5) say(`正在${action === 'prepare' ? '准备所选事项' : action === 'recovery-probe' ? '只读核对原事项' : action === 'recovery-prepare' ? '准备新的办理表单' : action === 'refresh' || query ? '查询最新待办' : '读取原办理状态'}，已等待 ${seconds} 秒。稍慢，请保留本页；无需重复提交。`);
+      if (seconds >= 5) say(`正在${action === 'prepare' ? '准备所选事项' : action === 'recovery-probe' ? '只读核对原事项' : action === 'recovery-prepare' ? '准备新的办理表单' : action === 'remaining-query' ? '查询原批次剩余事项' : action === 'refresh' || query ? '查询最新待办' : '读取原办理状态'}，已等待 ${seconds} 秒。稍慢，请保留本页；无需重复提交。`);
       progress = setTimeout(tick, 1000);
     };
     progress = setTimeout(tick, 1000);
@@ -460,7 +482,7 @@ export function installResultView({ document, window, fetch, initial, setTimeout
       let view = resultView;
       if (!view) {
         // Same original read request, now retrieving its fresh opaque ticket.
-        const receipt = await request('refresh', queryPending.body);
+        const receipt = await request(queryPending.action || 'refresh', queryPending.body);
         if (!receipt || !context.current()) return;
         if (receipt.taskId !== context.taskId) throw new Error('原查询回执不一致，请回原聊天核对。');
         view = receipt.resultView;
@@ -497,9 +519,9 @@ export function installResultView({ document, window, fetch, initial, setTimeout
     const current = () => !stopped && epoch === queryEpoch && queryPending === original;
     busy = true; queryRecoveryNeeded = false;
     if (queryRecover) queryRecover.hidden = true;
-    count(); say('正在请求最新 OA 待办；此步骤只查询，不会办理事项。');
+    count(); say(original.action === 'remaining-query' ? '正在重新查询原批次尚未开始的事项；此步骤不会准备或提交业务。' : '正在请求最新 OA 待办；此步骤只查询，不会办理事项。');
     try {
-      const value = await request('refresh', original.body);
+      const value = await request(original.action || 'refresh', original.body);
       if (!value || !current()) return;
       if (!uuid.test(value.taskId || '')) throw new Error('未取得原查询回执，请恢复同一查询。');
       if (original.taskId && original.taskId !== value.taskId) throw new Error('原查询回执不一致，请回原聊天核对。');

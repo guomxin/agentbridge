@@ -28,6 +28,7 @@ UI_PROFILES = {
         "lead": "先核对申请材料，再填写本次处理意见。确认后仅审批通过这条请假申请。"},
 }
 _SCRIPT = Path(__file__).with_name("static").joinpath("business_draft.mjs")
+_BATCH_SCRIPT = Path(__file__).with_name("static").joinpath("batch_view.mjs")
 _PDF_SCRIPT = Path(__file__).with_name("static").joinpath("pdf_preview.mjs")
 _MATERIAL_SCRIPT = Path(__file__).with_name("static").joinpath("material_preview.mjs")
 
@@ -282,7 +283,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     batch_html = (f'<p class="draft-batch">批次第 {int(batch["ordinal"])} / {int(batch["totalCount"])} 项'
                   ' · 本次确认仅处理当前项，其他项仍需分别核对。</p>'
                   if type(batch.get("ordinal")) is int and type(batch.get("totalCount")) is int
-                  and 0 < batch["ordinal"] <= batch["totalCount"] else "")
+                  and 0 < batch["ordinal"] <= batch["totalCount"] else "") + '<section id="draft-batch-list" hidden></section>'
     evidence = _render_review(ui.get("review"), element_id="draft-evidence-title") if has_evidence else ""
     review_body = ('<dl><dt>实际项目</dt><dd id="review-project"></dd><dt>项目编码</dt><dd id="review-project-code"></dd>'
                    '<dt>重复检查</dt><dd id="review-duplicate"></dd><dt>执行后果</dt><dd id="review-effect"></dd></dl>'
@@ -322,16 +323,38 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   .material-table th,.material-table td {{padding:10px;text-align:left;vertical-align:top;border:1px solid var(--line);white-space:pre-wrap;min-width:100px}}
   .material-table th {{background:var(--subtle-bg);color:var(--subtle-ink);font-weight:600}} .material-attachments {{margin:18px 0}}
   .material-attachments h3 {{font-size:14px}} .material-attachments li {{overflow-wrap:anywhere;line-height:1.7}}
+  .review-focus {{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:10px;margin:16px 0}}
+  .review-focus>div {{min-width:0;padding:12px;background:var(--subtle-bg);color:var(--subtle-ink);border-radius:6px}}
+  .review-focus h3,.material-directory h3 {{font-size:14px;margin:0 0 8px}}
+  .review-focus p {{font-size:13px;line-height:1.7;margin:6px 0;overflow-wrap:anywhere;white-space:pre-wrap}}
+  .review-missing {{color:var(--muted)}} .review-focus a,.material-directory a,.review-row a {{color:var(--teal-dark);text-underline-offset:3px}}
+  .material-directory {{border:1px solid var(--line);padding:12px;margin:16px 0;border-radius:6px}}
+  .material-directory>div {{display:flex;gap:8px 16px;flex-wrap:wrap}} .material-directory a {{font-size:13px;line-height:1.8;overflow-wrap:anywhere}}
+  .material-row-index {{margin-top:12px;font-size:13px}} .material-row-index>div {{display:flex;flex-direction:column;gap:8px;max-height:240px;overflow:auto;padding:10px 0}}
+  .material-row-index a {{color:var(--teal-dark);overflow-wrap:anywhere}} .material-table tr:focus {{outline:2px solid var(--teal);outline-offset:-2px}}
+  [id^="review-section-"],[id^="review-field-"],[id^="review-group-"],[id^="material-preview-"] {{scroll-margin-top:var(--draft-nav-clearance,100px)}}
+  .draft-material-layout>* {{min-width:0}}
+  @media(min-width:1100px) {{.draft-card:has(.material-side-by-side #draft-material-previews:not([hidden])) {{width:1120px;max-width:100%}}
+    .material-side-by-side:has(#draft-material-previews:not([hidden])) {{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}}
+    .material-side-by-side #draft-material-previews {{position:sticky;top:var(--draft-nav-clearance,100px);max-height:calc(100vh - var(--draft-nav-clearance,100px) - 20px);overflow:auto;padding-right:4px;scroll-padding-top:10px}}}}
   .material-attachments p,.material-completeness {{font-size:12px;line-height:1.6;color:var(--muted)}}
   .review-expense .review-key-facts,.review-attendance .review-key-facts {{background:var(--subtle-bg);color:var(--subtle-ink);padding:14px;border-radius:6px}}
   .draft-nav {{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0;position:sticky;top:0;z-index:2;background:var(--paper,#fff);padding:10px 0;border-bottom:1px solid var(--line)}}
   .draft-nav a {{padding:9px 13px;border-radius:5px;background:var(--selected-bg);color:var(--selected-ink);font-size:13px;text-decoration:none}}
-  #draft-form,#draft-evidence,#card-title {{scroll-margin-top:80px}}
+  #draft-form,#draft-evidence,#card-title {{scroll-margin-top:var(--draft-nav-clearance,100px)}}
   .draft-expiry,.field-count,#draft-submit-hint {{font-size:12px;color:var(--muted);line-height:1.6}}
   .draft-expiry.urgent {{color:var(--warning-ink);background:var(--warning-bg);padding:10px}}
   .draft-content {{margin:16px 0;padding:14px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px}}
   .draft-content p {{font-size:13px;line-height:1.7;overflow-wrap:anywhere}}
   .draft-content .draft-actions {{display:flex;flex-wrap:wrap;gap:10px}}
+  .business-batch-list {{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink)}}
+  .business-batch-items {{padding-left:22px;line-height:1.8}} .business-batch-items [aria-current="step"] {{font-weight:700}}
+  .material-pdf-search {{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}}
+  .material-pdf-search input {{min-width:0;flex:1 1 14em}} .material-pdf-search p,.material-pdf-search>div {{width:100%;font-size:13px;line-height:1.6}}
+  .material-pdf-search-result {{width:100%!important;text-align:left;white-space:normal;overflow-wrap:anywhere}}
+  .material-pdf-text {{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:8px}}
+  .material-pdf-text-body {{max-height:60vh;overflow:auto;line-height:1.75;user-select:text;font-size:14px}}
+  .material-pdf-display {{background:#fff;color:#17201d;border:1px solid var(--line)}}
   .draft-content-confirmation {{margin-top:14px;padding:14px;border:2px solid var(--teal);border-radius:10px;background:var(--paper);color:var(--ink)}}
   .draft-submit-bar {{position:sticky;bottom:0;background:var(--paper,#fff);border-top:1px solid var(--line);padding:12px 0 max(12px,env(safe-area-inset-bottom));z-index:3}}
   #draft-submit-hint {{display:block;margin-bottom:8px}} .draft-submit-bar button {{margin:0}}
@@ -353,10 +376,12 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   <div id="draft-material-change" class="draft-material-change" role="alert" hidden><strong>材料已更新，请重新核对</strong>下方已显示最新申请材料。本次尚未提交，请核对变化后再次确认。<div id="draft-material-diff"></div></div>
   <p class="draft-lead">{escape(lead)}</p>
   <p id="draft-expiry" class="draft-expiry" role="status"></p>
-  <nav class="draft-nav" aria-label="办理页导航"><a href="#card-title">事项概览</a>{'<a href="#draft-evidence">核对材料</a>' if has_evidence else ''}<a href="#draft-form">填写与确认</a></nav>
+  <nav class="draft-nav" aria-label="办理页导航"><a href="#card-title">事项概览</a><a id="draft-evidence-link" href="#draft-evidence"{' hidden' if not has_evidence else ''}>核对材料</a><a href="#draft-form">填写与确认</a></nav>
   {batch_html}<p class="draft-outcome"><strong>本次确认后的操作</strong>{escape(effect)}</p>
-  <div id="draft-evidence" class="draft-evidence"{' hidden' if not has_evidence else ''}>{evidence}</div>
-  <section id="draft-material-previews" aria-label="材料文件预览" hidden></section>
+  <div class="draft-material-layout{' material-side-by-side' if ui.get('reviewKind') in {'efficiency_data', 'quarterly_performance'} else ''}">
+    <div id="draft-evidence" class="draft-evidence"{' hidden' if not has_evidence else ''}>{evidence}</div>
+    <section id="draft-material-previews" aria-label="材料文件预览" hidden></section>
+  </div>
   <form id="draft-form" method="post" action="{escape(path)}">
     <section id="draft-content" class="draft-content" aria-label="保留的填写内容" hidden>
       <strong>填写内容与办理有效期</strong><p id="draft-content-saved"></p><p id="draft-content-candidate"></p>
@@ -388,7 +413,8 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
 <script type="module" nonce="{nonce}">
 {_PDF_SCRIPT.read_text(encoding='utf-8')}
 {_material_script()}
-{_SCRIPT.read_text(encoding='utf-8')}
+{_BATCH_SCRIPT.read_text(encoding='utf-8')}
+{_SCRIPT.read_text(encoding='utf-8').replace("import {renderBatchChecklist} from './batch_view.mjs';", "")}
 mountBusinessDraft({config}, document, window);
 </script>"""
     return _document(title=title, nonce=nonce, body=body, close_when_complete=False)

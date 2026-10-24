@@ -216,7 +216,7 @@ class TrustedFlowReader:
         if len(source_items) != 1:
             raise TrustedFlowDenied("batch source is ambiguous")
         source = source_items[0]
-        progress = {"completedCount": batch["succeeded_count"], "totalCount": batch["total_count"]}
+        progress = {**(view.get("batch") or {}), "completedCount": batch["succeeded_count"], "totalCount": batch["total_count"]}
         view = {**view, "batch": progress}
         if (task["status"] not in {"active", "running", "waiting_user"}
                 or batch["state"] not in {"running", "waiting_user"}):
@@ -314,8 +314,7 @@ class TrustedFlowReader:
             return self.service.write_authorizations, "execution_authorization"
         raise TrustedFlowDenied("unsupported flow source")
 
-    @staticmethod
-    def _view(context: FlowContext, state: str, *, operation_id: str | None = None) -> dict:
+    def _view(self, context: FlowContext, state: str, *, operation_id: str | None = None) -> dict:
         labels = {
             "waiting_coordinator": ("字段已保存", "正在等待原任务继续准备，请保留此页。连接恢复后会自动显示授权内容。"),
             "review_ready": ("请核对本次操作", "已准备本次操作的授权内容。"),
@@ -336,4 +335,11 @@ class TrustedFlowReader:
         }
         if operation_id:
             result["operationId"] = operation_id
+        if context.task_id and context.resume_arguments.get("batch_id"):
+            from agentbridge.core.task_projections import trusted_batch_projection
+            from agentbridge.core.oa_batch_remaining import remaining_presentation
+            batch = self.service.tasks.get_batch_for_task(parent_task_id=context.task_id, user_subject=context.resource["user_subject"])
+            if batch and batch["batch_id"] == context.resume_arguments["batch_id"]:
+                result["batch"] = trusted_batch_projection(batch)
+                result["oaBatchRemaining"] = remaining_presentation(self.service, context.resource["user_subject"], context.task_id)
         return result

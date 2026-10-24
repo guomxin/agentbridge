@@ -515,6 +515,18 @@ class TaskHubStore:
                 )
             WHERE status IN ('active', 'waiting_user', 'running')
               AND current_operation_id IS NOT NULL
+              AND NOT (
+                  COALESCE(json_extract(summary_json, '$.command.kind'), '') = 'oa_pending_query'
+                  AND COALESCE(json_type(summary_json, '$.command.remainingContext'), '') = 'object'
+                  AND COALESCE(json_extract(summary_json, '$.command.state'), '') = 'pending'
+                  AND EXISTS (
+                      SELECT 1 FROM task_events e
+                      WHERE e.task_id = agent_tasks.task_id AND e.user_subject = agent_tasks.user_subject
+                        AND e.event_type = 'task.prepare.requested'
+                        AND e.causation_ref = json_extract(agent_tasks.summary_json, '$.command.commandKey')
+                        AND json_extract(e.payload_json, '$.intentHash') = json_extract(agent_tasks.summary_json, '$.command.intentHash')
+                  )
+              )
               AND EXISTS (
                   SELECT 1 FROM operations
                   WHERE operations.operation_id =
@@ -1695,6 +1707,18 @@ class TaskHubStore:
                 newly_linked=linked is None,
             )
             task_status, event_type = decision.status, decision.event_type
+            if status == "succeeded":
+                # A scoped read is only one step of the frozen remaining-query
+                # command. Its successful IO must not finish the task before
+                # the account and original batch scope are attested atomically.
+                from agentbridge.core.oa_batch_remaining import read_observation_state
+                remaining_state = read_observation_state(connection, task, operation)
+                if remaining_state is not None:
+                    from dataclasses import replace
+                    task_status, event_type = remaining_state, "task.batch_remaining.read_completed"
+                    recorded = connection.execute("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
+                        "AND event_type=? AND causation_ref=?", (task_id, user_subject, event_type, operation_id)).fetchone()
+                    decision = replace(decision, update_task=task["status"] != task_status, emit_event=not recorded)
             if linked is None:
                 connection.execute(
                     """
@@ -2472,11 +2496,11 @@ class TaskHubStore:
         user_subject: str,
         reason: str,
         causation_ref: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         completion_reason = _required_text(reason, "reason", 120)
         now = _utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             task = self._select_owned_task(connection, task_id, user_subject)
             transition = terminal_transition(task["status"], "succeeded")
             if transition == "reuse":
@@ -2519,12 +2543,12 @@ class TaskHubStore:
         error_code: str,
         message: str,
         causation_ref: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         code = _required_text(error_code, "error_code", 120)
         failure_message = _required_text(message, "message", 500)
         now = _utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             task = self._select_owned_task(connection, task_id, user_subject)
             transition = terminal_transition(task["status"], "failed")
             if transition == "reuse":

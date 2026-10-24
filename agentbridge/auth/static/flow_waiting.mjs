@@ -1,4 +1,5 @@
 // Read-only status continuation. Decisions remain in the original trusted forms.
+import {renderBatchChecklist} from './batch_view.mjs';
 export function mountTrustedFlow(config, environment = {}) {
   const window = environment.window || globalThis.window;
   const document = environment.document || window.document;
@@ -150,6 +151,7 @@ export function mountTrustedFlow(config, environment = {}) {
         continued.hidden = true;
         continued.removeAttribute('href');
         batch.hidden = !state.batch;
+        renderBatchChecklist(document,document.getElementById('flow-batch-list'),state.batch);
         if (state.batch) {
           batch.textContent = `本批次已完成 ${state.batch.completedCount} / ${state.batch.totalCount} 项`;
           if (state.batch.nextOrdinal) batch.textContent += `；下一项（第 ${state.batch.nextOrdinal} 项）：${state.batch.nextTitle}`;
