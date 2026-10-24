@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "6344947f987c"
+    "a2adbc82fb46"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "974b1c40cbac3ae37eb9df2edf824cf80b0316df924bb9b0c3ef38d19e1e1603",
-      "afterSha256": "2184e9830bb849648356d99f653687ef84b15a19720cb7f13d507fc415ca489d"
-    }
-  },
-  "reason": "Reviewed additive private input-content retention table and indexes, isolated from execution tickets and authorization. Existing four-database objects and user_version remain unchanged. Source-bound restore requires fresh identity/material checks and a new explicit business decision. Preserve grants, original unknown receipts, authorization consumption and authoritative business verification. No automatic database rollback after a schema change."
+  "dataCompatibility": "no-migration",
+  "reason": "Display-only follow-up after production acceptance: show validated formatted body blocks before supplemental page text, retaining every source character in an accessible disclosure. No database, source material, schema hash, authorization, account grant or business verification changes. Existing input-content retention schema was reviewed and deployed in predecessor a2adbc82fb46."
 }

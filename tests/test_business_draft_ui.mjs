@@ -1224,3 +1224,55 @@ test('older WebViews measure navigation again on resize and ignore unavailable g
  const count=measured.length;height=NaN;h.events.get('resize')();assert.equal(measured.length,count);
  h.hide();assert.equal(h.events.has('resize'),false);
 });
+
+test('mixed body prioritizes its explicit formatted blocks and preserves every bare source character in a collapsed accessible disclosure',()=>{
+ const document=createDocument(),target=document.createElement('div');target.querySelectorAll=()=>[];
+ const plain=['合法开场与更多 审批 加签\n<script>仅文字</script>','\n补充说明','\n原始尾部'];
+ const reading={version:1,notices:['图片未读取'],nodes:[plain[0],
+  {tag:'p',children:['原格式化正文',{tag:'strong',children:['保留重点']}]},plain[1],
+  {tag:'table',children:[{tag:'tr',children:[{tag:'td',children:['00100.00']}]}]},plain[2]]};
+ const review={sections:[{id:'body',kind:'text',title:'正文与页面材料',text:'完整来源',reading}]},before=JSON.stringify(review);
+ renderEvidence(document,target,review,'efficiency_data');
+ const nodes=descendants(target),body=nodes.find(n=>n.className==='material-reading');
+ assert.equal(body.children[0].tag,'p');assert.equal(body.children[0].textContent,'原格式化正文保留重点');
+ assert.equal(body.children[1].className,'reading-table');assert.equal(body.children[1].textContent,'00100.00');
+ const original=nodes.find(n=>n.className==='material-page-text');
+ assert.equal(original.open,false);assert.equal(original.children[0].tag,'summary');
+ assert.equal(original.children[0].textContent,'其他原始页面文字（展开查看）');
+ assert.equal(original.children[1].textContent,plain.join(''));assert.equal(original.children[1].tabIndex,0);
+ assert.equal(body.children.at(-1),original);assert.match(body.textContent,/图片未读取/);
+ assert.ok(!nodes.some(n=>['script','img','iframe','input','form'].includes(n.tag)));
+ assert.equal(JSON.stringify(review),before);
+});
+
+test('plain-only body remains directly readable and an invalid mixed projection keeps the complete inert fallback',()=>{
+ for(const reading of [undefined,{version:1,notices:[],nodes:['仅有纯文字，包含合法正文']},
+  {version:1,notices:[],nodes:[{tag:'pre',children:['仅有纯文字，包含合法正文']}]},
+  {version:1,notices:[],nodes:['前置文字',{tag:'script',children:['不可执行']}]}]) {
+  const document=createDocument(),target=document.createElement('div');target.querySelectorAll=()=>[];
+  const text='仅有纯文字，包含合法正文';renderEvidence(document,target,{sections:[{id:'body',kind:'text',text,reading}]},'efficiency_data');
+  const nodes=descendants(target),body=nodes.find(n=>n.className==='material-body');
+  assert.equal(body.textContent,text);assert.equal(nodes.some(n=>n.className==='material-page-text'),false);
+ }
+});
+
+test('field readings and other text sections retain mixed node order without hiding plain context',()=>{
+ const document=createDocument(),target=document.createElement('div');target.querySelectorAll=()=>[];
+ const reading={version:1,notices:[],nodes:['前置合法文字',{tag:'p',children:['格式化段落']},'后置合法文字']};
+ renderEvidence(document,target,{fields:[{label:'事项',value:'原字段',reading}],sections:[
+  {id:'report',kind:'text',title:'原报告',text:'原报告',reading}]},'weekly_report');
+ const material=descendants(target).filter(n=>n.className==='material-reading');
+ assert.equal(material.length,2);
+ for(const body of material) assert.equal(body.textContent,'前置合法文字格式化段落后置合法文字');
+ assert.equal(descendants(target).some(n=>n.className==='material-page-text'),false);
+});
+
+test('user-expanded original page text stays expanded after a changed evidence projection',()=>{
+ const document=createDocument(),target=document.createElement('div');
+ target.querySelectorAll=selector=>selector==='details'?descendants(target).filter(n=>n.tag==='details'):[];
+ const review={sections:[{id:'body',kind:'text',text:'原材料',reading:{version:1,notices:[],nodes:['原页面文字',{tag:'p',children:['格式正文']} ]}}]};
+ renderEvidence(document,target,review,'efficiency_data');
+ descendants(target).find(n=>n.className==='material-page-text').open=true;
+ renderEvidence(document,target,{...review,title:'更新后的来源标题'},'efficiency_data');
+ assert.equal(descendants(target).find(n=>n.className==='material-page-text').open,true);
+});

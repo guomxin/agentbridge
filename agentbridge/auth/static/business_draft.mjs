@@ -558,7 +558,7 @@ const READING_TAGS = new Set(["p", "h2", "br", "ul", "ol", "li", "table", "thead
 
 // The server projects source HTML into a closed reading tree. Never parse HTML
 // here or copy source attributes: even an invalid projection stays inert text.
-export function appendReading(document, target, text, reading, onTable = () => {}) {
+export function appendReading(document, target, text, reading, onTable = () => {}, prioritizeFormattedBody = false) {
   if (!reading) { target.textContent = String(text ?? ""); return; }
   let budget = 20000;
   const valid = (item, depth = 0) => {
@@ -588,12 +588,28 @@ export function appendReading(document, target, text, reading, onTable = () => {
       onTable(scroll);
     } else parent.append(element);
   };
-  for (const item of reading.nodes) append(root, item);
+  // Only the body section opts in. Bare top-level text comes from the source
+  // outside its explicit formatted blocks; it can include useful context as
+  // well as page controls. Retain every character without classifying words.
+  const plainNodes = reading.nodes.filter(item => typeof item === "string");
+  const formattedNodes = reading.nodes.filter(item => typeof item !== "string");
+  const split = prioritizeFormattedBody && plainNodes.some(item => item.trim()) &&
+    formattedNodes.some(item => ["p", "h2", "ul", "ol", "table", "blockquote", "pre"].includes(item.tag));
+  for (const item of split ? formattedNodes : reading.nodes) append(root, item);
   for (const notice of reading.notices) {
     const note = document.createElement("p"); note.className = "reading-notice";
     note.textContent = notice; root.append(note);
   }
+  let originalText;
+  if (split) {
+    originalText = document.createElement("details"); originalText.className = "material-page-text";
+    const label = document.createElement("summary"), source = document.createElement("pre");
+    label.textContent = "其他原始页面文字（展开查看）";
+    source.textContent = plainNodes.join(""); source.tabIndex = 0;
+    originalText.append(label, source); root.append(originalText);
+  }
   target.append(root);
+  return originalText;
 }
 
 function appendReviewRows(document, target, fields, wrapped = true, register = () => {}, linkTo = null) {
@@ -704,9 +720,14 @@ export function renderEvidence(document, target, review, kind = "") {
       }
       const text = document.createElement(material.reading ? "div" : "pre"); text.className = "material-body"; text.tabIndex = 0;
       let tableIndex = 0;
-      appendReading(document, text, material.text, material.reading, table => {
+      const originalText = appendReading(document, text, material.text, material.reading, table => {
         const id = `${sectionId}-table-${++tableIndex}`; register(id, table); addDirectory(id, `${material.title || '正文'} · 原表 ${tableIndex}`);
-      }); detail.append(text);
+      }, material.id === "body");
+      if (originalText) {
+        originalText.dataset.group = `material-page-text:${materialIndex}`;
+        originalText.open = opened.get(originalText.dataset.group) === true;
+      }
+      detail.append(text);
       if (String(material.text || "").length > 1800) {
         const expand = document.createElement("button"); expand.type = "button"; expand.className = "secondary material-reading-toggle";
         let expanded = false; expand.textContent = "展开长文连续阅读"; expand.setAttribute("aria-expanded", "false");
