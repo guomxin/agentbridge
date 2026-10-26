@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1dbbb4786933"
+    "1ab289be6a29"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Account-scoped MCP credential expiry reminders and durable preparation delivery diagnostics using existing task events. No schema migration, token secret, permissions, frozen intent, material TTL, authorization or business verification changes."
+  "reason": "Bound desktop Workspace grid height when credential notice shares the main area, preserving internal history scrolling and composer visibility. CSS only; no database, authentication, material, authorization or business verification changes."
 }

@@ -19,6 +19,7 @@ parser.add_argument('--home',type=Path,required=True)
 args=parser.parse_args()
 if args.home.exists(): raise SystemExit('Use a fresh acceptance home')
 f=LatencyAcceptanceFixture(args.home,seed=False)
+f.seed_history(messages=160,tasks=0)
 clock=[datetime.now(timezone.utc)-timedelta(seconds=400)]
 store=McpIdentityTokenStore(f.service.tasks.db_path,clock=lambda:clock[0])
 token=store.issue(user_subject=OWNER,expected_principal_ref=OWNER,ttl_seconds=300)
