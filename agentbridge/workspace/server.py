@@ -479,6 +479,9 @@ def create_workspace_http_server(
                         {"items": application.list_endpoints(account)},
                     )
                     return
+                if route.path == "/api/credential-health":
+                    self._json(200, application.credential_health(account))
+                    return
                 if route.path == "/api/gateway":
                     self._json(200, application.gateway_status())
                     return

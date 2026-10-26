@@ -476,3 +476,16 @@ test('scoped remaining query summary overrides a full OA read count in both card
  assert.doesNotMatch(copy.textContent,/返回 14/);assert.doesNotMatch(f.detail.textContent,/返回 14/);
  assert.match(f.detail.textContent,/未找到不代表已成功/);
 });
+
+test('credential failure replaces indefinite query progress and clears on recovery', () => {
+  const f=fixture(), r=result(1,'active',[]);
+  r.task.summary={preparation:{kind:'oa_pending_query',state:'pending'}};
+  r.preparationHealth={state:'authentication_required',label:'连接认证失败',message:'请联系管理员检查连接凭证。原请求已保留。'};
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  assert.match(f.chat.textContent,/连接认证失败/);
+  assert.match(f.detail.textContent,/连接认证失败/);
+  assert.doesNotMatch(f.chat.textContent,/正在查询最新/);
+  r.preparationHealth=null;r.task.status='succeeded';r.task.version++;
+  f.upsertTaskCard(r);
+  assert.doesNotMatch(f.chat.textContent,/连接认证失败/);
+});

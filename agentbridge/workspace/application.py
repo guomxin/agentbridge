@@ -302,12 +302,15 @@ class WorkspaceApplication:
         from agentbridge.core.actionable_results import preparation_source_task_ids
         with self.service.tasks._connect() as connection:
             actionable_sources = preparation_source_task_ids(connection, account["user_subject"], task_id, service=self.service)
+        from agentbridge.workspace.credential_health import preparation_health
+        delivery = preparation_health(self.service, task)
         business = self._business_task_presentation(account, task, interactions)
         from agentbridge.core.oa_batch_remaining import remaining_presentation
         return {
             "task": _public_task(task),
             "actionableResults": self.actionable_results(account, task_id),
             "actionableSourceTaskIds": actionable_sources,
+            "preparationHealth": delivery,
             "skill": self.service.skills.task_presentation(account["user_subject"], task_id),
             "feedback": self.service.skill_authoring.workbench.task_feedback(account["user_subject"], task_id),
             "plan": task_plan_response(plan) if plan is not None else None,
@@ -670,7 +673,10 @@ class WorkspaceApplication:
                 "sessionKey": grant["session_key"], "endpointKey": grant["endpoint_key"],
                 "grant": grant["grant"], "taskId": command["taskId"], "commandKey": command["commandKey"],
             }, timeout_seconds=60)
+            self._record_preparation_delivery(account, command, "accepted")
         except Exception as exc:
+            code = exc.code if isinstance(exc, GatewayRequestError) else "unavailable"
+            self._record_preparation_delivery(account, command, code if code in {"FORBIDDEN", "UNAUTHORIZED", "MCP_HTTP_401", "HTTP_401"} else "unavailable")
             # The committed command remains recoverable through the host runtime
             # channel. Never execute a business action from this worker.
             _LOG.debug("Workspace preparation wake unavailable: %s", type(exc).__name__)
@@ -678,6 +684,13 @@ class WorkspaceApplication:
             with self._dispatch_workers_lock:
                 self._preparation_workers.pop(command["taskId"], None)
                 self._start_preparation_workers_locked()
+
+    def _record_preparation_delivery(self, account, command, code):
+        from agentbridge.workspace.credential_health import record_delivery
+        try:
+            record_delivery(self.service, account, command, code)
+        except Exception as exc:
+            _LOG.warning("Preparation delivery diagnostic unavailable: %s", type(exc).__name__)
 
     def task_feedback(self, account: dict, task_id: str, body: dict) -> dict:
         if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
@@ -896,6 +909,10 @@ class WorkspaceApplication:
                 limit=100,
             )
         ]
+
+    def credential_health(self, account: dict) -> dict:
+        from agentbridge.workspace.credential_health import credential_health
+        return credential_health(self.service, account["user_subject"])
 
     def gateway_status(self) -> dict:
         if self.gateway is None:

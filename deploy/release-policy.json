@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "a2adbc82fb46"
+    "1dbbb4786933"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Display-only follow-up after production acceptance: show validated formatted body blocks before supplemental page text, retaining every source character in an accessible disclosure. No database, source material, schema hash, authorization, account grant or business verification changes. Existing input-content retention schema was reviewed and deployed in predecessor a2adbc82fb46."
+  "reason": "Account-scoped MCP credential expiry reminders and durable preparation delivery diagnostics using existing task events. No schema migration, token secret, permissions, frozen intent, material TTL, authorization or business verification changes."
 }

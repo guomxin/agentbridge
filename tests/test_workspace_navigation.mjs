@@ -77,3 +77,10 @@ test('cancellation and account disposal discard delayed reads without navigation
   const f=handoffFixture();f.set({task:{task_id:'child',status:'running'}});const cancel=f.start();await flush();cancel();
   assert.equal(f.timers.size,0);assert.equal(f.progress.at(-1)[1],false);
 });
+
+test('authentication failure stops automatic waiting without opening a form',async()=>{
+  const f=handoffFixture();f.set({task:{task_id:'child',status:'active'},
+    preparationHealth:{state:'authentication_required',message:'连接认证失败，请续期。'}});
+  f.start({automatic:true});await flush();
+  assert.deepEqual(f.navigations,[]);assert.equal(f.timers.size,0);
+});

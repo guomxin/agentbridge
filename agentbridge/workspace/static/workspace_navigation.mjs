@@ -85,6 +85,7 @@ export function createPreparationHandoff({getScope, read, navigate, openResult, 
           if (!automatic) await openResult(taskId);
           return;
         }
+        if (result.preparationHealth?.state === 'authentication_required' || result.preparationHealth?.state === 'expired') { finish(result.preparationHealth.message); return; }
         if (now()-started >= 60000) { finish('材料准备仍在进行，可稍后点击继续办理；无需重新选择。'); return; }
         onProgress('正在准备材料；表单就绪后会直接打开。可取消自动打开，任务仍会继续。',true);
         scope.timeout(() => inspect(),2000);

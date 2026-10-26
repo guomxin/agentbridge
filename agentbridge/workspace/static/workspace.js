@@ -416,6 +416,8 @@ async function logout() {
   sessionScope = lifecycle.scope();
   viewScope = sessionScope.child();
   state.account = null;
+  $("#credential-notice").hidden = true;
+  $("#credential-notice").textContent = "";
   resetWorkspaceState();
   showAuth();
   setBusy($("#login-form"), true);
@@ -510,9 +512,15 @@ async function loadGatewayStatus() {
   state.gatewayStatusCheckActive = true;
   let available = false;
   try {
-    const result = await api("/api/gateway");
+    const [result, credential] = await Promise.all([api("/api/gateway").catch(() => ({available:false,code:"连接状态读取失败"})), api("/api/credential-health")]);
     scope.assertCurrent();
-    available = Boolean(result.available);
+    available = Boolean(result.available) && !credential.blocked;
+    const notice = $("#credential-notice");
+    notice.textContent = credential.message || "";
+    notice.hidden = !credential.message;
+    // Expiry and renewal can change presentation without a task event/version.
+    const pending = [...state.taskCards.values()].filter(card => card.dataset.preparationPending === 'true');
+    for (const card of pending.slice(0,32)) projectionQueue.enqueue(card.dataset.taskId);
     dot.className = `status-dot ${available ? "online" : "offline"}`;
     element.title = available
       ? `OpenClaw ${result.version || "已连接"}`

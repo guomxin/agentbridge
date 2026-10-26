@@ -311,6 +311,7 @@ async function renderUsers() {
     ];
     return filterRow(`${user.user_subject} ${Object.values(user.principal_bindings || {}).flatMap(value => [value.expected, value.verified]).join(" ")}`, "", `<td><strong>${escapeHtml(user.user_subject)}</strong></td><td>${principalBindingSummary(user)}</td><td>${user.active_token_count} / ${user.token_count}</td><td>${Object.entries(user.sessions).map(([system, value]) => `${escapeHtml(system)} ${badge(value)}`).join(" ") || "--"}</td><td><span class="muted">${user.database_grants?.capabilities?.length || 0} 项；按源配置</span></td><td class="row-action-cell">${rowMenuButton(`${user.user_subject}用户`, items)}</td>`);
   });
+  const expiring = tokens.items.filter(token => token.state === "active" && Date.parse(token.expires_at) <= Date.now() + 7 * 86400000);
   const tokenRows = tokens.items.map(token => {
     const displayState = token.state === "active" && new Date(token.expires_at).getTime() <= Date.now() ? "expired" : token.state;
     const items = admin && token.state === "active" ? [
@@ -323,6 +324,7 @@ async function renderUsers() {
     <p class="muted">数据库能力按中央账号和数据源配置，保存即生效，无需重启 OpenClaw 或重新签发 Token。</p>
     ${filteredTable(["用户标识", "各系统下游主体", "有效 / 全部令牌", "系统会话", "数据库能力", "操作"], userRows, "搜索用户或下游主体")}
     <div class="view-head section-spaced"><div><h2>MCP Token</h2><p>业务权限按用户配置；令牌用于认证、续期和撤销。管理员看不到已签发密钥。</p></div></div>
+    ${expiring.length ? `<p role="status">${expiring.length} 个未撤销凭证已过期或将在7天内到期，请核对下方到期时间并及时续期。</p>` : ""}
     ${filteredTable(["Token ID", "标签", "用户", "状态", "到期时间", "操作"], tokenRows, "搜索 Token 或用户", ["active", "expired", "revoked"])} `;
 }
 

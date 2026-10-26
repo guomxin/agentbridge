@@ -245,6 +245,9 @@ export function taskCardStatusForInteraction(state, fallback) {
 }
 
 export function taskCardStatusMessage(status, summary = null) {
+  if (status === 'failed' && summary?.failure?.code === 'ACTION_SOURCE_EXPIRED' && summary?.preparation?.kind === 'oa_pending_query') {
+    return '本次查询等待已超过10分钟，请重新发送“查询 OA 待办”获取最新结果。';
+  }
   if (summary?.preparation?.state === "pending" && ["active", "running"].includes(status)) {
     if (summary.preparation.kind === "oa_pending_query") {
       return "正在查询最新 OA 待办，请稍候。";
@@ -517,6 +520,7 @@ export function eventLabel(type) {
   return (
     {
       "task.created": "任务已创建",
+      "task.prepare.delivery": "智能体接续状态已更新",
       "task.operation.linked": "操作已关联",
       "task.operation.requires_user_action": "操作等待用户处理",
       "task.interaction.waiting": "等待用户处理",
