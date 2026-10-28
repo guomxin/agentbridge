@@ -654,5 +654,5 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     card.append(details);
   }
 
-  return { loadSkillDrafts, showSkillDraft, refreshSkillJobs, addSkillFeedback, canLeaveSkillEditor: leaveGuard.request };
+  return { loadSkillDrafts, showSkillDraft, refreshSkillJobs, addSkillFeedback, canLeaveSkillEditor: leaveGuard.request, canAutoReloadSkillEditor: leaveGuard.canAutoReload };
 }

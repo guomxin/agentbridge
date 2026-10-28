@@ -1202,3 +1202,24 @@ test('historical use feedback starts with a blank redacted question and retains 
   assert.equal(f.calls.find(c=>c.action === 'evaluate').data.cases[0].feedback_id,fid);
   f.view.dispose();
 });
+
+
+test('automatic version refresh waits for unsaved evaluation inputs and pending editor work', async () => {
+  const f=skillFixture();await f.forms.showSkillDraft('draft');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  const row=f.$('#skill-eval-cases').children[0];
+  row.querySelector('[name=prompt]').value='明天补测试';
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  row.querySelector('[name=contains]').value='明天';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  let reloads=0,allowed=false;
+  const state={activeStreams:new Set(),clientVersionCheckActive:false};
+  const start=workspaceSource.indexOf('async function checkClientVersion()');
+  const end=workspaceSource.indexOf('\n}',start)+2;
+  const check=new Function('sessionScope','scopedApi','CLIENT_VERSION','state','canAutoReloadSkillEditor','location',
+    workspaceSource.slice(start,end)+';return checkClientVersion;')(f.view,()=>async()=>({version:'new'}),'old',state,()=>allowed,{reload(){reloads++;}});
+  await check();assert.equal(reloads,0);assert.equal(state.clientVersionCheckActive,false);
+  allowed=true;await check();assert.equal(reloads,1);
+  f.view.dispose();
+});

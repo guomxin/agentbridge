@@ -107,7 +107,7 @@ const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
   document, state, $, toast, getScope: () => sessionScope, executeChatMessage, queryOaPending,
 });
-const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor } = createSkillForms({
+const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor, canAutoReloadSkillEditor } = createSkillForms({
   document, state, $, api, switchView, startTrial, clearTrial: clearComposerTrial, getScope: () => viewScope,
 });
 const projectionOrder = createProjectionOrder({ onOverflow: () => scheduleChatRefresh(100, 1) });
@@ -1515,7 +1515,7 @@ async function checkClientVersion() {
     const result = await api("/api/client-version");
     scope.assertCurrent();
     const runActive = state.activeStreams.size > 0;
-    if (result.version && result.version !== CLIENT_VERSION && !runActive) {
+    if (result.version && result.version !== CLIENT_VERSION && !runActive && canAutoReloadSkillEditor()) {
       location.reload();
     }
   } catch {

@@ -86,5 +86,6 @@ export function createSkillLeaveGuard({ eventTarget = globalThis, document = glo
     editor?.refresh();
     return () => { release(); finish(); };
   }
-  return {register, update, capture, request, begin, busy: () => operations.size > 0};
+  return {register, update, capture, request, begin, busy: () => operations.size > 0,
+    canAutoReload: () => !operations.size && !confirming && !editor?.isDirty() && !editor?.isBusy()};
 }
