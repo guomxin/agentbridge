@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1ab289be6a29"
+    "ec5ed3214716"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Bound desktop Workspace grid height when credential notice shares the main area, preserving internal history scrolling and composer visibility. CSS only; no database, authentication, material, authorization or business verification changes."
+  "dataCompatibility": "reviewed-schema-transition",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "2184e9830bb849648356d99f653687ef84b15a19720cb7f13d507fc415ca489d",
+      "afterSha256": "05d4a34ab4f9199f775c7c23c0ea0cb1fc7668e574764973fc3668b5f0621d56"
+    }
+  },
+  "reason": "Reviewed schema-only clone of the exact deployed four-database baseline. Adds only skill_regressions (draft owner and completed evaluation job reference); all existing objects and user_version values remain unchanged. No business grants, authorization or execution semantics are relaxed."
 }
