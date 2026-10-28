@@ -11,7 +11,7 @@ import time
 from typing import Callable, Protocol
 
 from agentbridge.core.business_skills import _json, skill_bundle
-from agentbridge.core.skill_quality import EVALUATION_SCHEMA, grade_output
+from agentbridge.core.skill_quality import EVALUATION_SCHEMA, grade_output, case_fingerprint
 from agentbridge.core.user_grants import UserGrantConflict
 
 
@@ -169,6 +169,10 @@ class SkillJobExecutor:
         return {'schema': EVALUATION_SCHEMA, 'repeats': payload['repeats'],
                 'job_id': job['job_id'], 'draft_id': payload['draft_id'], 'revision': payload['revision'],
                 'content_hash': payload['bundle']['content_hash'], 'cases': payload['cases'], 'rows': rows,
+                'name': payload['bundle']['manifest']['name'],
+                'case_fingerprint': case_fingerprint(payload['cases'], payload['repeats']),
+                'baseline': ({'version': payload['baseline']['manifest']['version'],
+                              'content_hash': payload['baseline']['content_hash']} if payload['baseline'] else None),
                 'scores': scores, 'passed': scores['candidate']['passed'] == scores['candidate']['total'],
                 'verification': 'independent_text_rules', 'semantic_review_required': True,
                 'limitations': '仅验证所列断言与合成文字；不证明业务执行、完整语义正确性或所有宿主上的触发准确率'}

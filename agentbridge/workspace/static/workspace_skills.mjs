@@ -126,10 +126,10 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     if (!finish) return false;
     try { return await action(permit); } finally { finish(); }
   }
-  async function reloadDraft(id, permit) {
+  async function reloadDraft(id, permit, evaluation) {
     const view = getScope();
     if (await loadSkillDrafts(permit) === false) return false;
-    if (id && view.current()) await showSkillDraft(id, permit);
+    if (id && view.current()) await showSkillDraft(id, permit, evaluation);
   }
   function downloadJson(value, filename, scope) {
     scope.assertCurrent();
@@ -172,7 +172,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       for(const d of data.items){const b=document.createElement("button");b.className="secondary";b.textContent=`${d.name} · 修订 ${d.revision} · ${draftStatus[d.review_state||d.state]||d.state}${d.published_version?" · 线上 "+d.published_version:" · 尚未发布"}`;b.onclick=()=>showSkillDraft(d.draft_id);list.append(b);}
     } catch(e){if(!scope.current()||isCancellation(e))return false;root.textContent=e.message;return false;}
   }
-  async function showSkillDraft(id, permit) {
+  async function showSkillDraft(id, permit, carriedEvaluation = null) {
     const view = getScope();
     if (!await leaveGuard.request(permit) || !view.current()) return false;
     const scope = view.replace("skill-draft-detail");
@@ -199,6 +199,11 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       const fields = ["name", "description", "instructions", "use_when", "not_for", "output"];
       const readFields = () => Object.fromEntries(fields.map(k => [k, editor.elements?.namedItem(k)?.value ?? ""]));
       let savedFields = readFields();
+      let retainedEvaluation = carriedEvaluation;
+      let readEvaluation = () => retainedEvaluation?.value || {cases: [], repeats: '1'};
+      let savedEvaluation = carriedEvaluation?.baseline ?? JSON.stringify(readEvaluation());
+      const evaluationDirty = () => JSON.stringify(readEvaluation()) !== savedEvaluation;
+      const editorSnapshot = () => JSON.stringify({method: readFields(), evaluation: readEvaluation()});
       let busy = false;
       let coverage = null;
       const isDirty = () => JSON.stringify(readFields()) !== JSON.stringify(savedFields);
@@ -222,7 +227,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const evaluate = $("#skill-eval-submit");
         if (evaluate) evaluate.disabled = dirty || processing || d.state === "archived";
       };
-      leaveGuard.register(scope, {isDirty, isBusy: () => busy, snapshot: () => JSON.stringify(readFields()), refresh: refreshState,
+      leaveGuard.register(scope, {isDirty: () => isDirty() || evaluationDirty(), isBusy: () => busy, snapshot: editorSnapshot, refresh: refreshState,
         notify: message => error(new Error(message))});
       const requireSaved = () => {
         scope.assertCurrent();
@@ -246,6 +251,8 @@ export function createSkillForms({ document, state, $, api: request, switchView,
           resources: {...d.bundle.resources, "SKILL.md": proposal.instructions}, content_hash: saved.content_hash};
         coverage = null;
         $("#skill-publication-profiles").innerHTML = "<legend>本次发布模式</legend><p>新修订需重新核对样例。</p>";
+        retainedEvaluation = {value: readEvaluation(), baseline: savedEvaluation};
+        readEvaluation = () => retainedEvaluation.value;
         $("#skill-quality-panel").replaceChildren();
         return saved;
       };
@@ -263,7 +270,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         await perform(async () => {
           await saveEdits();
           if (isDirty()) { await renderSkillQuality(d, scope, controls); error(new Error(`修订 ${d.revision} 已保存，仍有未保存修改，请继续保存。`)); return; }
-          await reloadDraft(id, leaveGuard.capture());
+          await reloadDraft(id, leaveGuard.capture(), retainedEvaluation);
         });
       };
       $("#draft-restore").onclick = async () => {
@@ -275,6 +282,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         });
       };
       $("#draft-test").onclick = async () => {
+        if (evaluationDirty() && !await leaveGuard.request()) return;
         if (d.state === "archived") { error(new Error("草稿已归档，不能试用。")); return; }
         if (editor.reportValidity && !editor.reportValidity()) return;
         const profile = $("#draft-test-profile").value;
@@ -303,7 +311,17 @@ export function createSkillForms({ document, state, $, api: request, switchView,
           });
         } catch (e) { error(e); }
       };
-      const controls = {requireSaved, refreshState, perform, setCoverage: value => {coverage = value;}};
+      const controls = {requireSaved, refreshState, perform, setCoverage: value => {coverage = value;},
+        evaluation: () => retainedEvaluation,
+        setEvaluationReader: read => {
+          readEvaluation = read;
+          if (!retainedEvaluation) savedEvaluation = JSON.stringify(read());
+          retainedEvaluation = null;
+          leaveGuard.update();
+        },
+        evaluationChanged: () => leaveGuard.update(),
+        evaluationSaved: value => {savedEvaluation = JSON.stringify(value); leaveGuard.update();},
+      };
       refreshState();
       await renderSkillQuality(d, scope, controls);
       scope.assertCurrent();
@@ -317,8 +335,8 @@ export function createSkillForms({ document, state, $, api: request, switchView,
 
   function skillReportHtml(report) {
     if (!report) return '<p>尚无独立评测。快速试用仅供人工复核。</p>';
-    const names={candidate:'候选版本',published:'线上版本',without_skill:'不使用助手'};
-    return `<p><strong>${report.passed?'所列断言通过':'存在未通过断言'}</strong> · 仍需人工检查语义正确性</p>
+    const names={candidate:'候选版本',published:report.baseline?.version ? `评测时线上 ${escapeHtml(report.baseline.version)}` : '历史线上对照（版本未记录）',without_skill:'不使用助手'};
+    return `<p>${escapeHtml(report.name || '助手')} · 修订 ${escapeHtml(report.revision)} · ${escapeHtml(report.job_id || '')}</p><p><strong>${report.passed?'所列断言通过':'存在未通过断言'}</strong> · 仍需人工检查语义正确性</p>
       <p>${escapeHtml(report.limitations)}</p>
       <div class="draft-actions">${Object.entries(report.scores).map(([k,v])=>`<span>${names[k]}：${v.passed}/${v.total}</span>`).join('')}</div>
       ${report.rows.map(r=>`<details><summary>${names[r.variant]} · ${escapeHtml(profileLabel(report.cases?.[r.case]?.profile || '未记录模式'))} · ${escapeHtml(r.prompt||'不支持的模式')} · ${r.passed?'通过':'未通过'}</summary><pre>${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')} · ${r.elapsed_ms||0} 毫秒</p>${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`).join('')}`;
@@ -350,19 +368,22 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     const view = scope;
     const draftAction = draftActions(scope);
     const root=$('#skill-jobs');if(!root)return;
+    const openReports = new Set([...root.querySelectorAll('[data-report-job]')].filter(d => d.open).map(d => d.dataset.reportJob));
     const openCandidates = new Set([...root.querySelectorAll('[data-candidate-job]')].filter(d => d.open).map(d => d.dataset.candidateJob));
     scope.clearTimer(state.skillJobTimer);
     if(state.activeView==='skills'&&items.some(j=>['queued','running'].includes(j.state)))state.skillJobTimer=scope.timeout(()=>refreshSkillJobs().catch(e=>{if(scope.current()&&!isCancellation(e))$('#draft-error').textContent=e.message;}),3000);
     const labels={queued:'排队中',running:'执行中',succeeded:'已完成',failed:'失败',canceled:'已取消'};
     const kinds={method:'可复用方法',preference:'个人偏好',fact:'业务事实',none:'无需沉淀'};
-    root.innerHTML=items.map(j=>`<article class="skill-job"><p><strong>${j.kind==='evaluation'?'独立评测':'方法提炼'}</strong> · ${labels[j.state]}${j.kind==='evaluation'?` · 已完成 ${j.progress} 项`:''}</p>
+    root.innerHTML=items.map(j=>`<article class="skill-job"><p><strong>${j.kind==='evaluation'?'独立评测':'方法提炼'}</strong> · ${labels[j.state]}${j.kind==='evaluation'?` · ${escapeHtml(j.name || '助手')} · 修订 ${escapeHtml(j.revision)} · 已完成 ${j.progress} 项`:''}</p>
       ${j.result?`<p>${escapeHtml(kinds[j.result.classification]||'')} ${escapeHtml(j.result.summary||j.result.message||'')}</p>`:''}
       ${j.error?`<p role="status">${escapeHtml(j.error)}</p>`:''}
+      ${j.kind==='evaluation' && j.result?.rows ? `<details data-report-job="${escapeHtml(j.job_id)}"><summary>查看本次报告</summary>${skillReportHtml(j.result)}</details>` : ''}
       ${j.result?.draft_id?`<button type="button" class="secondary" data-open-draft="${escapeHtml(j.result.draft_id)}">查看草稿</button>`:''}
       ${(j.result?.similar||[]).map(x=>`<button type="button" class="secondary" data-open-draft="${escapeHtml(x.draft_id)}">相似草稿：${escapeHtml(x.name)}</button>`).join('')}
       ${j.result?.candidate?`<details data-candidate-job="${escapeHtml(j.job_id)}"><summary>查看候选方法并采用</summary><pre>${escapeHtml(j.result.candidate.instructions)}</pre><button type="button" class="secondary" data-adopt-job="${j.job_id}">另存为新草稿</button>${(j.result.similar||[]).map(x=>`<button type="button" class="secondary" data-preview-adopt="${escapeHtml(j.job_id)}" data-adopt-target="${escapeHtml(x.draft_id)}">查看替换“${escapeHtml(x.name)}”的差异</button>`).join('')}</details>`:''}
       ${['queued','running'].includes(j.state)?`<button type="button" class="secondary" data-job-action="cancel_job" data-job="${j.job_id}">取消</button>`:''}
       ${j.state==='failed'&&j.attempts<3?`<button type="button" class="secondary" data-job-action="retry_job" data-job="${j.job_id}">重试</button>`:''}</article>`).join('')||'<p>暂无后台任务。</p>';
+    root.querySelectorAll('[data-report-job]').forEach(d => {d.open = openReports.has(d.dataset.reportJob);});
     root.querySelectorAll('[data-candidate-job]').forEach(d => { d.open = openCandidates.has(d.dataset.candidateJob); });
     root.querySelectorAll('[data-open-draft]').forEach(b=>b.onclick=()=>showSkillDraft(b.dataset.openDraft));
     root.querySelectorAll('[data-adopt-job]').forEach(b => {
@@ -450,6 +471,10 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       <button id="skill-standard-export" class="secondary" type="button">导出标准 Skill 文件包</button>
       <h4>独立评测</h4><p>仅使用合成文字，无业务工具。输入简短问题及可检查的期望；断言不会提供给被测模型。</p>
       ${skillReportHtml(quality.evaluation)}
+      <p id="skill-regression-status"></p><div class="draft-actions">
+      ${quality.evaluation ? '<button id="skill-pin-regression" type="button" class="secondary">将本次评测题目设为常用回归题</button>' : ''}
+      <button id="skill-use-regression" type="button" class="secondary" hidden>使用常用回归题</button>
+      <button id="skill-clear-regression" type="button" class="secondary" hidden>取消固定</button></div>
       ${quality.previous_report ? `<button id="skill-reuse-cases" class="secondary" type="button">用上次样例重测</button><p>来源：修订 ${quality.previous_report.revision} 的上次评测。仅复用问题和验收条件，不继承通过结论。</p>` : ''}
       <form id="skill-eval-form" class="draft-editor"><div id="skill-eval-cases"></div><div class="draft-actions"><button id="skill-add-case" type="button" class="secondary">添加样本</button><label>每项重复<select name="repeats"><option>1</option><option>2</option><option>3</option></select></label><button id="skill-eval-submit">启动独立评测</button></div><p id="skill-eval-state" role="status">填写后启动评测，样例才会随评测任务保存。</p></form>
       <h4>我的近期反馈</h4><p>反馈用于发现需要检查的问题，不代表独立评测通过。</p><div id="skill-feedback-list"></div>`;
@@ -465,7 +490,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       if (!scope.current()) return;
       const cases=$('#skill-eval-cases');if(cases.children.length>=12)return;
       const missingProfile = seed && !profiles.includes(seed.profile);
-      const node=document.createElement('fieldset');node.innerHTML=`<legend>验收样例</legend><p data-case-source></p><label>问题<textarea name="prompt" required maxlength="3000" placeholder="整理成周报：计划修复登录问题。"></textarea></label>
+      const node=document.createElement('fieldset');node.dataset.feedbackId=seed?.feedback_id || '';node.innerHTML=`<legend>验收样例</legend><p data-case-source></p><label>问题<textarea name="prompt" required maxlength="3000" placeholder="整理成周报：计划修复登录问题。"></textarea></label>
         <label>模式<select name="profile" required>${missingProfile ? '<option value="">请选择当前修订的模式</option>' : ''}${profiles.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(profileLabel(p))}（${escapeHtml(p)}）</option>`).join('')}</select></label>
         <label>测试内容<select name="kind"><option value="output">回答质量</option><option value="trigger_true">应该使用此助手</option><option value="trigger_false">不应使用此助手</option></select></label>
         <label>应包含（每行一项）<textarea name="contains" placeholder="计划"></textarea></label><label>不应包含（每行一项）<textarea name="excludes" placeholder="已修复"></textarea></label><button type="button" class="secondary">移除此样本</button>`;
@@ -474,7 +499,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       node.querySelector('[name=profile]').value = missingProfile ? '' : seed?.profile || profiles[0];
       node.querySelector('[name=kind]').value = seed?.kind === 'trigger' ? seed.expected_trigger ? 'trigger_true' : 'trigger_false' : 'output';
       for (const key of ['contains', 'excludes']) node.querySelector(`[name=${key}]`).value = (seed?.[key] || []).join('\n');
-      node.querySelector('button').onclick=()=>node.remove();cases.append(node);
+      node.querySelector('button').onclick=()=>{node.remove();controls.evaluationChanged();};cases.append(node);controls.evaluationChanged();
     };
     const reuse = (seeds, source, repeats) => {
       try {
@@ -485,10 +510,51 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         if (blank) container.replaceChildren();
         for (const seed of seeds) add(seed, source);
         if (repeats) $('#skill-eval-form').querySelector('[name=repeats]').value = String(repeats);
+        controls.evaluationChanged();
         $('#skill-eval-state').textContent = '已填入可编辑样例，尚未运行或保存。请核对模式，再补充“应包含/不应包含”的内容，之后启动评测。';
       } catch (error) { evalError(error); }
     };
-    add();$('#skill-add-case').onclick=()=>add();
+    const carried = controls.evaluation();
+    $('#skill-eval-cases').replaceChildren();
+    if (carried?.value.cases.length) {
+      for (const row of carried.value.cases) {
+        add({prompt: row.prompt, profile: row.profile, kind: row.kind === 'output' ? 'output' : 'trigger',
+          expected_trigger: row.kind === 'trigger_true', feedback_id: row.feedback_id, contains: row.contains.split('\n'), excludes: row.excludes.split('\n')}, '保留的待运行样例，请核对当前修订。');
+      }
+    } else add();
+    $('#skill-eval-form').querySelector('[name=repeats]').value = carried?.value.repeats || '1';
+    const readEvaluation = () => ({cases: [...$('#skill-eval-cases').children].map(node =>
+      ({...Object.fromEntries(['prompt', 'profile', 'kind', 'contains', 'excludes'].map(key => [key, node.querySelector(`[name=${key}]`).value])), ...(node.dataset.feedbackId ? {feedback_id: node.dataset.feedbackId} : {})})),
+      repeats: $('#skill-eval-form').querySelector('[name=repeats]').value || '1'});
+    controls.setEvaluationReader(readEvaluation);
+    $('#skill-eval-form').oninput = controls.evaluationChanged;
+    $('#skill-eval-form').onchange = controls.evaluationChanged;
+    $('#skill-add-case').onclick=()=>add();
+    const refreshRegression = () => {
+      const fixed = quality.regression;
+      $('#skill-use-regression').hidden = !fixed;
+      $('#skill-clear-regression').hidden = !fixed;
+      const comparable = quality.evaluation?.case_fingerprint;
+      $('#skill-regression-status').textContent = fixed
+        ? `常用回归题：修订 ${fixed.revision} 的 ${fixed.cases.length} 题，每项重复 ${fixed.repeats} 次。仅复用题目，不继承通过结论。` +
+          (comparable ? comparable === fixed.case_fingerprint ? ' 本次评测同题同条件。' : ' 本次评测的题目或条件已调整，分数不直接比较。' : '')
+        : '可固定一组常用回归题，临时测试不会替换它。';
+    };
+    const pinRegression = async jobId => {
+      try {
+        controls.requireSaved();
+        await controls.perform(async () => {
+          quality.regression = await request('/api/skill-regressions', {method:'POST', csrf:true, scope,
+            body:{draft_id:d.draft_id, expected_revision:d.revision, job_id:jobId}});
+          scope.assertCurrent(); refreshRegression();
+        });
+      } catch(error) {evalError(error);}
+    };
+    if (quality.evaluation) $('#skill-pin-regression').onclick = () => pinRegression(quality.evaluation.job_id);
+    $('#skill-clear-regression').onclick = () => pinRegression(null);
+    $('#skill-use-regression').onclick = () => {if(quality.regression)reuse(quality.regression.cases,
+      `常用回归题，来源修订 ${quality.regression.revision}；请核对当前模式。`,quality.regression.repeats);};
+    refreshRegression();
     if (quality.previous_report) $('#skill-reuse-cases').onclick=()=>reuse(quality.previous_report.cases,
       `来源：修订 ${quality.previous_report.revision} 的上次评测；不继承通过结论。`, quality.previous_report.repeats);
     $('#skill-sample-list').querySelectorAll('[data-sample-case]').forEach(button => {
@@ -505,12 +571,12 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const version = source.revision ? `修订 ${source.revision}` : feedback.version?.startsWith('draft:') ? `修订 ${feedback.version.slice(6)}` : `版本 ${feedback.version || '未记录'}`;
         const mode = feedback.profile && feedback.profile !== 'unknown' ? profileLabel(feedback.profile) : '模式未记录';
         summary.textContent = `${version} · ${mode} · ${{useful:'有帮助',incorrect:'结果有误',not_applicable:'不适用'}[feedback.rating] || feedback.rating}`;
-        const note = document.createElement('p'); note.textContent = `来源：${{sample:'试用样例',binding:'任务使用',catalog:'目录反馈'}[source.kind] || '未记录'}。${feedback.comment || '未填写说明。'}`;
+        const note = document.createElement('p'); note.textContent = `来源：${source.load_event_id ? '助手使用记录' : ({sample:'试用样例',binding:'任务使用',catalog:'目录反馈'}[source.kind] || '未记录')}。${feedback.comment || '未填写说明。'}`;
         item.append(summary, note);
-        if (source.kind === 'sample' && source.prompt) {
-          const button = document.createElement('button'); button.type='button';button.className='secondary';button.textContent='转成验收样例';
-          button.onclick=()=>reuse([{prompt:source.prompt, profile:source.profile || feedback.profile}],
-            `来源：${version} 的${mode}反馈。纠错说明：${feedback.comment || '未填写'} 请补上“应包含/不应包含”的内容；反馈仅作参考，不会自动成为验收条件。`);
+        if ((source.kind === 'sample' && source.prompt) || source.kind === 'binding') {
+          const button = document.createElement('button'); button.type='button';button.className='secondary';button.textContent=source.kind === 'sample' ? '转成验收样例' : '整理成脱敏验收样例';
+          button.onclick=()=>reuse([{prompt:source.prompt || '', profile:source.profile || feedback.profile, feedback_id:feedback.feedback_id}],
+            `来源：${version} 的${mode}反馈。纠错说明：${feedback.comment || '未填写'} 请填写脱敏问题及“应包含/不应包含”；不自动复制业务原文，反馈不会自动成为验收条件。`);
           item.append(button);
         }
         list.append(item);
@@ -544,6 +610,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const cases = [...$('#skill-eval-cases').children].map(n => {
           const kind = n.querySelector('[name=kind]').value;
           return {prompt:n.querySelector('[name=prompt]').value, profile:n.querySelector('[name=profile]').value,
+            ...(n.dataset.feedbackId ? {feedback_id:n.dataset.feedbackId} : {}),
             kind:kind === 'output' ? 'output' : 'trigger', ...(kind === 'output' ? {} : {expected_trigger:kind === 'trigger_true'}),
             ...Object.fromEntries(['contains','excludes'].map(k => [k,n.querySelector(`[name=${k}]`).value.split('\n').map(v => v.trim()).filter(Boolean)]))};
         });
@@ -554,10 +621,12 @@ export function createSkillForms({ document, state, $, api: request, switchView,
           if (item.kind === 'output' && !item.contains.length && !item.excludes.length) throw new Error('请为回答质量样例填写至少一项应包含或不应包含的断言。');
         }
         const repeats = Number($('#skill-eval-form').querySelector('[name=repeats]').value || 1);
+        const submittedEvaluation = readEvaluation();
         await controls.perform(async () => {
           await draftAction('evaluate', {draft_id:d.draft_id, expected_revision:d.revision, cases, repeats, request_key:crypto.randomUUID()});
           scope.assertCurrent();
-          $('#draft-detail-error').textContent=`修订 ${d.revision} 的评测已排队；完成后重新打开草稿查看对照。`;
+          controls.evaluationSaved(submittedEvaluation);
+          $('#draft-detail-error').textContent=`修订 ${d.revision} 的评测已排队；完成后在后台任务中查看本次报告。`;
           await refreshSkillJobs();
         });
       } catch(err) { if(scope.current() && !isCancellation(err)) $('#draft-detail-error').textContent=err.message; }

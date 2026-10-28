@@ -160,7 +160,7 @@ def test_owner_isolation_public_shape_and_newest_first(fixture):
         with pytest.raises(KeyError, match='后台任务不存在或不可访问'):
             operation('bob', first['job_id'])
     assert set(first) == {'job_id', 'kind', 'state', 'attempts', 'error', 'created_at', 'updated_at',
-                          'draft_id', 'revision', 'automatic', 'scope', 'progress', 'result'}
+                          'draft_id', 'revision', 'name', 'automatic', 'scope', 'progress', 'result'}
     assert first['progress'] == 0 and first['result'] is None
 
 

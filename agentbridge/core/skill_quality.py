@@ -68,11 +68,14 @@ def validate_cases(cases):
         raise ValueError('评测需要 1 至 12 个样本')
     result = []
     for case in cases:
-        if not isinstance(case, dict) or set(case) - {'prompt', 'profile', 'kind', 'contains', 'excludes', 'expected_trigger'}:
+        if not isinstance(case, dict) or set(case) - {'prompt', 'profile', 'kind', 'contains', 'excludes', 'expected_trigger', 'feedback_id'}:
             raise ValueError('评测样本字段无效')
         prompt = case.get('prompt')
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 3000:
             raise ValueError('评测问题需要 1 至 3000 字符')
+        feedback_id = case.get('feedback_id')
+        if feedback_id is not None and (not isinstance(feedback_id, str) or not re.fullmatch(r'[0-9a-f-]{36}', feedback_id)):
+            raise ValueError('反馈来源标识无效')
         kind = case.get('kind', 'output')
         if kind not in {'output', 'trigger'}:
             raise ValueError('评测类型无效')
@@ -88,6 +91,7 @@ def validate_cases(cases):
             row['expected_trigger'] = case['expected_trigger']
         elif not row['contains'] and not row['excludes']:
             raise ValueError('结果评测至少需要一条包含或排除断言')
+        if feedback_id is not None: row['feedback_id'] = feedback_id
         result.append(row)
     return result
 
@@ -229,3 +233,10 @@ def import_standard(package):
         raise ValueError('当前平台简介需为 1 至 500 字符')
     return {'name': name, 'description': desc, 'selection': {'use_when': desc, 'not_for': '未声明的业务操作与外部能力', 'output': '按照方法说明输出，发布前复核'},
             'instructions': match[2], 'references': {k: v for k, v in files.items() if k != 'SKILL.md'}, 'profiles': {'use': {}}}
+
+
+def case_fingerprint(cases, repeats):
+    from hashlib import sha256
+    rows = [{k: v for k, v in row.items() if k != 'feedback_id'} for row in cases]
+    return 'sha256:' + sha256(json.dumps({'cases': rows, 'repeats': repeats}, ensure_ascii=False,
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()

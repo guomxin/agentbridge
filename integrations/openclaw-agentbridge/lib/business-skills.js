@@ -138,20 +138,29 @@ export async function skillCatalog(identity, { router = null, now = () => Date.n
   if (!flights) { flights = new Map(); catalogFlights.set(cache, flights); }
   if (flights.has(key)) return flights.get(key);
   const promise = (async () => {
-    const catalog = await identity.client.callTool("agentbridge_skill_catalog", {});
-    const latest = router.catalogVersionsForBinding?.(identity.binding);
-    const changedDuringRead = versions && latest && (latest.catalogVersion !== versions.catalogVersion
-      || latest.permissionVersion !== versions.permissionVersion);
-    const valid = /^(?:sha256:)?[a-f0-9]{64}$/u.test(catalog?.catalogVersion || "") && /^(?:sha256:)?[a-f0-9]{64}$/u.test(catalog?.permissionVersion || "");
-    if (valid && (!changedDuringRead || (catalog.catalogVersion === latest.catalogVersion && catalog.permissionVersion === latest.permissionVersion))) {
-      router.rememberCatalogVersions?.(identity.binding, catalog);
-      const copy = structuredClone(catalog);
-      if (JSON.stringify(copy).length <= 1_000_000) {
-        cache.set(key, { at: now(), catalog: copy });
-        while (cache.size > 128) cache.delete(cache.keys().next().value);
+    let observed = versions;
+    const same = (a, b) => a?.catalogVersion === b?.catalogVersion && a?.permissionVersion === b?.permissionVersion;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const catalog = await identity.client.callTool("agentbridge_skill_catalog", {});
+      const latest = router.catalogVersionsForBinding?.(identity.binding);
+      const changedDuringRead = !same(observed, latest);
+      if ((changedDuringRead || attempt > 0) && !same(catalog, latest)) {
+        cache.delete(key);
+        observed = latest;
+        continue;
       }
+      const valid = /^(?:sha256:)?[a-f0-9]{64}$/u.test(catalog?.catalogVersion || "") && /^(?:sha256:)?[a-f0-9]{64}$/u.test(catalog?.permissionVersion || "");
+      if (valid) {
+        router.rememberCatalogVersions?.(identity.binding, catalog);
+        const copy = structuredClone(catalog);
+        if (JSON.stringify(copy).length <= 1_000_000) {
+          cache.set(key, { at: now(), catalog: copy });
+          while (cache.size > 128) cache.delete(cache.keys().next().value);
+        }
+      }
+      return catalog;
     }
-    return catalog;
+    throw new Error("助手目录正在更新，请重试；未使用已过期目录。");
   })();
   flights.set(key, promise);
   try { return await promise; }
@@ -183,13 +192,13 @@ export function releaseSkillSession(router, sessionKey) {
   }
   while (state.ended.size > MAX_RUN_STATES) state.ended.delete(state.ended.keys().next().value);
 }
-export function draftSampleGuard(router, context, identity, toolName, params) {
+export function draftSampleGuard(router, context, identity, toolName, params, { startSample = true } = {}) {
   if (closedRun(router, context)) return closedRunRejection();
   if (unresolvedRestriction(router, context, identity, runState(router).samples)) return {
     status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
       message: "当前会话存在仅样例回合，缺少精确回合关联，不能调用业务工具。" } };
   const key = skillRunKey(context, identity, router);
-  if (toolName === "agentbridge_skill_authoring" && params?.action === "test") {
+  if (startSample && toolName === "agentbridge_skill_authoring" && params?.action === "test") {
     if (!key) return {status:"rejected",error:{code:"SKILL_RUN_CONTEXT_REQUIRED",message:"缺少独立回合，不能开始草稿样例。"}};
     const runs=runState(router).samples;
     if (runs.size >= MAX_RUN_STATES && !runs.has(key)) return {status:"rejected",error:{code:"SKILL_SAMPLE_CAPACITY",message:"样例容量已满，请稍后重试。"}};

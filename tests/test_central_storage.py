@@ -39,6 +39,7 @@ class CentralStorageTests(unittest.TestCase):
                 # pre-refactor object's SQL instead of regenerating the baseline.
                 additions = [
                     ['table', 'skill_feedback_context'],
+                    ['table', 'skill_regressions'],
                     ['table', 'business_drafts'],
                     ['table', 'business_draft_previews'],
                     ['table', 'business_draft_decisions'],

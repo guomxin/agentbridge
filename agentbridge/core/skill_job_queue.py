@@ -87,6 +87,7 @@ class SkillJobQueue:
             for key in ('job_id', 'kind', 'state', 'attempts', 'error', 'created_at', 'updated_at')
         } | {
             'draft_id': payload.get('draft_id'), 'revision': payload.get('revision'),
+            'name': payload.get('bundle', {}).get('manifest', {}).get('name'),
             'automatic': payload.get('automatic', False), 'scope': payload.get('scope'),
             'progress': len(json.loads(row['progress_json'])),
             'result': json.loads(row['result_json']) if row['result_json'] else None,

@@ -692,6 +692,13 @@ class WorkspaceApplication:
         except Exception as exc:
             _LOG.warning("Preparation delivery diagnostic unavailable: %s", type(exc).__name__)
 
+    def skill_load_feedback(self, account: dict, event_id: str, body: dict) -> dict:
+        if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
+            raise ValueError("使用反馈只能包含评价、说明和请求标识。")
+        receipt = self.service.skill_authoring.workbench.record_load_feedback(account['user_subject'], event_id,
+            rating=body['rating'], comment=body['comment'], request_key=body['requestKey'])
+        return {'feedback': {'available': False, 'receipt': receipt}}
+
     def task_feedback(self, account: dict, task_id: str, body: dict) -> dict:
         if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
             raise ValueError("原任务反馈只能包含评价、补充说明和请求标识。")

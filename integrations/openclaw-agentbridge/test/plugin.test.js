@@ -8016,3 +8016,22 @@ test('native hook and lazy tool factories share only exact owner/session/run ass
   assert.equal((conflict.structuredContent || JSON.parse(conflict.content[0].text)).error.code,'SKILL_RUN_CONTEXT_REQUIRED');
   peer.stopAll();
 });
+
+test('ordinary authoring sample blocks native tools in its exact run and releases in a new run', async () => {
+  const sessionKey = 'agent:main:telegram:direct:1001', runId = 'sample-native-run';
+  const calls = [];
+  const client = {async callToolResult(name) {calls.push(name);return {structuredContent: {status:'running',test_id:'synthetic-sample'}};}};
+  const identityRouter = {enabled:true,config:{boundSkillToolGuard:true},resolveToolContext:()=>({bound:true,binding:{key:'owner'},client})};
+  const harness = fakeApi({autoPoll:false,boundSkillToolGuard:true});
+  registerAgentBridgeInteractions(harness.api,{identityRouter});
+  const context = {sessionKey,runId};
+  const params = {action:'test',data:{draft_id:'synthetic',expected_revision:1,profile:'use',prompt:'整理成周报：完成联调。',request_key:'sample'}};
+  harness.hooks.before_tool_call({toolCallId:'sample-call',toolName:'agentbridge_skill_authoring',runId,params},context);
+  await harness.toolFactory(context).find(t=>t.name==='agentbridge_skill_authoring').execute('sample-call',params);
+  for (const toolName of ['exec','read','openclawexec']) {
+    assert.equal(harness.hooks.before_tool_call({toolCallId:'native-'+toolName,toolName,runId,params:{}},context).block,true);
+  }
+  assert.equal(harness.hooks.before_tool_call({toolCallId:'result',toolName:'openclawagentbridge_skill_authoring',runId,params:{action:'test_result'}},context),undefined);
+  assert.equal(harness.hooks.before_tool_call({toolCallId:'new-native',toolName:'exec',runId:'next',params:{}},{sessionKey,runId:'next'}),undefined);
+  assert.deepEqual(calls,['agentbridge_skill_authoring']);
+});

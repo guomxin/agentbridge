@@ -565,4 +565,70 @@ class SkillWorkbenchTests(unittest.TestCase):
                 self.assertEqual(len(jobs),1);self.assertTrue(jobs[0]['automatic'])
 
 
+    def test_report_preserves_baseline_identity_after_new_publication(self):
+        self._publish_sample(1)
+        original = self.s.skills.current(self.d['skill_id'])
+        job = self.evaluate('frozen-baseline')
+        self.a.save('alice', draft_id=self.d['draft_id'], expected_revision=1,
+                    proposal={**self.p,'instructions':'新的方法'}, request_key='update-before-eval')
+        self._publish_sample(2)
+        self.w.run_once(lambda *_: {'text':'计划修复登录问题','model':'synthetic'})
+        report = self.w.jobs('alice',job['job_id'])['result']
+        self.assertEqual(report['revision'],1)
+        self.assertEqual(report['baseline'], {'version':'1.0.0','content_hash':original['content_hash']})
+        self.assertEqual(self.s.skills.current(self.d['skill_id'])['manifest']['version'],'1.0.1')
+
+
+
+    def test_fixed_regression_survives_ad_hoc_tests_and_new_revision(self):
+        from agentbridge.core.skill_quality import case_fingerprint
+        first = self.evaluate('fixed', repeats=2)
+        with self.assertRaises(KeyError):
+            self.w.set_regression('alice',draft_id=self.d['draft_id'],expected_revision=1,job_id=first['job_id'])
+        self.w.run_once(lambda *_: {'text':'计划修复'})
+        fixed = self.w.set_regression('alice',draft_id=self.d['draft_id'],expected_revision=1,job_id=first['job_id'])
+        self.evaluate('temporary'); self.w.run_once(lambda *_: {'text':'计划修复'})
+        self.assertEqual(self.w.regression('alice',self.d['draft_id']),fixed)
+        self.assertNotIn('passed',fixed)
+        self.a.save('alice',draft_id=self.d['draft_id'],expected_revision=1,proposal={**self.p,'instructions':'新方法'},request_key='next')
+        self.assertEqual(self.w.inspect('alice',self.d['draft_id'])['regression'],fixed)
+        with self.assertRaises(UserGrantConflict):
+            self.w.set_regression('alice',draft_id=self.d['draft_id'],expected_revision=1,job_id=None)
+        with self.assertRaises(KeyError): self.w.regression('bob',self.d['draft_id'])
+        other = self.a.save('alice',proposal={**self.p,'name':'另一个'},request_key='other')
+        with self.assertRaises(KeyError):
+            self.w.set_regression('alice',draft_id=other['draft_id'],expected_revision=1,job_id=first['job_id'])
+        self.assertNotEqual(case_fingerprint(fixed['cases'],1),fixed['case_fingerprint'])
+        attributed=[{**c,'feedback_id':'origin'} for c in fixed['cases']]
+        self.assertEqual(case_fingerprint(attributed,2),fixed['case_fingerprint'])
+        self.assertIsNone(self.w.set_regression('alice',draft_id=self.d['draft_id'],expected_revision=2,job_id=None))
+
+    def test_load_feedback_is_original_scoped_idempotent_and_reusable(self):
+        from agentbridge.core.skill_workbench import TaskFeedbackError
+        self._publish_sample(1)
+        binding = self.s.skills.bind('alice',self.d['skill_id'],'use')
+        self.s.skills.record_load('alice',self.d['skill_id'],'use','SKILL.md',
+            {'status':'succeeded','version':'1.0.0','binding_id':binding})
+        event = self.w.load_feedback_history('alice')[0]
+        self.assertTrue(event['feedback']['available'])
+        self.a.save('alice',draft_id=self.d['draft_id'],expected_revision=1,proposal={**self.p,'instructions':'新方法'},request_key='next')
+        self._publish_sample(2)
+        with closing(self.w.store.connect()) as db, db:
+            db.execute('UPDATE skill_bindings SET revoked=1 WHERE binding_id=?',(binding,))
+        args={'rating':'incorrect','comment':'不要补效果。','request_key':'load-feedback-key'}
+        saved=self.w.record_load_feedback('alice',event['event_id'],**args)
+        self.assertEqual(saved['version'],'1.0.0')
+        self.assertEqual(self.w.record_load_feedback('alice',event['event_id'],**{**args,'request_key':'different-request-key'}),saved)
+        with self.assertRaises(TaskFeedbackError): self.w.record_load_feedback('alice',event['event_id'],**{**args,'comment':'另一评价'})
+        with self.assertRaises(KeyError): self.w.record_load_feedback('bob',event['event_id'],**args)
+        self.assertEqual(self.w.load_feedback_history('alice')[0]['feedback']['receipt'],saved)
+        cases=[{'prompt':'整理计划','contains':['计划'],'feedback_id':saved['feedback_id']}]
+        job=self.w.evaluate('alice',draft_id=self.d['draft_id'],expected_revision=2,cases=cases,request_key='from-feedback')
+        self.w.run_once(lambda *_:{'text':'计划修复'})
+        self.assertEqual(self.w.jobs('alice',job['job_id'])['result']['cases'][0]['feedback_id'],saved['feedback_id'])
+        other=self.a.save('alice',proposal={**self.p,'name':'另一助手'},request_key='other')
+        with self.assertRaises(KeyError): self.w.evaluate('alice',draft_id=other['draft_id'],expected_revision=1,cases=cases,request_key='forged')
+        self.s.skills.record_load('alice',self.d['skill_id'],'use','SKILL.md',{'status':'succeeded','version':'1.0.1'})
+        self.assertFalse(self.w.load_feedback_history('alice')[0]['feedback']['available'])
+
 if __name__ == '__main__': unittest.main()

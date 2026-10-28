@@ -12,7 +12,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agentbridge.core.business_skills import _json, skill_catalog
 from agentbridge.core.skill_quality import (bundle_diff, diagnostics, export_standard,
-    import_standard, proposal_from_bundle, publication_evidence, similarity, validate_cases)
+    import_standard, proposal_from_bundle, publication_evidence, similarity, validate_cases, case_fingerprint)
 from agentbridge.core.skill_job_executor import SkillJobDependencies, SkillJobExecutor
 from agentbridge.core.skill_job_queue import SkillJobQueue
 from agentbridge.core.skill_ranking import rank_skill_candidates
@@ -61,6 +61,8 @@ class SkillWorkbench:
                 CREATE TABLE IF NOT EXISTS skill_feedback_context (
                     feedback_id TEXT PRIMARY KEY, profile TEXT NOT NULL,
                     source_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS skill_regressions (
+                    draft_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL, job_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS skill_auto_capture (
                     dispatch_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL,
                     assistant_text TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -143,6 +145,11 @@ class SkillWorkbench:
         cases = validate_cases(cases)
         if any(c['profile'] not in draft['bundle']['manifest']['profiles'] for c in cases): raise ValueError('评测模式不存在')
         with closing(self.store.connect()) as db:
+            for case in cases:
+                if case.get('feedback_id') and not db.execute(
+                        'SELECT 1 FROM skill_feedback WHERE feedback_id=? AND owner_subject=? AND skill_id=?',
+                        (case['feedback_id'], owner, draft['skill_id'])).fetchone():
+                    raise KeyError('反馈来源不存在或不属于此助手')
             row = db.execute('SELECT payload_json FROM skill_versions WHERE skill_id=? ORDER BY rowid DESC LIMIT 1', (draft['skill_id'],)).fetchone()
         baseline = json.loads(row[0]) if row else None
         return self._enqueue(owner, 'evaluation', {'draft_id': draft_id, 'revision': expected_revision,
@@ -176,9 +183,39 @@ class SkillWorkbench:
         before = json.loads(pub['payload_json']) if pub else None
         return {'diagnostics': diagnostics(draft['bundle']), 'diff': bundle_diff(before, draft['bundle']),
                 'published_version': pub['version'] if pub else None, 'evaluation': report,
+                'regression': self.regression(owner, draft_id),
                 'previous_report': previous_report, 'feedback': {'items': feedback},
                 'publication_evidence': publication_evidence(draft['bundle'], draft['revision'], draft['tested_profiles'], report),
                 'similar': self.similar(owner, draft['bundle']['manifest']['name'] + draft['bundle']['manifest']['description'], exclude=draft_id)}
+
+    def set_regression(self, owner, *, draft_id, expected_revision, job_id):
+        from agentbridge.core.skill_authoring import text, revision
+        text(draft_id, "草稿标识", 128)
+        revision(expected_revision)
+        if job_id is not None: text(job_id, "评测标识", 128)
+        with closing(self.store.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            self.authoring._owned(db, owner, draft_id, expected_revision)
+            if job_id is None:
+                db.execute('DELETE FROM skill_regressions WHERE draft_id=? AND owner_subject=?', (draft_id, owner))
+            else:
+                row = db.execute("SELECT payload_json FROM skill_jobs WHERE job_id=? AND owner_subject=? AND kind='evaluation' AND state='succeeded'",
+                                 (job_id, owner)).fetchone()
+                if not row or json.loads(row[0]).get('draft_id') != draft_id:
+                    raise KeyError('只能固定此助手已完成的评测题目')
+                db.execute('INSERT INTO skill_regressions VALUES (?,?,?) ON CONFLICT(draft_id) DO UPDATE SET job_id=excluded.job_id',
+                           (draft_id, owner, job_id))
+        return self.regression(owner, draft_id)
+
+    def regression(self, owner, draft_id):
+        with closing(self.store.connect()) as db:
+            self.authoring._owned(db, owner, draft_id)
+            row = db.execute('''SELECT j.job_id,j.payload_json FROM skill_regressions r JOIN skill_jobs j USING(job_id)
+                WHERE r.draft_id=? AND r.owner_subject=? AND j.owner_subject=? AND j.state='succeeded' ''', (draft_id, owner, owner)).fetchone()
+        if not row: return None
+        payload = json.loads(row['payload_json'])
+        return {'job_id': row['job_id'], 'revision': payload['revision'], 'cases': payload['cases'],
+                'repeats': payload['repeats'], 'case_fingerprint': case_fingerprint(payload['cases'], payload['repeats'])}
 
     def similar(self, owner, query, exclude=None):
         with closing(self.store.connect()) as db:
@@ -249,12 +286,39 @@ class SkillWorkbench:
         return self._record_feedback(owner, skill_id=skill_id, profile=profile, rating=rating, comment=comment,
             version=version, test_id=test_id, binding_id=binding_id)
 
+    @staticmethod
+    def _load_feedback_context(db, owner, event_id):
+        row = db.execute('''SELECT e.payload_json,b.* FROM skill_load_events e JOIN skill_bindings b ON e.dedupe_key=b.binding_id
+            WHERE e.event_id=? AND e.user_subject=? AND b.user_subject=?''', (event_id, owner, owner)).fetchone()
+        if not row: raise KeyError('使用记录没有可核实的原版本绑定')
+        event = json.loads(row['payload_json'])
+        if event.get('status') != 'succeeded' or any(event.get(k) != row[k] for k in ('skill_id','version','profile')):
+            raise KeyError('使用记录与原版本绑定不一致')
+        return row
+
+    def load_feedback_history(self, owner):
+        items = self.store.load_history(owner)
+        with closing(self.store.connect()) as db:
+            for item in items:
+                item['feedback'] = {'available': False, 'receipt': None}
+                try: self._load_feedback_context(db, owner, item['event_id'])
+                except KeyError: continue
+                fid = str(uuid5(NAMESPACE_URL, _json(['agentbridge.load-feedback.v1', owner, item['event_id']])))
+                row = db.execute('SELECT f.*,c.profile FROM skill_feedback f JOIN skill_feedback_context c USING(feedback_id) WHERE f.feedback_id=? AND f.owner_subject=?', (fid, owner)).fetchone()
+                item['feedback'] = {'available': row is None, 'receipt': self._task_receipt(row) if row else None}
+        return items
+
+    def record_load_feedback(self, owner, event_id, *, rating, comment, request_key):
+        if not isinstance(request_key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', request_key):
+            raise ValueError('反馈请求标识无效')
+        return self._record_feedback(owner, load_event_id=event_id, rating=rating, comment=comment)
+
     def record_task_feedback(self, owner, task_id, *, rating, comment, request_key):
         """Task attribution is server-owned and separate from skill tool inputs."""
         return self._record_feedback(owner, task_id=task_id, rating=rating, comment=comment, request_key=request_key)
 
     def _record_feedback(self, owner, *, skill_id=None, profile=None, rating, comment='', version=None,
-                         test_id=None, binding_id=None, task_id=None, request_key=None):
+                         test_id=None, binding_id=None, task_id=None, request_key=None, load_event_id=None):
         from agentbridge.core.skill_authoring import text
         if not isinstance(rating, str) or rating not in {'useful', 'incorrect', 'not_applicable'}: raise ValueError('反馈类型无效')
         comment = text(comment, '反馈', 1000, empty=True)
@@ -268,6 +332,16 @@ class SkillWorkbench:
                 raise ValueError('反馈请求标识无效')
         with closing(self.store.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
+            if load_event_id is not None:
+                binding = self._load_feedback_context(db, owner, load_event_id)
+                binding_id, skill_id, profile = (binding[k] for k in ('binding_id', 'skill_id', 'profile'))
+                fid = str(uuid5(NAMESPACE_URL, _json(['agentbridge.load-feedback.v1', owner, load_event_id])))
+                existing = db.execute('SELECT f.*,c.profile FROM skill_feedback f JOIN skill_feedback_context c USING(feedback_id) WHERE f.feedback_id=? AND f.owner_subject=?', (fid, owner)).fetchone()
+                if existing:
+                    receipt = self._task_receipt(existing)
+                    if existing['rating'] != rating or existing['comment'] != comment:
+                        raise TaskFeedbackError('SKILL_FEEDBACK_CONFLICT', '这次使用已有评价，不能覆盖。', feedback={'available': False, 'receipt': receipt})
+                    return receipt
             if task_id is not None:
                 task, task_binding, existing = self._task_feedback_context(db, owner, task_id)
                 if existing:
@@ -322,6 +396,9 @@ class SkillWorkbench:
             if task_id is not None:
                 source.update(task_id=task_id, task_status=task['status'], request_key=request_key)
                 feedback_id = str(uuid5(NAMESPACE_URL, _json(['agentbridge.task-feedback.v1', owner, task_id, binding_id, request_key])))
+            elif load_event_id is not None:
+                source['load_event_id'] = load_event_id
+                feedback_id = fid
             else:
                 feedback_id = str(uuid4())
             # Keep the original seven-column table writable by the previous
@@ -329,7 +406,7 @@ class SkillWorkbench:
             db.execute('INSERT INTO skill_feedback VALUES (?,?,?,?,?,?,?)',
                        (feedback_id, owner, skill_id, current, rating, comment, timestamp()))
             db.execute('INSERT INTO skill_feedback_context VALUES (?,?,?)', (feedback_id, profile, _json(source)))
-        if task_id is not None:
+        if task_id is not None or load_event_id is not None:
             return {'status': 'recorded', 'feedback_id': feedback_id, 'version': current, 'profile': profile,
                     'rating': rating, 'comment': comment}
         return {'status': 'recorded', 'feedback_id': feedback_id, 'version': current, 'profile': profile, 'source': source}

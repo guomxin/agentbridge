@@ -465,7 +465,7 @@ const editableDraft = (id = "draft") => ({...draft(id), revision: 3,
   tests: [{revision: 3, profile: "preview", status: "reported", prompt: "归纳计划", output: "计划"}],
 });
 
-function skillFixture({initial = editableDraft(), jobs = [], report = null, onAction, timers, confirm = () => false, refuseNavigation = false} = {}) {
+function skillFixture({initial = editableDraft(), jobs = [], report = null, onAction, onRequest, timers, confirm = () => false, refuseNavigation = false} = {}) {
   const nodes = new Map();
   const $ = selector => { if (!nodes.has(selector)) nodes.set(selector, new SkillElement()); return nodes.get(selector); };
   const view = createLifecycle({timers}).scope();
@@ -492,6 +492,8 @@ function skillFixture({initial = editableDraft(), jobs = [], report = null, onAc
     const {action, data} = options.body || {};
     calls.push({path, action, data: structuredClone(data)});
     let result;
+    const custom = await onRequest?.(path, options);
+    if (custom !== undefined) return custom;
     if (path.includes("?id=")) result = structuredClone(drafts.get(decodeURIComponent(path.split("?id=")[1])));
     else if (!action) result = {items: [], preferences: {revision: 1, value: {auto_draft: false}}, scopes: {items: []}, scope: "workspace", jobs: {items: jobs}};
     else {
@@ -887,7 +889,7 @@ test("sample feedback carries original test attribution and can become an editab
   const row = f.$("#skill-eval-cases").children[0];
   assert.equal(row.querySelector('[name=prompt]').value, "归纳计划");
   assert.match(row.querySelector('[data-case-source]').textContent, /把计划误写成已完成/);
-  assert.match(row.querySelector('[data-case-source]').textContent, /纠错说明：把计划误写成已完成。 请补上“应包含\/不应包含”的内容；反馈仅作参考，不会自动成为验收条件。/);
+  assert.match(row.querySelector('[data-case-source]').textContent, /纠错说明：把计划误写成已完成。 请填写脱敏问题及“应包含\/不应包含”；不自动复制业务原文，反馈不会自动成为验收条件。/);
   assert.doesNotMatch(row.querySelector('[data-case-source]').textContent, /。。|断言/);
   assert.equal(row.querySelector('[name=contains]').value, "");
   assert.equal(row.querySelector('[name=excludes]').value, "");
@@ -1128,4 +1130,75 @@ test('remaining query handler keeps request identity and failed denominator with
  assert.equal(marks.at(-1)[0],'quick_query_queued');assert.equal(calls[0][1].body,payload);assert.equal(calls[1][1].body,payload);
  assert.match(calls[0][0],/oa-batch-remaining\/query$/);assert.equal(calls[0][1].csrf,true);
  scope.dispose();
+});
+
+test('pending evaluation inputs survive method save and remain protected until actually queued', async () => {
+  const f = skillFixture(); await f.forms.showSkillDraft('draft');
+  const row = f.$('#skill-eval-cases').children[0];
+  row.querySelector('[name=prompt]').value = '整理成周报：完成联调，下周补测试。';
+  row.querySelector('[name=contains]').value = '联调\n下周';
+  f.$('#skill-eval-form').querySelector('[name=repeats]').value = '2';
+  f.$('#skill-eval-form').oninput();
+  assert.equal(await f.forms.canLeaveSkillEditor(),false);
+  assert.ok(f.windowEvents.has('beforeunload'));
+  f.editor.controls.get('instructions').value += ' 不添加原文外推断。';
+  await f.editor.onsubmit(submitEvent(f.editor));
+  const restored = f.$('#skill-eval-cases').children;
+  assert.equal(restored.length,1);
+  assert.equal(restored[0].querySelector('[name=prompt]').value,'整理成周报：完成联调，下周补测试。');
+  assert.equal(restored[0].querySelector('[name=contains]').value,'联调\n下周');
+  assert.equal(f.$('#skill-eval-form').querySelector('[name=repeats]').value,'2');
+  assert.equal(await f.forms.canLeaveSkillEditor(),false);
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.equal(f.calls.filter(c=>c.action==='evaluate').length,1);
+  assert.equal(await f.forms.canLeaveSkillEditor(),true);
+  f.view.dispose();
+});
+
+test('completed evaluation task exposes its own frozen report and baseline, not current draft', async () => {
+  const report={draft_id:'draft',revision:2,name:'周报助手',job_id:'old-job',passed:false,baseline:{version:'1.0.0'},
+    scores:{candidate:{passed:0,total:1},published:{passed:1,total:1}},cases:[{profile:'use'}],
+    rows:[{variant:'candidate',case:0,prompt:'整理成周报',output:'原文外推断',passed:false,checks:[{rule:'excludes',value:'推断',passed:false}]}]};
+  const f=skillFixture({jobs:[{job_id:'old-job',kind:'evaluation',state:'succeeded',revision:2,name:'周报助手',progress:2,result:report}]});
+  await f.forms.refreshSkillJobs();
+  const html=f.$('#skill-jobs').innerHTML;
+  assert.match(html,/查看本次报告/);assert.match(html,/修订 2/);assert.match(html,/评测时线上 1.0.0/);assert.match(html,/不应包含：推断/);
+  f.view.dispose();
+});
+
+
+test('fixed regression pinning retains pending inputs and imports original conditions without a pass', async () => {
+  const requests = [], fixed = {job_id:'old-job',revision:2,cases:[{prompt:'整理计划',profile:'preview',kind:'output',contains:['计划'],excludes:['已完成']}],repeats:2,case_fingerprint:'old-conditions'};
+  const report = {job_id:'new-job',revision:3,cases:fixed.cases,scores:{},rows:[],case_fingerprint:'changed-conditions'};
+  const f = skillFixture({report,onAction: action => action === 'inspect' ? {...quality('检查'),evaluation:report,regression:fixed} : undefined,
+    onRequest:(path,options) => {if(path === '/api/skill-regressions'){requests.push(options.body);return {...fixed,job_id:options.body.job_id};}}});
+  await f.forms.showSkillDraft('draft');
+  assert.match(f.$('#skill-regression-status').textContent,/分数不直接比较/);
+  const input=f.$('#skill-eval-cases').children[0].querySelector('[name=prompt]');input.value='未保存的新题';
+  await f.$('#skill-pin-regression').onclick();assert.equal(input.value,'未保存的新题');
+  assert.deepEqual(requests,[{draft_id:'draft',expected_revision:3,job_id:'new-job'}]);
+  f.$('#skill-use-regression').onclick();
+  assert.equal(f.$('#skill-eval-cases').children.length,2,'existing question is retained');
+  const imported=f.$('#skill-eval-cases').children[1];
+  assert.equal(imported.querySelector('[name=prompt]').value,'整理计划');
+  assert.equal(imported.querySelector('[name=excludes]').value,'已完成');
+  assert.equal(f.$('#skill-eval-form').querySelector('[name=repeats]').value,'2');
+  assert.equal(f.calls.some(c => c.action === 'evaluate'),false);
+  f.view.dispose();
+});
+
+test('historical use feedback starts with a blank redacted question and retains provenance in evaluation', async () => {
+  const fid='12345678-1234-1234-1234-123456789abc';
+  const f=skillFixture({onAction:action => action === 'inspect' ? {...quality('检查'),feedback:{items:[{feedback_id:fid,rating:'incorrect',comment:'不要补效果',profile:'preview',version:'1.0.0',source:{kind:'binding',load_event_id:'event',profile:'preview'}}]}}:undefined});
+  await f.forms.showSkillDraft('draft');
+  const item=f.$('#skill-feedback-list').children[0];
+  assert.match(item.children[1].textContent,/助手使用记录/);
+  item.children[2].onclick();
+  const row=f.$('#skill-eval-cases').children[0];
+  assert.equal(row.querySelector('[name=prompt]').value,'');
+  assert.equal(row.querySelector('[name=contains]').value,'');
+  row.querySelector('[name=prompt]').value='整理计划';row.querySelector('[name=contains]').value='计划';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.equal(f.calls.find(c=>c.action === 'evaluate').data.cases[0].feedback_id,fid);
+  f.view.dispose();
 });

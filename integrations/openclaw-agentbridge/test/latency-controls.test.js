@@ -322,3 +322,30 @@ test('exact cross-registry call links are bounded, expire closed and survive loc
   a.bindToolCall({toolCallId:'late',runId:'run-1000'},{sessionKey});
   assert.equal(b.taskRunRefForToolCall('late',sessionKey,'agentbridge_skill_get'),null);
 });
+
+test('catalog invalidation during first read retries once without returning or caching the old response', async () => {
+  for (const cold of [false, true]) for (const staleRetry of [false, true]) {
+    const router = catalogRouter(), binding = router.config.identityBindings[0];
+    const old = stampedCatalog(), current = stampedCatalog('b'.repeat(64));
+    if (!cold) router.rememberCatalogVersions(binding, old);
+    let release, calls = 0;
+    const pending = new Promise(resolve => {release = resolve;});
+    const identity = {binding, client: {async callTool() {
+      calls += 1; return calls === 1 ? pending : staleRetry ? old : current;
+    }}};
+    const first = skillCatalog(identity, {router}), second = skillCatalog(identity, {router});
+    router.rememberCatalogVersions(binding, current); release(old);
+    if (staleRetry) {
+      for (const result of await Promise.allSettled([first, second])) {
+        assert.equal(result.status, 'rejected'); assert.match(result.reason.message, /目录正在更新/);
+      }
+      assert.equal(router.catalogCache.size, 0);
+    } else {
+      const results = await Promise.all([first, second]);
+      assert.ok(results.every(value => value.catalogVersion === current.catalogVersion));
+      assert.equal((await skillCatalog(identity, {router})).catalogVersion, current.catalogVersion);
+    }
+    assert.equal(calls, 2);
+    assert.equal(router.catalogVersionsForBinding(binding).catalogVersion, current.catalogVersion);
+  }
+});

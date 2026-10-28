@@ -84,7 +84,7 @@ export function rowMenuButton(label, items) {
 
 export function skillReviewQualityHtml(q, selectedProfiles = []){
   if(!q)return '<p>历史申请未记录独立评测及版本差异。</p>';
-  const report=q.evaluation;const labels={candidate:'候选版本',published:'线上版本',without_skill:'不使用助手'};
+  const report=q.evaluation;const labels={candidate:'候选版本',published:report?.baseline?.version ? `评测时线上 ${escapeHtml(report.baseline.version)}` : '历史线上对照（版本未记录）',without_skill:'不使用助手'};
   const scoped = q.publication_evidence?.schema === 'agentbridge.skill-publication-evidence.v1' && selectedProfiles.length > 0;
   const rows = scoped ? selectedProfiles.map(profile => q.publication_evidence.profiles.find(row => row.profile === profile)) : [];
   const eligible = scoped && !q.publication_evidence.shared.blocked && rows.every(row => row?.eligible && !row.blocked);
@@ -95,6 +95,6 @@ export function skillReviewQualityHtml(q, selectedProfiles = []){
     ${scoped?`<p><strong>${eligible?'本次申请的模式具备发布依据，仍需人工复核':'本次申请的模式存在阻断，不能批准'}</strong></p><p>${escapeHtml(q.publication_evidence.shared.reason)}</p>${rows.map((row,index)=>`<p>${escapeHtml(selectedProfiles[index])}：${escapeHtml(row?.evidence||'缺少发布依据')}</p>`).join('')}`:''}
     ${report?`${scoped?'':`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p>`}<p>${escapeHtml(report.limitations)}</p>
     ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
-    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p></details>`).join('')}`:''}
+    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p>${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`).join('')}`:''}
     ${manual?`<p>申请中有模式仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`:''}`;
 }

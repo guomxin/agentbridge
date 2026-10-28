@@ -326,7 +326,7 @@ test('saved feedback is restored from GET after reload, and a conflict restores 
   }});
   f.upsertTaskCard(feedbackResult()); const view = feedbackNodes(f.chat); choose(view,'useful'); comment(view,'本页尚未保存'); await submit(view);
   assert.equal(view.form.hidden,true); assert.match(view.receipt.textContent,/不适用/);
-  assert.equal(view.status.textContent,'此任务已有另一份评价，以下为已保存内容。');
+  assert.equal(view.status.textContent,'这次使用已有另一份评价，以下为已保存内容。');
   assert.doesNotMatch(view.receipt.textContent,/本页尚未保存/);
 });
 
@@ -488,4 +488,21 @@ test('credential failure replaces indefinite query progress and clears on recove
   r.preparationHealth=null;r.task.status='succeeded';r.task.version++;
   f.upsertTaskCard(r);
   assert.doesNotMatch(f.chat.textContent,/连接认证失败/);
+});
+
+
+test('load feedback stays on the original use record and restores the saved receipt', async () => {
+  const calls = [], receipt = {status:'recorded',feedback_id:'saved',rating:'incorrect',comment:'不要补效果。',version:'1.0.0',profile:'use'};
+  const f = fixture({makeFeedbackRequestKey: () => 'load-feedback-key', submitSkillFeedback: async (...args) => {calls.push(args);return {feedback:{available:false,receipt}};}});
+  const event = {event_id:'original',name:'周报助手',status:'succeeded',version:'1.0.0',profile:'use',feedback:{available:true,receipt:null}};
+  const card = f.renderSkillCard(event), view = feedbackNodes(card);
+  assert.match(card.textContent,/评价这次使用/);
+  choose(view,'incorrect');comment(view,'不要补效果。');await submit(view);
+  assert.equal(calls[0][0],'original');
+  assert.deepEqual(Object.keys(calls[0][1]).sort(),['comment','rating','requestKey']);
+  assert.equal(view.form.hidden,true);
+  const restored = f.renderSkillCard({...event,feedback:{available:false,receipt}});
+  assert.match(feedbackNodes(restored).receipt.textContent,/不要补效果/);
+  const legacy = f.renderSkillCard({...event,event_id:'legacy',feedback:{available:false,receipt:null}});
+  assert.equal(feedbackNodes(legacy).panel.hidden,true);
 });

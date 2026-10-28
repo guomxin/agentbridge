@@ -76,6 +76,26 @@ class TaskFeedbackAcceptanceTests(unittest.TestCase):
         self.assertEqual(feedback["receipt"]["profile"], "use")
         return feedback["receipt"]
 
+    def test_load_feedback_http_enforces_owner_csrf_and_original_binding(self):
+        case = self.case()
+        store = self.fixture.service.skills
+        with store.connect() as db:
+            binding = db.execute('SELECT b.* FROM skill_bindings b JOIN skill_task_bindings t USING(binding_id) WHERE t.task_id=?',(case['task_id'],)).fetchone()
+        store.record_load(OWNER,binding['skill_id'],binding['profile'],'SKILL.md',
+            {'status':'succeeded','version':binding['version'],'binding_id':binding['binding_id']})
+        event=store.load_history(OWNER)[0]
+        path=f"/api/skills/history/{event['event_id']}/feedback"
+        def post(cookies, csrf=True, payload=None):
+            return _request(self.port,'POST',path,origin=self.origin,cookies=cookies,
+                csrf=cookies.get('agentbridge_workspace_csrf') if csrf else None,body=payload or self.payload)
+        self.assertEqual(post(self.cookies,False)[0],401)
+        self.assertEqual(post(self.other_cookies)[0],404)
+        self.assertEqual(post(self.cookies,payload={**self.payload,'version':'forged'})[0],400)
+        receipt=self.assert_recorded(post(self.cookies))
+        status,_,history=_request(self.port,'GET','/api/skills/history',cookies=self.cookies)
+        self.assertEqual(status,200)
+        self.assertEqual(history['items'][0]['feedback']['receipt'],receipt)
+
     def test_new_publication_does_not_move_feedback_off_the_original_task_version(self):
         case = self.case()
         self.assertEqual(self.fixture.service.skills.current(case["skill_id"])["manifest"]["version"], "1.0.1")

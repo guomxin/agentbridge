@@ -98,7 +98,7 @@ const { consumeChatStream } = createChatStream({
 const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTaskCardControllers } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
+  submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
   prepareRecovery:prepareOaPendingRecovery, getScope:() => sessionScope,
   openPreparation:(taskId,options) => preparationHandoff.start(taskId,options), viewState,
   queryRemaining:queryOaBatchRemaining,
@@ -1266,6 +1266,14 @@ async function loadTaskDetail(taskId) {
       }
     }
   }
+}
+
+async function submitSkillFeedback(eventId, payload) {
+  const scope = sessionScope;
+  const result = await scopedApi(scope)(`/api/skills/history/${encodeURIComponent(eventId)}/feedback`,
+    {method: "POST", body: payload, csrf: true});
+  scope.assertCurrent();
+  return result;
 }
 
 async function submitTaskFeedback(taskId, payload) {

@@ -1,5 +1,5 @@
 import { resolvePluginConfig } from "./config.js";
-import { businessSkillContext, releaseSkillRun, releaseSkillSession, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
+import { businessSkillContext, releaseSkillRun, releaseSkillSession, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard, draftSampleGuard } from "./business-skills.js";
 import { registerSkillCompletion } from "./skill-completion.js";
 import {
   createInteractionSharedState,
@@ -27,7 +27,7 @@ import { createHostPerformance } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.122";
+export const PLUGIN_VERSION = "0.4.123";
 
 const CROSS_ENDPOINT_CONTEXT_MAX_AGE_MINUTES = 360;
 const CROSS_ENDPOINT_CONTEXT_LIMIT = 12;
@@ -241,10 +241,12 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         event.sessionKey || context.sessionKey, "agentbridge_skill_get");
       const toolName = AGENTBRIDGE_AGENT_FACING_TOOL_NAMES.includes(event.toolName)
         ? event.toolName : AGENTBRIDGE_AGENT_FACING_TOOL_NAMES.find(name => `openclaw${name}` === event.toolName) || event.toolName;
-      const scopeBlocked = boundSkillToolGuard(identityRouter, { ...context,
+      const skillContext = { ...context,
         sessionKey: event.sessionKey || context.sessionKey,
-        runId: (scopeRun && scopeRun !== event.toolCallId ? scopeRun : null) || event.runId || context.runId },
-      identity, toolName, event.params);
+        runId: (scopeRun && scopeRun !== event.toolCallId ? scopeRun : null) || event.runId || context.runId };
+      const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, toolName, event.params, { startSample: false });
+      if (sampleBlocked) return { block: true, blockReason: sampleBlocked.error.message };
+      const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, toolName, event.params);
       if (scopeBlocked) return { block: true, blockReason: scopeBlocked.error.message };
     }
     if (

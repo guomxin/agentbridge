@@ -12,7 +12,7 @@ import { createOaPendingRecovery } from "./workspace_recovery.mjs";
 import {createBatchRemaining} from './workspace_batch_remaining.mjs';
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   const clocks = new Map();
@@ -95,7 +95,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     });
     return state.taskFeedback.get(taskId);
   }
-  function createFeedbackView(taskId) {
+  function createFeedbackView(taskId, submit = submitTaskFeedback) {
     const model = feedbackModel(taskId);
     const view = disclosure("反馈业务助手", "business-disclosure task-feedback");
     const identity = element("p", "task-feedback-identity");
@@ -129,17 +129,17 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     form.addEventListener("submit", async event => {
       event.preventDefault();
       if (model.pending || model.receipt || !model.available || !feedbackLabels[model.rating] ||
-          model.comment.length > 1000 || typeof submitTaskFeedback !== "function") return;
+          model.comment.length > 1000 || typeof submit !== "function") return;
       model.request ||= {rating: model.rating, comment: model.comment, requestKey: makeFeedbackRequestKey()};
       model.pending = true; model.error = ""; renderFeedbackModel(model);
       try {
-        const response = await submitTaskFeedback(model.taskId, {...model.request});
+        const response = await submit(model.taskId, {...model.request});
         if (!response?.feedback?.receipt) throw new Error("评价回执暂未返回，请重试恢复本次评价。");
         model.receipt = response.feedback.receipt; model.available = false; model.request = null;
       } catch (error) {
         if (error.feedback?.receipt) {
           model.receipt = error.feedback.receipt; model.available = false; model.request = null;
-          model.receiptNotice = "此任务已有另一份评价，以下为已保存内容。";
+          model.receiptNotice = "这次使用已有另一份评价，以下为已保存内容。";
         } else {
           model.error = error.message || "保存应答尚未确认，输入已保留，请重试恢复本次评价。";
           if ([400, 422].includes(error.status)) model.request = null;
@@ -656,6 +656,18 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const time = document.createElement("small");
     time.textContent = formatTime(event.created_at);
     card.append(heading, status, description, time);
+    if (event.feedback && submitSkillFeedback) {
+      const key = `skill-load:${event.event_id}`;
+      const view = createFeedbackView(key, (_key, payload) => submitSkillFeedback(event.event_id, payload));
+      text(view.summary, '评价这次使用');
+      const model = feedbackModel(key);
+      model.skill = {name: event.name, version: event.version, profile: event.profile};
+      model.available = Boolean(event.feedback.available);
+      model.receipt = event.feedback.receipt || model.receipt;
+      if (model.receipt) {model.available = false; model.request = null;}
+      renderFeedbackModel(model);
+      card.append(view.root);
+    }
     setTimelineNode(card, {key: `skill:${event.event_id}`, createdAt: event.created_at});
     return card;
   }
