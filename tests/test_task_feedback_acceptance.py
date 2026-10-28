@@ -96,6 +96,46 @@ class TaskFeedbackAcceptanceTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(history['items'][0]['feedback']['receipt'],receipt)
 
+    def test_report_review_http_enforces_owner_csrf_fields_and_conflicts(self):
+        a = self.fixture.service.skill_authoring
+        draft = a.save(OWNER, proposal={'name':'周报复核','description':'整理原文',
+            'selection':{'use_when':'整理周报','not_for':'业务查询','output':'周报'},
+            'instructions':'只整理原文。'}, request_key='report-review-draft')
+        job = a.workbench.evaluate(OWNER,draft_id=draft['draft_id'],expected_revision=1,
+            cases=[{'prompt':'明天补测试','contains':['明天']}],request_key='report-review-job')
+        a.workbench.run_once(lambda *_:{'text':'明天补测试。','model':'synthetic'})
+        payload = {'job_id':job['job_id'],'row_key':'0:0:candidate','status':'acceptable',
+                   'note':'保留原文。','expected_version':0}
+        def post(cookies, *, csrf=True, update=None):
+            return _request(self.port,'POST','/api/skill-report-reviews',origin=self.origin,cookies=cookies,
+                csrf=cookies.get('agentbridge_workspace_csrf') if csrf else None,body={**payload,**(update or {})})
+        self.assertEqual(post(self.cookies,csrf=False)[0],401)
+        self.assertEqual(post(self.other_cookies)[0],404)
+        self.assertEqual(post(self.cookies,update={'owner_subject':OWNER})[0],400)
+        status,_,saved = post(self.cookies)
+        self.assertEqual(status,200,saved); self.assertEqual(saved['version'],1)
+        self.assertEqual(post(self.cookies,update={'note':'另一页面修改'})[0],409)
+        self.assertEqual(a.workbench.jobs(OWNER,job['job_id'])['result']['reviews']['0:0:candidate'],saved)
+
+    def test_pending_cases_http_requires_owner_csrf_and_both_versions(self):
+        a=self.fixture.service.skill_authoring
+        draft=a.save(OWNER,proposal={'name':'待测题助手','description':'整理原文',
+            'selection':{'use_when':'整理周报','not_for':'业务查询','output':'周报'},
+            'instructions':'只整理原文。'},request_key='pending-sheet')
+        payload={'draft_id':draft['draft_id'],'expected_revision':1,'expected_version':0,
+            'value':{'cases':[{'prompt':'','profile':'','kind':'output','contains':'明天\n','excludes':''}],'repeats':'2'}}
+        def post(cookies,*,csrf=True,update=None):
+            return _request(self.port,'POST','/api/skill-pending-cases',origin=self.origin,cookies=cookies,
+                csrf=cookies.get('agentbridge_workspace_csrf') if csrf else None,body={**payload,**(update or {})})
+        self.assertEqual(post(self.cookies,csrf=False)[0],401)
+        self.assertEqual(post(self.other_cookies)[0],404)
+        self.assertEqual(post(self.cookies,update={'owner_subject':OWNER})[0],400)
+        status,_,saved=post(self.cookies)
+        self.assertEqual(status,200,saved);self.assertEqual(saved['value'],payload['value'])
+        self.assertEqual(post(self.cookies,update={'value':{'cases':[],'repeats':'1'}})[0],409)
+        self.assertEqual(post(self.cookies,update={'expected_revision':2})[0],409)
+        self.assertEqual(a.workbench.inspect(OWNER,draft['draft_id'])['pending_cases'],saved)
+
     def test_new_publication_does_not_move_feedback_off_the_original_task_version(self):
         case = self.case()
         self.assertEqual(self.fixture.service.skills.current(case["skill_id"])["manifest"]["version"], "1.0.1")

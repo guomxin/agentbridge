@@ -106,6 +106,36 @@ def grade_output(case, output):
     return {'passed': bool(checks) and all(c['passed'] for c in checks), 'checks': checks}
 
 
+def validate_pending_cases(value, profiles):
+    """Bound an unfinished editor draft without treating it as runnable evidence."""
+    if not isinstance(value, dict) or set(value) != {'cases', 'repeats'}:
+        raise ValueError('待测题需要题目及重复次数')
+    if not isinstance(value['repeats'], str) or value['repeats'] not in {'1', '2', '3'}:
+        raise ValueError('重复次数为 1 至 3')
+    cases = value['cases']
+    if not isinstance(cases, list) or len(cases) > 12:
+        raise ValueError('最多保存 12 个待测题')
+    result = []
+    required = {'prompt', 'profile', 'kind', 'contains', 'excludes'}
+    for case in cases:
+        if not isinstance(case, dict) or set(case) - (required | {'feedback_id'}) or not required <= set(case):
+            raise ValueError('待测题字段无效')
+        for key, limit in [('prompt',3000), ('profile',128), ('kind',32), ('contains',10020), ('excludes',10020)]:
+            if not isinstance(case[key], str) or len(case[key]) > limit:
+                raise ValueError('待测题字段过长或不是文本')
+        if case['profile'] and case['profile'] not in profiles:
+            raise ValueError('请重新选择当前修订的模式')
+        if case['kind'] not in {'output','trigger_true','trigger_false'}:
+            raise ValueError('待测题类型无效')
+        feedback_id = case.get('feedback_id')
+        if 'feedback_id' in case and (not isinstance(feedback_id, str) or not re.fullmatch(r'[0-9a-f-]{36}',feedback_id)):
+            raise ValueError('反馈来源标识无效')
+        result.append(dict(case))
+    if len(json.dumps(result, ensure_ascii=False)) > 48000:
+        raise ValueError('待测题总内容过长，请缩短后保存')
+    return {'cases': result, 'repeats': value['repeats']}
+
+
 EVALUATION_SCHEMA = 'agentbridge.skill-evaluation.v2'
 
 
@@ -240,3 +270,32 @@ def case_fingerprint(cases, repeats):
     rows = [{k: v for k, v in row.items() if k != 'feedback_id'} for row in cases]
     return 'sha256:' + sha256(json.dumps({'cases': rows, 'repeats': repeats}, ensure_ascii=False,
         sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def compare_reports(source, current):
+    """Compare fixed questions and aligned candidate rows, never infer environment equality."""
+    if not source or not current:
+        return None
+    result = {'source_job_id': source.get('job_id'), 'source_revision': source.get('revision'),
+              'same_report': bool(source.get('job_id') and source.get('job_id') == current.get('job_id')),
+              'inputs_equal': False, 'models': 'unknown', 'regressed_cases': [],
+              'limitations': '仅比较题目、断言、重复次数及候选输出记录的模型；不证明运行环境完全一致。'}
+    try:
+        old_cases, new_cases = validate_cases(source.get('cases')), validate_cases(current.get('cases'))
+        result['inputs_equal'] = case_fingerprint(old_cases, source['repeats']) == case_fingerprint(new_cases, current['repeats'])
+        if not result['inputs_equal']:
+            return result
+        old_passed = _candidate_case_results(source, old_cases)
+        new_passed = _candidate_case_results(current, new_cases)
+        def models(report):
+            values = {(r['case'], r['repeat']): r.get('model') for r in report['rows'] if r['variant'] == 'candidate'}
+            return values if all(isinstance(v, str) and v.strip() for v in values.values()) else None
+        old_models, new_models = models(source), models(current)
+        if old_models is not None and new_models is not None:
+            result['models'] = 'known_same' if old_models == new_models else 'changed'
+        if result['models'] == 'known_same' and not result['same_report']:
+            result['regressed_cases'] = [i for i, passed in enumerate(old_passed) if passed and not new_passed[i]]
+    except (ValueError, KeyError, TypeError):
+        # Older/incomplete reports remain readable, without claiming comparability.
+        pass
+    return result

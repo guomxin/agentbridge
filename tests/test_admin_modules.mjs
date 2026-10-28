@@ -164,3 +164,36 @@ test('later modal intent rejects an older same-view response even when transport
   await assert.rejects(first,{name:'AbortError'});
   assert.equal(next.title,'new');
 });
+
+test('approval shows frozen human review problems separately without changing automatic publication evidence',()=>{
+  const q={diagnostics:{message:'检查',checks:[]},diff:[],audience_diff:{added:[],removed:[]},
+    evaluation:{passed:true,limitations:'仅验证断言',scores:{candidate:{passed:1,total:1}},
+      cases:[{profile:'preview'}],rows:[{key:'0:0:candidate',variant:'candidate',case:0,prompt:'明天补测试',output:'明天补测试，提升稳定性。',passed:true,model:'frozen-model',checks:[]}],
+      reviews:{'0:0:candidate':{status:'problem',note:'<img src=x onerror=alert(1)> 不要补效果。',version:1}}},
+    publication_evidence:{schema:'agentbridge.skill-publication-evidence.v1',shared:{blocked:false,reason:''},profiles:[
+      {profile:'preview',eligible:true,blocked:false,source:'evaluation',evidence:'所列断言通过'},
+    ]}};
+  const before=structuredClone(q),html=skillReviewQualityHtml(q,['preview']);
+  assert.match(html,/候选版本：1\/1/);
+  assert.match(html,/提交时人工复核：0 项可接受，1 项有问题，0 项未复核/);
+  assert.match(html,/人工复核：有问题/);
+  assert.match(html,/本次申请冻结的输出，不改变自动断言成绩/);
+  assert.match(html,/&lt;img src=x onerror=alert\(1\)&gt; 不要补效果。/);
+  assert.doesNotMatch(html,/<img|不能批准|name="review_status"|name="review_note"/);
+  assert.deepEqual(q,before,'rendering frozen evidence cannot mutate the report or publication decision');
+});
+
+test('approval distinguishes old unrecorded human reviews from new unreviewed outputs',()=>{
+  const q={diagnostics:{message:'检查',checks:[]},diff:[],audience_diff:{added:[],removed:[]},
+    evaluation:{passed:true,limitations:'合成文字',scores:{candidate:{passed:1,total:1}},
+      rows:[{key:'0:0:candidate',variant:'candidate',prompt:'测试',output:'完成',passed:true}]}};
+  let html=skillReviewQualityHtml(q);
+  assert.match(html,/提交时人工复核未记录；不能据此判断是否已人工检查/);
+  assert.match(html,/人工复核：未记录/);
+  assert.doesNotMatch(html,/人工复核：可接受/);
+  q.evaluation.reviews={};html=skillReviewQualityHtml(q);
+  assert.match(html,/0 项可接受，0 项有问题，1 项未复核/);
+  assert.match(html,/人工复核：未复核/);
+  q.evaluation.reviews={'0:0:candidate':{status:'unexpected',note:'缺少明确判断'}};
+  html=skillReviewQualityHtml(q);assert.match(html,/1 项未记录/);assert.match(html,/人工复核：未记录/);
+});

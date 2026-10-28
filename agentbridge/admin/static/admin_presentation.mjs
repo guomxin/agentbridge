@@ -89,12 +89,25 @@ export function skillReviewQualityHtml(q, selectedProfiles = []){
   const rows = scoped ? selectedProfiles.map(profile => q.publication_evidence.profiles.find(row => row.profile === profile)) : [];
   const eligible = scoped && !q.publication_evidence.shared.blocked && rows.every(row => row?.eligible && !row.blocked);
   const manual = !report || (scoped && rows.some(row => row?.source !== 'evaluation'));
+  const reviewLabels = {unreviewed:'未复核',acceptable:'可接受',problem:'有问题',unknown:'未记录'};
+  const hasReviewSnapshot = report && Object.hasOwn(report, 'reviews');
+  const rowReview = row => {
+    const saved = report.reviews?.[row.key];
+    const status = saved ? (Object.hasOwn(reviewLabels, saved.status) ? saved.status : 'unknown') : hasReviewSnapshot ? 'unreviewed' : 'unknown';
+    return {status, note:saved?.note || ''};
+  };
+  const reviewCounts = {unreviewed:0,acceptable:0,problem:0,unknown:0};
+  for (const row of report?.rows || []) reviewCounts[rowReview(row).status]++;
+  const reviewSummary = hasReviewSnapshot
+    ? `提交时人工复核：${reviewCounts.acceptable} 项可接受，${reviewCounts.problem} 项有问题，${reviewCounts.unreviewed} 项未复核${reviewCounts.unknown ? `，${reviewCounts.unknown} 项未记录` : ''}。仅对应本次申请冻结的输出，不改变自动断言成绩。`
+    : '提交时人工复核未记录；不能据此判断是否已人工检查。';
   return `<h3>固定修订质量依据</h3><p>${escapeHtml(q.diagnostics.message)}</p>${q.diagnostics.checks.filter(c=>c.level==='warning').map(c=>`<p>待复核：${escapeHtml(c.message)}</p>`).join('')}
     <details><summary>版本差异（${q.diff.length} 项）</summary>${q.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre class="skill-review-text">${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
     <p>新增使用用户：${escapeHtml(q.audience_diff.added.join('、')||'无')}；移除：${escapeHtml(q.audience_diff.removed.join('、')||'无')}</p>
     ${scoped?`<p><strong>${eligible?'本次申请的模式具备发布依据，仍需人工复核':'本次申请的模式存在阻断，不能批准'}</strong></p><p>${escapeHtml(q.publication_evidence.shared.reason)}</p>${rows.map((row,index)=>`<p>${escapeHtml(selectedProfiles[index])}：${escapeHtml(row?.evidence||'缺少发布依据')}</p>`).join('')}`:''}
     ${report?`${scoped?'':`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p>`}<p>${escapeHtml(report.limitations)}</p>
     ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
-    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p>${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`).join('')}`:''}
+    <p>${escapeHtml(reviewSummary)}</p>
+    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'} · 人工复核：${reviewLabels[rowReview(r).status]}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p>${rowReview(r).note ? `<p>复核说明：</p><pre class="skill-review-text">${escapeHtml(rowReview(r).note)}</pre>` : ''}${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`).join('')}`:''}
     ${manual?`<p>申请中有模式仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`:''}`;
 }

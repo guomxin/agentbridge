@@ -1223,3 +1223,346 @@ test('automatic version refresh waits for unsaved evaluation inputs and pending 
   allowed=true;await check();assert.equal(reloads,1);
   f.view.dispose();
 });
+
+function reviewReport(jobId = 'report-job') {
+  return {job_id:jobId,draft_id:'draft',revision:3,name:'周报助手',passed:true,content_hash:'hash-3',
+    cases:[{prompt:'整理成周报：明天补测试。',profile:'preview',kind:'output',contains:['明天'],excludes:[]}],
+    rows:[{key:'0:0:candidate',case:0,repeat:0,variant:'candidate',prompt:'整理成周报：明天补测试。',output:'明天补测试。',passed:true,model:'synthetic-review',checks:[{rule:'contains',value:'明天',passed:true}]}],
+    scores:{candidate:{passed:1,total:1}},reviews:{}};
+}
+function attachReviewForm(f, {status='unreviewed',note='',rowKey='0:0:candidate'} = {}) {
+  const form=new SkillElement();form.dataset.reviewRow=rowKey;
+  form.querySelector('[name=review_status]').value=status;
+  form.querySelector('[name=review_note]').value=note;
+  f.$('#skill-quality-panel').queries.set('[data-review-row]',[form]);
+  return form;
+}
+
+test('unsaved human review protects navigation, auto reload, method save and evaluation',async()=>{
+  let prompts=0;
+  const f=skillFixture({report:reviewReport(),confirm:()=>{prompts++;return false;}});
+  const form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  form.querySelector('[name=review_status]').value='problem';
+  form.querySelector('[name=review_note]').value='不要补原文没有的效果。';form.oninput();
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  assert.equal(f.windowEvents.has('beforeunload'),true);
+  assert.equal(await f.forms.canLeaveSkillEditor(),false);assert.equal(prompts,1);
+  await f.editor.onsubmit(submitEvent(f.editor));
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.equal(f.calls.some(c=>c.action==='save'||c.action==='evaluate'),false);
+  assert.match(f.$('#draft-detail-error').textContent,/未保存的复核说明/);
+  assert.equal(form.querySelector('[name=review_note]').value,'不要补原文没有的效果。');
+  f.view.dispose();
+});
+
+test('review save binds original job and row, preserves edits during request, and leaves automatic scores unchanged',async()=>{
+  const report=reviewReport(),pending=deferred(),requests=[];
+  const f=skillFixture({report,onRequest:(path,options)=>{
+    if(path!=='/api/skill-report-reviews')return;
+    requests.push(structuredClone(options.body));
+    if(requests.length===1)return pending.promise;
+    return {...options.body,version:2};
+  }});
+  const form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  form.querySelector('[name=review_status]').value='problem';form.querySelector('[name=review_note]').value='计划被补写。';form.oninput();
+  const first=form.onsubmit(submitEvent(form));await flush();
+  assert.deepEqual(requests,[{job_id:'report-job',row_key:'0:0:candidate',status:'problem',note:'计划被补写。',expected_version:0}]);
+  form.querySelector('[name=review_note]').value='计划被补写，还需要核对日期。';form.oninput();
+  await form.onsubmit(submitEvent(form));assert.equal(requests.length,1,'pending save cannot create a competing request');
+  pending.resolve({row_key:'0:0:candidate',status:'problem',note:'计划被补写。',version:1});await first;
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  assert.match(form.querySelector('[role=status]').textContent,/仍有未保存修改/);
+  assert.equal(report.passed,true);assert.deepEqual(report.scores,{candidate:{passed:1,total:1}});
+  await form.onsubmit(submitEvent(form));
+  assert.equal(requests[1].expected_version,1);
+  assert.equal(requests[1].note,'计划被补写，还需要核对日期。');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  assert.equal(f.windowEvents.has('beforeunload'),false);
+  assert.match(f.$('#skill-quality-panel').querySelector('[data-review-summary]').textContent,/1 项有问题/);
+  f.view.dispose();
+});
+
+test('failed review save keeps note and original concurrency version for explicit retry',async()=>{
+  const requests=[];
+  const f=skillFixture({report:reviewReport(),onRequest:(path,options)=>{
+    if(path!=='/api/skill-report-reviews')return;
+    requests.push({...options.body});
+    if(requests.length===1)throw new Error('网络不可用，请重试。');
+    return {...options.body,version:1};
+  }});
+  const form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  form.querySelector('[name=review_status]').value='acceptable';form.querySelector('[name=review_note]').value='保留了明天。';form.oninput();
+  await form.onsubmit(submitEvent(form));
+  assert.match(form.querySelector('[role=status]').textContent,/网络不可用/);
+  assert.equal(form.querySelector('[name=review_note]').value,'保留了明天。');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  await form.onsubmit(submitEvent(form));
+  assert.deepEqual(requests[1],requests[0]);assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  f.view.dispose();
+});
+
+test('background job refresh cannot erase an edited review and historic reports remain read only',async()=>{
+  const report=reviewReport(),pendingTimers=new Map();let next=0;
+  const timers={setTimeout(cb){pendingTimers.set(++next,cb);return next;},clearTimeout(id){pendingTimers.delete(id);}};
+  const f=skillFixture({report,timers,jobs:[{job_id:'old',kind:'evaluation',state:'succeeded',result:report},{job_id:'running',kind:'evaluation',state:'running',progress:1}]});
+  const form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  form.querySelector('[name=review_note]').value='这条还没检查完。';form.oninput();
+  await f.forms.refreshSkillJobs();
+  assert.equal(pendingTimers.size,1);
+  assert.match(f.$('#skill-jobs').innerHTML,/查看本次报告/);
+  assert.doesNotMatch(f.$('#skill-jobs').innerHTML,/data-review-row|name="review_note"/);
+  assert.equal(form.querySelector('[name=review_note]').value,'这条还没检查完。');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  f.view.dispose();assert.equal(pendingTimers.size,0);
+});
+
+test('fresh report starts unreviewed and does not borrow prior report judgement',async()=>{
+  const saved=reviewReport('old-job');saved.reviews={'0:0:candidate':{row_key:'0:0:candidate',status:'problem',note:'旧输出补写了效果。',version:2}};
+  let active=saved;
+  const f=skillFixture({onAction:action=>action==='inspect'?{...quality('检查'),evaluation:active}:undefined});
+  let form=attachReviewForm(f,{status:'problem',note:'旧输出补写了效果。'});await f.forms.showSkillDraft('draft');
+  assert.match(f.$('#skill-quality-panel').innerHTML,/1 项有问题/);
+  active=reviewReport('new-job');form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  assert.equal(form.querySelector('[name=review_status]').value,'unreviewed');
+  assert.equal(form.querySelector('[name=review_note]').value,'');
+  assert.match(f.$('#skill-quality-panel').innerHTML,/0 项有问题，1 项未复核/);
+  f.view.dispose();
+});
+
+test('review text entered while saving a method cannot be discarded by the save response',async()=>{
+  const save=deferred(),f=skillFixture({report:reviewReport(),onAction:action=>action==='save'?save.promise:undefined});
+  const form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  f.editor.controls.get('instructions').value+=' 请核对时间。';f.editor.oninput();
+  const beforeInspects=f.calls.filter(c=>c.action==='inspect').length;
+  const pending=f.editor.onsubmit(submitEvent(f.editor));await flush();
+  // Even if another host or scripted event edits a disabled field, its new text
+  // must not be blessed as saved or replaced by a stale network response.
+  form.querySelector('[name=review_note]').value='保存方法期间新补的复核。';form.oninput();
+  save.resolve({draft_id:'draft',revision:7,content_hash:'hash-7'});await pending;
+  assert.equal(f.calls.filter(c=>c.action==='inspect').length,beforeInspects,'no report redraw after newer review edit');
+  assert.equal(form.querySelector('[name=review_note]').value,'保存方法期间新补的复核。');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  assert.match(f.$('#draft-detail-error').textContent,/复核/);
+  f.view.dispose();
+});
+
+const pendingValue = (patch={}) => ({cases:[{prompt:'',profile:'preview',kind:'output',contains:'\n明天\n',excludes:'',...patch}],repeats:'2'});
+
+test('saved pending cases restore incomplete raw text without running or inheriting an old pass',async()=>{
+  const report=reviewReport(),stored={version:4,source_revision:2,value:pendingValue({profile:'retired',kind:'trigger_false',feedback_id:'12345678-1234-1234-1234-123456789abc'})};
+  const f=skillFixture({onAction:action=>action==='inspect'?{...quality('检查'),evaluation:report,pending_cases:stored}:undefined});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];
+  assert.equal(row.querySelector('[name=prompt]').value,'');
+  assert.equal(row.querySelector('[name=contains]').value,'\n明天\n');
+  assert.equal(row.querySelector('[name=kind]').value,'trigger_false');
+  assert.equal(row.querySelector('[name=profile]').value,'','retired mode must not be silently reassigned');
+  assert.equal(row.dataset.feedbackId,stored.value.cases[0].feedback_id);
+  assert.match(row.querySelector('[data-case-source]').textContent,/来源修订 2.*修订已变化.*原模式“retired”/);
+  assert.equal(f.$('#skill-eval-form').querySelector('[name=repeats]').value,'2');
+  assert.match(f.$('#skill-eval-state').textContent,/保存不代表已经运行或通过/);
+  assert.equal(f.calls.some(c=>c.action==='evaluate'),false);
+  assert.equal(await f.forms.canLeaveSkillEditor(),true);
+  assert.equal(report.passed,true,'old result remains its own immutable evidence');
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.match(f.$('#draft-detail-error').textContent,/明确选择当前修订的模式/);
+  assert.equal(f.calls.some(c=>c.action==='evaluate'),false);
+  f.view.dispose();
+});
+
+test('pending save sends raw snapshot and companion version, preserving edits made during request',async()=>{
+  const stored={version:4,source_revision:3,value:pendingValue()},first=deferred(),requests=[];
+  const f=skillFixture({onAction:action=>action==='inspect'?{...quality('检查'),pending_cases:stored}:undefined,onRequest:(path,options)=>{
+    if(path!=='/api/skill-pending-cases')return;
+    requests.push(structuredClone(options.body));
+    if(requests.length===1)return first.promise;
+    return {version:6,source_revision:3,value:structuredClone(options.body.value)};
+  }});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];
+  row.querySelector('[name=prompt]').value='整理成周报：明天补测试。';
+  f.$('#skill-eval-form').oninput();
+  const saving=f.$('#skill-save-pending').onclick();await flush();
+  assert.deepEqual(requests,[{draft_id:'draft',expected_revision:3,expected_version:4,value:pendingValue({prompt:'整理成周报：明天补测试。'})}]);
+  assert.equal(f.$('#skill-save-pending').disabled,true);
+  row.querySelector('[name=contains]').value='明天\n测试';f.$('#skill-eval-form').oninput();
+  await f.$('#skill-save-pending').onclick();assert.equal(requests.length,1);
+  first.resolve({version:5,source_revision:3,value:requests[0].value});await saving;
+  assert.match(f.$('#skill-eval-state').textContent,/仍有未保存修改/);
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  await f.$('#skill-save-pending').onclick();
+  assert.equal(requests[1].expected_version,5);
+  assert.equal(requests[1].value.cases[0].contains,'明天\n测试');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  assert.equal(await f.forms.canLeaveSkillEditor(),true);
+  assert.match(f.$('#skill-eval-state').textContent,/已保存.*尚未运行/);
+  assert.equal(f.calls.some(c=>c.action==='evaluate'),false);
+  f.view.dispose();
+});
+
+test('pending save failure retains fields and expected version; incomplete question can be saved explicitly',async()=>{
+  const requests=[];
+  const f=skillFixture({onRequest:(path,options)=>{
+    if(path!=='/api/skill-pending-cases')return;
+    requests.push(structuredClone(options.body));
+    if(requests.length===1)throw Error('网络暂时不可用，请重试。');
+    return {version:1,source_revision:3,value:options.body.value};
+  }});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=excludes]').value='已完成';f.$('#skill-eval-form').oninput();
+  await f.$('#skill-save-pending').onclick();
+  assert.match(f.$('#skill-eval-state').textContent,/网络暂时不可用/);
+  assert.equal(row.querySelector('[name=prompt]').value,'');
+  assert.equal(row.querySelector('[name=excludes]').value,'已完成');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  await f.$('#skill-save-pending').onclick();
+  assert.deepEqual(requests[1],requests[0]);assert.equal(requests[0].expected_version,0);
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  assert.equal(f.calls.some(c=>c.action==='evaluate'),false);
+  f.view.dispose();
+});
+
+test('pending case save cannot silently save an unsaved method revision',async()=>{
+  const requests=[];
+  const f=skillFixture({onRequest:(path,options)=>{if(path==='/api/skill-pending-cases'){requests.push(options.body);return {version:1};}}});
+  await f.forms.showSkillDraft('draft');
+  f.editor.controls.get('instructions').value+='新方法。';f.editor.oninput();
+  assert.equal(f.$('#skill-save-pending').disabled,true);
+  await f.$('#skill-save-pending').onclick();
+  assert.equal(requests.length,0);assert.match(f.$('#skill-eval-state').textContent,/未保存修改/);
+  f.view.dispose();
+});
+
+function progressFeedback(latest) {
+  return {feedback_id:'12345678-1234-1234-1234-123456789abc',rating:'incorrect',comment:'不要补效果',profile:'preview',version:'1.0.0',source:{kind:'binding',load_event_id:'event'},
+    progress:{pending_saved:true,latest_job:latest}};
+}
+
+test('feedback displays the latest failed run without reusing passing scores and opens that exact job',async()=>{
+  const latest={job_id:'latest-failed',revision:4,state:'failed',candidate:{passed:1,total:1},review:{problem:0,unreviewed:0}};
+  const requests=[],f=skillFixture({onAction:(action,data)=>{
+    if(action==='inspect')return {...quality('检查'),feedback:{items:[progressFeedback(latest)]}};
+    if(action==='jobs'){requests.push(data);return {job_id:'latest-failed',state:'failed',error:'模型暂时不可用'};}
+  }});
+  await f.forms.showSkillDraft('draft');
+  const item=f.$('#skill-feedback-list').children[0];
+  assert.match(item.children[2].textContent,/已保存关联待测题目.*最近测试：修订 4 · 失败/);
+  assert.doesNotMatch(item.children[2].textContent,/1\/1|已解决|线上已修复/);
+  await item.children[3].onclick();
+  assert.deepEqual(requests,[{job_id:'latest-failed'}]);
+  assert.match(item.children[4].innerHTML,/模型暂时不可用.*尚无完整结果/);
+  assert.doesNotMatch(item.children[4].innerHTML,/data-review-row/);
+  f.view.dispose();
+});
+
+test('feedback completion keeps automatic and manual results separate and report link is read only',async()=>{
+  const latest={job_id:'feedback-report',revision:4,state:'succeeded',candidate:{passed:1,total:1},review:{problem:1,unreviewed:0}};
+  const report=reviewReport('feedback-report');report.reviews={'0:0:candidate':{status:'problem',note:'补了效果',version:1}};
+  const f=skillFixture({onAction:(action,data)=>{
+    if(action==='inspect')return {...quality('检查'),feedback:{items:[progressFeedback(latest)]}};
+    if(action==='jobs'){assert.equal(data.job_id,'feedback-report');return {job_id:'feedback-report',state:'succeeded',result:report};}
+  }});
+  await f.forms.showSkillDraft('draft');const item=f.$('#skill-feedback-list').children[0];
+  assert.match(item.children[2].textContent,/候选断言 1\/1.*人工复核 1 项有问题.*不代表线上已修复/);
+  await item.children[3].onclick();
+  assert.match(item.children[4].innerHTML,/feedback-report.*修订|修订.*feedback-report/);
+  assert.match(item.children[4].innerHTML,/有问题.*补了效果/);
+  assert.doesNotMatch(item.children[4].innerHTML,/<form|data-review-row/);
+  f.view.dispose();
+});
+
+test('changing the fixed comparison source clears stale regression badges without replacing pending input',async()=>{
+  const report=reviewReport(),comparison={source_revision:2,inputs_equal:true,models:'known_same',regressed_cases:[0]};
+  const fixed={job_id:'old-job',revision:2,cases:report.cases,repeats:1};
+  const f=skillFixture({onAction:action=>action==='inspect'?{...quality('检查'),evaluation:report,regression:fixed,comparison}:undefined,
+    onRequest:(path,options)=>path==='/api/skill-regressions'?(options.body.job_id?{...fixed,job_id:options.body.job_id}:null):undefined});
+  const summary=new SkillElement();summary.textContent='上次通过 → 本次失败 · 第 1 题 · 明天补测试';
+  f.$('#skill-quality-panel').queries.set('[data-report-case] > summary',[summary]);
+  await f.forms.showSkillDraft('draft');
+  const input=f.$('#skill-eval-cases').children[0].querySelector('[name=prompt]');input.value='尚未保存的新题';
+  await f.$('#skill-pin-regression').onclick();
+  assert.equal(summary.textContent,'第 1 题 · 明天补测试');
+  assert.match(f.$('#skill-quality-panel').querySelector('[data-report-comparison]').textContent,/尚无新的对照/);
+  assert.equal(f.$('#skill-quality-panel').querySelector('[data-regression-note]').textContent,'');
+  assert.equal(input.value,'尚未保存的新题');
+  await f.$('#skill-clear-regression').onclick();
+  assert.equal(f.$('#skill-quality-panel').querySelector('[data-report-comparison]').textContent,'');
+  assert.equal(input.value,'尚未保存的新题');
+  f.view.dispose();
+});
+
+test('pending and review saves refresh feedback progress in place without losing draft inputs or expanded feedback',async()=>{
+  const report=reviewReport(),latest={job_id:report.job_id,revision:3,state:'succeeded',candidate:{passed:1,total:1},review:{problem:0,unreviewed:1}};
+  let pendingSaved=false,inspects=0;
+  const f=skillFixture({onAction:action=>{
+    if(action!=='inspect')return;
+    inspects++;
+    const feedback=progressFeedback(structuredClone(latest));feedback.progress.pending_saved=pendingSaved;
+    return {...quality('检查'),evaluation:report,feedback:{items:[feedback]}};
+  },onRequest:(path,options)=>{
+    if(path==='/api/skill-pending-cases'){pendingSaved=true;return {version:1,source_revision:3,value:options.body.value};}
+    if(path==='/api/skill-report-reviews'){latest.review={problem:1,unreviewed:0};return {...options.body,version:1};}
+  }});
+  const review=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  const list=f.$('#skill-feedback-list'),baseQuery=list.querySelectorAll.bind(list);
+  list.querySelectorAll=selector=>selector==='[data-feedback-id]'?list.children:baseQuery(selector);
+  list.children[0].open=true;
+  assert.doesNotMatch(list.children[0].children[2].textContent,/已保存关联待测题目/);
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='明天补测试';
+  row.querySelector('[name=contains]').value='明天';f.$('#skill-eval-form').oninput();
+  await f.$('#skill-save-pending').onclick();
+  assert.equal(inspects,2);assert.match(list.children[0].children[2].textContent,/已保存关联待测题目/);
+  assert.equal(list.children[0].open,true);
+  assert.equal(f.$('#skill-eval-cases').children[0],row,'refresh must not reconstruct the case editor');
+  row.querySelector('[name=prompt]').value='明天继续补测试';f.$('#skill-eval-form').oninput();
+  review.querySelector('[name=review_status]').value='problem';review.querySelector('[name=review_note]').value='补了原文没有的效果';review.oninput();
+  await review.onsubmit(submitEvent(review));
+  assert.equal(inspects,3);assert.match(list.children[0].children[2].textContent,/人工复核 1 项有问题、0 项未复核/);
+  assert.equal(row.querySelector('[name=prompt]').value,'明天继续补测试');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false,'newer unsubmitted case edit remains dirty');
+  assert.match(review.querySelector('[role=status]').textContent,/复核已保存/);
+  f.view.dispose();
+});
+
+test('feedback refresh failure after a successful pending save preserves saved receipt and editable inputs',async()=>{
+  let inspects=0,saves=0;
+  const f=skillFixture({onAction:action=>{
+    if(action!=='inspect')return;
+    if(++inspects===2)throw Error('进度查询暂时失败');
+    return {...quality('检查'),feedback:{items:[progressFeedback(null)]}};
+  },onRequest:(path,options)=>{
+    if(path==='/api/skill-pending-cases'){saves++;return {version:1,source_revision:3,value:options.body.value};}
+  }});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='明天补测试';f.$('#skill-eval-form').oninput();
+  await f.$('#skill-save-pending').onclick();
+  assert.equal(saves,1);assert.match(f.$('#skill-eval-state').textContent,/待测题目已保存/);
+  assert.match(f.$('#skill-feedback-state').textContent,/进度暂未更新.*已保存的内容不受影响/);
+  assert.equal(row.querySelector('[name=prompt]').value,'明天补测试');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),true);
+  assert.equal(await f.forms.canLeaveSkillEditor(),true);
+  await f.$('#skill-refresh-feedback').onclick();
+  assert.equal(saves,1,'refresh does not repeat the acknowledged save');
+  assert.match(f.$('#skill-feedback-state').textContent,/进度更新于/);
+  assert.match(f.$('#skill-eval-state').textContent,/待测题目已保存/);
+  f.view.dispose();
+});
+
+test('an older failed feedback refresh cannot overwrite the status of a newer successful refresh',async()=>{
+  let inspections=0,rejectOld;
+  const old=new Promise((resolve,reject)=>{rejectOld=reject;});
+  const f=skillFixture({onAction:action=>{
+    if(action!=='inspect')return;
+    if(++inspections===2)return old;
+    return {...quality('检查'),feedback:{items:[progressFeedback({job_id:'new',revision:4,state:'running'})]}};
+  }});
+  await f.forms.showSkillDraft('draft');
+  const older=f.$('#skill-refresh-feedback').onclick();await flush();
+  await f.$('#skill-refresh-feedback').onclick();
+  const fresh=f.$('#skill-feedback-state').textContent;assert.match(fresh,/进度更新于/);
+  rejectOld(Error('older request failed'));await older;
+  assert.equal(f.$('#skill-feedback-state').textContent,fresh);
+  assert.match(f.$('#skill-feedback-list').children[0].children[2].textContent,/修订 4 · 执行中/);
+  f.view.dispose();
+});

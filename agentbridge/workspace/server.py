@@ -561,6 +561,16 @@ def create_workspace_http_server(
                         raise ValueError('常用回归题需要草稿、修订和报告标识')
                     self._json(200, application.service.skill_authoring.workbench.set_regression(account['user_subject'], **body))
                     return
+                if route.path == "/api/skill-report-reviews":
+                    if not isinstance(body, dict) or set(body) != {'job_id', 'row_key', 'status', 'note', 'expected_version'}:
+                        raise ValueError('结果复核需要报告、结果行、状态、说明和复核版本')
+                    self._json(200, application.service.skill_authoring.workbench.review_report(account['user_subject'], **body))
+                    return
+                if route.path == "/api/skill-pending-cases":
+                    if not isinstance(body, dict) or set(body) != {'draft_id', 'expected_revision', 'expected_version', 'value'}:
+                        raise ValueError('保存待测题需要草稿、修订、待测题版本和题目内容')
+                    self._json(200, application.service.skill_authoring.workbench.save_pending_cases(account['user_subject'], **body))
+                    return
                 skill_feedback = re.fullmatch(r"/api/skills/history/([0-9a-f-]{36})/feedback", route.path)
                 if skill_feedback:
                     self._json(200, application.skill_load_feedback(account, skill_feedback.group(1), body))

@@ -12,7 +12,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agentbridge.core.business_skills import _json, skill_catalog
 from agentbridge.core.skill_quality import (bundle_diff, diagnostics, export_standard,
-    import_standard, proposal_from_bundle, publication_evidence, similarity, validate_cases, case_fingerprint)
+    import_standard, proposal_from_bundle, publication_evidence, similarity, validate_cases, case_fingerprint, compare_reports,
+    validate_pending_cases)
 from agentbridge.core.skill_job_executor import SkillJobDependencies, SkillJobExecutor
 from agentbridge.core.skill_job_queue import SkillJobQueue
 from agentbridge.core.skill_ranking import rank_skill_candidates
@@ -63,6 +64,14 @@ class SkillWorkbench:
                     source_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS skill_regressions (
                     draft_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL, job_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS skill_report_reviews (
+                    job_id TEXT NOT NULL, row_key TEXT NOT NULL, owner_subject TEXT NOT NULL,
+                    status TEXT NOT NULL, note TEXT NOT NULL, version INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL, PRIMARY KEY(job_id,row_key));
+                CREATE TABLE IF NOT EXISTS skill_pending_cases (
+                    draft_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL,
+                    source_revision INTEGER NOT NULL, version INTEGER NOT NULL,
+                    value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS skill_auto_capture (
                     dispatch_id TEXT PRIMARY KEY, owner_subject TEXT NOT NULL,
                     assistant_text TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -94,7 +103,57 @@ class SkillWorkbench:
         return SkillJobQueue.public(row)
 
     def jobs(self, owner, job_id=None):
-        return self._job_queue().jobs(owner, job_id)
+        result = self._job_queue().jobs(owner, job_id)
+        with closing(self.store.connect()) as db:
+            for job in [result] if job_id else result['items']:
+                if job['kind'] == 'evaluation' and job['state'] == 'succeeded':
+                    job['result'] = self._report_reviews(db, owner, job['result'])
+        return result
+
+    @staticmethod
+    def _report_reviews(db, owner, report):
+        if not report or not report.get('job_id') or not isinstance(report.get('rows'), list):
+            return report
+        keys = {row.get('key') for row in report['rows']}
+        reviews = {row['row_key']: {k: row[k] for k in ('row_key','status','note','version','updated_at')}
+                   for row in db.execute('SELECT * FROM skill_report_reviews WHERE job_id=? AND owner_subject=?',
+                                         (report['job_id'], owner)) if row['row_key'] in keys}
+        return {**report, 'reviews': reviews}
+
+    def review_report(self, owner, *, job_id, row_key, status, note, expected_version):
+        from agentbridge.core.skill_authoring import text
+        text(job_id, '评测标识', 128)
+        text(row_key, '结果行标识', 128)
+        if not isinstance(status, str) or status not in {'unreviewed', 'acceptable', 'problem'}:
+            raise ValueError('复核状态无效')
+        note = text(note, '复核说明', 1000, empty=True)
+        if type(expected_version) is not int or expected_version < 0:
+            raise ValueError('复核版本无效')
+        with closing(self.store.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            job = db.execute("SELECT result_json FROM skill_jobs WHERE job_id=? AND owner_subject=? AND kind='evaluation' AND state='succeeded'",
+                             (job_id, owner)).fetchone()
+            if not job:
+                raise KeyError('已完成的评测不存在或不可访问')
+            report = json.loads(job['result_json'])
+            rows = [row for row in report.get('rows', []) if row.get('key') == row_key]
+            if len(rows) != 1 or rows[0].get('skipped') or not isinstance(rows[0].get('output'), str) or not rows[0]['output'].strip():
+                raise ValueError('只能复核此报告中已生成的输出')
+            existing = db.execute('SELECT * FROM skill_report_reviews WHERE job_id=? AND row_key=? AND owner_subject=?',
+                                  (job_id, row_key, owner)).fetchone()
+            current_version = existing['version'] if existing else 0
+            if expected_version != current_version:
+                if existing and existing['status'] == status and existing['note'] == note:
+                    return {k: existing[k] for k in ('row_key','status','note','version','updated_at')}
+                raise UserGrantConflict('此结果的复核已在另一页面修改，请刷新后再试。')
+            if existing and existing['status'] == status and existing['note'] == note:
+                return {k: existing[k] for k in ('row_key','status','note','version','updated_at')}
+            value = {'row_key': row_key, 'status': status, 'note': note,
+                     'version': current_version + 1, 'updated_at': timestamp()}
+            db.execute('INSERT INTO skill_report_reviews VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_id,row_key) DO UPDATE SET '
+                       'status=excluded.status,note=excluded.note,version=excluded.version,updated_at=excluded.updated_at',
+                       (job_id, row_key, owner, status, note, value['version'], value['updated_at']))
+            return value
 
     def cancel(self, owner, job_id):
         return self._job_queue().cancel(owner, job_id)
@@ -156,7 +215,78 @@ class SkillWorkbench:
             'bundle': draft['bundle'], 'baseline': baseline, 'cases': cases, 'repeats': repeats}, request_key)
 
     def latest_report(self, db, owner, draft_id, revision):
-        return SkillJobQueue.latest_report(db, owner, draft_id, revision)
+        return self._report_reviews(db, owner, SkillJobQueue.latest_report(db, owner, draft_id, revision))
+
+    @staticmethod
+    def _pending_cases(db, owner, draft_id):
+        row = db.execute('SELECT * FROM skill_pending_cases WHERE draft_id=? AND owner_subject=?', (draft_id,owner)).fetchone()
+        return ({'source_revision':row['source_revision'], 'version':row['version'],
+                 'value':json.loads(row['value_json']), 'updated_at':row['updated_at']} if row else None)
+
+    def save_pending_cases(self, owner, *, draft_id, expected_revision, expected_version, value):
+        from agentbridge.core.skill_authoring import text, revision
+        text(draft_id, '草稿标识', 128)
+        revision(expected_revision)
+        if type(expected_version) is not int or expected_version < 0:
+            raise ValueError('待测题版本无效')
+        with closing(self.store.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            draft = self.authoring._owned(db,owner,draft_id,expected_revision)
+            if draft['state'] == 'archived':
+                raise ValueError('草稿已归档')
+            _, bundle = self.authoring._bundle(db,draft_id,expected_revision)
+            value = validate_pending_cases(value,bundle['manifest']['profiles'])
+            for case in value['cases']:
+                if case.get('feedback_id') and not db.execute(
+                        'SELECT 1 FROM skill_feedback WHERE feedback_id=? AND owner_subject=? AND skill_id=?',
+                        (case['feedback_id'],owner,draft['skill_id'])).fetchone():
+                    raise KeyError('反馈来源不存在或不属于此助手')
+            existing = self._pending_cases(db,owner,draft_id)
+            current_version = existing['version'] if existing else 0
+            if existing and existing['source_revision'] == expected_revision and existing['value'] == value:
+                return existing
+            if current_version != expected_version:
+                raise UserGrantConflict('待测题已在另一页面修改，请刷新后再保存。')
+            db.execute('INSERT INTO skill_pending_cases VALUES (?,?,?,?,?,?) ON CONFLICT(draft_id) DO UPDATE SET '
+                       'source_revision=excluded.source_revision,version=excluded.version,value_json=excluded.value_json,updated_at=excluded.updated_at',
+                       (draft_id,owner,expected_revision,current_version+1,_json(value),timestamp()))
+            return self._pending_cases(db,owner,draft_id)
+
+    def _feedback_progress(self, db, owner, draft_id, feedback, pending):
+        """Derive progress from existing links, including a later failed or unfinished attempt."""
+        pending_ids = {case.get('feedback_id') for case in pending['value']['cases']} if pending else set()
+        by_id = {item['feedback_id']:item for item in feedback}
+        for item in feedback:
+            item['progress'] = {'pending_saved':item['feedback_id'] in pending_ids,'latest_job':None}
+        remaining = set(by_id)
+        if not remaining:
+            return
+        jobs = db.execute("SELECT * FROM skill_jobs WHERE owner_subject=? AND kind='evaluation' "
+                          "AND json_extract(payload_json,'$.draft_id')=? ORDER BY created_at DESC,rowid DESC", (owner,draft_id))
+        for job in jobs:
+            payload = json.loads(job['payload_json'])
+            linked = {}
+            for index, case in enumerate(payload.get('cases',[])):
+                if case.get('feedback_id') in remaining:
+                    linked.setdefault(case['feedback_id'],[]).append(index)
+            if not linked:
+                continue
+            result = json.loads(job['result_json']) if job['result_json'] else None
+            rows = result.get('rows',[]) if result else json.loads(job['progress_json'])
+            reviews = self._report_reviews(db,owner,result).get('reviews',{}) if result else {}
+            for feedback_id, indexes in linked.items():
+                candidate_rows = [r for r in rows if r.get('variant')=='candidate' and r.get('case') in indexes]
+                review_counts = {'acceptable':0,'problem':0,'unreviewed':0}
+                for row in candidate_rows:
+                    if row.get('output') and not row.get('skipped'):
+                        review_counts[reviews.get(row.get('key'),{}).get('status','unreviewed')] += 1
+                by_id[feedback_id]['progress']['latest_job'] = {
+                    'job_id':job['job_id'],'revision':payload['revision'],'state':job['state'],'case_indexes':indexes,
+                    'candidate':{'passed':sum(r.get('passed') is True for r in candidate_rows),
+                                 'total':len(indexes)*payload.get('repeats',1)}, 'review':review_counts}
+                remaining.remove(feedback_id)
+            if not remaining:
+                break
 
     def inspect(self, owner, draft_id):
         draft = self.authoring.get(owner, draft_id)
@@ -180,11 +310,15 @@ class SkillWorkbench:
                 LEFT JOIN skill_feedback_context c USING(feedback_id)
                 WHERE f.owner_subject=? AND f.skill_id=? ORDER BY f.created_at DESC,f.rowid DESC LIMIT 20''',
                 (owner, draft['skill_id']))]
+            pending = self._pending_cases(db,owner,draft_id)
+            self._feedback_progress(db,owner,draft_id,feedback,pending)
         before = json.loads(pub['payload_json']) if pub else None
+        regression = self.regression(owner, draft_id)
+        source = self.jobs(owner, regression['job_id'])['result'] if regression and report else None
         return {'diagnostics': diagnostics(draft['bundle']), 'diff': bundle_diff(before, draft['bundle']),
                 'published_version': pub['version'] if pub else None, 'evaluation': report,
-                'regression': self.regression(owner, draft_id),
-                'previous_report': previous_report, 'feedback': {'items': feedback},
+                'regression': regression, 'comparison': compare_reports(source, report),
+                'previous_report': previous_report, 'pending_cases':pending, 'feedback': {'items': feedback},
                 'publication_evidence': publication_evidence(draft['bundle'], draft['revision'], draft['tested_profiles'], report),
                 'similar': self.similar(owner, draft['bundle']['manifest']['name'] + draft['bundle']['manifest']['description'], exclude=draft_id)}
 

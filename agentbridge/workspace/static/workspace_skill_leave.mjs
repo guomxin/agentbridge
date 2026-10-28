@@ -5,7 +5,7 @@ export function confirmSkillDiscard(document, scope) {
     dialog.id = "skill-leave-dialog";
     dialog.className = "skill-leave-dialog";
     dialog.setAttribute("aria-labelledby", "skill-leave-title");
-    const title = document.createElement("h3"); title.id = "skill-leave-title"; title.textContent = "有未保存的草稿或验收样例修改";
+    const title = document.createElement("h3"); title.id = "skill-leave-title"; title.textContent = "有未保存的草稿、验收样例或复核修改";
     const note = document.createElement("p"); note.textContent = "离开会丢弃这些修改；已保存的修订不受影响。";
     const actions = document.createElement("div"); actions.className = "draft-actions";
     const stay = document.createElement("button"); stay.type = "button"; stay.textContent = "继续编辑";
@@ -72,7 +72,7 @@ export function createSkillLeaveGuard({ eventTarget = globalThis, document = glo
     const current = editor, snapshot = editor.snapshot();
     confirming = true;
     try {
-      const allowed = await (confirm ? confirm("有未保存的草稿或验收样例修改。确定：放弃修改并离开；取消：继续编辑。")
+      const allowed = await (confirm ? confirm("有未保存的草稿、验收样例或复核修改。确定：放弃修改并离开；取消：继续编辑。")
         : confirmSkillDiscard(document, current.scope));
       return Boolean(allowed && editor === current && current.scope.current() && current.snapshot() === snapshot && !operations.size && !current.isBusy());
     } finally { confirming = false; }
