@@ -40,6 +40,8 @@ class CentralStorageTests(unittest.TestCase):
                 additions = [
                     ['table', 'skill_feedback_context'],
                     ['table', 'skill_regressions'],
+                    ['table', 'skill_report_reviews'],
+                    ['table', 'skill_pending_cases'],
                     ['table', 'business_drafts'],
                     ['table', 'business_draft_previews'],
                     ['table', 'business_draft_decisions'],
