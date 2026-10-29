@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "74cbeff5c602"
+    "b31c757cfe2c"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Exact deployed predecessor 74cbeff5c602. Read the verified all-pending grid when the home section is incomplete, and show valid partial Workspace results as read-only. No database schema or authorization contract changes. Preparation continues to require a complete source; unknown outcomes, material identity checks and account isolation remain enforced. Rollback preserves the same stored operation shape and safely returns to the predecessor's incomplete-result rejection."
+  "reason": "Exact deployed predecessor b31c757cfe2c. Let a controlled page worker provision an independent page through its original owner, so post-submit verification and read-only recovery can use the existing complete pending reader. No database schema, stored operation, authorization or verification contract changes. Origin restrictions, read budgets, per-page cleanup and immutable unknown attempts remain enforced. Rollback retains the same stored data and returns to the predecessor's conservative incomplete-read rejection."
 }

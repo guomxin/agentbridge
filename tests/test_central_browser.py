@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+import time
 
 from agentbridge.adapters.seeyon_central import (
     SeeyonCentralAdapter,
@@ -11,9 +12,11 @@ from agentbridge.adapters.seeyon_central import (
 from agentbridge.browser.central import (
     AttachedCentralBrowserWorker,
     CentralBrowserWorker,
+    CentralBrowserPageWorker,
     CentralProfileInUseError,
     CentralProfileUnavailableError,
 )
+from agentbridge.browser.read_budget import ReadBudgetExceeded, read_deadline_scope
 
 
 class CentralBrowserTests(unittest.TestCase):
@@ -253,6 +256,87 @@ class CentralBrowserTests(unittest.TestCase):
 
                 self.assertTrue(readback_page.closed)
                 self.assertFalse(primary_page.closed)
+
+    def test_nested_fork_preserves_action_and_readback_pages(self):
+        with TemporaryDirectory() as tmp:
+            controller = FakePlaywrightController()
+            with CentralBrowserWorker(
+                profile_path=Path(tmp) / "profile",
+                allowed_origins={"http://oa.example.test"},
+                playwright_starter=lambda: controller,
+            ) as worker:
+                action = worker.goto("http://oa.example.test/seeyon/action")
+                with worker.fork_page() as readback:
+                    self.assertIsInstance(readback, CentralBrowserPageWorker)
+                    readback_page = readback.goto("http://oa.example.test/seeyon/readback")
+                    with readback.fork_page() as nested:
+                        self.assertIsInstance(nested, CentralBrowserPageWorker)
+                        more = nested.goto("http://oa.example.test/seeyon/more")
+                        self.assertIsNot(more, action)
+                        self.assertIsNot(more, readback_page)
+                        self.assertIs(nested._owner, worker)
+                        with self.assertRaisesRegex(ValueError, "origin is not allowed"):
+                            nested.goto("https://other.example.test/invalid")
+                        with self.assertRaisesRegex(ValueError, "origin is not allowed"):
+                            nested.request("GET", "https://other.example.test/invalid")
+                    self.assertTrue(more.closed)
+                    self.assertFalse(action.closed)
+                    self.assertFalse(readback_page.closed)
+                    self.assertEqual(action.url, "http://oa.example.test/seeyon/action")
+                    self.assertEqual(readback_page.url, "http://oa.example.test/seeyon/readback")
+                self.assertTrue(readback_page.closed)
+                self.assertFalse(action.closed)
+                with self.assertRaisesRegex(RuntimeError, "closed"):
+                    readback.fork_page()
+                self.assertEqual(len(controller.context.pages), 3)
+
+    def test_nested_fork_failure_does_not_close_action_or_readback(self):
+        with TemporaryDirectory() as tmp:
+            controller = FakePlaywrightController()
+            with CentralBrowserWorker(
+                profile_path=Path(tmp) / "profile",
+                allowed_origins={"http://oa.example.test"},
+                playwright_starter=lambda: controller,
+            ) as worker, worker.fork_page() as readback:
+                action, readback_page = worker.page, readback.page
+                with patch.object(controller.context, "new_page", side_effect=RuntimeError("no page")):
+                    with self.assertRaisesRegex(RuntimeError, "no page"):
+                        readback.fork_page()
+                self.assertFalse(action.closed)
+                self.assertFalse(readback_page.closed)
+
+    def test_nested_fork_inherits_budget_and_closes_late_allocation(self):
+        with TemporaryDirectory() as tmp:
+            controller = FakePlaywrightController()
+            with CentralBrowserWorker(
+                profile_path=Path(tmp) / "profile",
+                allowed_origins={"http://oa.example.test"},
+                playwright_starter=lambda: controller,
+            ) as worker, worker.fork_page() as readback:
+                deadline = time.monotonic() + 100
+                with read_deadline_scope(deadline):
+                    with patch("agentbridge.browser.read_budget.time.monotonic", return_value=deadline + 1):
+                        with self.assertRaises(ReadBudgetExceeded):
+                            readback.fork_page()
+                    self.assertEqual(len(controller.context.pages), 2)
+                    allocate = controller.context.new_page
+
+                    def late_allocation():
+                        page = allocate()
+                        expired.start()
+                        return page
+
+                    expired = patch("agentbridge.browser.read_budget.time.monotonic", return_value=deadline + 1)
+                    try:
+                        with patch.object(controller.context, "new_page", side_effect=late_allocation):
+                            with self.assertRaises(ReadBudgetExceeded):
+                                readback.fork_page()
+                    finally:
+                        expired.stop()
+                self.assertEqual(len(controller.context.pages), 3)
+                self.assertTrue(controller.context.pages[-1].closed)
+                self.assertFalse(worker.page.closed)
+                self.assertFalse(readback.page.closed)
 
     def test_worker_prevents_concurrent_use_of_the_same_profile(self):
         with TemporaryDirectory() as tmp:

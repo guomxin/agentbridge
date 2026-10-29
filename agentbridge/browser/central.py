@@ -592,6 +592,12 @@ class CentralBrowserPageWorker:
         if callable(close):
             close()
 
+    def fork_page(self) -> CentralBrowserPageWorker:
+        """Provision an independent page using the same governed owner context."""
+        if self._closed:
+            raise RuntimeError("central browser page worker is closed")
+        return self._owner.fork_page()
+
     def request(
         self,
         method: str,

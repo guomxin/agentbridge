@@ -50,9 +50,9 @@ def verify_pending_action(
 def _verify_pending_action(adapter, readback_worker, target: dict, *, pending_snapshot, done_snapshot) -> dict:
     """Return one observation; read failures propagate without asserting success.
 
-    The currently verified pending source is the home section, not a paginated
-    query. If it cannot prove complete coverage (including more than 100 rows),
-    fail closed. Raising the requested limit cannot make that source complete.
+    The adapter may supplement an incomplete home section with the verified
+    all-pending grid. If either path cannot prove complete coverage (including
+    more than 100 rows), fail closed. Raising the limit is not completeness.
     """
     affair_id = _text(target.get("affair_id"))
     if not affair_id:
