@@ -143,12 +143,42 @@ BUSINESS_SETTLEMENT_SNAPSHOT_SCRIPT = r"""
         record_id: String(element.closest('tr[data-record-id]')?.getAttribute('data-record-id') || '')};
       if (section?.classList.contains('cap4-attach')) {
         const links = Array.from(element.querySelectorAll('a.cap4-attach-downall'));
-        field.attachment_count = element.querySelectorAll('.cap4-attach__att').length;
+        const attachments = Array.from(element.querySelectorAll('.cap4-attach__att'));
+        field.attachment_count = attachments.length;
         field.attachment_ids = links.flatMap(link => {
           const href = link.getAttribute('href') || '';
           const match = href.match(/^\/seeyon\/rest\/attachment\/file\/batchDownload\/(-?\d+(?:,-?\d+)*)(?:\?|$)/);
           return match ? match[1].split(',') : ['invalid'];
         });
+        // CAP4 intentionally leaves its hidden batch link empty for one file.
+        // Bind that file's rendered name to both read-only component records;
+        // absent or conflicting metadata must still fail the identity check.
+        if (attachments.length === 1 && links.length === 1
+            && /^\/seeyon\/rest\/attachment\/file\/batchDownload\/(?:\?[^#]*)?$/.test(links[0].getAttribute('href') || '')
+            && getComputedStyle(links[0]).display === 'none') {
+          const component = section.__vue__;
+          const data = component?.$props?.data;
+          const values = data?.value;
+          const infos = data?.attachmentInfo?.attachmentInfos;
+          const item = Array.isArray(values) && values.length === 1 ? values[0] : null;
+          const info = Array.isArray(infos) && infos.length === 1 ? infos[0] : null;
+          const numericId = value => typeof value === 'string' && /^-?\d{1,20}$/.test(value);
+          const rendered = clean(attachments[0].querySelector('.cap4-attach__aright')?.innerText);
+          const namedSize = rendered.match(/^(.*) \(\d+(?:\.\d+)?(?:B|KB|MB|GB)\)$/);
+          if (component?.$options?.name === 'Cap4Attachment' && component.$el === section
+              && data?.auth === 'browse' && data.type === 'attachment' && data.ctrlType === 'suiAttachment'
+              && data.id === element.id.replace(/_id$/, '') && data.recordId === field.record_id
+              && data.formId === '-1826745395617707257'
+              && item && info && numericId(item.fileUrl) && item.fileUrl === info.fileUrl
+              && typeof item.name === 'string' && clean(item.name) && item.name === info.filename
+              && namedSize?.[1] === clean(item.name) && rendered === value
+              && typeof item.size === 'string' && /^[1-9]\d{0,19}$/.test(item.size) && item.size === info.size
+              && numericId(data.showValue) && data.showValue === data.showValue2
+              && data.showValue === data.attachmentInfo.baseAttachmentInfo?.subReference
+              && data.showValue === info.subReference) {
+            field.attachment_ids = [item.fileUrl];
+          }
+        }
       }
       return field;
     }),

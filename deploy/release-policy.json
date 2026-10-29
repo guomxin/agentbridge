@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "d63237b8a849"
+    "f83afd3b1c7b"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "UI-only follow-up to the exact deployed d63237b8a849: synchronize skill job completion notices and draft lists while preserving unsaved inputs. No database schema, persisted skill contract, authorization, or business execution changes. The predecessor already enforces the new execution and review restrictions, so program rollback to that predecessor preserves their semantics."
+  "reason": "Exact deployed predecessor f83afd3b1c7b. Add the verified CAP4 single-attachment identity source to the existing read-only business-settlement snapshot. No database schema or snapshot shape changes; freeze the same numeric file identity and retain all material, authorization and commit verification checks. The predecessor safely rejects this single-file representation, so program rollback remains compatible."
 }
