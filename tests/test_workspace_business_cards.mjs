@@ -22,6 +22,103 @@ function result(version, status, interactions) {
 const findClass = (root, name) => descendants(root).find(node => node.className.split(" ").includes(name));
 const links = root => descendants(root).filter(node => node.tag === "a" && !node.hidden);
 
+test('partial OA query cards and details show accurate coverage beside a long preserved history',()=>{
+  const f=fixture({refreshQuery:async()=>({taskId:'new-query'})});
+  for(let i=0;i<160;i++){
+    const old=result(1,'succeeded',[]);old.task={...old.task,task_id:`history-${i}`,title:`合成历史 ${i} ${'较长历史内容。'.repeat(20)}`};
+    f.upsertTaskCard(old);
+  }
+  const r=result(1,'succeeded',[]);r.task.title='查询 OA 待办';
+  r.task.summary={preparation:{kind:'oa_pending_query',state:'succeeded'}};
+  r.actionableResults=[{sourceTaskId:'task',operationId:'partial-operation',coverage:'partial',
+    coverageInfo:{returnedCount:9,reportedTotal:11,hasMore:true},targets:Array.from({length:9},(_,i)=>({
+      targetKey:`partial-${i}`,title:`合成事项 ${i+1}`,workflowLabel:'只读待办',enabled:false,disabledReason:'查询尚未取全，仅供查看。'}))}];
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  const card=f.state.taskCards.get('task:summary');
+  assert.equal(f.state.taskCards.size,161);
+  assert.match(findClass(card,'application-card-status').textContent,/未取全/);
+  assert.match(findClass(card,'application-card-copy').textContent,/已读取 9 项.*OA 报告共 11 项.*尚未取全/);
+  assert.match(findClass(f.detail,'application-card-copy').textContent,/已读取 9 项.*OA 报告共 11 项.*尚未取全/);
+  assert.equal(descendants(card).filter(node=>node.className==='actionable-result-row').length,9);
+  const search=descendants(card).find(node=>node.type==='search');search.focus();
+  r.task.version++;r.actionableResults[0]={...r.actionableResults[0],coverage:'complete',
+    targets:r.actionableResults[0].targets.map(target=>({...target,enabled:true,disabledReason:null}))};
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  assert.equal(f.document.activeElement,search);
+  assert.equal(f.state.taskCards.size,161);
+  assert.equal(findClass(card,'application-card-status').textContent,'已查询');
+  assert.match(findClass(card,'application-card-copy').textContent,/本次查询返回 9 项/);
+  assert.doesNotMatch(card.textContent,/尚未取全/);
+});
+
+test('complete empty OA query states zero pending items in both card and detail',()=>{
+  const f=fixture(),r=result(1,'succeeded',[]);
+  r.task.title='查询 OA 待办';r.actionableResults=[{sourceTaskId:'task',operationId:'empty-query',coverage:'complete',targets:[]}];
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  assert.match(findClass(f.chat,'application-card-copy').textContent,/返回 0 项待办/);
+  assert.match(findClass(f.detail,'application-card-copy').textContent,/返回 0 项待办/);
+  assert.match(f.chat.textContent,/本次查询没有待办事项/);
+});
+
+test('blocked remaining scope never presents an unverified range as zero matched or missing',()=>{
+  const f=fixture(),r=result(1,'succeeded',[]);
+  r.actionableResults=[{sourceTaskId:'task',operationId:'blocked-scope',coverage:'partial',
+    coverageInfo:{returnedCount:9,reportedTotal:12,hasMore:true},targets:[],
+    remaining:{blocked:true,requestedCount:0,matchedCount:0,missingCount:0,changedCount:0,items:[]}}];
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  for(const root of [f.chat,f.detail]) {
+    assert.match(findClass(root,'application-card-copy').textContent,/原批次剩余范围尚未核验，未展示或开放办理/);
+    assert.match(root.textContent,/待办来源已读取 9 项.*OA 报告共 12 项/);
+    assert.doesNotMatch(root.textContent,/匹配 0 项|未找到 0 项|已读取 0 项|原批次剩余 0 项/);
+    assert.equal(descendants(root).filter(node=>node.className==='actionable-result-row').length,0);
+  }
+});
+
+test('a pending read without an active interaction asks to continue the query without inventing a form',()=>{
+  const f=fixture(),r=result(1,'waiting_user',[]);
+  r.task.summary={preparation:{kind:'oa_pending_query',state:'requires_user_action'}};
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  for(const root of [f.chat,f.detail]) {
+    assert.equal((findClass(root,'application-card-status') || findClass(root,'eyebrow')).textContent,'查询待继续');
+    assert.equal(findClass(root,'application-card-copy').textContent,'本次查询尚未完成，请查看进度并按提示继续，或稍后重新查询。');
+    assert.doesNotMatch(root.textContent,/等待填写并确认|请.*密码|查询返回 0/);
+    assert.equal(links(root).length,0);
+  }
+});
+
+test('an actual query login interaction and a business confirmation retain their own prompts',()=>{
+  for(const [kind,type,title,message] of [
+    ['oa_pending_query','credential','登录 OA','请在原安全页面完成 OA 登录。'],
+    ['oa_pending_prepare','business_input','核对业务单据','请核对材料并填写本次意见。'],
+  ]) {
+    const f=fixture(),current={...interaction('current',type),title,message},r=result(1,'waiting_user',[current]);
+    r.task.summary={preparation:{kind,state:'requires_user_action'}};
+    f.upsertTaskCard(r);f.renderTaskDetail(r);
+    for(const root of [f.chat,f.detail]) {
+      assert.equal((findClass(root,'application-card-status') || findClass(root,'eyebrow')).textContent,'等待确认');
+      assert.match(root.textContent,new RegExp(title));
+      assert.match(root.textContent,new RegExp(message));
+      assert.doesNotMatch(root.textContent,/查询待继续|本次查询尚未完成/);
+      assert.equal(links(root).length,1);
+    }
+  }
+});
+
+test('a prior query wait cannot replace terminal outcomes or a complete empty result',()=>{
+  const f=fixture(),r=result(1,'waiting_user',[]);
+  r.task.summary={preparation:{kind:'oa_pending_query',state:'requires_user_action'}};
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  assert.match(f.chat.textContent,/查询待继续/);
+  for(const status of ['failed','outcome_unknown','canceled','expired','succeeded']) {
+    r.task={...r.task,status,version:r.task.version+1};
+    r.actionableResults=status==='succeeded' ? [{sourceTaskId:'task',operationId:'empty',coverage:'complete',targets:[]}] : [];
+    f.upsertTaskCard(r);f.renderTaskDetail(r);
+    for(const root of [f.chat,f.detail]) assert.doesNotMatch(root.textContent,/查询待继续|本次查询尚未完成/);
+  }
+  assert.match(findClass(f.chat,'application-card-copy').textContent,/本次查询返回 0 项待办/);
+  assert.match(findClass(f.detail,'application-card-copy').textContent,/本次查询返回 0 项待办/);
+});
+
 test("trusted single confirmation retains one form and one recorded decision while legacy steps stay distinct", () => {
   const f = fixture();
   const input = {...interaction("single"), confirmation: {mode: "single", state: "pending"},

@@ -570,6 +570,27 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "ACTION_SELECTION_INVALID")
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
+    def test_mixed_complete_and_partial_sources_keep_the_existing_telegram_entry_complete_only(self):
+        partial_operation = self.add_query_operation()
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE operations SET result_json=json_set(result_json,'$.coverage.status','partial','$.coverage.hasMore',json('true')) WHERE operation_id=?", (partial_operation,))
+        default_groups = actions.list_actionable_results(self.service, OWNER, self.source["task_id"])
+        self.assertEqual([group["operationId"] for group in default_groups], [self.source["operation_id"]])
+        workspace_groups = self.fixture.app.actionable_results(self.fixture.account, self.source["task_id"])
+        self.assertEqual([group["coverage"] for group in workspace_groups], ["complete", "partial"])
+        self.assertTrue(all(not target["enabled"] for target in workspace_groups[1]["targets"]))
+        token, _ = self.issue()
+        page = self.views.read(token)
+        self.assertTrue(page["selectionAvailable"])
+        self.assertEqual([group["operationId"] for group in page["groups"]], [self.source["operation_id"]])
+        before = self.counts()
+        with self.assertRaises(actions.ActionableResultError) as caught:
+            self.views.prepare(token, {"operationId": partial_operation,
+                "targetKeys": [workspace_groups[1]["targets"][0]["targetKey"]], "requestKey": uuid4().hex})
+        self.assertEqual(caught.exception.code, "ACTION_SELECTION_INVALID")
+        self.assertEqual(before, self.counts())
+        self.assertEqual(self.fixture.oa.writes, [])
+
     def test_each_frozen_source_keeps_its_original_ttl_and_existing_recovery(self):
         earlier = actions._now() - timedelta(seconds=500)
         with self.service.tasks._connect() as connection:

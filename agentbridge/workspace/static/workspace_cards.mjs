@@ -42,9 +42,27 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   const remainingQueryCopy = result => {
     const scopes=(result.actionableResults || []).map(group=>group.remaining).filter(Boolean);
     if(!scopes.length) return '';
+    if(scopes.some(scope=>scope.blocked)) return '原批次剩余范围尚未核验，未展示或开放办理；请回原批次重新核对。';
     const count=field=>scopes.reduce((sum,item)=>sum+(Number.isSafeInteger(item[field]) ? item[field] : 0),0);
     return `本轮核对原批次剩余 ${count('requestedCount')} 项：仍匹配 ${count('matchedCount')} 项，当前待办未找到 ${count('missingCount')} 项，资格变化 ${count('changedCount')} 项。仅仍匹配项可重新选择；未找到不代表已成功。`;
   };
+  const queryResultCopy = result => {
+    const groups = result.actionableResults || [];
+    if (!groups.length) return '';
+    const count = groups.reduce((sum, group) => sum + (group.coverage === 'partial' && Number.isSafeInteger(group.coverageInfo?.returnedCount)
+      && group.coverageInfo.returnedCount >= 0 ? group.coverageInfo.returnedCount : group.targets.length), 0);
+    if (groups.some(group => group.coverage === 'partial')) {
+      const totals = groups.map(group => group.coverage === 'partial' ? group.coverageInfo?.reportedTotal : group.targets.length);
+      const total = totals.every(value => Number.isSafeInteger(value) && value >= 0) ? totals.reduce((sum, value) => sum + value, 0) : null;
+      return `本次已读取 ${count} 项${total === null ? '' : `，OA 报告共 ${total} 项`}；尚未取全，仅供查看。请重新查询取得完整结果后办理。`;
+    }
+    return count ? `本次查询返回 ${count} 项；具体办理状态见各事项。` : '本次查询返回 0 项待办。';
+  };
+  const pendingQueryWait = result => result.task?.summary?.preparation?.kind === 'oa_pending_query'
+    && result.task.status === 'waiting_user' && !actionableTaskInteractions(result).length ? {
+      label: '查询待继续',
+      message: '本次查询尚未完成，请查看进度并按提示继续，或稍后重新查询。',
+    } : null;
   const disclosure = (label, className) => {
     const root = element("details", className);
     const summary = element("summary");
@@ -426,18 +444,19 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       oldSources.every(group => Date.parse(group.expiresAt) <= Date.now() && !(group.targets || []).some(target =>
         target.preparation && !["succeeded","completed","verified_complete","failed","outcome_unknown","canceled","expired","superseded","skipped"].includes(target.preparation.state))));
     const recovered = oaRecoveryPresentation(result);
+    const queryWait = pendingQueryWait(result);
     if (recovered?.completed) {
       card.className = "message assistant application-card succeeded";
       view.status.className = "application-card-status succeeded";
     }
-    text(view.status, result.preparationHealth?.label || recovered?.label || failure?.label || (oaQuery && cardStatus === "succeeded" ? "已查询" : statusLabel(cardStatus)));
-    const selectedCount = result.actionableResults?.reduce((sum, group) => sum + group.targets.length, 0);
+    text(view.status, result.preparationHealth?.label || recovered?.label || failure?.label || queryWait?.label || (oaQuery && cardStatus === "succeeded" ?
+      result.actionableResults?.some(group => group.coverage === 'partial') ? "未取全" : "已查询" : statusLabel(cardStatus)));
     const scopedQueryCopy=remainingQueryCopy(result);
     if (oaQuery) text(view.title, scopedQueryCopy ? '原批次剩余事项查询' : "OA 待办查询");
     const execution = businessExecutionPresentation(result);
     const statusCopy = oaQuery && cardStatus === "succeeded" ?
-      selectedCount ? `本次查询返回 ${selectedCount} 项；具体办理状态见各事项。` : "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary);
-    text(view.description, result.preparationHealth?.message || recovered?.message || failure?.message || scopedQueryCopy || (execution?.message ?
+      queryResultCopy(result) || "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary);
+    text(view.description, result.preparationHealth?.message || recovered?.message || failure?.message || queryWait?.message || scopedQueryCopy || (execution?.message ?
       task.summary?.batch ? `${statusCopy} ${execution.message}` : execution.message : statusCopy));
     const current = active[0] || result.interaction;
     updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
@@ -581,10 +600,12 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     updateClock(view.wait, result);
     const execution = businessExecutionPresentation(result);
     const recovered = oaRecoveryPresentation(result);
+    const queryWait = pendingQueryWait(result);
     const primaryAction = taskPrimaryAction(result);
     view.primaryAction = primaryAction;
     text(view.title, displayTaskTitle(taskResultTitle(result)));
-    text(view.status, result.preparationHealth?.label || recovered?.label || statusLabel(execution?.running ? "running" : task.status));
+    text(view.status, result.preparationHealth?.label || recovered?.label || queryWait?.label ||
+      (task.status === 'succeeded' && result.actionableResults?.some(group => group.coverage === 'partial') ? '未取全' : statusLabel(execution?.running ? "running" : task.status)));
     view.readOnlyQuery = execution?.readOnlyQuery === true;
     view.resume.hidden = primaryAction.kind === "form";
     text(view.resume, primaryAction.label);
@@ -595,7 +616,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     else view.resumeLink.removeAttribute("href");
     view.queryAction.hidden = !view.readOnlyQuery || Boolean(recovered?.completed);
     view.queryAction.disabled = Boolean(view.queryPending) || !view.readOnlyQuery || typeof refreshQuery !== "function";
-    if (!view.queryRequestKey) text(view.outcomeNotice, result.preparationHealth?.message || recovered?.message || remainingQueryCopy(result) || execution?.message || taskCardStatusMessage(task.status, task.summary));
+    if (!view.queryRequestKey) text(view.outcomeNotice, result.preparationHealth?.message || recovered?.message || queryWait?.message || remainingQueryCopy(result) || queryResultCopy(result) || execution?.message || taskCardStatusMessage(task.status, task.summary));
     updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
       ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
         ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],

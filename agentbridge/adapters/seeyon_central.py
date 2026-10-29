@@ -1306,6 +1306,32 @@ class SeeyonCentralAdapter:
         parsed = parse_pending_projection(payload, base_url=final_url or self.base_url)
         if parsed.get("error"):
             raise SeeyonReadContractMismatch(str(parsed["error"]))
+        total = parsed.get("total")
+        if type(total) is int and total > len(parsed.get("items") or []):
+            from agentbridge.adapters.seeyon_pending_query import (
+                PendingQueryContractMismatch, PendingQueryLoginRequired, read_pending_more,
+            )
+            if callable(getattr(worker, "fork_page", None)):
+                try:
+                    with worker.fork_page() as reader, self.capability_scope(reader):
+                        full = read_pending_more(reader, base_url=self.base_url, projection=payload)
+                    if ((full.get("query_evidence") or {}).get("complete") is not True
+                            and len(full.get("items") or []) < len(parsed.get("items") or [])):
+                        parsed["query_evidence"] = full["query_evidence"]
+                        return parsed
+                    return full
+                except ReadBudgetExceeded:
+                    raise
+                except PendingQueryLoginRequired as exc:
+                    raise SeeyonLoginRequired(str(exc)) from exc
+                except PendingQueryContractMismatch:
+                    # The observed home rows remain facts, never a complete
+                    # preparation source when the full-list contract fails.
+                    parsed["query_evidence"] = {
+                        "complete": False, "pagesFetched": 1,
+                        "scanBudget": len(parsed.get("items") or []),
+                        "completionReason": "pending_full_list_unavailable",
+                    }
         return parsed
 
     def _fetch_history_page_collection(self, worker, collection: str) -> dict:

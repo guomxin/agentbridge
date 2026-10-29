@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "f83afd3b1c7b"
+    "74cbeff5c602"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Exact deployed predecessor f83afd3b1c7b. Add the verified CAP4 single-attachment identity source to the existing read-only business-settlement snapshot. No database schema or snapshot shape changes; freeze the same numeric file identity and retain all material, authorization and commit verification checks. The predecessor safely rejects this single-file representation, so program rollback remains compatible."
+  "reason": "Exact deployed predecessor 74cbeff5c602. Read the verified all-pending grid when the home section is incomplete, and show valid partial Workspace results as read-only. No database schema or authorization contract changes. Preparation continues to require a complete source; unknown outcomes, material identity checks and account isolation remain enforced. Rollback preserves the same stored operation shape and safely returns to the predecessor's incomplete-result rejection."
 }

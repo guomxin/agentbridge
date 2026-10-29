@@ -119,6 +119,38 @@ def _require_grants(service, subject, items):
         service.user_grants.require_capability(subject, capability)
 
 
+def _display_source(connection, subject, source_task_id, operation_id, *, fresh=True):
+    """Partial reads may be displayed, never used as preparation authority."""
+    try:
+        return _source(connection, subject, source_task_id, operation_id, fresh=fresh)
+    except ActionableResultError as exc:
+        if exc.code != "ACTION_SOURCE_INCOMPLETE":
+            raise
+    row = connection.execute(
+        "SELECT o.* FROM operations o JOIN task_operations t ON t.operation_id=o.operation_id "
+        "JOIN agent_tasks a ON a.task_id=t.task_id AND a.user_subject=t.user_subject "
+        "WHERE t.task_id=? AND t.user_subject=? AND o.operation_id=? AND o.user_subject=? "
+        "AND a.status='succeeded' AND o.capability_name='oa.workflow.pending.list' AND o.status='succeeded'",
+        (source_task_id, subject, operation_id, subject),
+    ).fetchone()
+    if row is None:
+        _fail("ACTION_SOURCE_NOT_FOUND", "待办查询结果不可用，请重新查询。")
+    operation = _operation_from_row(row)
+    finished = _date(operation.get("finished_at"))
+    if fresh and (finished > _now() + timedelta(seconds=60) or _now() >= finished + timedelta(seconds=SOURCE_TTL_SECONDS)):
+        _fail("ACTION_SOURCE_EXPIRED", "待办查询已超过10分钟，请重新查询后选择事项。")
+    pending = operation.get("result")
+    if not isinstance(pending, dict) or (pending.get("coverage") or {}).get("status") != "partial":
+        _fail("ACTION_SOURCE_INCOMPLETE", "待办来源不完整，请重新查询。")
+    rows = pending.get("items")
+    if (not isinstance(rows, list) or len(rows) > 100
+            or any(not isinstance(item, dict) or not isinstance(item.get("affair_id"), str)
+                   or not item["affair_id"].strip() or len(item["affair_id"]) > 256 for item in rows)
+            or len({item["affair_id"] for item in rows}) != len(rows)):
+        _fail("ACTION_SOURCE_INVALID", "待办来源标识不完整或存在重复，请重新查询。")
+    return operation, pending
+
+
 def _reviewed_current_skill(service, subject, profile, connection):
     item = service.skills.current(SKILL_ID, connection)
     service.skills._allowed(subject, SKILL_ID, profile, connection)
@@ -504,9 +536,10 @@ def preparation_source_task_ids(connection, subject, task_id, *, service=None):
     return list(dict.fromkeys([*result, *(row["task_id"] for row in rows if row["task_id"] != task_id)]))
 
 
-def list_actionable_results(service, subject, source_task_id):
+def list_actionable_results(service, subject, source_task_id, *, include_partial=False):
     """Return UI-safe choices, retaining unsupported rows as disabled choices."""
     groups = []
+    read_source = _display_source if include_partial else _source
     with service.tasks._connect() as connection:
         _owned_task(connection, subject, source_task_id)
         ids = connection.execute(
@@ -524,15 +557,16 @@ def list_actionable_results(service, subject, source_task_id):
         for entry in ids:
             expired = False
             try:
-                operation, pending = _source(connection, subject, source_task_id, entry[0])
+                operation, pending = read_source(connection, subject, source_task_id, entry[0])
             except ActionableResultError as exc:
                 if exc.code != "ACTION_SOURCE_EXPIRED":
                     continue
                 try:
-                    operation, pending = _source(connection, subject, source_task_id, entry[0], fresh=False)
+                    operation, pending = read_source(connection, subject, source_task_id, entry[0], fresh=False)
                 except ActionableResultError:
                     continue
                 expired = True
+            partial = pending["coverage"]["status"] == "partial"
             preparations = _source_preparations(connection, subject, source_task_id, entry[0]) | \
                 _cross_source_preparations(service, connection, subject, pending, entry[0])
             from agentbridge.core.oa_batch_remaining import source_scope
@@ -554,17 +588,20 @@ def list_actionable_results(service, subject, source_task_id):
             for row in visible_rows:
                 target = {"targetKey": _target_key(entry[0], row),
                     **{key: str(row.get(key) or "")[:500] for key in ("title", "sender", "date", "category")},
-                    "workflowType": None, "workflowLabel": "暂未支持的待办", "enabled": False, "disabledReason": None,
+                    "workflowType": None, "workflowLabel": "只读待办" if partial else "暂未支持的待办", "enabled": False, "disabledReason": None,
                     "preparation": preparations.get(_target_key(entry[0], row))}
-                try:
-                    selected = _select(service, pending, [row["affair_id"]])
-                    display = selected[0]["display_summary"]
-                    target.update(workflowType=display["profile"], workflowLabel=_LABELS[display["profile"]])
-                    _require_grants(service, subject, selected)
-                    _reviewed_current_skill(service, subject, "single", connection)
-                    target["enabled"] = True
-                except (ActionableResultError, SkillRejected, PermissionError) as exc:
-                    target["disabledReason"] = str(exc) if not isinstance(exc, PermissionError) else "当前没有办理此类待办的权限。"
+                if partial:
+                    target["disabledReason"] = "查询尚未取全，当前事项仅供查看；请重新查询后办理。"
+                else:
+                    try:
+                        selected = _select(service, pending, [row["affair_id"]])
+                        display = selected[0]["display_summary"]
+                        target.update(workflowType=display["profile"], workflowLabel=_LABELS[display["profile"]])
+                        _require_grants(service, subject, selected)
+                        _reviewed_current_skill(service, subject, "single", connection)
+                        target["enabled"] = True
+                    except (ActionableResultError, SkillRejected, PermissionError) as exc:
+                        target["disabledReason"] = str(exc) if not isinstance(exc, PermissionError) else "当前没有办理此类待办的权限。"
                 if target["preparation"]:
                     target["enabled"] = False
                     progress_reason = (
@@ -580,7 +617,11 @@ def list_actionable_results(service, subject, source_task_id):
             finished = _date(operation["finished_at"])
             groups.append({"sourceTaskId": source_task_id, "operationId": entry[0], "title": "OA 待办",
                 "fetchedAt": finished.isoformat(), "expiresAt": (finished + timedelta(seconds=SOURCE_TTL_SECONDS)).isoformat(),
-                "coverage": "complete", "targets": targets, **({"remaining":remaining} if remaining is not None else {})})
+                "coverage": "partial" if partial else "complete", "targets": targets,
+                **({"coverageInfo": {"returnedCount": len(pending["items"]),
+                    "reportedTotal": pending["total"] if type(pending.get("total")) is int and pending["total"] >= 0 else None,
+                    "hasMore": pending["coverage"].get("hasMore") is True}} if partial else {}),
+                **({"remaining":remaining} if remaining is not None else {})})
     return groups
 
 

@@ -63,6 +63,66 @@ const preparedGroup = (state, taskId = "child-task") => ({...group(), targets: g
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const rows = root => descendants(root).filter(node => node.className === "actionable-result-row");
 
+test('partial results show nine of eleven as read-only and retain only the query action', async () => {
+  const document=createDocument(), root=document.createElement('div'), calls=[], refreshes=[];
+  const ui=createActionableResults({document,state:{},makeRequestKey:()=>'partial-refresh',
+    prepareTargets:(...args)=>calls.push(args),refreshQuery:async body=>{refreshes.push(body);return {taskId:'new-query'};}});
+  const partial={...group(),coverage:'partial',coverageInfo:{returnedCount:9,reportedTotal:11,hasMore:true},
+    targets:Array.from({length:9},(_,i)=>({targetKey:`partial-${i}`,title:`合成待办 ${i+1}`,enabled:true}))};
+  ui.render(root,[partial]);
+  assert.equal(root.hidden,false);assert.equal(rows(root).length,9);
+  assert.match(root.textContent,/已读取 9 项.*OA 报告共 11 项.*尚未取全，仅供查看/);
+  assert.ok(rows(root).every(row=>find(row,'input').disabled && find(row,'button').disabled));
+  assert.equal(find(root,'button','选择当前可办 0 项').disabled,true);
+  assert.equal(find(root,'button','准备已选事项（0）').disabled,true);
+  find(root,'button','准备已选事项（0）').events.click();
+  find(rows(root)[0],'button').events.click();
+  await flush();assert.deepEqual(calls,[]);
+  assert.equal(find(root,'button','重新查询待办').disabled,false);
+  find(root,'button','重新查询待办').events.click();await flush();
+  assert.deepEqual(refreshes,[{requestKey:'partial-refresh'}]);
+});
+
+test('partial to complete refresh restores choices without retaining stale selected-only filters', () => {
+  const document=createDocument(),root=document.createElement('div'),state={};
+  const ui=createActionableResults({document,state,viewState:{getSource:()=>({search:'',type:'考勤确认',onlySelected:true,selected:['one']}),setSource(){}}});
+  const partial={...group(),coverage:'partial',coverageInfo:{returnedCount:3,reportedTotal:5,hasMore:true},
+    targets:group().targets.map(target=>({...target,workflowLabel:'只读待办',enabled:false}))};
+  ui.render(root,[partial]);
+  assert.ok(rows(root).every(row=>!row.hidden && find(row,'input').disabled));
+  const search=descendants(root).find(node=>node.type==='search');search.focus();
+  ui.render(root,[{...group(),coverage:'complete'}]);
+  assert.equal(document.activeElement,search);
+  assert.equal(find(root,'button','选择当前可办 2 项').disabled,false);
+  assert.equal(find(rows(root)[0],'input').disabled,false);
+  assert.doesNotMatch(root.textContent,/尚未取全/);
+  assert.equal(find(root,'button','准备已选事项（0）').disabled,true);
+});
+
+test('complete empty and partial empty sources distinguish no pending items from an incomplete read',()=>{
+  const document=createDocument(),root=document.createElement('div');
+  const ui=createActionableResults({document,state:{},refreshQuery:async()=>({taskId:'new-query'})});
+  ui.render(root,[{...group(),coverage:'complete',targets:[]}]);
+  assert.equal(root.hidden,false);assert.match(root.textContent,/共 0 项/);
+  assert.match(root.textContent,/本次查询没有待办事项/);
+  ui.render(root,[{...group(),coverage:'partial',coverageInfo:{returnedCount:0,reportedTotal:11},targets:[]}]);
+  assert.match(root.textContent,/已读取 0 项.*OA 报告共 11 项/);
+  assert.match(root.textContent,/尚未取得可展示的事项/);
+  assert.doesNotMatch(root.textContent,/本次查询没有待办事项/);
+});
+
+test('an unverified remaining scope reports global partial coverage without claiming zero matches',()=>{
+  const document=createDocument(),root=document.createElement('div');
+  const ui=createActionableResults({document,state:{},refreshQuery:async()=>({taskId:'new-query'})});
+  ui.render(root,[{...group(),coverage:'partial',coverageInfo:{returnedCount:9,reportedTotal:12,hasMore:true},targets:[],
+    remaining:{blocked:true,requestedCount:0,matchedCount:0,missingCount:0,changedCount:0,items:[]}}]);
+  assert.equal(rows(root).length,0);
+  assert.match(root.textContent,/原批次剩余范围尚未核验，未展示或开放办理/);
+  assert.match(root.textContent,/待办来源已读取 9 项.*OA 报告共 12 项/);
+  assert.doesNotMatch(root.textContent,/匹配 0 项|未找到 0 项|已读取 0 项|原批次剩余 0 项/);
+  assert.equal(find(root,'button','准备已选事项（0）').disabled,true);
+});
+
 test('restored view preferences are filtered through the fresh source and cannot restore disabled selection authority',()=>{
   const document=createDocument(),root=document.createElement('div'),saved=[];
   const ui=createActionableResults({document,state:{},viewState:{getSource:()=>({search:'周报',type:'',onlySelected:false,selected:['one','two','unknown','removed']}),setSource:(key,value)=>saved.push([key,value])}});

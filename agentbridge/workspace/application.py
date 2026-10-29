@@ -548,7 +548,7 @@ class WorkspaceApplication:
 
     def actionable_results(self, account: dict, task_id: str) -> list[dict]:
         from agentbridge.core.actionable_results import list_actionable_results
-        return list_actionable_results(self.service, account["user_subject"], task_id)
+        return list_actionable_results(self.service, account["user_subject"], task_id, include_partial=True)
 
     def prepare_selected_results(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.actionable_results import queue_preparation

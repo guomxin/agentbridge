@@ -31,7 +31,7 @@ class ActionableResultsTests(unittest.TestCase):
             "hostInstanceId": "openclaw-gateway", "hostRunId": "synthetic-actionable-run"}
 
     def groups(self):
-        return actions.list_actionable_results(self.service, OWNER, self.source["task_id"])
+        return self.fixture.app.actionable_results(self.account, self.source["task_id"])
 
     def body(self, indices=(0,), request=None):
         group = self.groups()[0]
@@ -341,7 +341,7 @@ class ActionableResultsTests(unittest.TestCase):
 
     def test_incomplete_duplicate_and_missing_source_fail_closed(self):
         original = deepcopy(self.service.operations.get(self.source["operation_id"])["result"])
-        for change in (lambda r: r.update(coverage={"status": "partial"}),
+        for change in (lambda r: r.update(coverage={"status": "unknown"}),
                        lambda r: r["items"].append(deepcopy(r["items"][0])),
                        lambda r: r["items"][0].pop("affair_id")):
             with self.subTest(change=change):
@@ -351,6 +351,87 @@ class ActionableResultsTests(unittest.TestCase):
                 self.assertEqual(self.groups(), [])
                 with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)):
                     self.assertEqual(self.groups(), [])
+
+    def test_partial_query_displays_nine_of_eleven_without_preparation_authority(self):
+        def partial(result):
+            for index in range(7):
+                row = deepcopy(result["items"][0])
+                row["affair_id"] = f"synthetic-partial-{index}"
+                row["title"] += f" · 合成事项 {index}"
+                result["items"].append(row)
+            result.update(count=9, source_count=9, total=11,
+                          coverage={"status": "partial", "hasMore": True, "completionReason": "collection_not_exhausted"})
+        self.mutate_source(partial)
+        before = {table: self.count(table) for table in ("operations", "agent_tasks", "write_authorizations", "business_drafts")}
+        with patch.object(self.service, "invoke", side_effect=AssertionError("display cannot invoke")):
+            group = self.groups()[0]
+            self.assertEqual(group["coverage"], "partial")
+            self.assertEqual(group["coverageInfo"], {"returnedCount": 9, "reportedTotal": 11, "hasMore": True})
+            self.assertEqual(actions.list_actionable_results(self.service, OWNER, self.source["task_id"]), [])
+            self.assertEqual(len(group["targets"]), 9)
+            self.assertTrue(all(not item["enabled"] for item in group["targets"]))
+            self.assertTrue(all("仅供查看" in item["disabledReason"] for item in group["targets"]))
+            self.assertNotIn("affair_id", actions._json(group))
+            with self.assertRaises(actions.ActionableResultError) as caught:
+                self.queue({"operationId": group["operationId"], "targetKeys": [group["targets"][0]["targetKey"]], "requestKey": uuid4().hex})
+            self.assertEqual(caught.exception.code, "ACTION_SOURCE_INCOMPLETE")
+        self.assertEqual(before, {table: self.count(table) for table in before})
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_partial_query_rejects_duplicate_missing_and_oversized_identity_sources(self):
+        original = deepcopy(self.service.operations.get(self.source["operation_id"])["result"])
+        for change in (
+            lambda result: result["items"].append(deepcopy(result["items"][0])),
+            lambda result: result["items"][0].pop("affair_id"),
+            lambda result: result["items"][0].update(affair_id=" "),
+            lambda result: result.update(items=[{**result["items"][0], "affair_id": f"over-limit-{i}"} for i in range(101)]),
+        ):
+            with self.subTest(change=change):
+                with self.service.tasks._connect() as connection:
+                    connection.execute("UPDATE operations SET result_json=? WHERE operation_id=?", (actions._json(original), self.source["operation_id"]))
+                def mutate(result):
+                    result["coverage"] = {"status": "partial", "hasMore": True}
+                    change(result)
+                self.mutate_source(mutate)
+                self.assertEqual(self.groups(), [])
+        self.assertEqual(self.count("write_authorizations"), 0)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_partial_projection_respects_expiry_grants_and_owner_then_complete_refresh_restores_choices(self):
+        self.mutate_source(lambda result: result.update(total=11, coverage={"status": "partial", "hasMore": True}))
+        self.assertEqual(self.groups()[0]["coverage"], "partial")
+        with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)):
+            self.assertEqual(self.groups(), [])
+        with self.assertRaises(actions.ActionableResultError):
+            actions.list_actionable_results(self.service, "other-user", self.source["task_id"], include_partial=True)
+        original_grants = self.service.user_grants.get(OWNER)["permissions"]
+        grant_permissions(self.service.user_grants, OWNER, [])
+        self.assertEqual(self.groups(), [])
+        grant_permissions(self.service.user_grants, OWNER, original_grants)
+        self.mutate_source(lambda result: result.update(total=len(result["items"]), coverage={"status": "complete", "hasMore": False}))
+        complete = self.groups()[0]
+        self.assertEqual(complete["coverage"], "complete")
+        self.assertNotIn("coverageInfo", complete)
+        self.assertTrue(all(item["enabled"] for item in complete["targets"]))
+        self.assertEqual(self.count("write_authorizations"), 0)
+
+    def test_partial_display_does_not_project_a_foreign_or_unlinked_operation(self):
+        self.mutate_source(lambda result: result.update(coverage={"status": "partial", "hasMore": True}))
+        self.assertEqual(self.groups()[0]["coverage"], "partial")
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE operations SET user_subject='other-user' WHERE operation_id=?", (self.source["operation_id"],))
+        self.assertEqual(self.groups(), [])
+        with self.service.tasks._connect() as connection:
+            connection.execute("UPDATE operations SET user_subject=? WHERE operation_id=?", (OWNER, self.source["operation_id"]))
+            connection.execute("DELETE FROM task_operations WHERE task_id=? AND operation_id=?", (self.source["task_id"], self.source["operation_id"]))
+        self.assertEqual(self.groups(), [])
+        self.assertEqual(self.count("write_authorizations"), 0)
+
+    def test_complete_empty_query_keeps_an_explicit_zero_item_result_group(self):
+        self.mutate_source(lambda result: result.update(items=[], count=0, source_count=0, total=0))
+        group = self.groups()[0]
+        self.assertEqual(group["coverage"], "complete")
+        self.assertEqual(group["targets"], [])
 
     def test_foreign_task_operation_and_target_are_rejected(self):
         body = self.body()
