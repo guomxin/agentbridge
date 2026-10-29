@@ -1,6 +1,7 @@
 """Offline safety and evidence checks for the optional real-model host harness."""
 import json
 import hashlib
+from copy import deepcopy
 import os
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ from unittest.mock import patch
 
 from agentbridge.core.business_skills import skill_bundle, skill_catalog, validate_binding
 from tests.support.skill_host_acceptance import (
-    ALICE, BOB, CASES_PATH, ROOT, SkillHostAcceptance, host_config,
+    ALICE, BOB, AUTHORING_CASES, CASES_PATH, ROOT, SkillHostAcceptance, host_config,
     compare_source_identity, isolated_environment, observe, source_identity,
 )
 
@@ -22,8 +23,8 @@ class SkillHostAcceptanceTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
 
-    def fixture(self):
-        fixture = SkillHostAcceptance(self.home)
+    def fixture(self, **kwargs):
+        fixture = SkillHostAcceptance(self.home, **kwargs)
         self.addCleanup(fixture.close)
         return fixture
 
@@ -36,6 +37,7 @@ class SkillHostAcceptanceTests(unittest.TestCase):
     def test_identity_covers_candidate_plugin_and_new_fixture_sources(self):
         identity = source_identity()
         for name in ('integrations/openclaw-agentbridge/index.js', 'integrations/openclaw-agentbridge/lib/business-skills.js',
+                     'integrations/openclaw-agentbridge/lib/agentbridge-tools.json',
                      'tests/support/skill_host_acceptance.py', 'tests/support/skill_host_acceptance_auth.mjs',
                      'tests/support/skill_host_acceptance_cache.mjs', 'tests/fixtures/skill_host_cases.json'):
             self.assertEqual(identity['files_sha256'][name], hashlib.sha256((ROOT / name).read_bytes()).hexdigest())
@@ -44,6 +46,62 @@ class SkillHostAcceptanceTests(unittest.TestCase):
         comparison = compare_source_identity(identity, changed)
         self.assertFalse(comparison['relevant_content_unchanged'])
         self.assertEqual(comparison['changed_files'], ['tests/fixtures/skill_host_cases.json'])
+        catalog = 'integrations/openclaw-agentbridge/lib/agentbridge-tools.json'
+        changed = {**identity, 'files_sha256': {**identity['files_sha256'], catalog: 'changed'}}
+        self.assertEqual(compare_source_identity(identity, changed)['changed_files'], [catalog])
+
+    def test_authoring_suite_restricts_identity_draft_and_business_effects(self):
+        fixture = self.fixture(authoring=True)
+        authoring = fixture.service.skill_authoring
+        seed = fixture.authoring_seed
+        self.assertFalse(fixture.skills)
+        self.assertFalse(authoring.reviews(ALICE)['items'])
+        self.assertEqual(seed['report_origin'], 'synthetic/no-model')
+        self.assertIn('synthetic text report', fixture.report['evidence_boundary']['evaluation'])
+        for action in ('submit', 'approve', 'report_review', 'test_result', 'generate', 'evaluate', 'import_standard'):
+            with self.subTest(action=action), self.assertRaisesRegex(PermissionError, 'SYNTHETIC_ONLY'):
+                authoring.dispatch(ALICE, action, {'draft_id': seed['draft_id']})
+        for owner, draft_id in ((BOB, seed['draft_id']), (ALICE, 'other-draft')):
+            with self.assertRaises(PermissionError):
+                authoring.dispatch(owner, 'get', {'draft_id': draft_id})
+        proposal = authoring.export(ALICE, draft_id=seed['draft_id'])['proposal']
+        for changes in ({'all': ['oa.workflow.read']}, {'database': {'all': ['database.query']}},
+                        {'execution': {'effects': ['controlled_write'], 'allow_batch': False}},
+                        {'execution': {'effects': ['read'], 'allow_batch': True}},
+                        {'execution': {'effects': ['read'], 'allow_batch': False, 'capabilities': ['oa.workflow.pending.list']}}):
+            with self.subTest(changes=changes), self.assertRaises(PermissionError):
+                authoring.dispatch(ALICE, 'save', {'draft_id': seed['draft_id'], 'expected_revision': 1,
+                    'request_key': 'unsafe', 'proposal': {**proposal, 'profiles': {'use': changes}}})
+        with self.assertRaises(PermissionError):
+            fixture.service.invoke(user_subject=ALICE, capability_name='oa.leave.prepare', arguments={})
+        self.assertEqual(authoring.get(ALICE, seed['draft_id'])['revision'], 1)
+
+    def test_authoring_control_plane_evidence_requires_real_calls_and_persistence(self):
+        fixture = self.fixture(authoring=True)
+        authoring, seed = fixture.service.skill_authoring, fixture.authoring_seed
+        dispatch = lambda action, **data: authoring.dispatch(ALICE, action, data)
+        proposal = deepcopy(authoring.export(ALICE, draft_id=seed['draft_id'])['proposal'])
+        proposal.update(standard_metadata={'license': 'MIT', 'compatibility': '仅处理文字'},
+            profiles={'use': {'description': '整理文字', 'execution': {'effects': ['read'], 'allow_batch': False, 'capabilities': []}}})
+        dispatch('save', draft_id=seed['draft_id'], expected_revision=1, request_key='metadata', proposal=proposal)
+        dispatch('export_standard', draft_id=seed['draft_id'])
+        self.assertTrue(all(fixture.authoring_observation('metadata', fixture.authoring_calls)['checks'].values()))
+        self.assertFalse(fixture.authoring_observation('metadata', [])['checks']['metadata_saved'])
+        pending = {'cases': [{'prompt': '整理：完成联调。', 'profile': 'use', 'kind': 'output', 'contains': '联调', 'excludes': ''}], 'repeats': '1'}
+        dispatch('save_pending_cases', draft_id=seed['draft_id'], expected_revision=2, expected_version=0, value=pending)
+        dispatch('pending_cases', draft_id=seed['draft_id'])
+        for kind in ('pending_save', 'pending_read'):
+            self.assertTrue(all(fixture.authoring_observation(kind, fixture.authoring_calls)['checks'].values()))
+        dispatch('set_regression', draft_id=seed['draft_id'], expected_revision=2, job_id=seed['job_id'])
+        self.assertTrue(fixture.authoring_observation('pin', fixture.authoring_calls)['checks']['regression_pinned'])
+        dispatch('set_regression', draft_id=seed['draft_id'], expected_revision=2, job_id=None)
+        self.assertTrue(fixture.authoring_observation('unpin', fixture.authoring_calls)['checks']['regression_null_sent_and_cleared'])
+        self.assertFalse(fixture.authoring_observation('unpin', [])['checks']['regression_null_sent_and_cleared'])
+        dispatch('archive', draft_id=seed['draft_id'], expected_revision=2)
+        self.assertTrue(fixture.authoring_observation('archive', fixture.authoring_calls)['checks']['draft_archived'])
+        self.assertFalse(authoring.reviews(ALICE)['items'])
+        self.assertFalse(fixture.calls)
+        self.assertEqual(len(AUTHORING_CASES), 6)
 
     def test_allowed_read_uses_real_grants_and_all_other_calls_fail_closed(self):
         fixture = self.fixture()

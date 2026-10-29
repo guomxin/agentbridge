@@ -44,12 +44,29 @@ TOOLS = ['agentbridge_identity_status', 'agentbridge_skill_catalog', 'agentbridg
          'oa_workflow_pending_list', 'oa_workflow_sent_list', 'oa_workflow_done_list',
          'agentbridge_operation_get', 'agentbridge_operation_list']
 CASES_PATH = ROOT / 'tests/fixtures/skill_host_cases.json'
+AUTHORING_ACTIONS = frozenset({'list', 'get', 'inspect', 'pending_cases', 'save_pending_cases',
+    'set_regression', 'save', 'export', 'export_standard', 'jobs', 'archive'})
+AUTHORING_CASES = [
+    {'id': 'authoring-metadata', 'authoring_check': 'metadata', 'prompt':
+     '给目录补验助手草稿加上 MIT 许可、兼容说明“仅处理文字”；模式说明写“整理文字”，执行范围明确只读、不批量、不调用业务能力。保存并导出标准包。'},
+    {'id': 'authoring-pending-save', 'authoring_check': 'pending_save', 'prompt':
+     '给目录补验助手存一道待测题：“整理：完成联调。”，应包含“联调”，先别运行。'},
+    {'id': 'authoring-pending-read', 'authoring_check': 'pending_read', 'prompt':
+     '读一下目录补验助手保存的待测题目，告诉我题目和期望。'},
+    {'id': 'authoring-regression-pin', 'authoring_check': 'pin', 'prompt':
+     '把目录补验助手之前已完成的评测题目设为常用回归题。'},
+    {'id': 'authoring-regression-clear', 'authoring_check': 'unpin', 'prompt':
+     '取消固定目录补验助手的常用回归题。'},
+    {'id': 'authoring-archive', 'authoring_check': 'archive', 'prompt':
+     '归档目录补验助手这个测试草稿。'},
+]
 
 
 def source_identity():
     """Bounded source manifest plus whole tracked-diff digest, never diff text."""
     paths = set((ROOT / 'agentbridge/core').glob('*skill*.py'))
-    paths.update((ROOT / 'integrations/openclaw-agentbridge/lib').rglob('*.js'))
+    for suffix in ('*.js', '*.json'):
+        paths.update((ROOT / 'integrations/openclaw-agentbridge/lib').rglob(suffix))
     paths.update((ROOT / 'tests/support').glob('skill_host_acceptance*'))
     for name in ('agentbridge/core/central_service.py', 'agentbridge/core/user_grants.py',
                  'agentbridge/core/host_contract.py', 'agentbridge/mcp/central.py',
@@ -178,7 +195,7 @@ def proposals():
 
 
 class SkillHostAcceptance:
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, *, authoring=False):
         self.home = home.expanduser().resolve()
         if self.home.exists() and any(self.home.iterdir()):
             raise ValueError('An empty isolated home is required; existing runtimes are never reused')
@@ -199,6 +216,9 @@ class SkillHostAcceptance:
             trusted_card_base_url='http://127.0.0.1:1', worker_factory=lambda session, adapter: SyntheticWorker(session))
         self.calls = []
         self.resource_calls = []
+        self.authoring_calls = []
+        self.authoring_mode = authoring
+        self.authoring_seed = None
         for system, adapter in self.service._adapters_by_system.items():
             adapter.invoke_capability = self._invoke
             self.service._worker_factories_by_system[system] = lambda session, adapter: SyntheticWorker(session)
@@ -210,12 +230,23 @@ class SkillHostAcceptance:
         self.identities = McpIdentityTokenStore(self.service.db_path)
         self.tokens = {owner: self.identities.issue(user_subject=owner, expected_principal_ref=owner, ttl_seconds=14400)['token'] for owner in (ALICE, BOB)}
         write_metadata(self.home / 'synthetic-identities.json', self.tokens)
-        self.skills = self._seed()
+        self.skills = {} if authoring else self._seed()
+        if authoring:
+            self.authoring_seed = self._seed_authoring()
         real_dispatch = self.service.skill_authoring.dispatch
         def read_only_authoring(owner, action, data):
-            if action not in {'resource', 'discover'}:
-                raise PermissionError('SYNTHETIC_ONLY: skill authoring mutations and evaluations are disabled')
-            result = real_dispatch(owner, action, data)
+            entry = {'owner': owner, 'action': action, 'data': data, 'status': 'started'}
+            self.authoring_calls.append(entry)
+            try:
+                if authoring:
+                    self._check_authoring_action(owner, action, data)
+                elif action not in {'resource', 'discover'}:
+                    raise PermissionError('SYNTHETIC_ONLY: skill authoring mutations and evaluations are disabled')
+                result = real_dispatch(owner, action, data)
+            except Exception as error:
+                entry.update(status='rejected', error_type=type(error).__name__)
+                raise
+            entry.update(status='succeeded', result=result)
             if action == 'resource':
                 self.resource_calls.append({'owner': owner, 'path': result['path'],
                                             'binding_id': result['binding_id'], 'version': result['version']})
@@ -229,11 +260,88 @@ class SkillHostAcceptance:
         self.app = None
         self.stop_event = threading.Event()
         self.log_levels = {}
-        self.report = {'fixture': FIXTURE, 'candidate': str(ROOT), 'cases': [],
+        self.report = {'fixture': FIXTURE, 'candidate': str(ROOT), 'suite': 'authoring' if authoring else 'selection', 'cases': [],
             'evidence_boundary': {'host': 'actual isolated Workspace grant -> agentbridge.workspace.bind -> chat.send -> same-socket authoritative history; no local fallback',
                                  'central': 'candidate real MCP, authorization and skill stores',
                                  'business': 'synthetic read-only OA; no production business evidence',
                                  'semantic_review': 'required separately; string assertions are insufficient'}}
+        if authoring:
+            self.report['authoring_seed'] = self.authoring_seed
+            self.report['evidence_boundary']['evaluation'] = 'precompleted synthetic text report; only actual host control-plane calls are under test, not evaluator or output quality'
+
+    def _check_authoring_action(self, owner, action, data):
+        if owner != ALICE or action not in AUTHORING_ACTIONS or not isinstance(data, dict):
+            raise PermissionError('SYNTHETIC_ONLY: authoring action or owner is not allowed')
+        if action not in {'list', 'jobs'} and data.get('draft_id') != self.authoring_seed['draft_id']:
+            raise PermissionError('SYNTHETIC_ONLY: only the dedicated private draft may be addressed')
+        if action == 'save':
+            proposal = data.get('proposal') or {}
+            if proposal.get('executionMode', 'read_exploration') != 'read_exploration':
+                raise PermissionError('SYNTHETIC_ONLY: only text methods may be saved')
+            for profile in (proposal.get('profiles') or {'use': {}}).values():
+                policy = profile.get('execution') or {}
+                if (profile.get('all') or profile.get('any') or profile.get('database')
+                        or policy.get('effects', ['read']) != ['read'] or policy.get('allow_batch', False)
+                        or policy.get('capabilities')):
+                    raise PermissionError('SYNTHETIC_ONLY: business dependencies and execution are disabled')
+
+    def _seed_authoring(self):
+        authoring = self.service.skill_authoring
+        proposal = {'name': '目录补验助手', 'description': '隔离验收使用的纯文字整理方法。',
+            'selection': {'use_when': '用户提供文字要求整理', 'not_for': '业务查询、提交或审批', 'output': '保留原意的短句'},
+            'instructions': '只整理用户提供的文字，不补事实；缺少原文先询问。', 'profiles': {'use': {}}}
+        draft = authoring.save(ALICE, proposal=proposal, request_key='synthetic-authoring-seed')
+        workbench = authoring.workbench
+        job = workbench.evaluate(ALICE, draft_id=draft['draft_id'], expected_revision=1,
+            cases=[{'prompt': '合成题：整理联调记录。', 'profile': 'use', 'kind': 'output', 'contains': ['联调'], 'excludes': []}],
+            request_key='synthetic-completed-report')
+        for _ in range(4):
+            if not workbench.run_once(lambda *_: {'text': '合成联调记录，仅为控制面夹具。', 'model': 'synthetic/no-model'}):
+                break
+        if workbench.jobs(ALICE, job['job_id'])['state'] != 'succeeded':
+            raise RuntimeError('Synthetic report seed did not complete')
+        return {'draft_id': draft['draft_id'], 'job_id': job['job_id'], 'report_origin': 'synthetic/no-model',
+                'published': False, 'human_reviewed': False}
+
+    def authoring_observation(self, kind, calls):
+        seed = self.authoring_seed
+        authoring = self.service.skill_authoring
+        draft = authoring.get(ALICE, seed['draft_id'])
+        manifest = draft['bundle']['manifest']
+        pending = authoring.workbench.pending_cases(ALICE, draft_id=seed['draft_id'])['pending_cases']
+        regression = authoring.workbench.regression(ALICE, seed['draft_id'])
+        successful = [call for call in calls if call['status'] == 'succeeded']
+        performed = lambda action: [call for call in successful if call['action'] == action]
+        checks = {'no_rejected_dispatch_calls': all(call['status'] == 'succeeded' for call in calls),
+                  'private_unpublished': not draft.get('published_version') and not draft.get('requests')}
+        if kind == 'metadata':
+            saves, exports = performed('save'), performed('export_standard')
+            checks.update(metadata_saved=bool(saves) and manifest.get('standard_metadata') == {'license': 'MIT', 'compatibility': '仅处理文字'},
+                explicit_execution_sent=any(any(profile.get('description') == '整理文字' and
+                    profile.get('execution') == {'effects': ['read'], 'allow_batch': False, 'capabilities': []}
+                    for profile in call['data'].get('proposal', {}).get('profiles', {}).values()) for call in saves),
+                explicit_execution_persisted=any(profile.get('description') == '整理文字' and
+                    profile.get('execution') == {'effects': ['read'], 'allow_batch': False, 'capabilities': []}
+                    for profile in manifest['profiles'].values()),
+                standard_export=bool(exports) and all(phrase in exports[-1]['result'].get('files', {}).get('SKILL.md', '')
+                    for phrase in ('license: "MIT"', 'compatibility: "仅处理文字"')))
+        elif kind in {'pending_save', 'pending_read'}:
+            action = 'save_pending_cases' if kind == 'pending_save' else 'pending_cases'
+            checks.update(pending_action_observed=bool(performed(action)), pending_persisted=bool(pending) and
+                any(row['prompt'] == '整理：完成联调。' and '联调' in row['contains'] for row in pending['value']['cases']))
+            if kind == 'pending_save':
+                checks['pending_version_recorded'] = bool(pending) and pending['version'] == 1 and any(
+                    call['data'].get('expected_version') == 0 for call in performed(action))
+        elif kind == 'pin':
+            checks['regression_pinned'] = bool(performed('set_regression')) and bool(regression) and regression['job_id'] == seed['job_id']
+        elif kind == 'unpin':
+            checks['regression_null_sent_and_cleared'] = regression is None and any(
+                'job_id' in call['data'] and call['data']['job_id'] is None for call in performed('set_regression'))
+        elif kind == 'archive':
+            checks['draft_archived'] = bool(performed('archive')) and draft['state'] == 'archived'
+        return {'checks': checks, 'state': {'revision': draft['revision'], 'state': draft['state'],
+                'standard_metadata': manifest.get('standard_metadata'), 'profiles': manifest['profiles'],
+                'pending_cases': pending, 'regression': regression}, 'calls': calls}
 
     def _invoke(self, name, worker, arguments):
         if name not in READS or worker.session['user_subject'] != ALICE:
@@ -397,6 +505,7 @@ class SkillHostAcceptance:
         outputs = []
         for step, prompt in enumerate([case['prompt']] + ([case['follow_up']] if case.get('follow_up') else [])):
             before, calls_before, resources_before = self.snapshot(owner)
+            authoring_before = len(self.authoring_calls)
             prompt_file = self.home / 'evidence' / f"{case['id']}-{step}.prompt.txt"
             private_text(prompt_file, prompt)
             started = time.monotonic()
@@ -423,6 +532,11 @@ class SkillHostAcceptance:
             expected = case.get('skill') if step == 0 else case.get('follow_up_skill')
             observations = observe(case if step == 0 else {'skill': expected}, payload, events,
                                    self.calls[calls_before:], self.skills, code, self.resource_calls[resources_before:])
+            if case.get('authoring_check'):
+                control = self.authoring_observation(case['authoring_check'], self.authoring_calls[authoring_before:])
+                observations['authoring'] = control
+                observations['checks'].update(control['checks'])
+                observations['checks']['no_business_calls'] = not self.calls[calls_before:]
             row = {'id': case['id'], 'step': step, 'prompt': prompt, 'elapsed_seconds': round(time.monotonic() - started, 3),
                    'exit_code': code, 'session_key': session_key, 'skill_events': events,
                    'synthetic_calls': self.calls[calls_before:], 'resource_calls': self.resource_calls[resources_before:],
@@ -535,6 +649,7 @@ def main():
     parser.add_argument('--source-agent-dir', type=Path)
     parser.add_argument('--timeout', type=int, default=150)
     parser.add_argument('--cases', help='Comma-separated IDs; default all 20')
+    parser.add_argument('--suite', choices=('selection', 'authoring'), default='selection')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--prepare', action='store_true', help='Offline seed/config validation; no authentication or model')
     mode.add_argument('--run', action='store_true', help='Actual Gateway agent RPC, distinct synthetic private session per case')
@@ -543,10 +658,10 @@ def main():
     if not args.prepare and (not args.source_config or not args.source_agent_dir):
         parser.error('--run/--serve require explicit model source config and source agent directory')
     selected = set(args.cases.split(',')) if args.cases else None
-    cases = json.loads(CASES_PATH.read_text())
+    cases = AUTHORING_CASES if args.suite == 'authoring' else json.loads(CASES_PATH.read_text())
     if selected and not selected <= {case['id'] for case in cases}:
         parser.error('Unknown case ID')
-    fixture = SkillHostAcceptance(args.home)
+    fixture = SkillHostAcceptance(args.home, authoring=args.suite == 'authoring')
     try:
         fixture.configure(provider_plugin=args.provider_plugin.resolve(), model=args.model, ca=args.ca,
                           mcp_url='http://127.0.0.1:1/mcp' if args.prepare else None)

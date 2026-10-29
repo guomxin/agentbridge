@@ -22,8 +22,9 @@ from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
 
 
 SKILL_ID = "oa-pending"
-# A published/customized instruction bundle requires an explicit route review.
-REVIEWED_SKILL_HASH = "8f15040419e44c57f2717c8a7dab99bd26c990a3e3442e36c2b4ee4228b3cc82"
+# Reviewed bundled oa-pending 1.5.1, including its explicit execution limits.
+# Keep a fixed full-bundle pin: published/customized bundles need route review.
+REVIEWED_SKILL_HASH = "a1b25702f56f335da356b9efb2d524bb10ed5da298c2b55a310636f3acf16e0b"
 SOURCE_TTL_SECONDS = 600
 COMMAND_KIND = "oa_pending_prepare"
 _MUTABLE_COMMAND_FIELDS = {"state", "operationId", "error"}

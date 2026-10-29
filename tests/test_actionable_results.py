@@ -9,7 +9,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from agentbridge.core import actionable_results as actions
-from agentbridge.core.business_skills import SkillRejected
+from agentbridge.core.business_skills import SkillRejected, validate_skill_bundle
 from tests.authorization_fixtures import grant_permissions
 from tests.support.latency_acceptance import LatencyAcceptanceFixture, LatencyContract, OWNER
 from tests.test_seeyon_pending_actions import ALL_PENDING_PROFILES
@@ -408,6 +408,30 @@ class ActionableResultsTests(unittest.TestCase):
             expected_revision=2, actor="admin", reason="new assignment")
         response = self.execute(queued)
         self.assertEqual(response["error"]["code"], "SKILL_BINDING_REVOKED")
+
+    def test_reviewed_route_pins_execution_metadata_and_resources_before_queueing(self):
+        body = self.body()
+        original = self.service.skills.current('oa-pending')
+        self.assertEqual(original['content_hash'], actions.REVIEWED_SKILL_HASH)
+        self.assertFalse(original['manifest']['profiles']['single']['execution']['allow_batch'])
+        self.assertTrue(original['manifest']['profiles']['batch']['execution']['allow_batch'])
+        before = {table: self.count(table) for table in ('operations', 'agent_tasks', 'skill_bindings', 'write_authorizations')}
+        for field in ('execution', 'description', 'instructions'):
+            changed = deepcopy(original)
+            if field == 'execution':
+                changed['manifest']['profiles']['single']['execution']['allow_batch'] = True
+            elif field == 'description':
+                changed['manifest']['profiles']['single']['description'] += '未复核的修改'
+            else:
+                changed['resources']['SKILL.md'] += '\n未复核的执行说明。'
+            changed = validate_skill_bundle(changed['manifest'], changed['resources'])
+            self.assertNotEqual(changed['content_hash'], actions.REVIEWED_SKILL_HASH)
+            with self.subTest(field=field), patch.object(self.service.skills, 'current', return_value=changed):
+                self.assertTrue(all(not item['enabled'] for item in self.groups()[0]['targets']))
+                with self.assertRaises(actions.ActionableResultError) as caught:
+                    self.queue(body)
+                self.assertEqual(caught.exception.code, 'ACTION_SKILL_CHANGED')
+            self.assertEqual(before, {table: self.count(table) for table in before})
 
     def test_new_skill_instructions_stop_first_prepare(self):
         queued = self.queue()
