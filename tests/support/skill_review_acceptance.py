@@ -67,7 +67,7 @@ class SkillReviewAcceptanceFixture(SkillPracticalAcceptanceFixture):
         cases = [dict(CASES[0]), {**CASES[1], 'feedback_id': feedback['feedback_id']}]
         fixed = a.workbench.evaluate(OWNER, draft_id=draft_id, expected_revision=1,
             cases=cases, repeats=2, request_key=key + '-fixed')
-        a.workbench.run_once(self.complete)
+        self._finish_evaluation(fixed['job_id'])
         a.workbench.set_regression(OWNER, draft_id=draft_id, expected_revision=1, job_id=fixed['job_id'])
         instructions = proposal['instructions'] + REGRESSION_MARKER
         if changed_model:
@@ -76,9 +76,19 @@ class SkillReviewAcceptanceFixture(SkillPracticalAcceptanceFixture):
             proposal={**proposal, 'instructions': instructions}, request_key=key + '-revision-2')
         current = a.workbench.evaluate(OWNER, draft_id=draft_id, expected_revision=2,
             cases=cases, repeats=2, request_key=key + '-current')
-        a.workbench.run_once(self.complete)
+        self._finish_evaluation(current['job_id'])
         return {'draft_id': draft_id, 'skill_id': draft['skill_id'], 'fixed_job_id': fixed['job_id'],
                 'current_job_id': current['job_id'], 'feedback_id': feedback['feedback_id']}
+
+    def _finish_evaluation(self, job_id):
+        for _ in range(50):
+            job = self.service.skill_authoring.workbench.jobs(OWNER, job_id)
+            if job['state'] == 'succeeded':
+                return
+            if job['state'] not in ('queued', 'running'):
+                raise RuntimeError('Synthetic evaluation failed: ' + str(job['error']))
+            self.service.skill_authoring.workbench.run_once(self.complete)
+        raise RuntimeError('Synthetic evaluation exceeded the bounded slice budget')
 
     def public_metadata(self):
         return {'fixture': 'synthetic-skill-review-v1', 'workspace_url': self.workspace_url,

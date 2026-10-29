@@ -35,7 +35,12 @@ class SkillPendingCasesTests(unittest.TestCase):
         job=self.w.evaluate('alice',draft_id=self.d['draft_id'],expected_revision=1,cases=[
             {'prompt':'明天补测试。','contains':['明天'],'feedback_id':self.feedback['feedback_id']},
             {'prompt':'明天继续查。','contains':['明天'],'feedback_id':self.feedback['feedback_id']}],request_key=key)
-        if complete:self.w.run_once(lambda *_:{'text':output,'model':'synthetic'})
+        if complete:
+            for _ in range(40):
+                if not self.w.run_once(lambda *_:{'text':output,'model':'synthetic'}):
+                    break
+            else:
+                self.fail('synthetic evaluation exceeded its slice budget')
         return job
 
     def test_partial_raw_values_survive_refresh_and_method_revision(self):
@@ -110,3 +115,27 @@ class SkillPendingCasesTests(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(ValueError):self.save(value=value)
         with self.assertRaises(ValueError):self.save(version=True)
         self.assertIsNone(self.inspect()['pending_cases'])
+
+    def test_conversation_actions_share_pending_sheet_and_regression_identity_checks(self):
+        did = self.d['draft_id']
+        self.assertEqual(self.a.dispatch('alice', 'pending_cases', {'draft_id': did}),
+                         {'draft_id': did, 'pending_cases': None})
+        saved = self.a.dispatch('alice', 'save_pending_cases', {'draft_id': did,
+            'expected_revision': 1, 'expected_version': 0, 'value': self.value})
+        self.assertEqual(self.a.dispatch('alice', 'pending_cases', {'draft_id': did})['pending_cases'], saved)
+        self.assertEqual(self.inspect()['pending_cases'], saved)
+        with self.assertRaises(KeyError): self.a.dispatch('bob', 'pending_cases', {'draft_id': did})
+        changed = deepcopy(self.value); changed['cases'][0]['prompt'] = '其他问题'
+        with self.assertRaises(UserGrantConflict):
+            self.a.dispatch('alice', 'save_pending_cases', {'draft_id': did,
+                'expected_revision': 1, 'expected_version': 0, 'value': changed})
+        job = self.evaluate('conversation')
+        args = {'draft_id': did, 'expected_revision': 1, 'job_id': job['job_id']}
+        pinned = self.a.dispatch('alice', 'set_regression', args)
+        self.assertEqual(pinned['regression'], self.inspect()['regression'])
+        with self.assertRaises(KeyError): self.a.dispatch('bob', 'set_regression', args)
+        with self.assertRaises(UserGrantConflict): self.a.dispatch('alice', 'set_regression', {**args, 'expected_revision': 2})
+        self.assertEqual(self.a.dispatch('alice', 'set_regression', {**args, 'job_id': None}), {'regression': None})
+        self.assertIsNone(self.inspect()['regression'])
+        with self.assertRaises(ValueError):
+            self.a.dispatch('alice', 'review_report', {'job_id': job['job_id'], 'status': 'acceptable'})

@@ -149,6 +149,10 @@ for _prepare in ("oa.missed_punch.approval.prepare", "oa.missed_punch.approval.b
     DEFINITIONS[_prepare].update(preflight_function="preflight_missed_punch_approval",
                                  preflight_profile="missed_punch")
 FUNCTION_NAMES = sorted([*CONTRACT["function_names"], "preflight_missed_punch_approval"])
+# Explicit batch metadata is additive; retain every other frozen capability field.
+for spec in CONTRACT['capabilities']:
+    if spec['name'] in {'oa.missed_punch.approval.batch.prepare', 'oa.workflow.pending.batch.prepare'}:
+        spec['batch'] = True
 SPECS = {spec["name"]: spec for spec in CONTRACT["capabilities"]}
 SCOPES = {name: frozenset(scopes) for name, scopes in CONTRACT["scopes"]}
 MEETING_PREPARES = {
@@ -226,6 +230,8 @@ def test_all_oa_write_specs_match_versioned_contract_and_registration_order():
     assert [
         spec.to_dict() for spec in registry._specs.values() if spec.effect != "read"
     ] == CONTRACT["capabilities"]
+    assert {spec.name for spec in registry.list() if spec.batch} == {
+        'oa.missed_punch.approval.batch.prepare', 'oa.workflow.pending.batch.prepare'}
 
 
 @pytest.mark.parametrize("prepare_name", list(DEFINITIONS))

@@ -15,7 +15,8 @@ from uuid import uuid4
 
 from agentbridge.core.business_skills import PROTOCOL, _json, validate_skill_bundle
 from agentbridge.core.skill_actions import dispatch_skill_action
-from agentbridge.core.skill_quality import publication_evidence
+from agentbridge.core.skill_quality import (candidate_review_problems, normalize_standard_metadata,
+    proposal_from_bundle, publication_evidence, standard_document)
 from agentbridge.core.user_grants import UserGrantConflict
 
 
@@ -122,7 +123,16 @@ class SkillAuthoring:
         profiles = proposal.get('profiles', {'use': {}})
         if not isinstance(refs, dict) or not isinstance(profiles, dict) or not profiles or len(profiles) > 8:
             raise ValueError("参考文件或模式无效")
-        body = text(proposal.get('instructions'), "处理方法", 40000)
+        embedded, body = standard_document(text(proposal.get('instructions'), "处理方法", 40000))
+        body = text(body, "处理方法", 40000)
+        metadata = {k: embedded[k] for k in ('license', 'compatibility') if k in embedded}
+        declared = normalize_standard_metadata(proposal.get('standard_metadata', {}))
+        if any(k in metadata and metadata[k] != v for k, v in declared.items()):
+            raise ValueError('正文与标准元数据冲突，请先修正草稿')
+        metadata.update(declared)
+        metadata = normalize_standard_metadata(metadata)
+        if metadata:
+            proposal['standard_metadata'] = metadata
         # A generated bundle contains instructions, never credentials or executable assets.
         serialized = _json(proposal)
         if re.search(r'(?i)(-----BEGIN .*PRIVATE KEY|Bearer\s+[A-Za-z0-9._~+/=-]{16,}|(?:password|cookie|api_key)\s*[:=]\s*["\']?[^\s"\']{8,}|https?://[^\s"<>]+/(?:input|authorize|auth)/[A-Za-z0-9_-]{20,})', serialized):
@@ -133,11 +143,20 @@ class SkillAuthoring:
                     'entrypoint': 'SKILL.md', 'status': 'enabled',
                     'executionMode': proposal.get('executionMode', 'read_exploration'),
                     'profiles': profiles, 'resources': list(refs),
-                    'required_resources': proposal.get('required_resources', {p: list(refs) for p in profiles}),
+                    'required_resources': proposal.get('required_resources', {p: [] for p in profiles}),
                     'selection': proposal.get('selection')}
+        if metadata:
+            manifest['standard_metadata'] = metadata
         if not all(isinstance(k, str) and k.startswith('references/') for k in refs):
             raise ValueError("参考文件必须位于 references 目录")
-        return validate_skill_bundle(manifest, {'SKILL.md': body, **refs})
+        resources = {'SKILL.md': body, **refs}
+        # Validate dependency identifiers before expanding a draft's optional
+        # contract. Fixed bundles always contain the full capability list.
+        validate_skill_bundle({**manifest, 'profiles': {name: {k: v for k, v in deps.items() if k != 'execution'}
+                              for name, deps in profiles.items()}}, resources)
+        from agentbridge.core.skill_execution import normalize_profile_execution
+        manifest['profiles'] = normalize_profile_execution(self.service, manifest['executionMode'], profiles)
+        return validate_skill_bundle(manifest, resources)
 
     def _provenance(self, owner, data):
         if not isinstance(data, dict) or set(data) - {'kind', 'task_ids', 'summary', 'complete', 'scope'}:
@@ -346,6 +365,7 @@ class SkillAuthoring:
             prior_audience = [x[0][5:] for x in db.execute("SELECT owner FROM skill_config WHERE owner LIKE 'user:%' AND json_type(value_json,?) IS NOT NULL", ('$.' + draft['skill_id'],))]
             quality = {'diagnostics': diagnostics(bundle), 'diff': bundle_diff(prior, bundle), 'evaluation': report,
                        'publication_evidence': {**evidence, 'selected_profiles': profiles},
+                       'candidate_problems': candidate_review_problems(report, profiles),
                        'audience_diff': {'added': sorted(set(audience)-set(prior_audience)), 'removed': sorted(set(prior_audience)-set(audience))}}
             db.execute('INSERT INTO skill_review_quality VALUES (?,?)', (rid, _json(quality)))
             self._event(db,owner,'release.submitted',rid,{'draft_id':draft_id,'revision':draft['revision']})
@@ -374,10 +394,16 @@ class SkillAuthoring:
             if not r: raise KeyError('申请不存在')
             _,bundle=self._bundle(db,r['draft_id'],r['draft_revision'])
             quality = db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request_id,)).fetchone()
-            return {**self._review_public(r),'bundle':bundle, 'quality': json.loads(quality[0]) if quality else None, 'tests':[dict(t) for t in db.execute(
+            snapshot = json.loads(quality[0]) if quality else None
+            if snapshot is not None:
+                # Older pending requests use the same frozen report; never fetch
+                # live review notes into an already submitted request.
+                snapshot['candidate_problems'] = candidate_review_problems(snapshot.get('evaluation'), json.loads(r['profiles_json']))
+            return {**self._review_public(r),'bundle':bundle, 'quality': snapshot, 'tests':[dict(t) for t in db.execute(
                 "SELECT t.profile,t.prompt,t.output,t.status FROM skill_draft_tests t JOIN skill_review_tests e USING(test_id) WHERE e.request_id=?",(request_id,))]}
 
-    def decide(self, *, actor, request_id, decision, reason, reviewed_tests=False, manual_quality_reason=None, audit_callback=None):
+    def decide(self, *, actor, request_id, decision, reason, reviewed_tests=False, manual_quality_reason=None,
+               problem_resolutions=None, audit_callback=None):
         if actor.get('role')!='admin': raise PermissionError('需要管理员审批权限')
         if decision not in {'approve','changes_requested','rejected'}: raise ValueError('审批决定无效')
         reason=text(reason,'审批意见',1000)
@@ -393,7 +419,8 @@ class SkillAuthoring:
             if decision=='approve':
                 if reviewed_tests is not True: raise ValueError('请复核草稿、样例结果及使用范围后批准')
                 quality = db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request_id,)).fetchone()
-                report = json.loads(quality[0]).get('evaluation') if quality else None
+                snapshot = json.loads(quality[0]) if quality else {}
+                report = snapshot.get('evaluation')
                 _,bundle=self._bundle(db,r['draft_id'],r['draft_revision'])
                 if bundle['content_hash']!=r['content_hash']: raise ValueError('申请内容不一致')
                 profiles=json.loads(r['profiles_json']); audience=json.loads(r['audience_json'])
@@ -405,12 +432,19 @@ class SkillAuthoring:
                 selected = [p for p in evidence['profiles'] if p['profile'] in profiles]
                 if any(not p['eligible'] for p in selected):
                     raise ValueError('独立评测未通过或内容不匹配，请退回修改并重新申请')
+                problems = candidate_review_problems(report, profiles)
+                resolutions = {} if problem_resolutions is None else problem_resolutions
+                if not isinstance(resolutions, dict) or set(resolutions) != {p['row_key'] for p in problems}:
+                    raise ValueError('请为本次申请的每项候选问题填写接受理由；如需修正，请退回修改并重新评测')
+                resolutions = {key: text(value, '候选问题接受理由', 1000) for key, value in resolutions.items()}
+                snapshot['candidate_problems'] = problems
+                if problems:
+                    snapshot['problem_resolutions'] = resolutions
                 if any(p['source'] != 'evaluation' for p in selected):
                     text(manual_quality_reason, '申请模式缺少独立输出评测时的人工验证说明', 1000)
-                    snapshot = json.loads(quality[0]) if quality else {}
                     snapshot['manual_quality_reason'] = manual_quality_reason
-                    db.execute('INSERT INTO skill_review_quality VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET snapshot_json=excluded.snapshot_json',
-                               (request_id, _json(snapshot)))
+                db.execute('INSERT INTO skill_review_quality VALUES (?,?) ON CONFLICT(request_id) DO UPDATE SET snapshot_json=excluded.snapshot_json',
+                           (request_id, _json(snapshot)))
                 sid=bundle['manifest']['id']
                 current=db.execute('SELECT * FROM skill_publications WHERE skill_id=?',(sid,)).fetchone()
                 pubrev=current['revision'] if current else 0
@@ -496,9 +530,8 @@ class SkillAuthoring:
             return self._receipt(db,owner,request_key,digest,{'draft_id':draft_id,'revision':rev,'status':'draft_saved','published':False})
 
     def export(self, owner, draft_id):
-        draft=self.get(owner,draft_id); bundle=draft['bundle']; manifest=bundle['manifest']
-        return {'format':'agentbridge.skill-draft.v1','proposal':{**{k:manifest[k] for k in ('name','description','selection','profiles','executionMode','required_resources')},
-            'instructions':bundle['resources']['SKILL.md'],'references':{k:v for k,v in bundle['resources'].items() if k!='SKILL.md'}}}
+        draft=self.get(owner,draft_id)
+        return {'format':'agentbridge.skill-draft.v1','proposal':proposal_from_bundle(draft['bundle'])}
 
     def dispatch(self, owner, action, data):
         return dispatch_skill_action(self, owner, action, data)

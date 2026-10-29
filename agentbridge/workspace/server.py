@@ -284,12 +284,16 @@ def create_workspace_http_server(
                 if route.path == "/api/skill-drafts":
                     authoring = application.service.skill_authoring
                     draft_id = query.get("id", [None])[0]
-                    self._json(200, authoring.get(account["user_subject"], draft_id) if draft_id else {
+                    self._json(200, {**authoring.get(account["user_subject"], draft_id),
+                                     "authoring_catalog":application.skill_authoring_catalog()} if draft_id else {
                         **authoring.list(account["user_subject"]), "preferences": authoring.preferences(account["user_subject"]),
                         "scope": 'workspace:' + account['account_id'],
                         "scopes": authoring.workbench.scopes(account['user_subject']),
                         "jobs": authoring.workbench.jobs(account['user_subject']),
                         "runtime": authoring.workbench.status()})
+                    return
+                if route.path == "/api/skill-authoring-catalog":
+                    self._json(200, application.skill_authoring_catalog())
                     return
                 if route.path == "/api/skills/history":
                     self._json(200, {"items": application.service.skill_authoring.workbench.load_feedback_history(account["user_subject"])})

@@ -25,8 +25,16 @@ class SkillDatabaseDependencies(StrictModel):
     any: list[str] = Field(default_factory=list)
 
 
+class SkillExecution(StrictModel):
+    effects: list[Literal['read', 'reversible_write', 'controlled_write']] = Field(min_length=1, max_length=3)
+    allow_batch: bool
+    capabilities: list[str] | None = Field(default=None, max_length=500)
+
+
 class SkillDependencies(SkillDatabaseDependencies):
     database: SkillDatabaseDependencies | None = None
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    execution: SkillExecution | None = None
 
 
 class SkillMethod(StrictModel):
@@ -34,6 +42,12 @@ class SkillMethod(StrictModel):
     steps: list[str] = Field(default_factory=list, max_length=30)
     exceptions: list[str] = Field(default_factory=list, max_length=20)
     acceptance: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SkillStandardMetadata(StrictModel):
+    """Declarative package information; never runtime permission or instructions."""
+    license: str | None = Field(default=None, min_length=1, max_length=1000)
+    compatibility: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 class SkillProposal(StrictModel):
@@ -46,6 +60,7 @@ class SkillProposal(StrictModel):
     references: dict[str, str] = Field(default_factory=dict)
     required_resources: dict[str, list[str]] | None = None
     method: SkillMethod | None = None
+    standard_metadata: SkillStandardMetadata | None = None
 
 
 class SkillAuthoringData(StrictModel):
@@ -53,6 +68,7 @@ class SkillAuthoringData(StrictModel):
     proposal: SkillProposal | None = None
     draft_id: str | None = None
     expected_revision: int | None = None
+    expected_version: int | None = None
     request_key: str | None = None
     provenance: dict | None = None
     profile: str | None = None

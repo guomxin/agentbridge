@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "oa-pending",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "name": "OA 待办办理",
   "description": "对已支持的 OA 待办核对处理依据，通过可信卡完成单项或逐项办理，并核验处理结果。",
   "executionMode": "controlled_action",
@@ -32,7 +32,41 @@
         "oa.resignation.approve",
         "oa.quarterly_performance.acknowledge",
         "oa.meeting.reply"
-      ]
+      ],
+      "description": "核对并准备单项待办，授权后执行并核验。",
+      "execution": {
+        "effects": [
+          "read",
+          "controlled_write"
+        ],
+        "allow_batch": false,
+        "capabilities": [
+          "oa.attendance_confirmation.prepare",
+          "oa.business_settlement.approval.prepare",
+          "oa.business_trip.approval.prepare",
+          "oa.efficiency_data.approval.prepare",
+          "oa.flight_application.approval.prepare",
+          "oa.intellectual_property_declaration.approval.prepare",
+          "oa.intellectual_property_reward.acknowledgement.prepare",
+          "oa.labor_contract_renewal.approval.prepare",
+          "oa.leave.approval.prepare",
+          "oa.meeting.reply.prepare",
+          "oa.missed_punch.approval.prepare",
+          "oa.overtime.approval.prepare",
+          "oa.quarterly_performance.acknowledgement.prepare",
+          "oa.resignation.approval.prepare",
+          "oa.standard_collaboration.approval.prepare",
+          "oa.travel_expense.approval.prepare",
+          "oa.weekly_report.acknowledgement.prepare",
+          "oa.work_handover.approval.prepare",
+          "oa.workflow.detail.get",
+          "oa.workflow.done.list",
+          "oa.workflow.opinions.list",
+          "oa.workflow.pending.list",
+          "oa.workflow.sent.list",
+          "oa.workflow.tracked.list"
+        ]
+      }
     },
     "batch": {
       "all": [
@@ -57,7 +91,43 @@
         "oa.resignation.approve",
         "oa.quarterly_performance.acknowledge",
         "oa.meeting.reply"
-      ]
+      ],
+      "description": "持久保存多项待办，逐项独立授权和核验。",
+      "execution": {
+        "effects": [
+          "read",
+          "controlled_write"
+        ],
+        "allow_batch": true,
+        "capabilities": [
+          "oa.attendance_confirmation.prepare",
+          "oa.business_settlement.approval.prepare",
+          "oa.business_trip.approval.prepare",
+          "oa.efficiency_data.approval.prepare",
+          "oa.flight_application.approval.prepare",
+          "oa.intellectual_property_declaration.approval.prepare",
+          "oa.intellectual_property_reward.acknowledgement.prepare",
+          "oa.labor_contract_renewal.approval.prepare",
+          "oa.leave.approval.prepare",
+          "oa.meeting.reply.prepare",
+          "oa.missed_punch.approval.batch.prepare",
+          "oa.missed_punch.approval.prepare",
+          "oa.overtime.approval.prepare",
+          "oa.quarterly_performance.acknowledgement.prepare",
+          "oa.resignation.approval.prepare",
+          "oa.standard_collaboration.approval.prepare",
+          "oa.travel_expense.approval.prepare",
+          "oa.weekly_report.acknowledgement.prepare",
+          "oa.work_handover.approval.prepare",
+          "oa.workflow.detail.get",
+          "oa.workflow.done.list",
+          "oa.workflow.opinions.list",
+          "oa.workflow.pending.batch.prepare",
+          "oa.workflow.pending.list",
+          "oa.workflow.sent.list",
+          "oa.workflow.tracked.list"
+        ]
+      }
     }
   },
   "selection": {

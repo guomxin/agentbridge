@@ -82,7 +82,7 @@ export function rowMenuButton(label, items) {
   return `<button type="button" class="row-menu-trigger" data-row-actions="${escapeHtml(JSON.stringify(items))}" aria-label="${escapeHtml(label)}操作" aria-haspopup="dialog" aria-expanded="false">操作 <span aria-hidden="true">⌄</span></button>`;
 }
 
-export function skillReviewQualityHtml(q, selectedProfiles = []){
+export function skillReviewQualityHtml(q, selectedProfiles = [], {canReview = false} = {}){
   if(!q)return '<p>历史申请未记录独立评测及版本差异。</p>';
   const report=q.evaluation;const labels={candidate:'候选版本',published:report?.baseline?.version ? `评测时线上 ${escapeHtml(report.baseline.version)}` : '历史线上对照（版本未记录）',without_skill:'不使用助手'};
   const scoped = q.publication_evidence?.schema === 'agentbridge.skill-publication-evidence.v1' && selectedProfiles.length > 0;
@@ -101,6 +101,18 @@ export function skillReviewQualityHtml(q, selectedProfiles = []){
   const reviewSummary = hasReviewSnapshot
     ? `提交时人工复核：${reviewCounts.acceptable} 项可接受，${reviewCounts.problem} 项有问题，${reviewCounts.unreviewed} 项未复核${reviewCounts.unknown ? `，${reviewCounts.unknown} 项未记录` : ''}。仅对应本次申请冻结的输出，不改变自动断言成绩。`
     : '提交时人工复核未记录；不能据此判断是否已人工检查。';
+  const problems = q.candidate_problems || [];
+  const problemHtml = problems.length ? `<section><h3>本次申请的候选问题（${problems.length} 项）</h3>
+    <p>以下问题来自提交时冻结的人工复核，包含本次申请模式的输出及共用适用场景判断。批准前须逐项说明为何接受；可退回修改后重新评测，也可拒绝。接受理由不修改复核状态或自动断言成绩。</p>
+    ${problems.map((problem, index) => {
+      const row = report?.rows?.find(item => item.key === problem.row_key);
+      const accepted = q.problem_resolutions?.[problem.row_key] || '';
+      return `<details open><summary>问题 ${index + 1} · ${problem.kind === 'trigger' ? '共用适用场景判断' : escapeHtml(problem.profile)} · 样例 ${problem.case + 1} · 第 ${problem.repeat + 1} 次</summary>
+        <p>冻结的复核说明：</p><pre class="skill-review-text">${escapeHtml(problem.note || '未填写说明')}</pre>
+        ${row ? `<p>对应问题与输出：</p><pre class="skill-review-text">${escapeHtml(row.prompt || report.cases?.[problem.case]?.prompt || '')}\n${escapeHtml(row.output || row.skipped || '')}</pre>` : ''}
+        ${canReview ? `<label>问题 ${index + 1} 的接受理由<textarea name="problem_resolution_${index}" maxlength="1000" placeholder="说明已核对的影响、为何本次范围内可接受；如需修复请选择退回修改。">${escapeHtml(accepted)}</textarea></label>`
+          : accepted ? `<p>管理员接受理由：</p><pre class="skill-review-text">${escapeHtml(accepted)}</pre>` : '<p>尚未记录管理员接受理由。</p>'}</details>`;
+    }).join('')}</section>` : '';
   return `<h3>固定修订质量依据</h3><p>${escapeHtml(q.diagnostics.message)}</p>${q.diagnostics.checks.filter(c=>c.level==='warning').map(c=>`<p>待复核：${escapeHtml(c.message)}</p>`).join('')}
     <details><summary>版本差异（${q.diff.length} 项）</summary>${q.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre class="skill-review-text">${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
     <p>新增使用用户：${escapeHtml(q.audience_diff.added.join('、')||'无')}；移除：${escapeHtml(q.audience_diff.removed.join('、')||'无')}</p>
@@ -109,5 +121,6 @@ export function skillReviewQualityHtml(q, selectedProfiles = []){
     ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
     <p>${escapeHtml(reviewSummary)}</p>
     ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'} · 人工复核：${reviewLabels[rowReview(r).status]}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p>${rowReview(r).note ? `<p>复核说明：</p><pre class="skill-review-text">${escapeHtml(rowReview(r).note)}</pre>` : ''}${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`).join('')}`:''}
+    ${problemHtml}
     ${manual?`<p>申请中有模式仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`:''}`;
 }

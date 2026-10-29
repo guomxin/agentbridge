@@ -72,7 +72,7 @@ def schema_digest(value):
 
 
 def authorized_schema_transition(policy, before, after):
-    if policy["dataCompatibility"] == "no-migration":
+    if policy["dataCompatibility"] in {"no-migration", "reviewed-forward-only"}:
         return before == after
     if policy["dataCompatibility"] != "reviewed-schema-transition":
         return False
@@ -170,8 +170,10 @@ for name in ('agentbridge', 'bscli'):
         previous = self.active_release()
         self.run("systemctl", "is-active", "--quiet", self.service)
         policy = self.config["policy"]
-        if previous not in policy["compatibleFrom"] or policy["dataCompatibility"] not in {"no-migration", "reviewed-schema-transition"}:
+        if previous not in policy["compatibleFrom"] or policy["dataCompatibility"] not in {"no-migration", "reviewed-schema-transition", "reviewed-forward-only"}:
             raise RuntimeError("Release policy does not authorize this predecessor")
+        if policy["dataCompatibility"] == "reviewed-forward-only" and not str(policy.get("reason", "")).strip():
+            raise RuntimeError("Forward-only release requires a reviewed semantic compatibility reason")
         if policy["dataCompatibility"] == "reviewed-schema-transition":
             before = schemas(self.root / "data")
             transitions = policy.get("schemaTransitions", {})
@@ -285,6 +287,9 @@ for name in ('agentbridge', 'bscli'):
         atomic_write(self.envfile, f"AGENTBRIDGE_RELEASE_ID={self.release_id}\n".encode())
         self.run("chown", "root:agentbridge", self.envfile)
         self.run("systemctl", "daemon-reload")
+        # Persist before the command: a lost reply cannot prove the candidate
+        # never accepted writes with semantics the old program cannot enforce.
+        self.stage("switching", candidateStartAttempted=True)
         self.run("systemctl", "start", self.service)
         self.stage("checking")
         self.ready()
@@ -295,6 +300,10 @@ for name in ('agentbridge', 'bscli'):
     def recover(self):
         self.stage("recovering")
         self.run("systemctl", "stop", self.service)
+        if (self.config["policy"]["dataCompatibility"] == "reviewed-forward-only"
+                and self.state.get("candidateStartAttempted")):
+            self.stage("manual_recovery_required", reason="Candidate may have persisted new data semantics; automatic program rollback forbidden")
+            return
         if "schemaBefore" in self.state and schemas(self.root / "data") != self.state["schemaBefore"]:
             self.stage("manual_recovery_required", reason="Schema changed; data restore and program rollback forbidden automatically")
             return

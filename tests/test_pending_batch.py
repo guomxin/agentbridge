@@ -520,3 +520,34 @@ def test_submitted_batch_card_cannot_be_canceled(run):
     assert response["error"]["code"] == "TASK_ACTION_ALREADY_STARTED"
     assert service.tasks.get_batch_for_task(parent_task_id=tid, user_subject="user-a")["state"] == "waiting_user"
     assert committed == []
+
+
+def test_batch_only_skill_resumes_distinct_commits_without_exposing_single_prepare(run):
+    from agentbridge.core.business_skills import SkillRejected
+    service, tid, rows, prepared, committed = run
+    rows[:] = [row(1), row(2, '周报发送流程'), row(3, '【HR】补签申请单')]
+    authoring = service.skill_authoring
+    draft = authoring.save('user-a', proposal={
+        'name': '合成批量待办', 'description': '仅办理冻结批次',
+        'selection': {'use_when': '批量办理', 'not_for': '单独新建', 'output': '每项核验结果'},
+        'instructions': '核对冻结范围，逐项授权并核验结果。', 'executionMode': 'controlled_action',
+        'profiles': {'batch': {'all': ['oa.workflow.read'], 'execution': {
+            'effects': ['read', 'controlled_write'], 'allow_batch': True,
+            'capabilities': [BATCH]}}}}, request_key='batch-only-skill')
+    sample = authoring.test_start('user-a', draft_id=draft['draft_id'], expected_revision=1,
+        profile='batch', prompt='合成批次', request_key='sample')
+    authoring.test_result('user-a', test_id=sample['test_id'], output='计划逐项授权并核验。')
+    review = authoring.submit('user-a', draft_id=draft['draft_id'], expected_revision=1,
+        request_key='review', reason='合成测试')
+    authoring.decide(actor={'role': 'admin', 'username': 'fixture'}, request_id=review['request_id'],
+        decision='approve', reason='合成测试', reviewed_tests=True, manual_quality_reason='仅验证合成控制流')
+    binding = service.skills.bind('user-a', draft['skill_id'], 'batch')
+    service.skills.attach('user-a', tid, binding)
+    for single in ('oa.efficiency_data.approval.prepare', 'oa.weekly_report.acknowledgement.prepare'):
+        with pytest.raises(SkillRejected):
+            service.invoke(user_subject='user-a', task_id=tid, capability_name=single, arguments={})
+    field = start(service, tid)
+    for _ in rows:
+        field = finish(service, authorize(service, field))
+    assert field['batch']['state'] == 'succeeded'
+    assert prepared == committed == ['affair-1', 'affair-2', 'affair-3']

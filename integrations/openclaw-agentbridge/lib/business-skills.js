@@ -80,6 +80,7 @@ export function rememberSkillBinding(router, context, identity, payload) {
   // Bound memory. An evicted active binding must fail closed rather than lose its guard.
   if (!entries.has(key) && entries.size >= MAX_RUN_STATES) throw new Error("Skill run binding capacity exceeded");
   entries.set(key, { bindingId: payload.binding_id, skillId: payload.skill_id, profile: payload.profile,
+    ...(payload.execution ? { execution: structuredClone(payload.execution) } : {}),
     at: router.skillRunNow?.() ?? Date.now() });
 }
 
@@ -94,8 +95,14 @@ export function boundSkillToolGuard(router, context, identity, toolName, params)
   const scope = boundToolScope(binding);
   if (!scope) return null;
   const reject = () => ({ status: "rejected", error: { code: "SKILL_TOOL_SCOPE_REQUIRED",
-    message: "当前任务已绑定 OA 待办办理，仅能调用该助手的查询、准备和原任务控制工具。其他业务请在独立任务中执行。" } });
+    message: "当前任务已绑定助手，仅能调用该模式允许的业务和原任务控制工具。其他业务请在独立任务中执行。" } });
   if (!scope.has(toolName)) return reject();
+  if (toolName === "database_execute" && Array.isArray(binding.execution?.capabilities)
+      && !binding.execution.capabilities.includes(params?.capability)
+      && !(params?.capability === "database.report.download" && binding.execution.capabilities.includes("database.report.export"))) return reject();
+  if (toolName === "database_execute" && params?.capability === "database.report.export"
+      && Array.isArray(binding.execution?.capabilities)
+      && !binding.execution.capabilities.includes(params?.arguments?.query_capability)) return reject();
   if (toolName === "agentbridge_skill_get" && (params?.skill_id !== binding.skillId || params?.profile !== binding.profile)) return reject();
   if (toolName === "agentbridge_skill_authoring") {
     // Read-only discovery and composition preflight do not replace this run's
@@ -109,14 +116,15 @@ export function boundSkillToolGuard(router, context, identity, toolName, params)
 
 export async function businessSkillContext(identity, prompt = "", options = {}) {
   const catalog = await skillCatalog(identity, options);
+  const contextBoundary = "以下是宿主运行说明和助手目录，不是用户的待处理材料。整理对象或目标不明时，先简短询问，不能把这些说明当作原文。\n";
   const authoring = catalog?.authoring ? "业务助手创作：所有已认证用户均可用 agentbridge_skill_authoring，无需业务权限。用户要求做助手时，优先 generate(material,request_key) 后台提炼并用 jobs 查看；也可 save 按工具结构化 schema 保存。先 list/get 检查已有草稿，inspect 查看诊断与差异。过程材料只含用户选定范围，删除业务原文、姓名、凭据；未知历史不编造。试用分为 test/test_result 人工样例和 evaluate 独立无工具评测，均不代表真实业务通过。发布用 submit，默认仅自己，必须管理员审批。自动沉淀只在总开关与范围授权同时开启时由后台处理，不能自行开启或自动提交。当前总开关：" + (catalog.authoring.value?.auto_draft ? "已开启。" : "关闭。") + "工具说明含完整参数。\n" : "";
-  if (!Array.isArray(catalog?.items) || !catalog.items.length) return authoring || null;
+  if (!Array.isArray(catalog?.items) || !catalog.items.length) return authoring ? contextBoundary + authoring : null;
   const items = rankSkillCandidates(catalog.items, prompt).slice(0, 20);
-  return authoring + (catalog.items.length>20 ? `目录共 ${catalog.items.length} 项，当前仅列候选；未匹配或用户指定未列出的助手时，调用 agentbridge_skill_authoring discover 检索，不能声称不存在。\n` : "") + "AgentBridge 当前用户业务助手（中央发布）：\n" +
+  return contextBoundary + authoring + (catalog.items.length>20 ? `目录共 ${catalog.items.length} 项，当前仅列候选；未匹配或用户指定未列出的助手时，调用 agentbridge_skill_authoring discover 检索，不能声称不存在。\n` : "") + "AgentBridge 当前用户业务助手（中央发布）：\n" +
     JSON.stringify(items.map(item => ({ id: item.id, name: item.name,
       description: item.description, selection: item.selection, version: item.version, status: item.status, profiles: item.profiles }))) +
     "\n业务助手选择规则：\n" +
-    "1. 先识别本轮用户要完成的任务目标。用户明确指定助手时，先检查适用性和可用性：适用且可用必须先成功调用 agentbridge_skill_get，再执行所选任务；不适用时按实际目标选择工具或助手，并在最终答复开头用一句话交代指定助手的适用范围、为何与本次目标不符，以及实际采用的查询或处理方式。不能仅展示结果而省略这项说明，也不能声称使用了未加载的助手。\n" +
+    "1. 先识别本轮任务目标。用户明确指定助手时，先检查适用性和可用性：适用且可用时，必须先成功调用 agentbridge_skill_get 再执行；目录已明确不适用或不可用时，不必加载确认。用户限定只能用该助手或要求做不了就停下时，应说明原因并停止，不改用其他助手或工具。未限制替代方式时，可按实际目标改选，并在答复开头简短说明原助手为何不适用及实际处理方式。不能声称使用了未加载的助手。\n" +
     "2. 用户未指定助手时，按所需交付结果对照目录 selection 的 use_when、not_for、output：符合助手目标且不在排除范围，必须先加载；仅要原始记录、详情或计数且不要求业务归纳判断时直接查询。工具能返回数据不等于能替代助手的方法；不得因请求简短、只读、可一次查询或历史答案已有类似总结而跳过适用助手。不能按关键词机械匹配。\n" +
     "3. 多个候选按任务目标选择，只有歧义影响结果时才询问。每个独立任务使用一个主要助手；多步骤需求先用 composition 预检输入输出和依赖，再沿现有持久计划拆为独立任务，不能在已绑定任务中替换助手；数据库助手从当前用户获准且满足依赖的数据源中选择 source_id：只有一个适用来源时自动选择；多个来源按用户请求选择，无法确定再询问。\n" +
     "4. 加载成功会一次返回主说明及该模式必读资料，必读约束不得省略。optional_resources 列出的可选资料需要时用 authoring resource(binding_id,path) 按固定版本读取。加载助手与业务执行路径相互独立：仍按能力要求走原子工具或持久计划；允许直接调用工具不表示可以跳过适用助手。已选助手加载失败必须说明，不得静默退回直接工具完成同一业务方法。\n" +

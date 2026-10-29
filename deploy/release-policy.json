@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "f9c0b83ed2af"
+    "785e57f0ec94"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "05d4a34ab4f9199f775c7c23c0ea0cb1fc7668e574764973fc3668b5f0621d56",
-      "afterSha256": "573440e9a8bbcf071585fc8b29d84a4793578352d958f8fac1501c9b05cd11d7"
-    }
-  },
-  "reason": "Reviewed schema-only clone of the exact deployed four-database baseline. Adds only skill_report_reviews (owner-scoped row review) and skill_pending_cases (owner-scoped editable cases); all existing objects and user_version values remain unchanged. No business grants, authorization or execution semantics are relaxed."
+  "dataCompatibility": "reviewed-forward-only",
+  "reason": "Reviewed schema-only clone of the exact deployed four-database baseline: no SQL schema or user_version changes. New skill execution contracts and frozen problem-resolution requirements are persisted in existing JSON snapshots. The previous program ignores these restrictions, so automatic program rollback is forbidden after candidate start is attempted. Existing identities, grants, authorizations and immutable task bindings remain enforced; backup is for separately reviewed recovery only."
 }

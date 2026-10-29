@@ -4,11 +4,12 @@ import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 import unittest
 
 from pydantic import ValidationError
 
-from agentbridge.core.skill_actions import SKILL_ACTION_DEFINITIONS, SKILL_ACTIONS, parse_skill_action
+from agentbridge.core.skill_actions import SKILL_ACTION_DEFINITIONS, SKILL_ACTIONS, SkillActionName, parse_skill_action
 from agentbridge.core.skill_authoring import SkillAuthoring
 from agentbridge.core import skill_contracts, skill_quality
 from agentbridge.core.skill_workbench import SkillWorkbench
@@ -51,7 +52,18 @@ class SkillActionContractTests(unittest.TestCase):
         self.assertEqual(FIXTURE['baseline'], '8dca9e0317e8cf3db6351d21544f1a96fbf71aa0')
         for name, expected in FIXTURE['schemas'].items():
             with self.subTest(model=name):
-                self.assertEqual(getattr(skill_contracts, name).model_json_schema(), expected)
+                current = deepcopy(getattr(skill_contracts, name).model_json_schema())
+                # Assert additive fields separately; retain the original contract
+                # for all prior fields and definitions rather than replacing it.
+                current.get('properties', {}).pop('standard_metadata', None)
+                current.get('properties', {}).pop('expected_version', None)
+                current.get('$defs', {}).pop('SkillStandardMetadata', None)
+                current.get('$defs', {}).pop('SkillExecution', None)
+                current.get('$defs', {}).get('SkillProposal', {}).get('properties', {}).pop('standard_metadata', None)
+                for added in ('description', 'execution'):
+                    current.get('$defs', {}).get('SkillDependencies', {}).get('properties', {}).pop(added, None)
+                    if name == 'SkillDependencies': current.get('properties', {}).pop(added, None)
+                self.assertEqual(current, expected)
         for name in ('StrictModel', 'SkillSelection', 'SkillDatabaseDependencies', 'SkillDependencies',
                      'SkillMethod', 'SkillProposal', 'SkillAuthoringData'):
             self.assertIs(getattr(skill_quality, name), getattr(skill_contracts, name))
@@ -59,8 +71,10 @@ class SkillActionContractTests(unittest.TestCase):
         self.assertIs(SkillAuthoringData, skill_contracts.SkillAuthoringData)
 
     def test_declarations_match_original_routes_and_handler_signatures(self):
-        self.assertEqual(len(SKILL_ACTION_DEFINITIONS), 28)
-        self.assertEqual(list(SKILL_ACTIONS), [action['name'] for action in FIXTURE['actions']])
+        additions = {'pending_cases', 'save_pending_cases', 'set_regression'}
+        self.assertEqual(len(SKILL_ACTION_DEFINITIONS), 31)
+        self.assertEqual([name for name in SKILL_ACTIONS if name not in additions], [action['name'] for action in FIXTURE['actions']])
+        self.assertEqual(get_args(SkillActionName), tuple(SKILL_ACTIONS))
         self.assertEqual(len(SKILL_ACTIONS), len(SKILL_ACTION_DEFINITIONS))
         fields = set()
         for expected in FIXTURE['actions']:
@@ -86,7 +100,27 @@ class SkillActionContractTests(unittest.TestCase):
                 self.assertEqual(definition.optional, optional)
                 self.assertFalse(set(required) & set(optional))
                 fields.update(required + optional)
+        for name in additions:
+            definition = SKILL_ACTIONS[name]
+            signature = inspect.signature(getattr(SkillWorkbench, definition.handler))
+            params = [p for p in signature.parameters.values() if p.name not in {'self', 'owner'}]
+            self.assertEqual(definition.required, tuple(p.name for p in params if p.default is inspect.Parameter.empty))
+            self.assertEqual(definition.optional, ())
+            fields.update(definition.required)
         self.assertEqual(fields, set(skill_contracts.SkillAuthoringData.model_fields))
+
+    def test_new_metadata_and_version_fields_are_strict_and_review_is_not_an_action(self):
+        self.assertEqual(transport_outcome({'expected_version': 0})['result'], {'expected_version': 0})
+        self.assertEqual(transport_outcome({'expected_version': True})['error'], 'ValidationError')
+        metadata = skill_contracts.SkillStandardMetadata.model_validate({'license': 'MIT', 'compatibility': 'Text only'})
+        self.assertEqual(metadata.model_dump(), {'license': 'MIT', 'compatibility': 'Text only'})
+        for invalid in ({'license': 1}, {'compatibility': 'x' * 501}, {'allowed_tools': ['write']}, {'license': ''}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                skill_contracts.SkillStandardMetadata.model_validate(invalid)
+        for action in ('review_report', 'decide'):
+            with self.assertRaises(ValueError): parse_skill_action(action, {})
+        parsed = parse_skill_action('set_regression', {'draft_id': 'draft', 'expected_revision': 1, 'job_id': None})
+        self.assertIsNone(parsed.arguments['job_id'])
 
     def test_dispatch_shapes_values_errors_and_routes_match_frozen_baseline(self):
         authoring = recorder_authoring()

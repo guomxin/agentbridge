@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "log-review",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "name": "日志总结与事项复核",
   "description": "回答一段时间整体做了哪些工作，汇总日志中的各项成果、计划和问题并复核覆盖；聚焦某个工作主题如何推进、目前到哪一步时使用事项进展追踪。",
   "executionMode": "read_exploration",
@@ -19,6 +19,23 @@
         "any": [
           "database.logs.query",
           "database.logs.content_analyze"
+        ]
+      },
+      "description": "按时间范围总结工作并复核证据。",
+      "execution": {
+        "effects": [
+          "read"
+        ],
+        "allow_batch": false,
+        "capabilities": [
+          "database.comments.analyze",
+          "database.directory",
+          "database.free.read",
+          "database.logs.analyze",
+          "database.logs.content_analyze",
+          "database.logs.query",
+          "database.report.export",
+          "database.schema"
         ]
       }
     }

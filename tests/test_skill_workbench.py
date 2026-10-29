@@ -20,6 +20,13 @@ class SkillWorkbenchTests(unittest.TestCase):
                   'instructions': '输入用户文字。步骤：区分计划和完成，核对依据。材料不足时追问。'}
         self.d = self.a.save('alice', proposal=self.p, request_key='draft')
 
+    def run_jobs(self, complete):
+        # These assertions concern completed evidence; slice scheduling has its own tests.
+        for _ in range(40):
+            if not self.w.run_once(complete):
+                return
+        self.fail('synthetic jobs did not complete within their bounded evaluation budget')
+
     def evaluate(self, key='eval', **kwargs):
         return self.w.evaluate('alice', draft_id=self.d['draft_id'], expected_revision=1,
             cases=[{'prompt': '计划修复登录问题', 'contains': ['计划'], 'excludes': ['已修复']}], request_key=key, **kwargs)
@@ -31,7 +38,7 @@ class SkillWorkbenchTests(unittest.TestCase):
             self.assertNotIn('已修复', system + prompt)
             self.assertNotIn('contains', system + prompt)
             return {'text': '计划：修复登录问题', 'model': 'test/model'}
-        self.w.run_once(complete)
+        self.run_jobs(complete)
         report = self.w.jobs('alice', j['job_id'])['result']
         self.assertEqual(len(calls), 4)
         self.assertEqual(report['scores']['candidate'], {'passed': 2, 'total': 2})
@@ -44,20 +51,20 @@ class SkillWorkbenchTests(unittest.TestCase):
         def complete(*args):
             self.w.cancel('alice', j['job_id'])
             return {'text': '计划：修复', 'model': 'test'}
-        self.w.run_once(complete)
+        self.run_jobs(complete)
         self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'canceled')
         self.assertIsNone(self.w.jobs('alice', j['job_id'])['result'])
 
     def test_generation_is_atomic_private_and_classified(self):
         j = self.w.generate('alice', material='做个周报助手', request_key='generate')
-        self.w.run_once(lambda *_: {'text': json.dumps({'kind': 'method', 'summary': '提取方法', 'proposal': self.p})})
+        self.run_jobs(lambda *_: {'text': json.dumps({'kind': 'method', 'summary': '提取方法', 'proposal': self.p})})
         done = self.w.jobs('alice', j['job_id'])
         self.assertEqual(done['state'], 'succeeded'); self.assertTrue(done['result']['saved'])
         self.assertEqual(len(self.a.list('alice')['items']), 2)
         self.assertEqual(self.a.list('bob')['items'], [])
         self.assertEqual(self.a.reviews('alice')['items'], [])
         j2 = self.w.generate('alice', material='以后用三段', request_key='preference')
-        self.w.run_once(lambda *_: {'text': '{"kind":"preference","summary":"偏好三段","proposal":null}'})
+        self.run_jobs(lambda *_: {'text': '{"kind":"preference","summary":"偏好三段","proposal":null}'})
         self.assertFalse(self.w.jobs('alice', j2['job_id'])['result']['saved'])
         self.assertEqual(len(self.a.list('alice')['items']), 2)
 
@@ -66,12 +73,12 @@ class SkillWorkbenchTests(unittest.TestCase):
         with self.assertRaises(PermissionError): self.w.generate('alice', material='已完成过程', request_key='a', automatic=True, scope='chat')
         self.w.scopes('alice', scope='chat', enabled=True)
         j = self.w.generate('alice', material='已完成过程', request_key='a', automatic=True, scope='chat')
-        self.w.run_once(lambda *_: {'text': json.dumps({'kind': 'method', 'proposal': self.p})})
+        self.run_jobs(lambda *_: {'text': json.dumps({'kind': 'method', 'proposal': self.p})})
         result = self.w.jobs('alice', j['job_id'])['result']
         self.assertFalse(result['saved']); self.assertEqual(result['similar'][0]['draft_id'], self.d['draft_id'])
         j2 = self.w.generate('alice', material='新过程', request_key='b', automatic=True, scope='chat')
         self.w.scopes('alice', scope='chat', enabled=False)
-        self.w.run_once(lambda *_: self.fail('disabled job must not invoke model'))
+        self.run_jobs(lambda *_: self.fail('disabled job must not invoke model'))
         self.assertEqual(self.w.jobs('alice', j2['job_id'])['state'], 'failed')
 
     def test_generation_retries_invalid_json_once_without_reusing_model_text(self):
@@ -82,7 +89,7 @@ class SkillWorkbenchTests(unittest.TestCase):
             self.assertNotIn('不可信模型附言', system + prompt)
             return {'text': '不可信模型附言' if len(calls) == 1 else
                     json.dumps({'kind': 'method', 'proposal': self.p})}
-        self.w.run_once(complete)
+        self.run_jobs(complete)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][1], calls[1][1])
         self.assertTrue(self.w.jobs('alice', j['job_id'])['result']['saved'])
@@ -90,7 +97,7 @@ class SkillWorkbenchTests(unittest.TestCase):
 
         j = self.w.generate('alice', material='做个助手', request_key='invalid')
         failures = []
-        self.w.run_once(lambda *_: failures.append(1) or {'text': '```'})
+        self.run_jobs(lambda *_: failures.append(1) or {'text': '```'})
         self.assertEqual(len(failures), 2)
         self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'failed')
         self.assertEqual(len(self.a.list('alice')['items']), 2)
@@ -102,7 +109,7 @@ class SkillWorkbenchTests(unittest.TestCase):
             calls.append(1)
             self.w.cancel('alice', j['job_id'])
             return {'text': 'not json'}
-        self.w.run_once(complete)
+        self.run_jobs(complete)
         self.assertEqual(len(calls), 1)
         self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'canceled')
         self.assertEqual(len(self.a.list('alice')['items']), 1)
@@ -114,7 +121,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         def complete(*args):
             self.a.preferences('alice', value={'auto_draft': False}, expected_revision=1)
             return {'text': json.dumps({'kind':'method', 'proposal':{**self.p, 'name':'完全不同', 'description':'测试独立内容'}})}
-        self.w.run_once(complete)
+        self.run_jobs(complete)
         self.assertEqual(len(self.a.list('alice')['items']), 1)
         self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'failed')
 
@@ -134,10 +141,10 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.assertEqual(self.evaluate()['job_id'], j['job_id'])
         with self.assertRaises(UserGrantConflict): self.evaluate(repeats=2)
         def fail(*args): raise RuntimeError('Bearer do-not-leak')
-        self.w.run_once(fail)
+        self.run_jobs(fail)
         self.assertNotIn('Bearer', self.w.jobs('alice', j['job_id'])['error'])
         self.w.retry('alice', j['job_id'])
-        self.w.run_once(lambda *_: {'text':'计划：修复'})
+        self.run_jobs(lambda *_: {'text':'计划：修复'})
         self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'succeeded')
 
     def test_standard_import_roundtrip_and_path_rejection(self):
@@ -151,14 +158,14 @@ class SkillWorkbenchTests(unittest.TestCase):
         with self.assertRaises(ValueError): import_standard({'format':'agentskills.files.v1','files':{'SKILL.md':'---\nname: !evil\ndescription: x\n---\nx'}})
 
     def test_failed_evaluation_blocks_submission_and_review_keeps_its_frozen_report(self):
-        self.evaluate(); self.w.run_once(lambda *_: {'text':'已修复'})
+        self.evaluate(); self.run_jobs(lambda *_: {'text':'已修复'})
         t = self.a.test_start('alice', draft_id=self.d['draft_id'], expected_revision=1, profile='use', prompt='试一下', request_key='sample')
         self.a.test_result('alice', test_id=t['test_id'], output='计划修复')
         with self.assertRaisesRegex(ValueError, '未通过'):
             self.a.submit('alice', draft_id=self.d['draft_id'], expected_revision=1, request_key='blocked-submit', reason='发布')
-        self.evaluate('better'); self.w.run_once(lambda *_: {'text':'计划修复'})
+        self.evaluate('better'); self.run_jobs(lambda *_: {'text':'计划修复'})
         r = self.a.submit('alice', draft_id=self.d['draft_id'], expected_revision=1, request_key='submit', reason='发布')
-        self.evaluate('later-failure'); self.w.run_once(lambda *_: {'text':'已修复'})
+        self.evaluate('later-failure'); self.run_jobs(lambda *_: {'text':'已修复'})
         detail = self.a.review_detail(r['request_id'])
         self.assertTrue(detail['quality']['evaluation']['passed'])
         self.assertFalse(self.w.inspect('alice', self.d['draft_id'])['publication_evidence']['profiles'][0]['eligible'])
@@ -174,7 +181,7 @@ class SkillWorkbenchTests(unittest.TestCase):
             cases.append({'prompt':'trigger', 'profile':'fill', 'kind':'trigger', 'expected_trigger':False})
         job = self.w.evaluate('alice', draft_id=draft['draft_id'], expected_revision=draft['revision'],
                               cases=cases, request_key=key, repeats=repeats)
-        self.w.run_once(lambda _system, prompt: {'text': trigger if prompt == 'trigger' else '已完成' if prompt in failed else '计划'})
+        self.run_jobs(lambda _system, prompt: {'text': trigger if prompt == 'trigger' else '已完成' if prompt in failed else '计划'})
         return self.w.jobs('alice', job['job_id'])['result']
 
     def _profile_sample(self, draft, profile='preview'):
@@ -335,7 +342,7 @@ class SkillWorkbenchTests(unittest.TestCase):
 
     def test_previous_report_reuses_only_this_owned_drafts_inputs_across_revisions(self):
         job = self.evaluate(repeats=2)
-        self.w.run_once(lambda *_: {'text': '计划修复'})
+        self.run_jobs(lambda *_: {'text': '计划修复'})
         original = self.w.jobs('alice', job['job_id'])['result']
         second = self.a.save('alice', draft_id=self.d['draft_id'], expected_revision=1,
                              proposal={**self.p, 'instructions': '新修订需重新评测。'}, request_key='revision-2')
@@ -343,7 +350,7 @@ class SkillWorkbenchTests(unittest.TestCase):
             other = self.a.save(owner, proposal=self.p, request_key='other')
             self.w.evaluate(owner, draft_id=other['draft_id'], expected_revision=1,
                             cases=[{'prompt': '别人的问题', 'contains': ['他人']}], request_key='other-eval')
-            self.w.run_once(lambda *_: {'text': '他人'})
+            self.run_jobs(lambda *_: {'text': '他人'})
         inspected = self.w.inspect('alice', self.d['draft_id'])
         previous = inspected['previous_report']
         self.assertEqual(previous['job_id'], job['job_id'])
@@ -356,7 +363,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         with self.assertRaises(KeyError): self.w.inspect('bob', self.d['draft_id'])
         rerun = self.w.evaluate('alice', draft_id=self.d['draft_id'], expected_revision=second['revision'],
             cases=previous['cases'], repeats=previous['repeats'], request_key='rerun')
-        self.w.run_once(lambda *_: {'text': '这次缺少所需关键词'})
+        self.run_jobs(lambda *_: {'text': '这次缺少所需关键词'})
         self.assertFalse(self.w.jobs('alice', rerun['job_id'])['result']['passed'])
         self.assertEqual(self.w.inspect('alice', self.d['draft_id'])['previous_report']['revision'], 2)
 
@@ -511,7 +518,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         d = self.a.save('alice', proposal={**self.p, 'references':{'references/extra.md':'旧资料'}, 'required_resources':{'use':[]}}, request_key='resource')
         self.w.evaluate('alice', draft_id=d['draft_id'], expected_revision=1,
                         cases=[{'prompt':'整理计划', 'contains':['计划']}], request_key='resource-eval')
-        self.w.run_once(lambda *_:{'text':'计划修复'})
+        self.run_jobs(lambda *_:{'text':'计划修复'})
         r = self.a.submit('alice', draft_id=d['draft_id'], expected_revision=1, request_key='resource-submit', reason='个人使用')
         self.a.decide(actor={'role':'admin','username':'admin'},request_id=r['request_id'],decision='approve',reason='核对依据',reviewed_tests=True)
         binding = self.s.skills.bind('alice', d['skill_id'], 'use')
@@ -538,7 +545,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         def complete(*args):
             self.w.cancel('alice',j['job_id'])
             return {'text':json.dumps({'kind':'method','proposal':self.p})}
-        self.w.run_once(complete)
+        self.run_jobs(complete)
         self.assertEqual(len(self.a.list('alice')['items']),1)
         self.assertEqual(self.w.jobs('alice',j['job_id'])['state'],'canceled')
 
@@ -572,7 +579,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.a.save('alice', draft_id=self.d['draft_id'], expected_revision=1,
                     proposal={**self.p,'instructions':'新的方法'}, request_key='update-before-eval')
         self._publish_sample(2)
-        self.w.run_once(lambda *_: {'text':'计划修复登录问题','model':'synthetic'})
+        self.run_jobs(lambda *_: {'text':'计划修复登录问题','model':'synthetic'})
         report = self.w.jobs('alice',job['job_id'])['result']
         self.assertEqual(report['revision'],1)
         self.assertEqual(report['baseline'], {'version':'1.0.0','content_hash':original['content_hash']})
@@ -585,9 +592,9 @@ class SkillWorkbenchTests(unittest.TestCase):
         first = self.evaluate('fixed', repeats=2)
         with self.assertRaises(KeyError):
             self.w.set_regression('alice',draft_id=self.d['draft_id'],expected_revision=1,job_id=first['job_id'])
-        self.w.run_once(lambda *_: {'text':'计划修复'})
+        self.run_jobs(lambda *_: {'text':'计划修复'})
         fixed = self.w.set_regression('alice',draft_id=self.d['draft_id'],expected_revision=1,job_id=first['job_id'])
-        self.evaluate('temporary'); self.w.run_once(lambda *_: {'text':'计划修复'})
+        self.evaluate('temporary'); self.run_jobs(lambda *_: {'text':'计划修复'})
         self.assertEqual(self.w.regression('alice',self.d['draft_id']),fixed)
         self.assertNotIn('passed',fixed)
         self.a.save('alice',draft_id=self.d['draft_id'],expected_revision=1,proposal={**self.p,'instructions':'新方法'},request_key='next')
@@ -624,7 +631,7 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.assertEqual(self.w.load_feedback_history('alice')[0]['feedback']['receipt'],saved)
         cases=[{'prompt':'整理计划','contains':['计划'],'feedback_id':saved['feedback_id']}]
         job=self.w.evaluate('alice',draft_id=self.d['draft_id'],expected_revision=2,cases=cases,request_key='from-feedback')
-        self.w.run_once(lambda *_:{'text':'计划修复'})
+        self.run_jobs(lambda *_:{'text':'计划修复'})
         self.assertEqual(self.w.jobs('alice',job['job_id'])['result']['cases'][0]['feedback_id'],saved['feedback_id'])
         other=self.a.save('alice',proposal={**self.p,'name':'另一助手'},request_key='other')
         with self.assertRaises(KeyError): self.w.evaluate('alice',draft_id=other['draft_id'],expected_revision=1,cases=cases,request_key='forged')

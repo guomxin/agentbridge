@@ -926,6 +926,69 @@ class AdminControlPlaneTests(unittest.TestCase):
 
 
 class AdminHttpServerTests(unittest.TestCase):
+    def test_skill_approval_requires_frozen_problem_reasons_without_blocking_rejection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            service = CentralCapabilityService(home=tmp, base_url="http://127.0.0.1:1/seeyon")
+            control = AdminControlPlane(service=service, identity_store=McpIdentityTokenStore(service.db_path))
+            authoring = service.skill_authoring
+            draft = authoring.save("author", proposal={"name":"复核助手", "description":"整理合成文字",
+                "selection":{"use_when":"整理计划", "not_for":"业务写入", "output":"计划"},
+                "instructions":"只整理给定文字，不补写结果。", "profiles":{"preview":{}, "fill":{}}}, request_key="draft")
+            job = authoring.workbench.evaluate("author", draft_id=draft["draft_id"], expected_revision=1,
+                cases=[{"prompt":"明天修复", "profile":"preview", "contains":["计划"]},
+                       {"prompt":"准备填单", "profile":"fill", "contains":["计划"]},
+                       {"prompt":"整理明天的计划", "profile":"fill", "kind":"trigger", "expected_trigger":True}],
+                request_key="evaluation")
+            for _ in range(40):
+                ran = authoring.workbench.run_once(lambda system, _: {"text":"true" if "判断用户请求" in system else "计划：明天修复。", "model":"synthetic"})
+                if not ran or authoring.workbench.jobs("author", job["job_id"])["state"] in {"succeeded", "failed", "cancelled"}:
+                    break
+            self.assertEqual(authoring.workbench.jobs("author", job["job_id"])["state"], "succeeded")
+            for key in ("0:0:candidate", "0:1:candidate", "0:2:candidate", "0:0:without_skill"):
+                authoring.workbench.review_report("author", job_id=job["job_id"], row_key=key,
+                    status="problem", note="冻结的人工问题", expected_version=0)
+            def submit(key):
+                return authoring.submit("author", draft_id=draft["draft_id"], expected_revision=1,
+                    profiles=["preview"], reason="仅合成验收", request_key=key)["request_id"]
+            request_id = submit("submit")
+            authoring.workbench.review_report("author", job_id=job["job_id"], row_key="0:0:candidate",
+                status="acceptable", note="后续修改不得回写已提交证据", expected_version=1)
+            for role in ("admin", "auditor"):
+                control.accounts.create(username=role, password=PASSWORD, role=role, must_change_password=False)
+            port = _free_port(); origin = f"http://127.0.0.1:{port}"
+            server = create_admin_http_server(control_plane=control, config=validate_admin_server_config(
+                host="127.0.0.1", port=port, public_base_url=origin, tls_cert=None, tls_key=None))
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            try:
+                cookies = {}
+                for role in ("admin", "auditor"):
+                    status, headers, _ = _request(port, "POST", "/api/login", origin=origin,
+                        body={"username":role, "password":PASSWORD})
+                    self.assertEqual(status, 200); cookies[role] = _cookies(headers)
+                def post(body, role="admin"):
+                    return _request(port, "POST", "/api/skill-reviews", origin=origin, cookies=cookies[role],
+                        csrf=cookies[role]["agentbridge_admin_csrf"], body=body)
+                status, _, frozen = _request(port, "GET", "/api/skill-reviews?id=" + request_id, cookies=cookies["auditor"])
+                self.assertEqual(status, 200)
+                self.assertEqual({p["row_key"] for p in frozen["quality"]["candidate_problems"]}, {"0:0:candidate", "0:2:candidate"})
+                self.assertEqual(frozen["quality"]["evaluation"]["reviews"]["0:0:candidate"]["status"], "problem")
+                decision = {"request_id":request_id, "decision":"approve", "reviewed_tests":True, "reason":"已核对冻结问题"}
+                self.assertEqual(post(decision)[0], 400)
+                accepted = {"0:0:candidate":"本次仅展示计划，已人工核对原文。", "0:2:candidate":"明确限制适用范围，由用户主动选择。"}
+                self.assertEqual(post({**decision, "problem_resolutions":{**accepted, "0:1:candidate":"其他模式"}})[0], 400)
+                self.assertEqual(post({**decision, "problem_resolutions":{**accepted, "0:0:candidate":" "}})[0], 400)
+                self.assertEqual(post({**decision, "problem_resolutions":accepted}, "auditor")[0], 403)
+                self.assertEqual(post({**decision, "problem_resolutions":accepted})[0], 200)
+                _, _, published = _request(port, "GET", "/api/skill-reviews?id=" + request_id, cookies=cookies["auditor"])
+                self.assertEqual(published["state"], "published")
+                self.assertEqual(published["quality"]["problem_resolutions"], accepted)
+                self.assertEqual(published["quality"]["evaluation"], frozen["quality"]["evaluation"])
+                for choice in ("changes_requested", "rejected"):
+                    next_id = submit(choice)
+                    self.assertEqual(post({"request_id":next_id, "decision":choice, "reason":"请先修正问题"})[0], 200)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=5)
+
     def test_user_grants_and_token_renewal_http_require_admin_and_revision(self) -> None:
         with TemporaryDirectory() as tmp:
             service = CentralCapabilityService(home=tmp, base_url="http://127.0.0.1:1/seeyon")

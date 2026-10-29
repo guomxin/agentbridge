@@ -54,7 +54,7 @@ class QueueFixture:
     def event(self, db, owner, kind, object_id, payload):
         assert db.in_transaction
         state = db.execute('SELECT state FROM skill_jobs WHERE job_id=?', (object_id,)).fetchone()[0]
-        assert state == {'job.queued': 'queued', 'job.canceled': 'canceled'}[kind]
+        assert state == {'job.queued': 'queued', 'job.canceled': 'canceled', 'job.claimed': 'running'}[kind]
         db.execute('INSERT INTO skill_authoring_events VALUES (?,?,?,?,?,?)',
                    (str(uuid4()), owner, kind, object_id, json.dumps(payload), self.stamp()))
         self.events.append((owner, kind, object_id, payload))
@@ -160,7 +160,7 @@ def test_owner_isolation_public_shape_and_newest_first(fixture):
         with pytest.raises(KeyError, match='后台任务不存在或不可访问'):
             operation('bob', first['job_id'])
     assert set(first) == {'job_id', 'kind', 'state', 'attempts', 'error', 'created_at', 'updated_at',
-                          'draft_id', 'revision', 'name', 'automatic', 'scope', 'progress', 'result'}
+                          'draft_id', 'revision', 'name', 'automatic', 'scope', 'progress', 'progress_stats', 'result'}
     assert first['progress'] == 0 and first['result'] is None
 
 
@@ -309,7 +309,7 @@ def test_cancel_is_idempotent_and_revokes_running_worker(fixture, claim_first):
     claimed = fixture.queue.claim() if claim_first else None
     assert fixture.queue.cancel('alice', queued['job_id'])['state'] == 'canceled'
     assert fixture.queue.cancel('alice', queued['job_id'])['state'] == 'canceled'
-    assert [event[1] for event in fixture.events] == ['job.queued', 'job.canceled']
+    assert [event[1] for event in fixture.events] == ['job.queued'] + (['job.claimed'] if claim_first else []) + ['job.canceled']
     assert len(fixture.wakes) == 1
     if claimed:
         with pytest.raises(UserGrantConflict):
@@ -327,7 +327,7 @@ def test_cancel_event_failure_rolls_back_state_and_claim_token(fixture):
     assert fixture.raw(queued['job_id'])['claim_token'] == claimed['claim_token']
     assert fixture.queue.jobs('alice', queued['job_id'])['state'] == 'running'
     with closing(fixture.connect()) as db:
-        assert db.execute('SELECT count(*) FROM skill_authoring_events').fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM skill_authoring_events').fetchone()[0] == 2
 
 
 def test_retry_preserves_attempts_progress_and_daily_identity(fixture):
@@ -347,7 +347,7 @@ def test_retry_preserves_attempts_progress_and_daily_identity(fixture):
     with pytest.raises(ValueError, match='最多尝试三次'):
         fixture.queue.retry('alice', queued['job_id'])
     assert len(fixture.wakes) == 3
-    assert len(fixture.events) == 1
+    assert [event[1] for event in fixture.events] == ['job.queued'] + ['job.claimed'] * 3
 
 
 def test_scope_reduction_blocks_active_and_retry_without_discarding_progress(fixture):
@@ -386,3 +386,139 @@ def test_latest_report_filters_owner_draft_revision_kind_and_state_on_same_conne
     fixture.complete('alice', 'newest', payload={'draft_id': 'draft', 'revision': 1})
     with closing(fixture.connect()) as db:
         assert fixture.queue.latest_report(db, 'alice', 'draft', 1) == {'key': 'newest'}
+
+
+def test_slices_rotate_owners_then_jobs_even_with_identical_timestamps(fixture):
+    alice_first = fixture.queue.enqueue('alice', 'evaluation', {}, 'alice-first')
+    alice_second = fixture.queue.enqueue('alice', 'evaluation', {}, 'alice-second')
+    bob = fixture.queue.enqueue('bob', 'evaluation', {}, 'bob')
+    expected = [alice_first, bob, alice_second, bob, alice_first, bob]
+    for index, queued in enumerate(expected):
+        claimed = fixture.queue.claim()
+        assert claimed['job_id'] == queued['job_id']
+        assert claimed['attempts'] == 1
+        fixture.queue.yield_job(claimed, [{'key': str(index), 'output': 'done'}])
+        current = fixture.queue.jobs(claimed['owner_subject'], claimed['job_id'])
+        assert current['state'] == 'queued' and current['attempts'] == 0
+        assert current['progress_stats']['unrecorded_calls_possible'] is False
+        with pytest.raises(UserGrantConflict):
+            fixture.queue.active(claimed)
+        with pytest.raises(UserGrantConflict):
+            fixture.queue.yield_job(claimed, [])
+
+
+def test_claim_event_failure_rolls_back_claim_and_service_order(fixture):
+    queued = fixture.queue.enqueue('alice', 'evaluation', {}, 'job')
+    fixture.fail_event = 'job.claimed'
+    with pytest.raises(RuntimeError, match='event storage unavailable'):
+        fixture.queue.claim()
+    assert fixture.raw(queued['job_id'])['state'] == 'queued'
+    assert fixture.raw(queued['job_id'])['attempts'] == 0
+    with closing(fixture.connect()) as db:
+        assert db.execute("SELECT count(*) FROM skill_authoring_events WHERE kind='job.claimed'").fetchone()[0] == 0
+
+
+def test_yield_rejects_cancellation_or_revoked_automatic_scope(fixture):
+    queued = fixture.queue.enqueue('alice', 'evaluation', {}, 'cancel')
+    job = fixture.queue.claim()
+    fixture.queue.cancel('alice', queued['job_id'])
+    with pytest.raises(UserGrantConflict):
+        fixture.queue.yield_job(job, [{'key': 'untrusted'}])
+    assert fixture.queue.jobs('alice', queued['job_id'])['progress'] == 0
+    assert fixture.queue.jobs('alice', queued['job_id'])['progress_stats']['unrecorded_calls_possible'] is True
+    fixture.allow()
+    automatic = fixture.queue.enqueue('alice', 'generation', {'automatic': True, 'scope': 'chat'}, 'auto')
+    active = fixture.queue.claim()
+    fixture.allow(enabled=False)
+    with pytest.raises(PermissionError):
+        fixture.queue.yield_job(active, [])
+    assert fixture.raw(automatic['job_id'])['state'] == 'running'
+
+
+def test_failure_retry_and_lease_recovery_preserve_progress_across_normal_yields(fixture):
+    queued = fixture.queue.enqueue('alice', 'evaluation', {}, 'retry-slices')
+    first = fixture.queue.claim()
+    progress = [{'key': 'first', 'output': 'done', 'usage': {'input': 1, 'output': 2, 'totalTokens': 3, 'cost_estimate_usd': .1}}]
+    fixture.queue.active(first, progress)
+    fixture.queue.finish(first, error='failed after an unknown call')
+    fixture.queue.retry('alice', queued['job_id'])
+    resumed = fixture.queue.claim()
+    assert resumed['attempts'] == 2 and json.loads(resumed['progress_json']) == progress
+    fixture.queue.yield_job(resumed, progress)
+    current = fixture.queue.jobs('alice', queued['job_id'])
+    assert current['attempts'] == 1 and current['state'] == 'queued'
+    assert current['progress_stats']['unrecorded_calls_possible'] is True
+    assert current['progress_stats']['cost_complete'] is False
+    active = fixture.queue.claim()
+    assert active['attempts'] == 2
+    fixture.time += timedelta(minutes=6)
+    recovered = fixture.queue.claim()
+    assert recovered['attempts'] == 3 and json.loads(recovered['progress_json']) == progress
+    with pytest.raises(UserGrantConflict):
+        fixture.queue.yield_job(active, [])
+    fixture.queue.yield_job(recovered, progress)
+    assert fixture.queue.claim()['attempts'] == 3
+
+
+def test_cancel_serializes_its_observed_state_with_concurrent_completion(fixture):
+    queued = fixture.queue.enqueue('alice', 'evaluation', {}, 'cancel-complete-race')
+    job = fixture.queue.claim()
+    observed, release = threading.Event(), threading.Event()
+
+    class PausedRead:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            self.cursor.close()
+            observed.set()
+            assert release.wait(5), 'cancellation barrier was not released'
+            return row
+
+    class PausedConnection:
+        def __init__(self):
+            self.db = fixture.connect()
+
+        def __enter__(self):
+            self.db.__enter__()
+            return self
+
+        def __exit__(self, *arguments):
+            return self.db.__exit__(*arguments)
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+        def execute(self, sql, *arguments):
+            cursor = self.db.execute(sql, *arguments)
+            if sql.startswith('SELECT * FROM skill_jobs WHERE job_id=? AND owner_subject=?'):
+                return PausedRead(cursor)
+            return cursor
+
+    cancel_queue = fixture.make_queue()
+    cancel_queue._connect = PausedConnection
+    completing_queue = fixture.make_queue()
+    completing_queue._connect = lambda: sqlite3.connect(fixture.path, timeout=0)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        canceling = executor.submit(cancel_queue.cancel, 'alice', queued['job_id'])
+        try:
+            assert observed.wait(5)
+            # A worker cannot complete between the cancellation read and its write.
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                completing_queue.finish(job, result={'saved': True})
+        finally:
+            release.set()
+        assert canceling.result(timeout=5)['state'] == 'canceled'
+    fixture.queue.finish(job, result={'saved': True})
+    current = fixture.queue.jobs('alice', queued['job_id'])
+    assert current['state'] == 'canceled' and current['result'] is None
+
+
+def test_completion_before_cancel_preserves_the_success_receipt(fixture):
+    queued = fixture.queue.enqueue('alice', 'generation', {}, 'completed-before-cancel')
+    job = fixture.queue.claim()
+    fixture.queue.finish(job, result={'saved': True})
+    canceled = fixture.queue.cancel('alice', queued['job_id'])
+    assert canceled['state'] == 'succeeded' and canceled['result'] == {'saved': True}
+    assert not any(event[1] == 'job.canceled' for event in fixture.events)

@@ -101,6 +101,10 @@ class WorkspaceApplication:
     def _skill_completion(self, system: str, prompt: str) -> dict:
         return self._gateway().call('agentbridge.skills.complete', {'system': system, 'prompt': prompt}, timeout_seconds=100)
 
+    def skill_authoring_catalog(self):
+        from agentbridge.core.skill_catalog import authoring_catalog
+        return authoring_catalog(self.service)
+
     def _capture_skill_method(self, capture):
         try:
             dispatch = self.store.get_host_dispatch(capture['dispatch_id'], user_subject=capture['owner_subject'])

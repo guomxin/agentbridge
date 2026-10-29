@@ -2916,11 +2916,20 @@ class WorkspaceHttpServerTests(unittest.TestCase):
                 self.assertEqual([x["skill_id"] for x in history["items"]], ["oa-work-log"])
 
                 self.assertEqual(_request(port, "GET", "/api/skill-drafts")[0], 401)
+                self.assertEqual(_request(port, "GET", "/api/skill-authoring-catalog")[0], 401)
+                status, _, editing_catalog = _request(port, "GET", "/api/skill-authoring-catalog", cookies=cookies)
+                self.assertEqual(status, 200)
+                self.assertEqual(editing_catalog["schema"], "agentbridge.skill-authoring-catalog.v1")
+                self.assertTrue(editing_catalog["business"])
+                self.assertTrue(all("inputSchema" not in item for item in editing_catalog["capabilities"]))
                 proposal={"name":"周报助手","description":"归纳输入","selection":{"use_when":"周报","not_for":"业务写入","output":"摘要"},"instructions":"根据输入归纳，不编造。"}
                 draft_body={"action":"save","data":{"proposal":proposal,"request_key":"http-draft"}}
                 self.assertEqual(_request(port,"POST","/api/skill-drafts",origin=origin,cookies=cookies,body=draft_body)[0],401)
                 status,_,saved=_request(port,"POST","/api/skill-drafts",origin=origin,cookies=cookies,csrf=cookies["agentbridge_workspace_csrf"],body=draft_body)
                 self.assertEqual(status,200)
+                detail_status, _, detail = _request(port, "GET", "/api/skill-drafts?id=" + saved["draft_id"], cookies=cookies)
+                self.assertEqual(detail_status, 200)
+                self.assertEqual(detail["authoring_catalog"], editing_catalog)
                 other=service.skill_authoring.save("user-b",proposal=proposal,request_key="other")
                 self.assertEqual(_request(port,"GET","/api/skill-drafts?id="+other["draft_id"],cookies=cookies)[0],404)
                 status,_,drafts=_request(port,"GET","/api/skill-drafts",cookies=cookies)

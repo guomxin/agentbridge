@@ -20,10 +20,17 @@ class SkillReportReviewTests(unittest.TestCase):
             'instructions':'输入用户原文，步骤：区分完成和计划，缺失时追问，核对原文。'}
         self.draft = self.authoring.save('alice', proposal=self.proposal, request_key='draft')
 
+    def run_jobs(self, complete):
+        # These assertions concern completed evidence; slice scheduling has its own tests.
+        for _ in range(40):
+            if not self.workbench.run_once(complete):
+                return
+        self.fail('synthetic jobs did not complete within their bounded evaluation budget')
+
     def evaluate(self, key='first', *, revision=1, text='计划：修复', model='test/model', repeats=1):
         job = self.workbench.evaluate('alice', draft_id=self.draft['draft_id'], expected_revision=revision,
             cases=[{'prompt':'明天修复','contains':['计划']}], repeats=repeats, request_key=key)
-        self.workbench.run_once(lambda *_: {'text':text,'model':model})
+        self.run_jobs(lambda *_: {'text':text,'model':model})
         return self.workbench.jobs('alice', job['job_id'])['result']
 
     def review(self, report, **changes):
@@ -117,3 +124,69 @@ class SkillReportReviewTests(unittest.TestCase):
         comparison = compare_reports(first,second)
         self.assertEqual(comparison['models'],'changed')
         self.assertEqual(comparison['regressed_cases'],[])
+
+    def test_candidate_problems_need_exact_admin_reasons_and_keep_frozen_reviews(self):
+        report = self.evaluate()
+        self.review(report)
+        request = self.authoring.submit('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+                                        request_key='problem-submit', reason='个人使用')
+        detail = self.authoring.review_detail(request['request_id'])
+        frozen = deepcopy(detail['quality']['evaluation'])
+        self.assertEqual([p['row_key'] for p in detail['quality']['candidate_problems']], ['0:0:candidate'])
+        self.review(report, status='acceptable', note='稍后改成可接受', expected_version=1)
+        args = {'actor': {'username': 'admin', 'role': 'admin'}, 'request_id': request['request_id'],
+                'decision': 'approve', 'reason': '已复核', 'reviewed_tests': True}
+        for reasons in (None, {}, {'0:0:candidate': ' '}, {'0:0:candidate': 'x' * 1001},
+                        {'0:0:candidate': '接受', '0:0:without_skill': '接受'}, {'0:0:candidate': True}):
+            with self.subTest(reasons=reasons), self.assertRaises(ValueError):
+                self.authoring.decide(**args, problem_resolutions=reasons)
+        self.assertEqual(self.authoring.review_detail(request['request_id'])['state'], 'submitted')
+        with self.assertRaises(PermissionError):
+            self.authoring.decide(**{**args, 'actor': {'role': 'viewer'}}, problem_resolutions={'0:0:candidate': '接受'})
+        reasons = {'0:0:candidate': '仅保留为合成示例，实际使用必须以原文核对。'}
+        def fail(*_): raise RuntimeError('audit unavailable')
+        with self.assertRaises(RuntimeError):
+            self.authoring.decide(**args, problem_resolutions=reasons, audit_callback=fail)
+        self.assertNotIn('problem_resolutions', self.authoring.review_detail(request['request_id'])['quality'])
+        self.authoring.decide(**args, problem_resolutions=reasons)
+        quality = self.authoring.review_detail(request['request_id'])['quality']
+        self.assertEqual(quality['problem_resolutions'], reasons)
+        self.assertEqual(quality['evaluation'], frozen)
+        self.assertEqual(quality['candidate_problems'][0]['review_version'], 1)
+        self.assertTrue(quality['evaluation']['passed'])
+
+    def test_only_selected_candidate_output_and_shared_trigger_need_resolution(self):
+        proposal = {**self.proposal, 'profiles': {'preview': {}, 'fill': {}}}
+        self.authoring.save('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+                            proposal=proposal, request_key='two-modes')
+        job = self.workbench.evaluate('alice', draft_id=self.draft['draft_id'], expected_revision=2,
+            cases=[{'prompt': '预览计划', 'profile': 'preview', 'contains': ['计划']},
+                   {'prompt': '填写计划', 'profile': 'fill', 'contains': ['计划']},
+                   {'prompt': '整理周报', 'profile': 'fill', 'kind': 'trigger', 'expected_trigger': True}], request_key='modes')
+        self.run_jobs(lambda system, _: {'text': 'true' if 'true 或 false' in system else '计划：修复', 'model': 'synthetic'})
+        for row_key in ('0:0:candidate', '0:1:candidate', '0:2:candidate', '0:0:without_skill'):
+            self.workbench.review_report('alice', job_id=job['job_id'], row_key=row_key,
+                status='problem', note='需要解释', expected_version=0)
+        request = self.authoring.submit('alice', draft_id=self.draft['draft_id'], expected_revision=2,
+            request_key='selected', reason='仅预览', profiles=['preview'])
+        quality = self.authoring.review_detail(request['request_id'])['quality']
+        self.assertEqual([p['row_key'] for p in quality['candidate_problems']], ['0:0:candidate', '0:2:candidate'])
+        result = self.authoring.decide(actor={'username': 'admin', 'role': 'admin'}, request_id=request['request_id'],
+            decision='approve', reason='逐项核对', reviewed_tests=True,
+            problem_resolutions={'0:0:candidate': '该合成输入的差异可接受', '0:2:candidate': '触发范围已逐句核对'})
+        self.assertEqual(result['state'], 'published')
+
+    def test_problem_can_be_returned_without_acceptance_or_retested(self):
+        report = self.evaluate()
+        self.review(report)
+        request = self.authoring.submit('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+            request_key='return', reason='个人使用')
+        self.authoring.decide(actor={'username': 'admin', 'role': 'admin'}, request_id=request['request_id'],
+            decision='changes_requested', reason='请修正问题')
+        self.evaluate('new-report')
+        request = self.authoring.submit('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+            request_key='retest', reason='已重新评测')
+        self.assertEqual(self.authoring.review_detail(request['request_id'])['quality']['candidate_problems'], [])
+        result = self.authoring.decide(actor={'username': 'admin', 'role': 'admin'}, request_id=request['request_id'],
+            decision='approve', reason='新结果已核对', reviewed_tests=True)
+        self.assertEqual(result['state'], 'published')

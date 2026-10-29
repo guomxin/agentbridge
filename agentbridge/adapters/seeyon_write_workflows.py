@@ -580,6 +580,7 @@ OA_WRITE_DECLARATIONS: dict[str, WriteWorkflowDefinition | WritePrepareAliasDefi
             effect="controlled_write",
             adapter="seeyon-central",
             workflow="missed-punch-approval-batch-prepare-v1",
+            batch=True,
         ),
     ),
     WORKFLOW_REVOKE_PREPARE_CAPABILITY: WriteWorkflowDefinition(
@@ -637,6 +638,7 @@ OA_WRITE_DECLARATIONS: dict[str, WriteWorkflowDefinition | WritePrepareAliasDefi
             effect="controlled_write",
             adapter="seeyon-central",
             workflow="pending-batch-prepare-v1",
+            batch=True,
         ),
     ),
 }

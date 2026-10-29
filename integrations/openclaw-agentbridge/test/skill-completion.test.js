@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { registerSkillCompletion } from '../lib/skill-completion.js';
+import { registerSkillCompletion, completionUsage } from '../lib/skill-completion.js';
+
+test('usage preserves known tokens and distinguishes missing prices from a known zero estimate', () => {
+  assert.equal(completionUsage(null, {}), null);
+  assert.deepEqual(completionUsage({input:100,output:20,totalTokens:120,cost:{total:0}}, {}),
+    {input:100,output:20,totalTokens:120});
+  assert.deepEqual(completionUsage({input:0,cost:{total:0}}, {cost:{input:2}}), {input:0,cost_estimate_usd:0});
+  assert.deepEqual(completionUsage({input:10,output:-1,totalTokens:'10',cacheRead:5,cacheWrite:Infinity,cost:{total:.01}}, {}),
+    {input:10,cacheRead:5,cost_estimate_usd:.01});
+  assert.equal(completionUsage({input:NaN,cost:{total:Infinity}}, {}), null);
+});
 
 test('workbench completion has no tools, session or client model override', async () => {
   let handler; let scope; let input;

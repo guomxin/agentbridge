@@ -1808,6 +1808,15 @@ td {
 .draft-editor[hidden] { display: none; }
 .draft-editor fieldset { border: 1px solid #dce3ec; border-radius: 10px; padding: 16px; display: grid; gap: 10px; min-width: 0; }
 .draft-editor fieldset legend { padding: 0 6px; color: #43576b; }
+.skill-config { min-width: 0; }
+.skill-config summary { cursor: pointer; overflow-wrap: anywhere; }
+.skill-config-card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 12px 0; min-width: 0; }
+.skill-config-card > div, #skill-configuration { display: grid; gap: 12px; min-width: 0; }
+.skill-config-options { max-height: 220px; overflow: auto; display: grid; gap: 8px; padding: 8px 0; }
+.skill-config label:has(input[type=checkbox]), .skill-config-required label { display: flex; align-items: flex-start; gap: 8px; overflow-wrap: anywhere; }
+.skill-config input[type=checkbox] { width: auto; flex: 0 0 auto; margin: 3px 0 0; }
+.skill-config-text { min-height: 150px; max-height: 360px; resize: vertical; overflow: auto; }
+.skill-config input, .skill-config textarea, .skill-config select { min-width: 0; max-width: 100%; box-sizing: border-box; }
 #skill-recipients label { display: flex; align-items: center; gap: 8px; }
 #skill-recipients input { width: auto; }
 #skill-publication-profiles label { display: flex; align-items: flex-start; gap: 8px; }

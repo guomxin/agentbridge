@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "oa-work-log",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "name": "OA 事项生成工作日志",
   "description": "将 OA 已办和已发事项按来源合并、转换为工作日志草稿，校验来源完整性，提供预览或可信卡核对后提交。",
   "executionMode": "durable_plan",
@@ -12,13 +12,45 @@
     "preview": {
       "all": [
         "oa.workflow.read"
-      ]
+      ],
+      "description": "仅整理来源并预览草稿，不准备业务写入。",
+      "execution": {
+        "effects": [
+          "read"
+        ],
+        "allow_batch": false,
+        "capabilities": [
+          "oa.workflow.detail.get",
+          "oa.workflow.done.list",
+          "oa.workflow.opinions.list",
+          "oa.workflow.pending.list",
+          "oa.workflow.sent.list",
+          "oa.workflow.tracked.list"
+        ]
+      }
     },
     "fill": {
       "all": [
         "oa.workflow.read",
         "taihua.work_log.create"
-      ]
+      ],
+      "description": "按来源准备填写卡，提交仍须独立授权。",
+      "execution": {
+        "effects": [
+          "read",
+          "controlled_write"
+        ],
+        "allow_batch": false,
+        "capabilities": [
+          "oa.workflow.detail.get",
+          "oa.workflow.done.list",
+          "oa.workflow.opinions.list",
+          "oa.workflow.pending.list",
+          "oa.workflow.sent.list",
+          "oa.workflow.tracked.list",
+          "taihua.work_log.create.prepare"
+        ]
+      }
     }
   },
   "selection": {

@@ -39,6 +39,11 @@ SKILL_ACTION_DEFINITIONS = (
     SkillActionDefinition('export', 'authoring', 'export', ('draft_id',)),
     SkillActionDefinition('requests', 'authoring', 'reviews'),
     SkillActionDefinition('inspect', 'workbench', 'inspect', ('draft_id',)),
+    SkillActionDefinition('pending_cases', 'workbench', 'pending_cases', ('draft_id',)),
+    SkillActionDefinition('save_pending_cases', 'workbench', 'save_pending_cases',
+                          ('draft_id', 'expected_revision', 'expected_version', 'value')),
+    SkillActionDefinition('set_regression', 'workbench', 'set_regression_action',
+                          ('draft_id', 'expected_revision', 'job_id')),
     SkillActionDefinition('generate', 'workbench', 'generate', ('material', 'request_key'),
                           ('draft_id', 'expected_revision', 'scope', 'automatic', 'task_ids')),
     SkillActionDefinition('evaluate', 'workbench', 'evaluate',
@@ -63,6 +68,9 @@ SKILL_ACTION_DEFINITIONS = (
 SKILL_ACTIONS: Mapping[str, SkillActionDefinition] = MappingProxyType({
     definition.name: definition for definition in SKILL_ACTION_DEFINITIONS
 })
+
+# The MCP surface and the dispatcher share the same finite action vocabulary.
+SkillActionName = Literal[tuple(SKILL_ACTIONS)]
 
 
 @dataclass(frozen=True)

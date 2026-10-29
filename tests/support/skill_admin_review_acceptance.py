@@ -1,4 +1,4 @@
-"""Isolated Admin review page with frozen manual evidence; never approve it.
+"""Isolated Admin review page with frozen manual evidence and synthetic approval.
 
 Run ``python -m tests.support.skill_admin_review_acceptance --home <empty-dir>``.
 The underlying service rejects business capabilities and downstream workers.
@@ -46,7 +46,7 @@ class SkillAdminReviewAcceptanceFixture(SkillPracticalAcceptanceFixture):
         a.workbench.review_report(OWNER, job_id=job['job_id'], row_key='0:0:candidate',
             status='problem', note='原文没有说尽快明确原因及解决方案，不应补写。', expected_version=0)
         request = a.submit(OWNER, draft_id=draft['draft_id'], expected_revision=1,
-            request_key='admin-review-submission', reason='隔离审批页验收：自动断言通过，人工指出原文外推断。只查看，不批准。')
+            request_key='admin-review-submission', reason='隔离审批页验收：自动断言通过，人工指出原文外推断。仅供合成审批测试。')
         # The submitted evidence must keep the original problem even after a
         # later live review changes. This is synthetic setup, not an approval.
         a.workbench.review_report(OWNER, job_id=job['job_id'], row_key='0:0:candidate',
@@ -64,7 +64,7 @@ class SkillAdminReviewAcceptanceFixture(SkillPracticalAcceptanceFixture):
                 'username': 'reviewadmin', 'synthetic_password': PASSWORD,
                 **self.meta['admin_review'],
                 'expected': '提交时人工复核：有问题；原文没有说尽快明确原因及解决方案，不应补写。',
-                'evidence_boundary': 'Real Admin UI/stores; synthetic output; no business access; view only'}
+                'evidence_boundary': 'Real Admin UI/stores; synthetic output and approval only; no business access'}
 
 
 def main():

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createViewScope, createTimerSlot } from '../agentbridge/admin/static/admin_lifecycle.mjs';
 import { createAdminApi, csrfToken, restoreAdminSession } from '../agentbridge/admin/static/admin_request.mjs';
-import { createModalController } from '../agentbridge/admin/static/admin_forms.mjs';
+import { createModalController, skillReviewDecision } from '../agentbridge/admin/static/admin_forms.mjs';
 import { badge, sessionStateBadge, table, filteredTable, skillReviewQualityHtml, escapeHtml, fmtBytes, fmtDuration } from '../agentbridge/admin/static/admin_presentation.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b)=>{resolve=a;reject=b;}); return {promise,resolve,reject}; };
@@ -196,4 +196,54 @@ test('approval distinguishes old unrecorded human reviews from new unreviewed ou
   assert.match(html,/人工复核：未复核/);
   q.evaluation.reviews={'0:0:candidate':{status:'unexpected',note:'缺少明确判断'}};
   html=skillReviewQualityHtml(q);assert.match(html,/1 项未记录/);assert.match(html,/人工复核：未记录/);
+});
+
+test('approval renders only server-scoped frozen candidate problems for explicit acceptance',()=>{
+  const q={diagnostics:{message:'检查',checks:[]},diff:[],audience_diff:{added:[],removed:[]},
+    candidate_problems:[
+      {row_key:'0:0:candidate',profile:'preview',kind:'output',case:0,repeat:0,note:'<img>补写了原文没有的效果。'},
+      {row_key:'0:2:candidate',profile:'fill',kind:'trigger',case:2,repeat:0,note:'触发范围过宽。'},
+    ],evaluation:{passed:true,limitations:'合成文字',scores:{candidate:{passed:3,total:3}},cases:[{profile:'preview'},{profile:'fill'},{profile:'fill'}],
+      rows:[
+        {key:'0:0:candidate',variant:'candidate',case:0,prompt:'计划修复',output:'<script>计划修复并提高稳定性',passed:true},
+        {key:'0:1:candidate',variant:'candidate',case:1,prompt:'填单',output:'未申请模式的输出',passed:true},
+        {key:'0:2:candidate',variant:'candidate',case:2,prompt:'查询',output:'true',passed:true},
+        {key:'0:0:without_skill',variant:'without_skill',case:0,prompt:'计划修复',output:'基线回答',passed:true},
+      ],reviews:Object.fromEntries(['0:0:candidate','0:1:candidate','0:2:candidate','0:0:without_skill'].map(key=>[key,{status:'problem'}]))}};
+  const before=structuredClone(q),html=skillReviewQualityHtml(q,['preview'],{canReview:true});
+  assert.match(html,/本次申请的候选问题（2 项）/);
+  assert.equal((html.match(/name="problem_resolution_/g)||[]).length,2);
+  assert.match(html,/共用适用场景判断/);
+  assert.match(html,/&lt;img&gt;补写了原文没有的效果/);
+  assert.match(html,/&lt;script&gt;计划修复并提高稳定性/);
+  assert.ok(html.includes('计划修复\n&lt;script&gt;计划修复并提高稳定性'));
+  assert.doesNotMatch(html,/<img>|<script>/);
+  assert.deepEqual(q,before,'rendering preserves frozen evidence');
+  q.problem_resolutions={'0:0:candidate':'本次接受 <限定> 范围','0:2:candidate':'保留人工选择'};
+  const readonly=skillReviewQualityHtml(q,['preview']);
+  assert.doesNotMatch(readonly,/name="problem_resolution_/);
+  assert.match(readonly,/管理员接受理由/);
+  assert.match(readonly,/本次接受 &lt;限定&gt; 范围/);
+  assert.match(readonly,/候选版本：3\/3/);
+});
+
+test('approval requires every frozen problem reason while return and rejection remain usable',()=>{
+  const problems=[{row_key:'0:0:candidate'},{row_key:'0:2:candidate'}];
+  const values=new Map([['decision','approve'],['reason','核对完毕'],['reviewed_tests','on'],['problem_resolution_0','  限定范围可接受  ']]);
+  assert.throws(()=>skillReviewDecision(values,'request',problems),/第 2 项候选问题/);
+  values.set('problem_resolution_1',' '.repeat(20));
+  assert.throws(()=>skillReviewDecision(values,'request',problems),/第 2 项候选问题/);
+  values.set('problem_resolution_1','x'.repeat(1001));
+  assert.throws(()=>skillReviewDecision(values,'request',problems),/1 至 1000 字/);
+  values.set('problem_resolution_1','已核对共用范围');
+  const result=skillReviewDecision(values,'request',problems);
+  assert.deepEqual(result.problem_resolutions,{'0:0:candidate':'限定范围可接受','0:2:candidate':'已核对共用范围'});
+  assert.equal(result.reviewed_tests,true);
+  assert.equal(result.request_id,'request');
+  for(const decision of ['changes_requested','rejected']){
+    values.set('decision',decision);values.delete('problem_resolution_1');
+    assert.equal(skillReviewDecision(values,'request',problems).problem_resolutions,undefined);
+  }
+  values.set('decision','approve');
+  assert.equal(skillReviewDecision(values,'legacy').problem_resolutions,undefined,'old requests with no known problems remain compatible');
 });

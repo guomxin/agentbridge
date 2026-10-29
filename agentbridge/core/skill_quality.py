@@ -18,6 +18,7 @@ from agentbridge.core.skill_contracts import (
 def proposal_from_bundle(bundle):
     m = bundle['manifest']
     return {**{k: m[k] for k in ('name', 'description', 'selection', 'profiles', 'executionMode', 'required_resources')},
+            **({'standard_metadata': m['standard_metadata']} if 'standard_metadata' in m else {}),
             'instructions': bundle['resources']['SKILL.md'],
             'references': {k: v for k, v in bundle['resources'].items() if k != 'SKILL.md'}}
 
@@ -42,7 +43,7 @@ def diagnostics(bundle):
 def bundle_diff(before, after):
     changes = []
     old = before or {'manifest': {}, 'resources': {}}
-    for key in ('name', 'description', 'selection', 'profiles', 'executionMode', 'required_resources'):
+    for key in ('name', 'description', 'selection', 'profiles', 'executionMode', 'required_resources', 'standard_metadata'):
         a, b = old['manifest'].get(key), after['manifest'].get(key)
         if a != b:
             changes.append({'field': key, 'before': a, 'after': b})
@@ -219,10 +220,90 @@ def publication_evidence(bundle, revision, tested_profiles, report):
                        'case_indexes': shared_indexes}, 'profiles': profiles}
 
 
+def candidate_review_problems(report, profiles):
+    """Select unresolved candidate notes from one frozen report, never its controls."""
+    if not report or not isinstance(report.get('reviews'), dict):
+        return []
+    cases, found = report.get('cases', []), []
+    for row in report.get('rows', []):
+        index = row.get('case')
+        if row.get('variant') != 'candidate' or type(index) is not int or not 0 <= index < len(cases):
+            continue
+        case = cases[index]
+        if case.get('kind', 'output') != 'trigger' and case.get('profile', 'use') not in profiles:
+            continue
+        review = report['reviews'].get(row.get('key'), {})
+        if review.get('status') == 'problem':
+            found.append({'row_key': row['key'], 'profile': case.get('profile', 'use'),
+                          'kind': case.get('kind', 'output'), 'case': index, 'repeat': row.get('repeat'),
+                          'note': review.get('note', ''), 'review_version': review.get('version')})
+    return found
+
+
+def standard_document(source, *, required=False):
+    """Read the supported scalar headers and remove repeated pasted headers safely."""
+    metadata = {}
+    body = source
+    while body.startswith(('---\n', '---\r\n')):
+        match = re.match(r'\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)(.*)\Z', body, re.S)
+        probe = match[1] if match else body
+        if (not required or metadata) and not re.search(r'^(?:name|description|license|compatibility):', probe, re.M):
+            break  # A leading Markdown horizontal rule is not a metadata header.
+        if not match:
+            raise ValueError('SKILL.md 缺少完整 YAML 元数据')
+        current = {}
+        for line in match[1].splitlines():
+            if not line.strip() or line.startswith('#'):
+                continue
+            key, sep, value = line.partition(':')
+            if not sep or key not in {'name', 'description', 'license', 'compatibility'} or key in current:
+                raise ValueError('当前导入仅支持 name/description/license/compatibility 标量元数据')
+            value = value.strip()
+            if value.startswith('"'):
+                try: value = json.loads(value)
+                except ValueError as exc: raise ValueError('元数据引号格式无效') from exc
+            elif value.startswith("'") and value.endswith("'"):
+                value = value[1:-1].replace("''", "'")
+            elif any(c in value for c in ('!', '&', '*', '|', '>')):
+                raise ValueError('请将 YAML 元数据转换为单行字符串')
+            if not isinstance(value, str): raise ValueError('元数据必须是字符串')
+            current[key] = value
+        for key in ('license', 'compatibility'):
+            if key in current and key in metadata and current[key] != metadata[key]:
+                raise ValueError('重复 YAML 元数据内容冲突：' + key)
+        # The first title describes the imported package; subsequent pasted
+        # headers cannot replace it. Declarative metadata is never discarded.
+        metadata = {**current, **metadata}
+        body = match[2].lstrip('\r\n')
+    if required and not metadata:
+        raise ValueError('SKILL.md 缺少 YAML 元数据')
+    return metadata, body
+
+
+def normalize_standard_metadata(value):
+    from agentbridge.core.skill_contracts import SkillStandardMetadata
+    from pydantic import ValidationError
+    try:
+        normalized = SkillStandardMetadata.model_validate(value).model_dump(exclude_none=True)
+    except ValidationError as exc:
+        raise ValueError('标准元数据仅支持 license（最多1000字符）和 compatibility（最多500字符）字符串') from exc
+    if any(not v.strip() for v in normalized.values()):
+        raise ValueError('标准元数据不能为空白')
+    return normalized
+
+
 def export_standard(bundle):
     m = bundle['manifest']
-    header = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in [('name', m['id']), ('description', m['description'])])
-    return {'format': 'agentskills.files.v1', 'files': {**bundle['resources'], 'SKILL.md': f'---\n{header}\n---\n\n{bundle["resources"]["SKILL.md"]}'}}
+    embedded, body = standard_document(bundle['resources']['SKILL.md'])
+    metadata = {k: embedded[k] for k in ('license', 'compatibility') if k in embedded}
+    declared = normalize_standard_metadata(m.get('standard_metadata', {}))
+    if any(k in metadata and metadata[k] != v for k, v in declared.items()):
+        raise ValueError('正文与标准元数据冲突，请先修正草稿')
+    metadata.update(declared)
+    metadata = normalize_standard_metadata(metadata)
+    header = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in [
+        ('name', m['id']), ('description', m['description']), *metadata.items()])
+    return {'format': 'agentskills.files.v1', 'files': {**bundle['resources'], 'SKILL.md': f'---\n{header}\n---\n\n{body}'}}
 
 
 def import_standard(package):
@@ -235,34 +316,17 @@ def import_standard(package):
     if sum(len(v) for v in files.values()) > 48000:
         raise ValueError('Skill 包过大')
     source = files.get('SKILL.md', '')
-    match = re.match(r'\A---\r?\n(.*?)\r?\n---\r?\n(.*)\Z', source, re.S)
-    if not match:
-        raise ValueError('SKILL.md 缺少 YAML 元数据')
-    meta = {}
-    for line in match[1].splitlines():
-        if not line.strip() or line.startswith('#'):
-            continue
-        key, sep, value = line.partition(':')
-        if not sep or key not in {'name', 'description', 'license', 'compatibility'} or key in meta:
-            raise ValueError('当前导入仅支持 name/description/license/compatibility 标量元数据')
-        value = value.strip()
-        if value.startswith('"'):
-            try: value = json.loads(value)
-            except ValueError as exc: raise ValueError('元数据引号格式无效') from exc
-        elif value.startswith("'") and value.endswith("'"):
-            value = value[1:-1].replace("''", "'")
-        elif any(c in value for c in ('!', '&', '*', '|', '>')):
-            raise ValueError('请将 YAML 元数据转换为单行字符串')
-        if not isinstance(value, str): raise ValueError('元数据必须是字符串')
-        meta[key] = value
+    meta, body = standard_document(source, required=True)
     name = meta.get('name', '')
     if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name) or len(name) > 64:
         raise ValueError('标准名称必须是最多 64 字符的小写字母数字及连字符')
     desc = meta.get('description', '')
     if not desc or len(desc) > 500:
         raise ValueError('当前平台简介需为 1 至 500 字符')
+    metadata = normalize_standard_metadata({k: meta[k] for k in ('license', 'compatibility') if k in meta})
     return {'name': name, 'description': desc, 'selection': {'use_when': desc, 'not_for': '未声明的业务操作与外部能力', 'output': '按照方法说明输出，发布前复核'},
-            'instructions': match[2], 'references': {k: v for k, v in files.items() if k != 'SKILL.md'}, 'profiles': {'use': {}}}
+            'instructions': body, 'references': {k: v for k, v in files.items() if k != 'SKILL.md'}, 'profiles': {'use': {}},
+            **({'standard_metadata': metadata} if metadata else {})}
 
 
 def case_fingerprint(cases, repeats):

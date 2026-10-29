@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from agentbridge.core.user_grants import UserGrantConflict
 from agentbridge.core.store_transactions import store_transaction
+from agentbridge.core.skill_execution import effective_skill_execution, validate_skill_execution
 
 PROTOCOL = "agentbridge.skills.v1"
 META_KEY = "agentbridge/skill"
@@ -83,8 +84,11 @@ def validate_skill_bundle(manifest, resources):
             raise ValueError("invalid Skill required resource")
     from agentbridge.core.user_grants import PERMISSIONS
     for profile, requirements in manifest["profiles"].items():
-        if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", profile) or not isinstance(requirements, dict) or set(requirements) - {"all", "any", "database"}:
-            raise ValueError('模式仅允许权限依赖 all、any、database；无需业务权限时使用 {"use":{}}，不要填写 description 或 tools')
+        if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", profile) or not isinstance(requirements, dict) or set(requirements) - {"all", "any", "database", "description", "execution"}:
+            raise ValueError('模式仅允许 all、any、database、description 和 execution；无需业务权限时使用 {"use":{}}')
+        if 'description' in requirements and (not isinstance(requirements['description'], str) or
+                not requirements['description'].strip() or len(requirements['description']) > 500):
+            raise ValueError('模式说明需要1至500字符')
         for mode in ("all", "any"):
             deps = requirements.get(mode, [])
             if not isinstance(deps, list) or any(not isinstance(p, str) or p not in PERMISSIONS for p in deps):
@@ -94,6 +98,22 @@ def validate_skill_bundle(manifest, resources):
             deps = requirements["database"]
             if not isinstance(deps, dict) or set(deps) - {"all", "any"} or any(not isinstance(v, list) or any(not isinstance(c, str) or c not in CAPABILITIES for c in v) for v in deps.values()):
                 raise ValueError("unknown Skill database dependency")
+        if 'execution' in requirements:
+            from agentbridge.core.skill_contracts import SkillExecution
+            from pydantic import ValidationError
+            policy = requirements['execution']
+            try:
+                SkillExecution.model_validate(policy)
+            except ValidationError as exc:
+                raise ValueError('业务助手执行合同无效') from exc
+            if set(policy) != {'effects', 'allow_batch', 'capabilities'} or policy['capabilities'] is None:
+                raise ValueError('固定版本需要完整执行合同和能力范围')
+            if len(policy['effects']) != len(set(policy['effects'])) or len(policy['capabilities']) != len(set(policy['capabilities'])):
+                raise ValueError('执行合同不能重复声明效果或能力')
+            if any(not re.fullmatch(r'[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+', name) for name in policy['capabilities']):
+                raise ValueError('执行合同能力名称无效')
+            if manifest['executionMode'] == 'read_exploration' and policy['effects'] != ['read']:
+                raise ValueError('只读探索仅允许 read 效果')
     payload = {"manifest": manifest, "resources": resources}
     return {**payload, "content_hash": sha256(_json(payload).encode()).hexdigest()}
 
@@ -401,8 +421,5 @@ def validate_binding(service, subject, binding, *, capability=None):
     state = dependency_state(service, subject, manifest, binding["profile"], binding["settings"]["source_id"])
     if not state["available"]:
         raise SkillRejected("SKILL_DEPENDENCY_UNAVAILABLE", "业务助手依赖不可用：" + "；".join(state["missing"]))
-    if capability and binding["profile"] == "preview":
-        if service.registry.get(capability).effect != "read":
-            raise SkillRejected("SKILL_PREVIEW_ONLY", "本次业务助手仅允许预览")
-    if capability and binding["profile"] == "single" and "batch" in capability:
-        raise SkillRejected("SKILL_SINGLE_ONLY", "本次业务助手仅允许单条办理")
+    if capability:
+        validate_skill_execution(service, binding, capability)

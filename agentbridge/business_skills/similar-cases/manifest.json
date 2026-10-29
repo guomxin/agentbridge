@@ -1,7 +1,7 @@
 {
   "schemaVersion": "agentbridge.skills.v1",
   "id": "similar-cases",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "相似案例检索",
   "description": "从日志中检索类似问题，核对相关性并归并同一事件及后续记录，输出处理措施、明确结果、适用条件、差异和出处。",
   "executionMode": "read_exploration",
@@ -19,6 +19,23 @@
         "any": [
           "database.logs.query",
           "database.logs.content_analyze"
+        ]
+      },
+      "description": "检索并比较有来源的历史处理案例。",
+      "execution": {
+        "effects": [
+          "read"
+        ],
+        "allow_batch": false,
+        "capabilities": [
+          "database.comments.analyze",
+          "database.directory",
+          "database.free.read",
+          "database.logs.analyze",
+          "database.logs.content_analyze",
+          "database.logs.query",
+          "database.report.export",
+          "database.schema"
         ]
       }
     }

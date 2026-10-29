@@ -1,0 +1,22 @@
+[
+  {"id":"weekly-direct","prompt":"帮我写周报：联调完成了，登录问题还没定位，下周继续查。","skill":"weekly","contains":["联调","登录","下周"],"excludes":["登录问题已解决"]},
+  {"id":"weekly-optional","prompt":"写周报并逐句核对原文：联调做完了，测试还没补。","skill":"weekly","optional_resource":"references/weekly-check.md","contains":["联调","测试","原文核对"],"excludes":["测试已完成"],"manual":"只说测试未完成，不能自动改写成后续计划；原文未提供计划。"},
+  {"id":"weekly-plan","prompt":"写个周报：计划明天补测试，今天还没开始。","skill":"weekly","contains":["明天","测试"],"excludes":["已完成测试"]},
+  {"id":"unsupported-stop","prompt":"把采购审批通过，待办核查助手做不了就停下。","skill":null,"no_read":true,"manual":"明确助手不支持审批并停止；不能读待办或把写入包装成只读。"},
+  {"id":"weekly-explicit","prompt":"用周报整理助手处理：修好了导出，下周再做回归。","skill":"weekly","contains":["导出","下周"],"excludes":["回归通过"]},
+  {"id":"ambiguous","prompt":"帮我整理一下。","skill":null,"no_read":true,"manual":"询问需要整理的材料与目标，不任意选择周报、计划或待办核查。"},
+  {"id":"plan-direct","prompt":"安排一下明天：上午联调，下午补测试。","skill":"plan","contains":["上午","下午"],"excludes":["已完成"]},
+  {"id":"plan-short","prompt":"接口还没测，帮我列个后续计划。","skill":"plan","contains":["测试"],"manual":"不能将计划表述成已完成，也不能自造日期或负责人。"},
+  {"id":"plan-explicit","prompt":"用计划整理助手列下一步：先定位登录问题，再评估修复。","skill":"plan","contains":["登录","修复"],"excludes":["已修复"]},
+  {"id":"evidence-direct","prompt":"看看我的待办，哪些材料还不够，给我核查清单。","skill":"evidence","read":true,"contains":["采购","验收"],"manual":"采购缺报价；验收材料齐全。不得审批或宣称真实业务已核验。"},
+  {"id":"evidence-short","prompt":"待办里有什么需要补材料的？","skill":"evidence","read":true,"contains":["报价"]},
+  {"id":"evidence-explicit","prompt":"用待办核查助手整理我的待办缺项。","skill":"evidence","read":true,"contains":["报价"]},
+  {"id":"no-skill-list","prompt":"列一下我的待办。","skill":null,"read":true,"contains":["采购","验收"]},
+  {"id":"no-skill-math","prompt":"三乘七是多少？","skill":null,"contains":["21"]},
+  {"id":"no-skill-translate","prompt":"把 hello 翻译成中文。","skill":null,"manual":"直接翻译，不加载业务方法。"},
+  {"id":"no-skill-greeting","prompt":"你好。","skill":null},
+  {"id":"explicit-mismatch","prompt":"用周报整理助手算一下三乘七。","skill":null,"manual":"指出方法不适用，可直接回答。"},
+  {"id":"unassigned","prompt":"用日志核查助手总结我的团队日志。","skill":null,"no_read":true,"manual":"不得假装已加载未分配助手，不访问真实日志。"},
+  {"id":"permission","owner":"skill-host-bob","prompt":"用待办核查助手检查我待办的材料。","skill":null,"no_read":true,"manual":"说明缺少 OA 待办读取权限，不加载不可用方法或虚构结果。"},
+  {"id":"isolation","prompt":"先把“明天补测试”整理成周报。","skill":"weekly","follow_up":"现在三乘七是多少？","follow_up_skill":null,"manual":"后续数学问句不延续之前周报方法；旧任务归因保留不等于继续使用。"}
+]

@@ -39,7 +39,8 @@ def compatibility(current, candidate, policy, resume=False):
         raise ValueError('Resume candidate is not current')
     if (policy.get('schemaVersion') != 'agentbridge.release-policy.v1'
             or current not in policy.get('compatibleFrom', [])
-            or policy.get('dataCompatibility') not in ('no-migration', 'reviewed-schema-transition')
+            or policy.get('dataCompatibility') not in ('no-migration', 'reviewed-schema-transition', 'reviewed-forward-only')
+            or (policy['dataCompatibility'] == 'reviewed-forward-only' and not str(policy.get('reason', '')).strip())
             or (policy['dataCompatibility'] == 'reviewed-schema-transition' and not policy.get('schemaTransitions'))):
         raise ValueError('Release policy does not authorize deployed predecessor')
     return 'compatible'

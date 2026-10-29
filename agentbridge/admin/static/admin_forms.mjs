@@ -1,3 +1,20 @@
+// The server supplies problems from the application’s frozen evidence. These
+// reasons accept a known limitation; they never change a model score or review.
+export function skillReviewDecision(form, requestId, candidateProblems = []) {
+  const decision = form.get("decision");
+  const result = {request_id: requestId, decision,
+    reviewed_tests: form.get("reviewed_tests") === "on", reason: form.get("reason"),
+    manual_quality_reason: form.get("manual_quality_reason") || null};
+  if (decision === "approve" && candidateProblems.length) {
+    result.problem_resolutions = Object.fromEntries(candidateProblems.map((problem, index) => {
+      const reason = String(form.get(`problem_resolution_${index}`) || "").trim();
+      if (!reason || reason.length > 1000) throw new Error(`请为第 ${index + 1} 项候选问题填写 1 至 1000 字的接受理由；也可选择退回修改或拒绝。`);
+      return [problem.row_key, reason];
+    }));
+  }
+  return result;
+}
+
 // The active dialog owns its action and completion; a replaced form cannot be
 // enabled or receive errors from a previous submission.
 export function createModalController({ modal, select, formData = form => new FormData(form) }) {

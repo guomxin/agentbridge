@@ -349,3 +349,44 @@ test('catalog invalidation during first read retries once without returning or c
     assert.equal(router.catalogVersionsForBinding(binding).catalogVersion, current.catalogVersion);
   }
 });
+
+test('explicit contracts scope arbitrary profile names and database capabilities without granting authority', () => {
+  const router = {config:{boundSkillToolGuard:true}}, identity={binding};
+  const execution={legacy:false,effects:['read'],allow_batch:false,
+    capabilities:['oa.workflow.pending.list','database.logs.query']};
+  rememberSkillBinding(router,context,identity,{status:'succeeded',binding_id:'contract-binding',
+    skill_id:'custom-review',profile:'anything',execution});
+  execution.capabilities.push('oa.leave.prepare'); // payload mutation cannot widen a remembered binding
+  for (const name of ['exec','oa_leave_prepare','oa_workflow_pending_batch_prepare'])
+    assert.equal(boundSkillToolGuard(router,context,identity,name,{}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+  for (const name of ['oa_workflow_pending_list','oa_session_login','agentbridge_task_get','agentbridge_task_plan_prepare'])
+    assert.equal(boundSkillToolGuard(router,context,identity,name,{}),null);
+  assert.equal(boundSkillToolGuard(router,context,identity,'database_execute',{capability:'database.logs.query'}),null);
+  assert.equal(boundSkillToolGuard(router,context,identity,'database_execute',{capability:'database.free.read'}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+  assert.equal(boundSkillToolGuard(router,context,identity,'agentbridge_skill_get',{skill_id:'custom-review',profile:'different'}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+  assert.deepEqual(skillBindingMeta(router,context,identity),{'agentbridge/skill':{bindingId:'contract-binding'}});
+});
+
+test('pure text and malformed new contracts fail closed while legacy bindings retain compatibility', () => {
+  for (const execution of [{legacy:false,effects:['read'],allow_batch:false,capabilities:[]},{legacy:false,capabilities:null}]) {
+    const router={config:{boundSkillToolGuard:true}},identity={binding};
+    rememberSkillBinding(router,context,identity,{status:'succeeded',binding_id:'pure',skill_id:'weekly',profile:'use',execution});
+    for (const tool of ['database_execute','oa_workflow_pending_list','agentbridge_task_plan_prepare','exec'])
+      assert.equal(boundSkillToolGuard(router,context,identity,tool,{}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+    assert.equal(boundSkillToolGuard(router,context,identity,'agentbridge_skill_authoring',{action:'resource',data:{binding_id:'pure'}}),null);
+  }
+  const router={config:{boundSkillToolGuard:true}},identity={binding};
+  rememberSkillBinding(router,context,identity,{status:'succeeded',binding_id:'old',skill_id:'legacy',profile:'review',
+    execution:{legacy:true,effects:['read'],allow_batch:true,capabilities:null}});
+  assert.equal(boundSkillToolGuard(router,context,identity,'database_execute',{capability:'database.logs.query'}),null);
+});
+
+test('database export cannot smuggle a query outside the fixed contract, while receipt download remains available', () => {
+  const router={config:{boundSkillToolGuard:true}},identity={binding};
+  rememberSkillBinding(router,context,identity,{status:'succeeded',binding_id:'export',skill_id:'report',profile:'use',
+    execution:{legacy:false,effects:['read'],allow_batch:false,capabilities:['database.logs.query','database.report.export']}});
+  const guard=params=>boundSkillToolGuard(router,context,identity,'database_execute',params);
+  assert.equal(guard({capability:'database.report.export',arguments:{query_capability:'database.logs.query'}}),null);
+  assert.equal(guard({capability:'database.report.download',arguments:{report_id:'owned-receipt'}}),null);
+  assert.equal(guard({capability:'database.report.export',arguments:{query_capability:'database.free.read'}}).error.code,'SKILL_TOOL_SCOPE_REQUIRED');
+});

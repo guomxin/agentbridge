@@ -1,5 +1,21 @@
 // Text-only model boundary for the central durable workbench. This never creates
 // an agent session, installs tools, or reads a user's conversation/workspace.
+export function completionUsage(usage, model) {
+  if (!usage || typeof usage !== 'object') return null;
+  const value = {};
+  for (const key of ['input', 'output', 'totalTokens', 'cacheRead', 'cacheWrite']) {
+    if (Number.isSafeInteger(usage[key]) && usage[key] >= 0) value[key] = usage[key];
+  }
+  const cost = usage.cost?.total;
+  const priced = Object.values(model?.cost || {}).some(rate => typeof rate === 'number' && Number.isFinite(rate) && rate > 0);
+  if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0
+      && (cost > 0 || priced || usage.cost?.totalOrigin === 'provider-billed')) {
+    value.cost_estimate_usd = cost;
+  }
+  // A missing price table is unknown cost, never proof that a run was free.
+  return Object.keys(value).length ? value : null;
+}
+
 export function registerSkillCompletion(api, { loadSdk } = {}) {
   if (typeof api.registerGatewayMethod !== 'function') return;
   let busy = false;
@@ -27,7 +43,7 @@ export function registerSkillCompletion(api, { loadSdk } = {}) {
       const text = (result.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
       if (!text.trim() || text.length > 48000) throw new Error('invalid output');
       respond(true, { text, model: `${prepared.model.provider}/${prepared.model.id}`,
-        usage: result.usage ? { input: result.usage.input, output: result.usage.output, totalTokens: result.usage.totalTokens } : null,
+        usage: completionUsage(result.usage, prepared.model),
         execution: 'tool_free_completion' });
     } catch {
       // Provider errors can contain URLs or authentication material. Never echo.

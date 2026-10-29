@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from agentbridge.core.business_skills import _json
 from agentbridge.core.user_grants import UserGrantConflict
+from agentbridge.core.skill_job_metrics import progress_stats
 
 
 class SkillJobQueue:
@@ -82,6 +83,7 @@ class SkillJobQueue:
     @staticmethod
     def public(row):
         payload = json.loads(row['payload_json'])
+        progress = json.loads(row['progress_json'])
         return {
             key: row[key]
             for key in ('job_id', 'kind', 'state', 'attempts', 'error', 'created_at', 'updated_at')
@@ -89,7 +91,10 @@ class SkillJobQueue:
             'draft_id': payload.get('draft_id'), 'revision': payload.get('revision'),
             'name': payload.get('bundle', {}).get('manifest', {}).get('name'),
             'automatic': payload.get('automatic', False), 'scope': payload.get('scope'),
-            'progress': len(json.loads(row['progress_json'])),
+            'progress': len(progress),
+            'progress_stats': progress_stats(row['kind'], payload, progress,
+                uncertain=row['attempts'] > 1 or
+                (row['state'] in {'failed', 'canceled', 'queued'} and row['attempts'] > 0)),
             'result': json.loads(row['result_json']) if row['result_json'] else None,
         }
 
@@ -110,6 +115,7 @@ class SkillJobQueue:
 
     def cancel(self, owner, job_id):
         with closing(self._connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute(
                 'SELECT * FROM skill_jobs WHERE job_id=? AND owner_subject=?',
                 (job_id, owner),
@@ -177,8 +183,12 @@ class SkillJobQueue:
                 (self._timestamp(),),
             )
             row = db.execute(
-                "SELECT * FROM skill_jobs WHERE state='queued' OR "
-                "(state='running' AND lease_until<? AND attempts<3) ORDER BY created_at LIMIT 1",
+                "SELECT j.* FROM skill_jobs j WHERE state='queued' OR "
+                "(state='running' AND lease_until<? AND attempts<3) "
+                "ORDER BY COALESCE((SELECT max(e.rowid) FROM skill_authoring_events e "
+                "WHERE e.owner_subject=j.owner_subject AND e.kind='job.claimed'),0), "
+                "COALESCE((SELECT max(e.rowid) FROM skill_authoring_events e "
+                "WHERE e.object_id=j.job_id AND e.kind='job.claimed'),0), created_at, j.rowid LIMIT 1",
                 (self._timestamp(),),
             ).fetchone()
             if not row:
@@ -189,10 +199,13 @@ class SkillJobQueue:
                 (token, (self._now() + timedelta(minutes=5)).isoformat(),
                  self._timestamp(), row['job_id']),
             )
+            # Existing audit rowids give deterministic service order even when timestamps tie.
+            self._event(db, row['owner_subject'], 'job.claimed', row['job_id'], {})
             return dict(db.execute('SELECT * FROM skill_jobs WHERE job_id=?', (row['job_id'],)).fetchone())
 
     def active(self, job, progress=None):
         with closing(self._connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute(
                 "SELECT * FROM skill_jobs WHERE job_id=? AND claim_token=? AND state='running'",
                 (job['job_id'], job['claim_token']),
@@ -207,6 +220,25 @@ class SkillJobQueue:
                 ((self._now() + timedelta(minutes=5)).isoformat(),
                  _json(progress) if progress is not None else row['progress_json'],
                  self._timestamp(), job['job_id']),
+            )
+
+    def yield_job(self, job, progress):
+        """Return a healthy slice to the same queue without spending a failure attempt."""
+        with closing(self._connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute(
+                "SELECT * FROM skill_jobs WHERE job_id=? AND claim_token=? AND state='running'",
+                (job['job_id'], job['claim_token']),
+            ).fetchone()
+            if not row:
+                raise UserGrantConflict('后台任务已取消或由其他进程接续')
+            payload = json.loads(row['payload_json'])
+            if payload.get('automatic') and not self.auto_allowed(db, row['owner_subject'], payload['scope']):
+                raise PermissionError('自动沉淀已关闭')
+            db.execute(
+                "UPDATE skill_jobs SET state='queued',progress_json=?,attempts=attempts-1,"
+                "claim_token=NULL,lease_until=NULL,updated_at=? WHERE job_id=?",
+                (_json(progress), self._timestamp(), job['job_id']),
             )
 
     def finish(self, job, result=None, error=None):

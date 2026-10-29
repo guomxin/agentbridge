@@ -81,6 +81,63 @@ class SkillJobExecutorTests(unittest.TestCase):
         self.assertEqual(after['result']['scores']['candidate'], {'passed': 2, 'total': 2})
         self.assertFalse(restarted.run_once(lambda *_: self.fail('completed job must not run again')))
 
+    def test_three_call_slices_resume_without_replaying_or_consuming_retries(self):
+        job = self.evaluation(repeats=3)
+        calls = []
+        def complete(*_):
+            calls.append(len(calls))
+            return {'text': '计划：整理', 'model': 'fixture',
+                    'usage': {'input': 10, 'output': 5, 'totalTokens': 15, 'cost_estimate_usd': .01}}
+        self.workbench.run_once(complete)
+        partial = self.workbench.jobs('alice', job['job_id'])
+        self.assertEqual((partial['state'], partial['attempts'], partial['progress']), ('queued', 0, 3))
+        self.assertEqual((partial['progress_stats']['completed'], partial['progress_stats']['total']), (3, 6))
+        self.assertEqual(partial['progress_stats']['model_calls'], 3)
+        self.assertFalse(partial['progress_stats']['unrecorded_calls_possible'])
+        restarted = self.restart().skill_authoring.workbench
+        restarted.run_once(complete)
+        done = restarted.jobs('alice', job['job_id'])
+        self.assertEqual((done['state'], done['attempts'], len(calls)), ('succeeded', 1, 6))
+        self.assertEqual(len({row['key'] for row in done['result']['rows']}), 6)
+        self.assertEqual(done['result']['progress_stats'], done['progress_stats'])
+        self.assertEqual(done['progress_stats']['usage']['totalTokens'], 90)
+        self.assertAlmostEqual(done['progress_stats']['usage']['cost_estimate_usd'], .06)
+        self.assertTrue(done['progress_stats']['usage_complete'])
+        self.assertTrue(done['progress_stats']['cost_complete'])
+
+    def test_another_owner_runs_between_large_evaluation_slices(self):
+        alice = self.evaluation(repeats=3)
+        bob_draft = self.authoring.save('bob', proposal=self.proposal, request_key='bob-draft')
+        bob = self.workbench.evaluate('bob', draft_id=bob_draft['draft_id'], expected_revision=1,
+            cases=[{'prompt': '计划整理', 'contains': ['计划']}], request_key='bob-evaluation')
+        self.workbench.run_once(lambda *_: {'text': '计划'})
+        self.assertEqual(self.workbench.jobs('alice', alice['job_id'])['progress'], 3)
+        self.workbench.run_once(lambda *_: {'text': '计划'})
+        self.assertEqual(self.workbench.jobs('bob', bob['job_id'])['state'], 'succeeded')
+        self.assertEqual(self.workbench.jobs('alice', alice['job_id'])['state'], 'queued')
+        self.workbench.run_once(lambda *_: {'text': '计划'})
+        self.assertEqual(self.workbench.jobs('alice', alice['job_id'])['state'], 'succeeded')
+
+    def test_generation_json_regeneration_records_both_calls_without_a_slice(self):
+        job = self.generation()
+        responses = iter([
+            {'text': '{invalid', 'model': 'fixture', 'usage': {'input': 4, 'output': 1, 'totalTokens': 5, 'cost_estimate_usd': .001}},
+            {**self.method_response(), 'usage': {'output': 2}},
+        ])
+        self.workbench.run_once(lambda *_: next(responses))
+        done = self.workbench.jobs('alice', job['job_id'])
+        self.assertEqual((done['state'], done['attempts'], done['progress']), ('succeeded', 1, 2))
+        self.assertEqual(done['progress_stats'], done['result']['progress_stats'])
+        stats = done['progress_stats']
+        self.assertIsNone(stats['total'])
+        self.assertEqual(stats['model_calls'], 2)
+        self.assertEqual(stats['usage']['output'], 3)
+        self.assertEqual(stats['usage']['totalTokens'], 5)  # Missing total is not inferred.
+        self.assertEqual((stats['usage_calls'], stats['priced_calls']), (2, 1))
+        self.assertEqual((stats['unknown_usage_calls'], stats['unknown_cost_calls']), (1, 1))
+        self.assertFalse(stats['usage_complete'])
+        self.assertFalse(stats['cost_complete'])
+
     def test_reclaimed_generation_cannot_save_or_complete_with_old_token(self):
         job = self.generation()
         reclaimed = []

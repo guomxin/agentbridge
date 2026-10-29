@@ -159,6 +159,72 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(s.state["status"], "rolled_back")
         self.assertFalse(s.state["automaticDataRestore"])
 
+    def test_forward_only_health_failure_forbids_semantically_unsafe_rollback(self):
+        s = self.subject
+        s.config['policy'].update(dataCompatibility='reviewed-forward-only', reason='Old program ignores new execution contracts')
+        s.fail_health = True
+        with self.assertRaisesRegex(RuntimeError, 'health failure'):
+            s.execute()
+        self.assertEqual(s.state['status'], 'manual_recovery_required')
+        self.assertTrue(s.state['candidateStartAttempted'])
+        self.assertEqual(s.active_release(), 'new')
+        self.assertNotIn(('ready', True), s.commands)
+        persisted = json.loads((s.directory / 'deployment.json').read_text())
+        self.assertTrue(persisted['candidateStartAttempted'])
+
+    def test_forward_only_failure_before_candidate_start_can_restore_previous(self):
+        s = self.subject
+        s.config['policy'].update(dataCompatibility='reviewed-forward-only', reason='Reviewed semantic change')
+        s.fail_backup = True
+        with self.assertRaisesRegex(RuntimeError, 'recovery point failure'):
+            s.execute()
+        self.assert_old()
+        self.assertEqual(s.state['status'], 'rolled_back')
+
+    def test_forward_only_still_requires_unchanged_sql_schema(self):
+        s = self.subject
+        s.config['policy'].update(dataCompatibility='reviewed-forward-only', reason='Reviewed semantic change')
+        s.change_schema = True
+        with self.assertRaisesRegex(RuntimeError, 'contract violated'):
+            s.execute()
+        self.assertEqual(s.state['status'], 'manual_recovery_required')
+
+    def test_forward_only_success_keeps_backup_and_confirmation(self):
+        s = self.subject
+        s.config['policy'].update(dataCompatibility='reviewed-forward-only', reason='Reviewed semantic change')
+        s.execute()
+        self.assertEqual(s.state['status'], 'confirmed')
+        self.assertIn('recoveryPoint', s.state)
+
+    def test_forward_only_start_reply_loss_persists_marker_before_command(self):
+        s = self.subject
+        s.config['policy'].update(dataCompatibility='reviewed-forward-only', reason='Reviewed semantic change')
+        run = s.run
+        def lose_reply(*args, **kwargs):
+            if args == ('systemctl', 'start', s.service):
+                receipt = json.loads((s.directory / 'deployment.json').read_text())
+                self.assertTrue(receipt['candidateStartAttempted'])
+                run(*args, **kwargs)
+                raise RuntimeError('start reply lost after command')
+            return run(*args, **kwargs)
+        with patch.object(s, 'run', side_effect=lose_reply):
+            with self.assertRaisesRegex(RuntimeError, 'reply lost'):
+                s.execute()
+        self.assertEqual(s.state['status'], 'manual_recovery_required')
+        self.assertNotIn(('ready', True), s.commands)
+
+    def test_forward_only_disk_recovery_respects_start_marker(self):
+        s = self.subject
+        s.config['policy'].update(dataCompatibility='reviewed-forward-only', reason='Reviewed semantic change')
+        s.prepare()
+        s.stage('switching', candidateStartAttempted=True)
+        recovered = FixtureRelease(s.config, unit_root=s.unit_root)
+        recovered.state = json.loads((s.directory / 'deployment.json').read_text())
+        recovered.commands = []
+        recovered.recover()
+        self.assertEqual(recovered.state['status'], 'manual_recovery_required')
+        self.assertEqual(recovered.commands, [('systemctl', 'stop', s.service)])
+
     def test_schema_change_stops_service_and_forbids_automatic_rollback(self):
         s = self.subject
         s.change_schema = True

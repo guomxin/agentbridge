@@ -97,6 +97,15 @@ def test_release_preflight_fails_closed(current, policy, resume):
         publish.compatibility(current, 'b' * 12, policy, resume)
 
 
+def test_forward_only_preflight_requires_explicit_review_reason():
+    policy = {'schemaVersion':'agentbridge.release-policy.v1', 'compatibleFrom':['a'*12],
+              'dataCompatibility':'reviewed-forward-only'}
+    with pytest.raises(ValueError):
+        publish.compatibility('a'*12, 'b'*12, policy)
+    policy['reason'] = 'Previous code ignores newly persisted execution restrictions.'
+    assert publish.compatibility('a'*12, 'b'*12, policy) == 'compatible'
+
+
 def test_unit_hash_and_external_path_gate(private):
     unit = private('unit', 'approved bytes')
     units = {name: {'path': str(unit), 'sha256': common.sha(unit.read_bytes())}

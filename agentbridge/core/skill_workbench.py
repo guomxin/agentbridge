@@ -223,6 +223,11 @@ class SkillWorkbench:
         return ({'source_revision':row['source_revision'], 'version':row['version'],
                  'value':json.loads(row['value_json']), 'updated_at':row['updated_at']} if row else None)
 
+    def pending_cases(self, owner, *, draft_id):
+        with closing(self.store.connect()) as db:
+            self.authoring._owned(db, owner, draft_id)
+            return {'draft_id': draft_id, 'pending_cases': self._pending_cases(db, owner, draft_id)}
+
     def save_pending_cases(self, owner, *, draft_id, expected_revision, expected_version, value):
         from agentbridge.core.skill_authoring import text, revision
         text(draft_id, '草稿标识', 128)
@@ -350,6 +355,10 @@ class SkillWorkbench:
         payload = json.loads(row['payload_json'])
         return {'job_id': row['job_id'], 'revision': payload['revision'], 'cases': payload['cases'],
                 'repeats': payload['repeats'], 'case_fingerprint': case_fingerprint(payload['cases'], payload['repeats'])}
+
+    def set_regression_action(self, owner, *, draft_id, expected_revision, job_id):
+        return {'regression': self.set_regression(owner, draft_id=draft_id,
+                expected_revision=expected_revision, job_id=job_id)}
 
     def similar(self, owner, query, exclude=None):
         with closing(self.store.connect()) as db:
@@ -636,6 +645,7 @@ class SkillWorkbench:
     def _job_executor(self):
         # Resolve collaborators at use time, including replacements made while a
         # model callback is running. The save port keeps its original transaction.
+        from agentbridge.core.skill_catalog import generation_catalog
         return SkillJobExecutor(SkillJobDependencies(
             claim=lambda: self.claim(),
             active=lambda job, *args, **kwargs: self._active(job, *args, **kwargs),
@@ -646,6 +656,8 @@ class SkillWorkbench:
             similar=lambda owner, query, **kwargs: self.similar(owner, query, **kwargs),
             normalize=lambda skill_id, proposal: self.authoring.normalize(skill_id, proposal),
             save=lambda owner, **arguments: self.authoring.save(owner, **arguments),
+            generation_catalog=lambda material, prior: generation_catalog(self.authoring.service, material, prior),
+            yield_job=lambda job, rows: self._job_queue().yield_job(job, rows),
         ))
 
     def run_once(self, complete):

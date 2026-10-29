@@ -19,6 +19,7 @@ class CapabilitySpec:
     effect: str
     adapter: str
     workflow: str
+    batch: bool = False
 
     def __post_init__(self) -> None:
         if not _CAPABILITY_NAME_RE.fullmatch(self.name):
@@ -27,6 +28,8 @@ class CapabilitySpec:
             raise ValueError(f"invalid capability version: {self.version}")
         if self.effect not in _EFFECTS:
             raise ValueError(f"invalid capability effect: {self.effect}")
+        if type(self.batch) is not bool:
+            raise TypeError("capability batch must be a boolean")
         if not isinstance(self.input_schema, dict) or not isinstance(self.output_schema, dict):
             raise TypeError("capability schemas must be JSON objects")
         if not self.adapter or not self.workflow:
@@ -37,7 +40,10 @@ class CapabilitySpec:
         return self.name.split(".", 1)[0]
 
     def to_dict(self) -> dict:
-        return {**asdict(self), "system": self.system}
+        value = {**asdict(self), "system": self.system}
+        if not self.batch:
+            value.pop('batch')  # Preserve older descriptors; absence means false.
+        return value
 
 
 class CapabilityRegistry:

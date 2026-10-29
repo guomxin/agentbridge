@@ -444,6 +444,7 @@ class SkillElement extends Element {
   querySelectorAll(selector) { return this.queries.get(selector) || []; }
   reportValidity() { return true; }
   focus() { this.focused = true; }
+  click() { this.clicked = true; }
 }
 class SkillFormData {
   constructor(form) { this.form = form; }
@@ -725,6 +726,78 @@ test("a failed save keeps dirty text and never navigates to trial", async () => 
   f.view.dispose();
 });
 
+test('complete skill configuration is saved with metadata and updated mode before trial',async()=>{
+  const initial=editableDraft();initial.bundle.manifest.standard_metadata={license:'MIT',compatibility:'只处理文字'};
+  const f=skillFixture({initial});await f.forms.showSkillDraft('draft');
+  const walk=node=>[node,...node.children.flatMap(walk)];
+  const field=(title,index=0)=>walk(f.$('#skill-configuration')).filter(node=>node.dataset.configField===title)[index];
+  field('模式标识').value='summary';field('模式标识').oninput();
+  field('模式说明').value='按证据整理';field('资料路径').value='references/来源.md';field('资料路径').oninput();
+  field('资料内容').value='新的核对步骤';
+  field('明确设置执行范围').checked=true;field('明确设置执行范围').onchange();
+  field('明确选择可用能力').checked=true;field('明确选择可用能力').onchange();
+  assert.equal(f.$('#draft-submit-button').disabled,true);
+  await f.$('#draft-test').onclick();
+  const proposal=f.calls.find(call=>call.action==='save').data.proposal;
+  assert.deepEqual(proposal.standard_metadata,{license:'MIT',compatibility:'只处理文字'});
+  assert.equal(proposal.profiles.summary.description,'按证据整理');assert.equal(proposal.profiles.preview,undefined);
+  assert.deepEqual(proposal.profiles.summary.execution,{effects:['read'],allow_batch:false,capabilities:[]});
+  assert.deepEqual(proposal.references,{'references/来源.md':'新的核对步骤'});
+  assert.deepEqual(proposal.required_resources,{summary:['references/来源.md'],fill:[]});
+  assert.equal(f.trials[0].profile,'summary');assert.equal(f.trials[0].expected_revision,7);
+  f.view.dispose();
+});
+
+test('configuration conflicts preserve edits and block accidental use of the old revision',async()=>{
+  const f=skillFixture({onAction:action=>{if(action==='save')throw Error('草稿修订已变化');}});
+  await f.forms.showSkillDraft('draft');
+  const walk=node=>[node,...node.children.flatMap(walk)];
+  const description=walk(f.$('#skill-configuration')).find(node=>node.dataset.configField==='模式说明');
+  description.value='保留这项修改';description.oninput();
+  await f.$('#draft-test').onclick();
+  assert.equal(description.value,'保留这项修改');assert.deepEqual(f.trials,[]);
+  assert.match(f.$('#draft-detail-error').textContent,/修订已变化/);
+  assert.equal(f.$('#draft-submit-button').disabled,true);
+  f.view.dispose();
+});
+
+test('save errors are announced next to editor actions and brought into view without losing input',async()=>{
+  const f=skillFixture({onAction:action=>{if(action==='save')throw Error('草稿已更新，请刷新后再操作');}});
+  await f.forms.showSkillDraft('draft');
+  const source=f.$('#draft-detail').innerHTML,notice=f.$('#draft-detail-error'),scrolls=[];
+  assert.match(source,/id="draft-detail-error" role="alert" aria-live="assertive"/);
+  assert.ok(source.indexOf('id="draft-detail-error"')<source.indexOf('历史修订'));
+  assert.equal((source.match(/id="draft-detail-error"/g)||[]).length,1);
+  notice.scrollIntoView=options=>scrolls.push(options);
+  f.editor.controls.get('instructions').value='保留我刚编辑的长方法';
+  await f.editor.onsubmit(submitEvent(f.editor));
+  assert.match(notice.textContent,/草稿已更新/);
+  assert.deepEqual(scrolls,[{block:'nearest',behavior:'smooth'}]);
+  assert.equal(f.editor.controls.get('instructions').value,'保留我刚编辑的长方法');
+  assert.equal(f.$('#draft-submit-button').disabled,true);
+  f.view.dispose();
+});
+
+test('job progress refresh keeps method input and expanded report while showing partial usage',async()=>{
+  let jobs=[{job_id:'job-progress',kind:'evaluation',state:'running',progress:1,name:'周报',revision:3,
+    progress_stats:{completed:1,total:4,model_calls:1,usage:null,usage_complete:false,cost_complete:false}}];
+  const f=skillFixture({onAction:action=>action==='jobs'?{items:jobs}:undefined});
+  await f.forms.showSkillDraft('draft');
+  f.editor.controls.get('instructions').value='不能被后台进度覆盖';f.editor.oninput();
+  const expanded={dataset:{reportJob:'job-progress'},open:true};f.$('#skill-jobs').queries.set('[data-report-job]',[expanded]);
+  await f.forms.refreshSkillJobs();
+  assert.match(f.$('#skill-jobs').innerHTML,/完成 1\/4 项/);
+  assert.match(f.$('#skill-jobs').innerHTML,/费用估算未返回/);
+  jobs=[{...jobs[0],progress:2,progress_stats:{completed:2,total:4,model_calls:2,
+    usage:{input:20,output:5,totalTokens:25,cost_estimate_usd:0.001},usage_calls:1,priced_calls:1,usage_complete:false,cost_complete:false}}];
+  await f.forms.refreshSkillJobs();
+  assert.match(f.$('#skill-jobs').innerHTML,/完成 2\/4 项/);
+  assert.match(f.$('#skill-jobs').innerHTML,/部分记录/);
+  assert.equal(f.editor.controls.get('instructions').value,'不能被后台进度覆盖');
+  assert.equal(expanded.open,true);assert.equal(f.$('#draft-submit-button').disabled,true);
+  f.view.dispose();
+});
+
 test("publication covers only current reported samples or a matching passing output evaluation", () => {
   const d = editableDraft();
   d.tests.push({revision: 2, profile: "fill", status: "reported"}, {revision: 3, profile: "fill", status: "running"});
@@ -851,10 +924,10 @@ test("sample conversion forces a removed mode to be selected and leaves assertio
   assert.equal(row.querySelector('[name=excludes]').value, "");
   assert.match(row.querySelector('[data-case-source]').textContent, /retired.*请明确选择/);
   await f.$("#skill-eval-form").onsubmit(submitEvent(f.$("#skill-eval-form")));
-  assert.match(f.$("#draft-detail-error").textContent, /明确选择/);
+  assert.match(f.$("#skill-eval-state").textContent, /明确选择/);
   row.querySelector('[name=profile]').value = "preview";
   await f.$("#skill-eval-form").onsubmit(submitEvent(f.$("#skill-eval-form")));
-  assert.match(f.$("#draft-detail-error").textContent, /填写至少一项/);
+  assert.match(f.$("#skill-eval-state").textContent, /填写至少一项/);
   assert.equal(f.calls.some(c => c.action === "evaluate"), false);
   row.querySelector('[name=contains]').value = "计划";
   row.querySelector('[name=excludes]').value = "已完成";
@@ -862,6 +935,54 @@ test("sample conversion forces a removed mode to be selected and leaves assertio
   assert.deepEqual(f.calls.find(c => c.action === "evaluate").data.cases[0],
     {prompt: "计划修复", profile: "preview", kind: "output", contains: ["计划"], excludes: ["已完成"]});
   f.view.dispose();
+});
+
+test('evaluation validation, request failure and queue success stay beside evaluation controls',async()=>{
+  let fail=true;
+  const f=skillFixture({onAction:action=>{if(action==='evaluate'&&fail)throw Error('草稿已更新，请刷新后再操作');}});
+  await f.forms.showSkillDraft('draft');
+  const notice=f.$('#skill-eval-state'),scrolls=[],roles=[];
+  notice.scrollIntoView=options=>scrolls.push(options);notice.setAttribute=(key,value)=>{if(key==='role')roles.push(value);};
+  f.$('#draft-detail-error').textContent='编辑器提示不应覆盖';
+  const source=f.$('#skill-quality-panel').innerHTML;
+  assert.match(source,/id="skill-eval-submit"[\s\S]*id="skill-eval-state"[\s\S]*<\/form>/);
+  const row=f.$('#skill-eval-cases').children[0];
+  row.querySelector('[name=prompt]').value='整理明天的计划';
+  row.querySelector('[name=contains]').value='';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.match(notice.textContent,/填写至少一项/);assert.equal(f.calls.some(call=>call.action==='evaluate'),false);
+  row.querySelector('[name=contains]').value='计划';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.match(notice.textContent,/草稿已更新/);assert.equal(row.querySelector('[name=prompt]').value,'整理明天的计划');
+  fail=false;
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.match(notice.textContent,/修订 3 的评测已排队/);assert.doesNotMatch(notice.textContent,/草稿已更新/);
+  assert.deepEqual(roles,['alert','alert','status']);
+  assert.deepEqual(scrolls,Array(3).fill({block:'nearest',behavior:'smooth'}));
+  assert.equal(f.$('#draft-detail-error').textContent,'编辑器提示不应覆盖');f.view.dispose();
+});
+
+test('queued evaluation remains visibly queued if the subsequent jobs refresh fails',async()=>{
+  const f=skillFixture({onAction:action=>{if(action==='jobs')throw Error('列表暂时不可用');}});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='整理计划';row.querySelector('[name=contains]').value='计划';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  assert.match(f.$('#skill-eval-state').textContent,/评测已排队；任务列表暂未刷新/);
+  assert.equal(f.calls.filter(call=>call.action==='evaluate').length,1);f.view.dispose();
+});
+
+test('standard export shows and replaces feedback next to its own button',async()=>{
+  let fail=true;
+  const f=skillFixture({onAction:action=>{if(action==='export_standard'){if(fail)throw Error('文件包暂时无法导出');return {files:[]};}}});
+  await f.forms.showSkillDraft('draft');
+  const source=f.$('#skill-quality-panel').innerHTML,notice=f.$('#skill-standard-export-state'),scrolls=[];
+  assert.match(source,/id="skill-standard-export"[^>]*>[^<]*<\/button><p id="skill-standard-export-state" role="status"/);
+  notice.scrollIntoView=options=>scrolls.push(options);
+  f.$('#skill-eval-state').textContent='保留评测状态';
+  await f.$('#skill-standard-export').onclick();assert.match(notice.textContent,/无法导出/);
+  fail=false;await f.$('#skill-standard-export').onclick();
+  assert.equal(notice.textContent,'文件包已开始下载。');assert.equal(scrolls.length,2);
+  assert.equal(f.$('#skill-eval-state').textContent,'保留评测状态');assert.equal(f.$('#draft-detail-error').textContent,'');f.view.dispose();
 });
 
 test("sample feedback carries original test attribution and can become an editable case without turning correction into assertions", async () => {
@@ -1366,7 +1487,7 @@ test('saved pending cases restore incomplete raw text without running or inherit
   assert.equal(await f.forms.canLeaveSkillEditor(),true);
   assert.equal(report.passed,true,'old result remains its own immutable evidence');
   await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
-  assert.match(f.$('#draft-detail-error').textContent,/明确选择当前修订的模式/);
+  assert.match(f.$('#skill-eval-state').textContent,/明确选择当前修订的模式/);
   assert.equal(f.calls.some(c=>c.action==='evaluate'),false);
   f.view.dispose();
 });

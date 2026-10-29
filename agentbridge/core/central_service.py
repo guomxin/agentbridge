@@ -596,10 +596,12 @@ class CentralCapabilityService:
             },
         }
 
-    def validate_skill_task(self, user_subject, task_id, *, capability=None, connection=None):
+    def validate_skill_task(self, user_subject, task_id, *, capability=None, source_id=None, connection=None):
         binding = self.skills.for_task(user_subject, task_id, connection)
         if binding:
             validate_binding(self, user_subject, binding, capability=capability)
+            if source_id and binding['settings']['source_id'] and source_id != binding['settings']['source_id']:
+                raise SkillRejected('SKILL_SOURCE_MISMATCH', '数据源与本次业务助手选择不一致')
 
     def guard_skill_authorization(self, connection, authorization_id, user_subject):
         rows = connection.execute(

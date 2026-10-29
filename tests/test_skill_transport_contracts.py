@@ -1,5 +1,6 @@
 """Skill contracts exercised through the authenticated MCP and Workspace routes."""
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -122,7 +123,32 @@ class SkillMcpTransportTests(unittest.TestCase):
             'inspect(draft_id)返回诊断、版本差异、previous_report复用样例输入（标注来源修订，不继承通过结论）和最近反馈。').replace(
             'feedback(skill_id,profile,version,rating:useful|incorrect|not_applicable,comment)反馈；',
             'feedback(skill_id,profile,rating:useful|incorrect|not_applicable,comment,可选version)反馈；可选test_id或binding_id二选一绑定自己已保存的试用或历史任务，原修订/模式/版本由服务端冻结；无来源时针对当前目录模式和版本。试用反馈版本为draft:修订号；用户纠错文字只能作为待复核的样例建议，不能当作已通过断言；')}
-        self.assertEqual(tool, expected)
+        # Additive public fields and the action enum are intentional. Freeze the
+        # rest of the historical wire contract rather than replacing its fixture.
+        legacy = deepcopy(tool)
+        actions = legacy['inputSchema']['properties']['action'].pop('enum')
+        self.assertTrue({'pending_cases', 'save_pending_cases', 'set_regression'} <= set(actions))
+        self.assertNotIn('review_report', actions)
+        self.assertNotIn('decide', actions)
+        definitions = legacy['inputSchema']['$defs']
+        execution = definitions.pop('SkillExecution')
+        self.assertEqual(set(execution['properties']), {'effects', 'allow_batch', 'capabilities'})
+        self.assertEqual(set(execution['required']), {'effects', 'allow_batch'})
+        for field in ('description', 'execution'):
+            self.assertIn(field, definitions['SkillDependencies']['properties'])
+            definitions['SkillDependencies']['properties'].pop(field)
+        metadata = definitions.pop('SkillStandardMetadata')
+        self.assertEqual(set(metadata['properties']), {'license', 'compatibility'})
+        self.assertIn('standard_metadata', definitions['SkillProposal']['properties'])
+        definitions['SkillProposal']['properties'].pop('standard_metadata')
+        definitions['SkillAuthoringData']['properties'].pop('expected_version')
+        start = legacy['description'].index('pending_cases(draft_id)')
+        end = legacy['description'].index('evaluate(draft_id', start)
+        legacy['description'] = legacy['description'][:start] + legacy['description'][end:]
+        legacy['description'] = legacy['description'].replace(
+            ',standard_metadata(可选license/compatibility声明)', '')
+        legacy['description'] = legacy['description'].replace('profiles(纯文字为{use:{}}；每模式可写description、all/any权限、database依赖和execution:{effects,allow_batch,capabilities可选})、executionMode(默认read_exploration，仅read；写入选controlled_action或durable_plan)、references(可选)、required_resources(各模式必读路径；未选资料按需读取)','profiles(无依赖必须为{use:{}}；模式对象只允许all/any权限数组和database依赖，不接受name/description/tools),executionMode(默认read_exploration),references(可选)')
+        self.assertEqual(legacy, expected)
 
     def test_mcp_rejects_extra_private_and_non_strict_field_values_before_dispatch(self):
         cases = [
@@ -161,7 +187,32 @@ class SkillMcpTransportTests(unittest.TestCase):
             self.assertEqual(authoring.list('user-a')['items'][0]['draft_id'], saved['draft_id'])
             response = mcp_call(client, token, 'decide', {})
             self.assertTrue(response.json()['result']['isError'])
-            self.assertIn('草稿操作无效', str(response.json()['result']['content']))
+            self.assertIn('action', str(response.json()['result']['content']))
+
+    def test_pending_cases_and_fixed_regression_roundtrip_through_mcp(self):
+        with mcp_authoring() as (service, token, client):
+            def call(action, data):
+                result = mcp_call(client, token, action, data).json()['result']
+                self.assertFalse(result['isError'], result)
+                return result['structuredContent']
+            draft = call('save', {'proposal': PROPOSAL, 'request_key': 'pending-draft'})
+            identity = {'draft_id': draft['draft_id'], 'expected_revision': 1}
+            self.assertIsNone(call('pending_cases', {'draft_id': draft['draft_id']})['pending_cases'])
+            value = {'cases': [{'prompt': '明天补测试。', 'profile': 'use', 'kind': 'output',
+                               'contains': '', 'excludes': ''}], 'repeats': '1'}
+            saved = call('save_pending_cases', {**identity, 'expected_version': 0, 'value': value})
+            self.assertEqual(saved['value'], value)
+            self.assertEqual(call('pending_cases', {'draft_id': draft['draft_id']})['pending_cases'], saved)
+            self.assertEqual(service.skill_authoring.workbench.jobs('user-a')['items'], [])
+            other = service.skill_authoring.save('user-b', proposal=PROPOSAL, request_key='private')
+            denied = mcp_call(client, token, 'pending_cases', {'draft_id': other['draft_id']}).json()['result']
+            self.assertTrue(denied['isError'])
+            job = call('evaluate', {**identity, 'cases': [{'prompt': '明天补测试。', 'contains': ['明天']}],
+                                    'request_key': 'regression-report'})
+            service.skill_authoring.workbench.run_once(lambda *_: {'text': '明天补测试。', 'model': 'synthetic'})
+            fixed = call('set_regression', {**identity, 'job_id': job['job_id']})
+            self.assertEqual(fixed['regression']['job_id'], job['job_id'])
+            self.assertEqual(call('set_regression', {**identity, 'job_id': None}), {'regression': None})
 
 
 class SkillWorkspaceTransportTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 import { isCancellation } from "./workspace_lifecycle.mjs";
 import { createSkillLeaveGuard } from "./workspace_skill_leave.mjs";
-import { skillReportHtml, comparisonText } from "./workspace_skill_report.mjs";
+import { skillReportHtml, skillProgressHtml, comparisonText } from "./workspace_skill_report.mjs";
+import { createSkillConfigurationEditor, configurationProposal } from "./workspace_skill_editor.mjs";
 
 const profileLabels = {preview: "草稿预览", fill: "准备填单", review: "总结与复核", track: "进展追踪", search: "案例检索", single: "单项办理", batch: "批量办理", use: "使用"};
 const profileLabel = profile => profileLabels[profile] || profile;
@@ -27,6 +28,7 @@ export function skillPublicationCoverage(draft, report, evidence) {
 
 function proposalFromBundle(bundle) {
   return {...Object.fromEntries(["name", "description", "selection", "profiles", "executionMode", "required_resources"].map(k => [k, bundle.manifest[k]])),
+    ...(bundle.manifest.standard_metadata ? {standard_metadata: bundle.manifest.standard_metadata} : {}),
     instructions: bundle.resources["SKILL.md"], references: Object.fromEntries(Object.entries(bundle.resources).filter(([k]) => k !== "SKILL.md"))};
 }
 
@@ -60,7 +62,7 @@ export function skillCandidateDiff(bundle, candidate) {
     if (JSON.stringify(ordered(normalize(a))) !== JSON.stringify(ordered(normalize(b)))) changes.push({label, before: a, after: b,
       kind: a === undefined ? "新增" : b === undefined ? "移除" : "修改"});
   };
-  for (const [key, label] of [["name", "名称"], ["description", "简介"], ["instructions", "处理方法"], ["selection", "适用范围与输出"], ["executionMode", "执行方式"]]) compare(label, before[key], after[key]);
+  for (const [key, label] of [["name", "名称"], ["description", "简介"], ["instructions", "处理方法"], ["selection", "适用范围与输出"], ["executionMode", "执行方式"], ["standard_metadata", "来源声明"]]) compare(label, before[key], after[key]);
   for (const [key, label] of [["profiles", "模式与能力依赖"], ["references", "参考资料"], ["required_resources", "模式必读资料"]]) {
     for (const name of [...new Set([...Object.keys(before[key] || {}), ...Object.keys(after[key] || {})])].sort()) compare(`${label} · ${name}`, before[key]?.[name], after[key]?.[name], key === "profiles" ? comparableDependencies : undefined);
   }
@@ -188,17 +190,23 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         <label>简介<textarea name="description" required maxlength="500">${escapeHtml(m.description)}</textarea></label>
         ${[["use_when","适用场景"],["not_for","不适用场景"],["output","输出结果"]].map(([k,t])=>`<label>${t}<textarea name="${k}" required maxlength="500">${escapeHtml(m.selection[k])}</textarea></label>`).join("")}
         <label>处理方法<textarea name="instructions" required maxlength="40000" rows="12">${escapeHtml(d.bundle.resources["SKILL.md"])}</textarea></label>
+        <details class="skill-config"><summary>模式、执行范围与参考资料</summary><div id="skill-configuration"></div></details>
         <label>试用模式<select id="draft-test-profile">${Object.keys(m.profiles).map(p => `<option value="${escapeHtml(p)}">${escapeHtml(profileLabel(p))}（${escapeHtml(p)}）</option>`).join("")}</select></label>
-        <div class="draft-actions"><button type="submit">保存新修订</button><button type="button" id="draft-test" class="secondary">试用已保存修订 ${d.revision}</button><button type="button" id="draft-export" class="secondary">导出</button><button type="button" id="draft-archive" class="secondary">归档</button></div></fieldset></form>
+        <div class="draft-actions"><button type="submit">保存新修订</button><button type="button" id="draft-test" class="secondary">试用已保存修订 ${d.revision}</button><button type="button" id="draft-export" class="secondary">导出</button><button type="button" id="draft-archive" class="secondary">归档</button></div></fieldset><p id="draft-detail-error" role="alert" aria-live="assertive"></p></form>
         <div class="draft-actions"><label>历史修订<select id="draft-revision">${d.revisions.map(v=>`<option value="${v.revision}">修订 ${v.revision}</option>`).join("")}</select></label><button type="button" id="draft-restore" class="secondary">恢复为新草稿修订</button></div><p>恢复不影响已发布版本；重新试用并审批后才会生效。</p>
         <h4>样例试运行</h4><p>以下为模型样例，未经独立验证，需人工核对。</p>
         <div id="skill-sample-list">${d.tests.map(t=>`<details><summary>修订 ${t.revision} · ${escapeHtml(profileLabel(t.profile))}（${escapeHtml(t.profile)}） · ${escapeHtml({reported:'已保存，待复核',running:'试用中'}[t.status] || t.status)}</summary><pre>${escapeHtml(t.prompt)}\n${escapeHtml(t.output||"等待样例结果")}</pre>${t.status === 'reported' && t.test_id ? `<button type="button" class="secondary" data-sample-case="${escapeHtml(t.test_id)}">转成验收样例</button><form data-sample-feedback="${escapeHtml(t.test_id)}" class="draft-editor"><label>这个样例是否有帮助？<select name="rating"><option value="useful">有帮助</option><option value="incorrect">结果有误</option></select></label><label>一句话说明<textarea name="comment" required maxlength="1000" placeholder="例如：把计划误写成已完成。"></textarea></label><button type="submit" class="secondary">保存反馈</button><p role="status"></p></form>` : ''}</details>`).join("")||"暂无样例"}</div>
         <div id="skill-quality-panel"></div><form id="draft-submit" class="draft-editor"><h4 id="draft-publication-title">申请发布已保存修订 ${d.revision}</h4><fieldset id="skill-publication-profiles"><legend>本次发布模式</legend><p>正在核对本修订样例。</p></fieldset><p id="skill-publication-state" role="status"></p><fieldset id="skill-recipients"><legend>使用范围（默认仅自己）</legend></fieldset><label>发布说明<textarea name="reason" required maxlength="1000"></textarea></label><button id="draft-submit-button" type="submit" disabled>提交审批</button></form>
-        <h4>发布申请</h4><div id="draft-requests"></div><p id="draft-detail-error" role="status"></p>`;
-      const error=e=>{if (scope.current() && !isCancellation(e)) $("#draft-detail-error").textContent=e.message;};
+        <h4>发布申请</h4><div id="draft-requests"></div>`;
+      const error=e=>{if (scope.current() && !isCancellation(e)) {
+        const notice=$("#draft-detail-error");notice.textContent=e.message;
+        notice.scrollIntoView?.({block:"nearest",behavior:"smooth"});
+      }};
       const editor = $("#draft-editor");
       const fields = ["name", "description", "instructions", "use_when", "not_for", "output"];
-      const readFields = () => Object.fromEntries(fields.map(k => [k, editor.elements?.namedItem(k)?.value ?? ""]));
+      const configuration = createSkillConfigurationEditor({document,root:$("#skill-configuration"),bundle:d.bundle,
+        catalog:d.authoring_catalog || {},onChange:()=>refreshState()});
+      const readFields = () => ({...Object.fromEntries(fields.map(k => [k, editor.elements?.namedItem(k)?.value ?? ""])),configuration:configuration.read()});
       let savedFields = readFields();
       let retainedEvaluation = carriedEvaluation;
       let readEvaluation = () => retainedEvaluation?.value || {cases: [], repeats: '1'};
@@ -222,6 +230,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         $("#draft-editor-fields").disabled = processing;
         for (const form of reviewForms) for (const input of form.querySelectorAll("input,textarea,select,button")) input.disabled = processing;
         for (const control of editor.querySelectorAll("input,textarea,select,button")) control.disabled = processing || (d.state === "archived" && control.id !== "draft-export");
+        configuration.setDisabled(processing || d.state === "archived");
         $("#draft-test").textContent = dirty ? "保存后试用" : `试用已保存修订 ${d.revision}`;
         $("#draft-restore").disabled = processing;
         const selected = [...$("#skill-publication-profiles").querySelectorAll('input[name="profiles"]:checked')].map(input => input.value);
@@ -248,7 +257,8 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         if (d.state === "archived") throw new Error("草稿已归档，不能保存或试用。");
         const values = readFields();
         const proposal = {...proposalFromBundle(d.bundle), ...Object.fromEntries(["name", "description", "instructions"].map(k => [k, values[k]])),
-          selection: Object.fromEntries(["use_when", "not_for", "output"].map(k => [k, values[k]]))};
+          selection: Object.fromEntries(["use_when", "not_for", "output"].map(k => [k, values[k]])),
+          ...configurationProposal(values.configuration)};
         const saved = await draftAction("save", {draft_id:id, expected_revision:d.revision, request_key:crypto.randomUUID(), proposal, provenance:{kind:"revision"}});
         scope.assertCurrent();
         // Do not clear text changed while the save was pending, even if a host
@@ -256,8 +266,12 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         savedFields = values;
         d.revision = saved.revision;
         d.tested_profiles = [];
-        d.bundle = {manifest: {...d.bundle.manifest, ...Object.fromEntries(["name", "description", "selection"].map(k => [k, proposal[k]]))},
-          resources: {...d.bundle.resources, "SKILL.md": proposal.instructions}, content_hash: saved.content_hash};
+        d.bundle = {manifest: {...d.bundle.manifest, ...Object.fromEntries(["name", "description", "selection", "profiles", "executionMode", "required_resources"].map(k => [k, proposal[k]])), resources:Object.keys(proposal.references)},
+          resources: {"SKILL.md": proposal.instructions,...proposal.references}, content_hash: saved.content_hash};
+        const trialSelect=$("#draft-test-profile"),selectedMode=trialSelect.value;
+        trialSelect.replaceChildren();
+        for(const profile of Object.keys(proposal.profiles)){const option=document.createElement('option');option.value=profile;option.textContent=profileLabel(profile);trialSelect.append(option);}
+        trialSelect.value=Object.hasOwn(proposal.profiles,selectedMode)?selectedMode:Object.keys(proposal.profiles)[0];
         coverage = null;
         $("#skill-publication-profiles").innerHTML = "<legend>本次发布模式</legend><p>新修订需重新核对样例。</p>";
         if (reviewDirty()) throw new Error(`修订 ${d.revision} 已保存，但复核说明又有修改；请先保存复核，再刷新报告。`);
@@ -295,12 +309,12 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         if ((evaluationDirty() || reviewDirty()) && !await leaveGuard.request()) return;
         if (d.state === "archived") { error(new Error("草稿已归档，不能试用。")); return; }
         if (editor.reportValidity && !editor.reportValidity()) return;
-        const profile = $("#draft-test-profile").value;
-        if (!Object.hasOwn(d.bundle.manifest.profiles, profile)) { error(new Error("请选择试用模式。")); return; }
         await perform(async () => {
           if (isDirty()) await saveEdits();
           scope.assertCurrent();
           if (isDirty()) { await renderSkillQuality(d, scope, controls); throw new Error(`修订 ${d.revision} 已保存，但仍有未保存修改；请再次保存后试用。`); }
+          const profile = $("#draft-test-profile").value;
+          if (!Object.hasOwn(d.bundle.manifest.profiles, profile)) throw new Error("请选择试用模式。");
           await startTrial({draft_id:id, expected_revision:d.revision, profile, name:d.bundle.manifest.name}, leaveGuard.capture());
         });
       };
@@ -377,7 +391,8 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     if(state.activeView==='skills'&&items.some(j=>['queued','running'].includes(j.state)))state.skillJobTimer=scope.timeout(()=>refreshSkillJobs().catch(e=>{if(scope.current()&&!isCancellation(e))$('#draft-error').textContent=e.message;}),3000);
     const labels={queued:'排队中',running:'执行中',succeeded:'已完成',failed:'失败',canceled:'已取消'};
     const kinds={method:'可复用方法',preference:'个人偏好',fact:'业务事实',none:'无需沉淀'};
-    root.innerHTML=items.map(j=>`<article class="skill-job"><p><strong>${j.kind==='evaluation'?'独立评测':'方法提炼'}</strong> · ${labels[j.state]}${j.kind==='evaluation'?` · ${escapeHtml(j.name || '助手')} · 修订 ${escapeHtml(j.revision)} · 已完成 ${j.progress} 项`:''}</p>
+    root.innerHTML=items.map(j=>`<article class="skill-job"><p><strong>${j.kind==='evaluation'?'独立评测':'方法提炼'}</strong> · ${labels[j.state]}${j.kind==='evaluation'?` · ${escapeHtml(j.name || '助手')} · 修订 ${escapeHtml(j.revision)}${j.progress_stats?'':` · 已完成 ${j.progress} 项`}`:''}</p>
+      ${skillProgressHtml(j.progress_stats,{kind:j.kind})}
       ${j.result?`<p>${escapeHtml(kinds[j.result.classification]||'')} ${escapeHtml(j.result.summary||j.result.message||'')}</p>`:''}
       ${j.error?`<p role="status">${escapeHtml(j.error)}</p>`:''}
       ${j.kind==='evaluation' && j.result?.rows ? `<details data-report-job="${escapeHtml(j.job_id)}"><summary>查看本次报告</summary>${skillReportHtml(j.result)}</details>` : ''}
@@ -471,7 +486,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     root.innerHTML=`<h4>方法检查与版本对照</h4><p>当前草稿修订 ${d.revision} · ${quality.published_version?'线上 '+escapeHtml(quality.published_version):'尚未发布'}</p>
       <p>${escapeHtml(quality.diagnostics.message)}</p>${quality.diagnostics.checks.map(c=>`<p>${c.level==='warning'?'待完善':'已识别'}：${escapeHtml(c.message)}</p>`).join('')}
       <details><summary>与线上版本的差异（${quality.diff.length} 项）</summary>${quality.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre>${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
-      <button id="skill-standard-export" class="secondary" type="button">导出标准 Skill 文件包</button>
+      <button id="skill-standard-export" class="secondary" type="button">导出标准 Skill 文件包</button><p id="skill-standard-export-state" role="status"></p>
       <h4>独立评测</h4><p>仅使用合成文字，无业务工具。输入简短问题及可检查的期望；断言不会提供给被测模型。适用场景判断仅检查方法说明，不证明宿主实际选择或加载。</p>
       ${skillReportHtml(quality.evaluation, quality.comparison, true)}
       <p id="skill-regression-status"></p><div class="draft-actions">
@@ -514,7 +529,12 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     controls.setCoverage(coverage);
     $('#skill-recipients').innerHTML='<legend>使用范围（默认仅自己）</legend>'+recipients.items.map((x,i)=>`<label><input type="checkbox" name="audience" value="${escapeHtml(x.subject)}" ${i===0?'checked':''}>${escapeHtml(x.name)}</label>`).join('');
     const profiles = Object.keys(d.bundle.manifest.profiles);
-    const evalError = error => {if (scope.current() && !isCancellation(error)) $('#skill-eval-state').textContent = error.message;};
+    const evalNotice = (message, selector = '#skill-eval-state', role = 'status') => {
+      if (!scope.current()) return;
+      const notice = $(selector); notice.setAttribute('role', role); notice.textContent = message;
+      notice.scrollIntoView?.({block:'nearest',behavior:'smooth'});
+    };
+    const evalError = (error, selector) => {if (scope.current() && !isCancellation(error)) evalNotice(error.message, selector, 'alert');};
     const add=(seed, source = '')=>{
       if (!scope.current()) return;
       const cases=$('#skill-eval-cases');if(cases.children.length>=12)return;
@@ -708,17 +728,19 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const repeats = Number($('#skill-eval-form').querySelector('[name=repeats]').value || 1);
         const submittedEvaluation = readEvaluation();
         await controls.perform(async () => {
-          await draftAction('evaluate', {draft_id:d.draft_id, expected_revision:d.revision, cases, repeats, request_key:crypto.randomUUID()});
-          scope.assertCurrent();
-          controls.evaluationSaved(submittedEvaluation);
-          $('#draft-detail-error').textContent=`修订 ${d.revision} 的评测已排队；完成后在后台任务中查看本次报告。`;
-          await refreshSkillJobs();
-          await refreshFeedback();
+          try {
+            await draftAction('evaluate', {draft_id:d.draft_id, expected_revision:d.revision, cases, repeats, request_key:crypto.randomUUID()});
+            scope.assertCurrent();
+            controls.evaluationSaved(submittedEvaluation);
+            evalNotice(`修订 ${d.revision} 的评测已排队；完成后在后台任务中查看本次报告。`);
+          } catch(error) { evalError(error); return; }
+          try { await refreshSkillJobs(); await refreshFeedback(); }
+          catch(error) {if(scope.current()&&!isCancellation(error))evalNotice('评测已排队；任务列表暂未刷新，可稍后手动刷新。');}
         });
-      } catch(err) { if(scope.current() && !isCancellation(err)) $('#draft-detail-error').textContent=err.message; }
+      } catch(err) { evalError(err); }
     };
     controls.refreshState();
-    $('#skill-standard-export').onclick=async()=>{try{const pack=await draftAction('export_standard',{draft_id:d.draft_id});downloadJson(pack, "skill-files.json", scope);}catch(e){if(!scope.current()||isCancellation(e))return;$('#draft-detail-error').textContent=e.message;}};
+    $('#skill-standard-export').onclick=async()=>{try{const pack=await draftAction('export_standard',{draft_id:d.draft_id});downloadJson(pack, "skill-files.json", scope);evalNotice('文件包已开始下载。','#skill-standard-export-state');}catch(e){evalError(e,'#skill-standard-export-state');}};
   }
 
   function addSkillFeedback(card,item) {

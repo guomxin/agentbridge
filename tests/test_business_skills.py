@@ -207,15 +207,23 @@ class BusinessSkillsTests(unittest.TestCase):
         config = validate_central_mcp_server_config(host="127.0.0.1", port=8790, public_base_url="http://testserver", tls_cert=None, tls_key=None)
         server = create_central_mcp_server(service=self.service, identity_store=store, config=config, auth_card_base_url="http://127.0.0.1:8780")
         with TestClient(server.streamable_http_app()) as client:
-            def call(name, args=None, user="alice", binding=None):
+            def call(name, args=None, user="alice", binding=None, task_id=None):
                 headers = {"Accept": "application/json, text/event-stream", "Authorization": "Bearer " + tokens[user]["token"], "MCP-Protocol-Version": "2025-06-18"}
                 context = {**meta, **({"agentbridge/skill": {"bindingId": binding}} if binding else {})}
+                if task_id:
+                    from agentbridge.mcp.central import TASK_CONTEXT_META_KEY
+                    context[TASK_CONTEXT_META_KEY] = {'taskId': task_id}
                 return client.post("/mcp", headers=headers, json={"jsonrpc":"2.0", "id":name, "method":"tools/call", "params":{"name":name,"arguments":args or {},"_meta":context}}).json()["result"]
             self.assertEqual(call("agentbridge_skill_catalog")["structuredContent"]["items"], [])
             self.assign()
             result = call("agentbridge_skill_get", {"skill_id":"oa-work-log", "profile":"preview", "expected_version":self.store.registry.get("oa-work-log")["manifest"]["version"]})
             self.assertFalse(result.get("isError"), result)
             binding = result["structuredContent"]["binding_id"]
+            execution = result['structuredContent']['execution']
+            self.assertEqual(execution['effects'], ['read'])
+            self.assertFalse(execution['legacy'])
+            self.assertFalse(execution['allow_batch'])
+            self.assertNotIn('taihua.work_log.create.prepare', execution['capabilities'])
             self.assertEqual(result["structuredContent"]["loaded_resources"], ["SKILL.md"])
             self.assertNotIn("resource", result["structuredContent"])
             mismatch = call("agentbridge_skill_get", {"skill_id":"oa-work-log", "profile":"preview", "expected_version":"0.0.1"}, binding=binding)
@@ -228,6 +236,27 @@ class BusinessSkillsTests(unittest.TestCase):
                 loaded = call("agentbridge_skill_get", {"skill_id":"log-review", "profile":"review", "source_id":"a"})["structuredContent"]
                 self.assertEqual(loaded["loaded_resources"], ["SKILL.md", "references/evidence.md"])
                 self.assertIn("结论核对", loaded["content"])
+                with patch('agentbridge.database.independent.IndependentDatabase.execute', return_value={'status': 'succeeded'}) as execute:
+                    allowed_db = call('database_execute', {'capability': 'database.directory', 'arguments': {'entity': 'users'}, 'source_id': 'a'}, binding=loaded['binding_id'])
+                    self.assertFalse(allowed_db.get('isError'), allowed_db)
+                    self.assertEqual(execute.call_count, 1)
+                    optional_db = call('database_execute', {'capability': 'database.free.read', 'arguments': {'sql': 'SELECT 1'}, 'source_id': 'a'}, binding=loaded['binding_id'])
+                    self.assertFalse(optional_db.get('isError'), optional_db)
+                    self.assertEqual(execute.call_count, 2)
+                    denied_other = call('database_execute', {'capability': 'database.directory', 'arguments': {'entity': 'users'}, 'source_id': 'a'}, binding=binding)
+                    self.assertTrue(denied_other.get('isError'), denied_other)
+                    self.assertEqual(execute.call_count, 2)
+                    task_id = 'skill-source-task-0001'
+                    self.store.attach('alice', task_id, loaded['binding_id'])
+                    denied_source = call('database_execute', {'capability':'database.directory',
+                        'arguments':{'entity':'users'}, 'source_id':'b'}, task_id=task_id)
+                    self.assertTrue(denied_source.get('isError'), denied_source)
+                    self.assertIn('数据源与本次业务助手选择不一致', str(denied_source))
+                    self.assertEqual(execute.call_count, 2)
+                    allowed_task = call('database_execute', {'capability':'database.directory',
+                        'arguments':{'entity':'users'}, 'source_id':'a'}, task_id=task_id)
+                    self.assertFalse(allowed_task.get('isError'), allowed_task)
+                    self.assertEqual(execute.call_count, 3)
             self.assertEqual(self.store.load_history("alice")[0]["loaded_resources"], loaded["loaded_resources"])
             self.assertEqual(self.store.load_history("alice")[0]["status"], "succeeded")
             denied = call("agentbridge_skill_get", {"skill_id":"oa-work-log", "profile":"preview"}, user="bob", binding=binding)
@@ -240,6 +269,46 @@ class BusinessSkillsTests(unittest.TestCase):
                 blocked = call("oa_workflow_pending_list", binding=binding)
                 self.assertTrue(blocked["isError"])
                 self.assertEqual(invoke.call_count, 1)
+            # An approved pure-text helper cannot reach database execution even
+            # when an authenticated host supplies a syntactically valid call.
+            authoring = self.service.skill_authoring
+            draft = authoring.save('alice', proposal={'name': '纯文字', 'description': '整理给定文字',
+                'selection': {'use_when': '整理文字', 'not_for': '查询业务', 'output': '文字'},
+                'instructions': '只整理输入文字。'}, request_key='pure-draft')
+            sample = authoring.test_start('alice', draft_id=draft['draft_id'], expected_revision=1,
+                profile='use', prompt='合成输入', request_key='pure-test')
+            authoring.test_result('alice', test_id=sample['test_id'], output='合成输出')
+            request = authoring.submit('alice', draft_id=draft['draft_id'], expected_revision=1,
+                request_key='pure-submit', reason='私有文字方法')
+            authoring.decide(actor={'username': 'admin', 'role': 'admin'}, request_id=request['request_id'],
+                decision='approve', reason='合成核对', reviewed_tests=True, manual_quality_reason='逐句核对输入输出')
+            pure = call('agentbridge_skill_get', {'skill_id': draft['skill_id'], 'profile': 'use'})['structuredContent']
+            self.assertEqual(pure['execution']['capabilities'], [])
+            with patch('agentbridge.database.independent.IndependentDatabase.execute') as execute:
+                denied = call('database_execute', {'capability': 'database.directory', 'arguments': {'entity': 'users'}}, binding=pure['binding_id'])
+                self.assertTrue(denied.get('isError'), denied)
+                execute.assert_not_called()
+            restricted = authoring.save('alice', proposal={'name': '受限导出', 'description': '仅导出日志查询',
+                'selection': {'use_when': '日志导出', 'not_for': '自由查询', 'output': 'CSV'}, 'instructions': '只使用日志查询。',
+                'profiles': {'use': {'database': {'all': ['database.logs.query']}, 'execution': {
+                    'effects': ['read'], 'allow_batch': False, 'capabilities': ['database.logs.query', 'database.report.export']}}}},
+                request_key='restricted-draft')
+            sample = authoring.test_start('alice', draft_id=restricted['draft_id'], expected_revision=1,
+                profile='use', prompt='合成输入', request_key='restricted-test')
+            authoring.test_result('alice', test_id=sample['test_id'], output='合成输出')
+            request = authoring.submit('alice', draft_id=restricted['draft_id'], expected_revision=1,
+                request_key='restricted-submit', reason='受限日志导出')
+            authoring.decide(actor={'username': 'admin', 'role': 'admin'}, request_id=request['request_id'],
+                decision='approve', reason='合成核对', reviewed_tests=True, manual_quality_reason='逐句核对输入输出')
+            with patch('agentbridge.database.independent.IndependentDatabase.catalog', return_value={'sources': [
+                {'source_id': 'a', 'capabilities': [{'name': 'database.logs.query'}]}]}):
+                restricted_loaded = call('agentbridge_skill_get', {'skill_id': restricted['skill_id'], 'profile': 'use', 'source_id': 'a'})['structuredContent']
+                with patch('agentbridge.database.independent.IndependentDatabase.execute') as execute:
+                    denied = call('database_execute', {'capability': 'database.report.export', 'source_id': 'a',
+                        'arguments': {'query_capability': 'database.free.read', 'query_arguments': {'sql': 'SELECT 1'}, 'request_key': 'export'}},
+                        binding=restricted_loaded['binding_id'])
+                    self.assertTrue(denied.get('isError'), denied)
+                    execute.assert_not_called()
 
 
 if __name__ == "__main__": unittest.main()

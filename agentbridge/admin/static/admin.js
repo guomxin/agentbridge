@@ -1,7 +1,7 @@
 import { statusText, statusClass, escapeHtml, fmtTime, fmtBytes, fmtDuration, fmtMetric, boundaryLabel, shortId, badge, sessionStateBadge, empty, table, filterRow, filteredTable, scopeBadges, rowMenuButton, skillReviewQualityHtml } from "./admin_presentation.mjs";
 import { createViewScope, createTimerSlot } from "./admin_lifecycle.mjs";
 import { createAdminApi, restoreAdminSession } from "./admin_request.mjs";
-import { createModalController } from "./admin_forms.mjs";
+import { createModalController, skillReviewDecision } from "./admin_forms.mjs";
 
 const state = { account: null, view: "overview", coordinationTab: "tasks", governanceTab: "events", incidents: [], selectedIncident: null, detailRevision: 0 };
 const titles = {
@@ -849,10 +849,10 @@ async function openSkillReview(id) {
   openModal({title:`${m.name} · 修订 ${r.draft_revision}`,submit:canReview?"提交审批决定":"关闭",body:`
     <p>${escapeHtml(m.description)}</p><p>申请人：${escapeHtml(r.owner_subject)} · 使用范围：${escapeHtml(r.audience.join("、"))}</p><p>发布说明：${escapeHtml(r.reason)}</p>
     <p>适用：${escapeHtml(m.selection.use_when)}<br>不适用：${escapeHtml(m.selection.not_for)}<br>输出：${escapeHtml(m.selection.output)}</p>
-    <p>本次发布模式：${escapeHtml(r.profiles.join('、'))}</p>${skillReviewQualityHtml(r.quality,r.profiles)}
+    <p>本次发布模式：${escapeHtml(r.profiles.join('、'))}</p>${skillReviewQualityHtml(r.quality,r.profiles,{canReview})}
     <details open><summary>方法与依赖</summary><pre class="skill-review-text">${escapeHtml(JSON.stringify(m.profiles,null,2))}\n${escapeHtml(r.bundle.resources["SKILL.md"])}</pre></details>
     ${Object.entries(r.bundle.resources).filter(([k])=>k!=="SKILL.md").map(([k,v])=>`<details><summary>${escapeHtml(k)}</summary><pre class="skill-review-text">${escapeHtml(v)}</pre></details>`).join("")}
     <h3>样例结果（模型生成，待人工复核）</h3>${r.tests.map(t=>`<details open><summary>${escapeHtml(t.profile)} · ${escapeHtml(t.prompt)}</summary><pre class="skill-review-text">${escapeHtml(t.output)}</pre></details>`).join("")}
     ${canReview?`<label>决定<select name="decision"><option value="changes_requested">退回修改</option><option value="approve">通过并发布</option><option value="rejected">拒绝</option></select></label><label><input type="checkbox" name="reviewed_tests">我已检查方法、依赖、脱敏、发布范围和全部样例结果</label>${reasonField("审批意见")}`:`<p>${escapeHtml(r.decision_reason||r.state)}</p>`}`,
-    action:async f=>{if(canReview)await api("/api/skill-reviews",{method:"POST",body:JSON.stringify({request_id:id,decision:f.get("decision"),reviewed_tests:f.get("reviewed_tests")==="on",reason:f.get("reason"),manual_quality_reason:f.get("manual_quality_reason")||null})});closeModal();await loadView("skillReviews");}});
+    action:async f=>{if(canReview)await api("/api/skill-reviews",{method:"POST",body:JSON.stringify(skillReviewDecision(f,id,r.quality?.candidate_problems || []))});closeModal();await loadView("skillReviews");}});
 }

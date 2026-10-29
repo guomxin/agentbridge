@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agentbridge.core.skill_contracts import SkillAuthoringData
+from agentbridge.core.skill_actions import SkillActionName
 from agentbridge.core.commit_notifications import current_version, wait_for_change_async
 
 import asyncio
@@ -1019,7 +1020,8 @@ def create_central_mcp_server(
                 raise SkillRejected("SKILL_SOURCE_MISMATCH", "数据源与本次业务助手选择不一致")
             if task_id:
                 await asyncio.to_thread(service.skills.attach, identity["user_subject"], task_id, meta["bindingId"])
-        await asyncio.to_thread(service.validate_skill_task, identity["user_subject"], task_id, capability=capability)
+        await asyncio.to_thread(service.validate_skill_task, identity["user_subject"], task_id,
+                                capability=capability, source_id=source_id)
 
     @mcp.tool(name="agentbridge_skill_catalog", title="业务助手目录",
         description="列出当前用户获分配的业务 Skill、任务目标、版本、可用功能和依赖，供选择适用助手。目录不包含完整执行规则。",
@@ -1033,12 +1035,15 @@ def create_central_mcp_server(
         return result
 
     @mcp.tool(name="agentbridge_skill_authoring", title="创作业务助手草稿",
-        description="所有用户均可创作私有草稿，无需业务权限。后台生成 generate(material,request_key,可选draft_id/expected_revision)，查看 jobs(可选job_id)，cancel_job/retry_job(job_id)。inspect(draft_id)返回诊断、版本差异、previous_report复用样例输入（标注来源修订，不继承通过结论）和最近反馈。evaluate(draft_id,expected_revision,cases,request_key,repeats=1)启动无工具独立评测；cases每项prompt/profile/kind(output或trigger)/contains字符串数组/excludes字符串数组，trigger需expected_trigger布尔。scopes(scope,enabled)设置自动提炼范围，preferences仍为总开关。discover(query,limit)按权限检索；resource(binding_id,path)读取固定版本可选参考；composition(steps:[{skill_id,profile,input,output}])预检组合；feedback(skill_id,profile,rating:useful|incorrect|not_applicable,comment,可选version)反馈；可选test_id或binding_id二选一绑定自己已保存的试用或历史任务，原修订/模式/版本由服务端冻结；无来源时针对当前目录模式和版本。试用反馈版本为draft:修订号；用户纠错文字只能作为待复核的样例建议，不能当作已通过断言；export_standard(draft_id)/import_standard(package,request_key)兼容标准文件包；recipients查看共享用户。原action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(无依赖必须为{use:{}}；模式对象只允许all/any权限数组和database依赖，不接受name/description/tools),executionMode(默认read_exploration),references(可选)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
+        description="所有用户均可创作私有草稿，无需业务权限。后台生成 generate(material,request_key,可选draft_id/expected_revision)，查看 jobs(可选job_id)，cancel_job/retry_job(job_id)。inspect(draft_id)返回诊断、版本差异、previous_report复用样例输入（标注来源修订，不继承通过结论）和最近反馈。pending_cases(draft_id)读取待测题；save_pending_cases(draft_id,expected_revision,expected_version,value)保存未完成题目，value={cases:[{prompt,profile,kind:output或trigger_true或trigger_false,contains:换行分隔文本,excludes:换行分隔文本}],repeats:字符串1或2或3}；set_regression(draft_id,expected_revision,job_id)固定已完成报告题组，job_id=null解除固定。保存题目不代表运行或通过；人工复核只由用户在网页完成。evaluate(draft_id,expected_revision,cases,request_key,repeats=1)启动无工具独立评测；cases每项prompt/profile/kind(output或trigger)/contains字符串数组/excludes字符串数组，trigger需expected_trigger布尔。scopes(scope,enabled)设置自动提炼范围，preferences仍为总开关。discover(query,limit)按权限检索；resource(binding_id,path)读取固定版本可选参考；composition(steps:[{skill_id,profile,input,output}])预检组合；feedback(skill_id,profile,rating:useful|incorrect|not_applicable,comment,可选version)反馈；可选test_id或binding_id二选一绑定自己已保存的试用或历史任务，原修订/模式/版本由服务端冻结；无来源时针对当前目录模式和版本。试用反馈版本为draft:修订号；用户纠错文字只能作为待复核的样例建议，不能当作已通过断言；export_standard(draft_id)/import_standard(package,request_key)兼容标准文件包；recipients查看共享用户。原action: list/get/export/requests/preferences/save/test/test_result/submit/withdraw/archive/restore。data为参数对象。save需要proposal{name,description,selection:{use_when,not_for,output},instructions,profiles(纯文字为{use:{}}；每模式可写description、all/any权限、database依赖和execution:{effects,allow_batch,capabilities可选})、executionMode(默认read_exploration，仅read；写入选controlled_action或durable_plan)、references(可选)、required_resources(各模式必读路径；未选资料按需读取),standard_metadata(可选license/compatibility声明)}及request_key；更新还需draft_id、expected_revision；provenance可选{kind:request/interaction/automatic/import/revision,summary,task_ids,complete}。test需要draft_id,expected_revision,profile,prompt,request_key，仅合成样例，不调用业务工具；test_result需要test_id,output。submit需要draft_id,expected_revision,request_key,reason，可选audience用户列表、profiles；默认仅自己。提交不代表发布，必须控制台审批。get/export需draft_id；withdraw需request_id；archive需draft_id,expected_revision。restore需draft_id,expected_revision,target_revision,request_key，将旧修订恢复为新草稿并重新测试审批。preferences读取传空对象；写入需value:{auto_draft:布尔},expected_revision。永不授予业务权限。",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False), structured_output=True)
-    async def agentbridge_skill_authoring(ctx: Context, action: str, data: SkillAuthoringData) -> dict[str, Any]:
+    async def agentbridge_skill_authoring(ctx: Context, action: SkillActionName, data: SkillAuthoringData) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
         arguments = data.model_dump(exclude_unset=True, exclude_none=True)
+        # Explicit null releases a fixed regression set; keep other legacy null semantics.
+        if action == "set_regression" and "job_id" in data.model_fields_set:
+            arguments["job_id"] = data.job_id
         trial = _request_meta(ctx).get('agentbridge/skill-trial')
         if trial is not None:
             if not isinstance(trial, Mapping) or set(trial) != {'dispatchId'} or not isinstance(trial['dispatchId'], str):
@@ -1053,6 +1058,7 @@ def create_central_mcp_server(
     async def agentbridge_skill_get(ctx: Context, skill_id: str, profile: str,
         source_id: str | None = None, expected_version: str | None = None) -> dict[str, Any]:
         from agentbridge.core.business_skills import SkillRejected, dependency_state, META_KEY, skill_bundle, validate_binding
+        from agentbridge.core.skill_execution import effective_skill_execution
         identity = _request_identity(identity_store)
         await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
         def load():
@@ -1079,7 +1085,8 @@ def create_central_mcp_server(
                 validate_binding(service, identity["user_subject"], binding)
                 return {"status": "succeeded", "skill_id": skill_id, "version": binding["version"],
                     "content_hash": snapshot["content_hash"], "binding_id": binding_id,
-                    "settings": binding["settings"], "profile": profile, **skill_bundle(binding)}
+                    "settings": binding["settings"], "profile": profile,
+                    "execution": effective_skill_execution(binding), **skill_bundle(binding)}
             except SkillRejected as exc:
                 return {"status": "rejected", "error": {"code": exc.code, "message": str(exc)}}
         result = await asyncio.to_thread(load)
@@ -3753,14 +3760,20 @@ def create_central_mcp_server(
     async def database_execute(ctx: Context, capability: str, arguments: dict[str, Any], source_id: str = "taihua_primary") -> dict[str, Any]:
         from agentbridge.database.independent import IndependentDatabase, DatabaseRejected, rejection_result
         identity = _request_identity(identity_store)
-        await require_skill_context(ctx, identity, source_id=source_id)
+        await require_skill_context(ctx, identity, capability=capability, source_id=source_id)
+        # Export reruns the requested query; its outer capability must not hide
+        # a query excluded by this task's fixed execution contract.
+        if capability == 'database.report.export' and isinstance(arguments.get('query_capability'), str):
+            await require_skill_context(ctx, identity, capability=arguments['query_capability'], source_id=source_id)
         try:
             result = await asyncio.to_thread(IndependentDatabase(service.home, original_base_url=workspace_base_url).execute,
                                             identity['user_subject'], capability, arguments, source_id)
         except DatabaseRejected as exc:
             return rejection_result(exc)
         _request_identity(identity_store)
-        await require_skill_context(ctx, identity, source_id=source_id)
+        await require_skill_context(ctx, identity, capability=capability, source_id=source_id)
+        if capability == 'database.report.export' and isinstance(arguments.get('query_capability'), str):
+            await require_skill_context(ctx, identity, capability=arguments['query_capability'], source_id=source_id)
         if capability == 'database.report.download':
             task_id = _request_task_id(ctx)
             if task_id:
