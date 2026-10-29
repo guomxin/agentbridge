@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "785e57f0ec94"
+    "d63237b8a849"
   ],
-  "dataCompatibility": "reviewed-forward-only",
-  "reason": "Reviewed schema-only clone of the exact deployed four-database baseline: no SQL schema or user_version changes. New skill execution contracts and frozen problem-resolution requirements are persisted in existing JSON snapshots. The previous program ignores these restrictions, so automatic program rollback is forbidden after candidate start is attempted. Existing identities, grants, authorizations and immutable task bindings remain enforced; backup is for separately reviewed recovery only."
+  "dataCompatibility": "no-migration",
+  "reason": "UI-only follow-up to the exact deployed d63237b8a849: synchronize skill job completion notices and draft lists while preserving unsaved inputs. No database schema, persisted skill contract, authorization, or business execution changes. The predecessor already enforces the new execution and review restrictions, so program rollback to that predecessor preserves their semantics."
 }

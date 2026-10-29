@@ -97,6 +97,7 @@ export function skillCandidateRemovals(changes) {
 
 export function createSkillForms({ document, state, $, api: request, switchView, startTrial, clearTrial = () => {}, getScope, FormData: FormDataType = globalThis.FormData, eventTarget = globalThis, confirm }) {
   const leaveGuard = createSkillLeaveGuard({document, eventTarget, confirm});
+  let updateGeneration = null, updateEvaluation = null;
   const adoptionsByView = new WeakMap();
   const pendingAdoptions = view => {
     if (!adoptionsByView.has(view)) adoptionsByView.set(view, new Set());
@@ -145,10 +146,16 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     scope.timeout(() => { URL.revokeObjectURL(url); release(); }, 1000);
   }
   const draftStatus={submitted:"待审批",published:"已发布",changes_requested:"需修改",rejected:"已拒绝",withdrawn:"已撤回",editing:"草稿",archived:"已归档"};
+  function renderDraftList(items) {
+    const list=$("#draft-list");list.replaceChildren();
+    if(!items.length)list.textContent="还没有草稿。可以直接在对话中说：做个周报助手。";
+    for(const d of items){const b=document.createElement("button");b.className="secondary";b.textContent=`${d.name} · 修订 ${d.revision} · ${draftStatus[d.review_state||d.state]||d.state}${d.published_version?" · 线上 "+d.published_version:" · 尚未发布"}`;b.onclick=()=>showSkillDraft(d.draft_id);list.append(b);}
+  }
   async function loadSkillDrafts(permit) {
     const parent = getScope();
     if (!await leaveGuard.request(permit) || !parent.current()) return false;
     const scope = parent.replace("skill-draft-list");
+    parent.replace("skill-workbench-home").dispose();
     parent.replace("skill-draft-detail").dispose();
     parent.replace("skill-jobs-request").dispose();
     parent.replace("skill-candidate-preview").dispose();
@@ -170,9 +177,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const input=document.createElement("input");input.type="file";input.accept="application/json,.json";
         input.onchange=async()=>{try {const f=input.files[0];if(!f)return;if(f.size>100000)throw new Error("文件不能超过100KB");const v=JSON.parse(await f.text());scope.assertCurrent();await navigateAfterAction(scope, async permit => {if(v.format==="agentskills.files.v1")await draftAction("import_standard",{package:v,request_key:crypto.randomUUID()});else if(v.format==="agentbridge.skill-draft.v1")await draftAction("save",{proposal:v.proposal,request_key:crypto.randomUUID(),provenance:{kind:"import"}});else throw new Error("不支持的草稿格式");await loadSkillDrafts(permit);});}catch(err){if(!scope.current()||isCancellation(err))return;$("#draft-error").textContent=err.message;}};input.click();
       };
-      const list=$("#draft-list");
-      if(!data.items.length)list.textContent="还没有草稿。可以直接在对话中说：做个周报助手。";
-      for(const d of data.items){const b=document.createElement("button");b.className="secondary";b.textContent=`${d.name} · 修订 ${d.revision} · ${draftStatus[d.review_state||d.state]||d.state}${d.published_version?" · 线上 "+d.published_version:" · 尚未发布"}`;b.onclick=()=>showSkillDraft(d.draft_id);list.append(b);}
+      renderDraftList(data.items);
     } catch(e){if(!scope.current()||isCancellation(e))return false;root.textContent=e.message;return false;}
   }
   async function showSkillDraft(id, permit, carriedEvaluation = null) {
@@ -360,16 +365,51 @@ export function createSkillForms({ document, state, $, api: request, switchView,
   }
 
   function renderSkillWorkbenchHome(data) {
-    const scope = getScope();
+    const scope = getScope().replace("skill-workbench-home");
+    updateGeneration = null;
     const draftAction = draftActions(scope);
     const root=$('#skill-workbench-home');
     const selected=data.scopes?.items.some(x=>x.scope===data.scope&&x.enabled);
     root.innerHTML=`<label class="draft-auto"><input id="skill-auto-scope" type="checkbox" ${selected?'checked':''}>允许从此工作台的新交互后台提炼（还需开启上方总开关）</label>
       <form id="skill-generate-form" class="draft-editor" hidden><label>想生成什么助手？<textarea id="skill-generate-material" required maxlength="16000" placeholder="做个周报助手，只整理我给的文字。"></textarea></label><button>后台生成草稿</button><p>可填写需求或粘贴选定过程。方法保存为私有草稿；偏好和事实单独提示。</p></form>
-      <details><summary>后台生成与评测</summary><button id="skill-refresh-jobs" type="button" class="secondary">刷新任务</button><div id="skill-jobs"></div></details>`;
+      <details id="skill-background-jobs"><summary>后台生成与评测</summary><button id="skill-refresh-jobs" type="button" class="secondary">刷新任务</button><div id="skill-jobs"></div></details>`;
     const fail=e=>{if (scope.current() && !isCancellation(e)) $('#draft-error').textContent=e.message;};
     $('#skill-auto-scope').onchange=async e=>{try{await draftAction('scopes',{scope:data.scope,enabled:e.target.checked});}catch(err){if(!scope.current()||isCancellation(err))return;e.target.checked=!e.target.checked;fail(err);}};
-    $('#skill-generate-form').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;try{await draftAction('generate',{material:$('#skill-generate-material').value,request_key:crypto.randomUUID()});$('#draft-error').textContent='已加入后台生成队列，可继续其他工作。';await refreshSkillJobs();}catch(err){if(!scope.current()||isCancellation(err))return;fail(err);}finally{button.disabled=false;}};
+    $('#skill-generate-form').onsubmit=async e=>{
+      e.preventDefault();const button=e.target.querySelector('button');if(button.disabled)return;button.disabled=true;
+      updateGeneration=null;
+      try {
+        const receipt=await draftAction('generate',{material:$('#skill-generate-material').value,request_key:crypto.randomUUID()});
+        scope.assertCurrent();
+        $('#skill-background-jobs').open=true;
+        $('#draft-error').textContent='已加入后台生成队列，可继续其他工作。';
+        let listed=false,listing=false,previousState='queued';
+        const update=async items=>{
+          if(!scope.current()||updateGeneration!==update)return;
+          const job=items.find(item=>item.job_id===receipt.job_id);if(!job)return;
+          const completed=job.result?.draft_id?'草稿已生成，可在下方草稿列表或后台任务中查看。':'提炼已完成，请在后台任务中查看结果。';
+          if(job.state!==previousState){
+            const message={queued:'已加入后台生成队列，可继续其他工作。',running:'正在后台生成草稿，可继续其他工作。',succeeded:completed,failed:`生成失败：${job.error||'请在后台任务中查看详情。'}`,canceled:'本次生成已取消。'}[job.state];
+            if(message)$('#draft-error').textContent=message;
+            previousState=job.state;
+          }
+          if(job.state!=='succeeded'||!job.result?.draft_id||listed||listing)return;
+          listing=true;
+          const listScope=scope.replace('generated-draft-list');
+          try {
+            const latest=await scopedApi(listScope)('/api/skill-drafts');listScope.assertCurrent();
+            if(updateGeneration!==update)return;
+            renderDraftList(latest.items);listed=true;$('#draft-error').textContent=completed;
+          } catch(error) {
+            if(scope.current()&&updateGeneration===update&&!isCancellation(error))$('#draft-error').textContent='草稿已生成；列表暂未刷新，可在后台任务中查看草稿或点击“刷新任务”。';
+          } finally {listing=false;}
+        };
+        updateGeneration=update;
+        try {await refreshSkillJobs();}
+        catch(error){if(scope.current()&&!isCancellation(error))$('#draft-error').textContent='已加入后台生成队列；进度暂未刷新，可稍后点击“刷新任务”。';}
+      } catch(err){fail(err);}
+      finally{if(scope.current())button.disabled=false;}
+    };
     $('#skill-refresh-jobs').onclick=()=>refreshSkillJobs().catch(fail);
     renderSkillJobs(data.jobs?.items||[]);
   }
@@ -379,6 +419,14 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     const data = await draftActions(scope)("jobs");
     scope.assertCurrent();
     renderSkillJobs(data.items);
+    updateEvaluation?.(data.items);
+    await updateGeneration?.(data.items);
+  }
+  function openBackgroundJob(jobId) {
+    const panel=$('#skill-background-jobs');if(panel)panel.open=true;
+    const job=[...$('#skill-jobs').querySelectorAll('[data-background-job]')].find(node=>node.dataset.backgroundJob===jobId);
+    const report=job?.querySelector('[data-report-job]');if(report)report.open=true;
+    (job||panel)?.scrollIntoView?.({block:'nearest',behavior:'smooth'});
   }
   function renderSkillJobs(items) {
     const scope = getScope();
@@ -391,7 +439,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     if(state.activeView==='skills'&&items.some(j=>['queued','running'].includes(j.state)))state.skillJobTimer=scope.timeout(()=>refreshSkillJobs().catch(e=>{if(scope.current()&&!isCancellation(e))$('#draft-error').textContent=e.message;}),3000);
     const labels={queued:'排队中',running:'执行中',succeeded:'已完成',failed:'失败',canceled:'已取消'};
     const kinds={method:'可复用方法',preference:'个人偏好',fact:'业务事实',none:'无需沉淀'};
-    root.innerHTML=items.map(j=>`<article class="skill-job"><p><strong>${j.kind==='evaluation'?'独立评测':'方法提炼'}</strong> · ${labels[j.state]}${j.kind==='evaluation'?` · ${escapeHtml(j.name || '助手')} · 修订 ${escapeHtml(j.revision)}${j.progress_stats?'':` · 已完成 ${j.progress} 项`}`:''}</p>
+    root.innerHTML=items.map(j=>`<article class="skill-job" data-background-job="${escapeHtml(j.job_id)}"><p><strong>${j.kind==='evaluation'?'独立评测':'方法提炼'}</strong> · ${labels[j.state]}${j.kind==='evaluation'?` · ${escapeHtml(j.name || '助手')} · 修订 ${escapeHtml(j.revision)}${j.progress_stats?'':` · 已完成 ${j.progress} 项`}`:''}</p>
       ${skillProgressHtml(j.progress_stats,{kind:j.kind})}
       ${j.result?`<p>${escapeHtml(kinds[j.result.classification]||'')} ${escapeHtml(j.result.summary||j.result.message||'')}</p>`:''}
       ${j.error?`<p role="status">${escapeHtml(j.error)}</p>`:''}
@@ -488,13 +536,13 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       <details><summary>与线上版本的差异（${quality.diff.length} 项）</summary>${quality.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre>${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
       <button id="skill-standard-export" class="secondary" type="button">导出标准 Skill 文件包</button><p id="skill-standard-export-state" role="status"></p>
       <h4>独立评测</h4><p>仅使用合成文字，无业务工具。输入简短问题及可检查的期望；断言不会提供给被测模型。适用场景判断仅检查方法说明，不证明宿主实际选择或加载。</p>
-      ${skillReportHtml(quality.evaluation, quality.comparison, true)}
+      <div id="skill-evaluation-report">${skillReportHtml(quality.evaluation, quality.comparison, true)}</div>
       <p id="skill-regression-status"></p><div class="draft-actions">
       ${quality.evaluation ? '<button id="skill-pin-regression" type="button" class="secondary">将本次评测题目设为常用回归题</button>' : ''}
       <button id="skill-use-regression" type="button" class="secondary" hidden>使用常用回归题</button>
       <button id="skill-clear-regression" type="button" class="secondary" hidden>取消固定</button></div>
       ${quality.previous_report ? `<button id="skill-reuse-cases" class="secondary" type="button">用上次样例重测</button><p>来源：修订 ${quality.previous_report.revision} 的上次评测。仅复用问题和验收条件，不继承通过结论。</p>` : ''}
-      <form id="skill-eval-form" class="draft-editor"><div id="skill-eval-cases"></div><div class="draft-actions"><button id="skill-add-case" type="button" class="secondary">添加样本</button><label>每项重复<select name="repeats"><option>1</option><option>2</option><option>3</option></select></label><button type="button" id="skill-save-pending" class="secondary">保存待测题目</button><button id="skill-eval-submit">启动独立评测</button></div><p id="skill-eval-state" role="status">可先保存待测题目，稍后再启动评测；保存不代表评测通过。</p></form>
+      <form id="skill-eval-form" class="draft-editor"><div id="skill-eval-cases"></div><div class="draft-actions"><button id="skill-add-case" type="button" class="secondary">添加样本</button><label>每项重复<select name="repeats"><option>1</option><option>2</option><option>3</option></select></label><button type="button" id="skill-save-pending" class="secondary">保存待测题目</button><button id="skill-eval-submit">启动独立评测</button></div><p id="skill-eval-state" role="status">可先保存待测题目，稍后再启动评测；保存不代表评测通过。</p><button id="skill-eval-open-job" type="button" class="secondary" hidden>查看本次后台任务</button></form>
       <h4>我的近期反馈</h4><p>反馈用于发现需要检查的问题，不代表独立评测通过。</p><button type="button" id="skill-refresh-feedback" class="secondary">刷新反馈进度</button><p id="skill-feedback-state" role="status"></p><div id="skill-feedback-list"></div>`;
     const reviewForms = [...root.querySelectorAll('[data-review-row]')];
     const reviewValue = form => JSON.stringify({status:form.querySelector('[name=review_status]').value,note:form.querySelector('[name=review_note]').value});
@@ -529,10 +577,10 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     controls.setCoverage(coverage);
     $('#skill-recipients').innerHTML='<legend>使用范围（默认仅自己）</legend>'+recipients.items.map((x,i)=>`<label><input type="checkbox" name="audience" value="${escapeHtml(x.subject)}" ${i===0?'checked':''}>${escapeHtml(x.name)}</label>`).join('');
     const profiles = Object.keys(d.bundle.manifest.profiles);
-    const evalNotice = (message, selector = '#skill-eval-state', role = 'status') => {
+    const evalNotice = (message, selector = '#skill-eval-state', role = 'status', scroll = true) => {
       if (!scope.current()) return;
       const notice = $(selector); notice.setAttribute('role', role); notice.textContent = message;
-      notice.scrollIntoView?.({block:'nearest',behavior:'smooth'});
+      if(scroll)notice.scrollIntoView?.({block:'nearest',behavior:'smooth'});
     };
     const evalError = (error, selector) => {if (scope.current() && !isCancellation(error)) evalNotice(error.message, selector, 'alert');};
     const add=(seed, source = '')=>{
@@ -729,10 +777,28 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const submittedEvaluation = readEvaluation();
         await controls.perform(async () => {
           try {
-            await draftAction('evaluate', {draft_id:d.draft_id, expected_revision:d.revision, cases, repeats, request_key:crypto.randomUUID()});
+            updateEvaluation=null;
+            const receipt=await draftAction('evaluate', {draft_id:d.draft_id, expected_revision:d.revision, cases, repeats, request_key:crypto.randomUUID()});
             scope.assertCurrent();
             controls.evaluationSaved(submittedEvaluation);
             evalNotice(`修订 ${d.revision} 的评测已排队；完成后在后台任务中查看本次报告。`);
+            const open=$('#skill-eval-open-job');open.hidden=false;open.textContent='查看本次后台任务';
+            open.onclick=()=>{if(scope.current())openBackgroundJob(receipt.job_id);};
+            const panel=$('#skill-background-jobs');if(panel)panel.open=true;
+            let previousState='queued';
+            updateEvaluation=items=>{
+              if(!scope.current())return;
+              const job=items.find(item=>item.job_id===receipt.job_id);
+              if(!job||job.state===previousState)return;
+              previousState=job.state;
+              const message={queued:`修订 ${d.revision} 的评测已排队。`,running:`正在评测修订 ${d.revision}，可继续编辑待测题目。`,
+                succeeded:`修订 ${d.revision} 的评测已完成，可查看本次报告；完成不代表通过。`,
+                failed:`修订 ${d.revision} 的评测失败：${job.error||'请查看本次后台任务。'}`,canceled:`修订 ${d.revision} 的本次评测已取消。`}[job.state];
+              if(message)evalNotice(message,'#skill-eval-state',job.state==='failed'?'alert':'status',false);
+              open.textContent=job.state==='succeeded'?'查看本次报告':'查看本次后台任务';
+              if(job.state==='succeeded'&&!quality.evaluation)$('#skill-evaluation-report').innerHTML=job.result?.rows
+                ?skillReportHtml(job.result):'<p>本次评测已完成，请在后台任务中查看报告。</p>';
+            };
           } catch(error) { evalError(error); return; }
           try { await refreshSkillJobs(); await refreshFeedback(); }
           catch(error) {if(scope.current()&&!isCancellation(error))evalNotice('评测已排队；任务列表暂未刷新，可稍后手动刷新。');}

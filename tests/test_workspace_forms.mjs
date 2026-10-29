@@ -798,6 +798,154 @@ test('job progress refresh keeps method input and expanded report while showing 
   f.view.dispose();
 });
 
+const draftListing = (items=[],jobs=[]) => ({items,preferences:{revision:1,value:{auto_draft:false}},scopes:{items:[]},scope:'workspace',jobs:{items:jobs}});
+
+test('generation opens its progress and polling adds the completed draft without rebuilding dirty editors',async()=>{
+  const pending=new Map(),jobs=[],items=[];let next=0;
+  const timers={setTimeout(cb){pending.set(++next,cb);return next;},clearTimeout(id){pending.delete(id);}};
+  const f=skillFixture({jobs,timers,onAction:action=>{
+    if(action==='generate'){jobs.push({job_id:'generated-job',kind:'generation',state:'queued'});return jobs[0];}
+  },onRequest:(path,options)=>path==='/api/skill-drafts'&&!options.body?draftListing(items,jobs):undefined});
+  await f.forms.loadSkillDrafts();await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='尚未保存的待测题';f.$('#skill-eval-form').oninput();
+  f.editor.controls.get('instructions').value='尚未保存的方法';f.editor.oninput();
+  f.$('#skill-generate-material').value='整理我给的文字';f.$('#skill-background-jobs').open=false;
+  await f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));
+  assert.equal(f.$('#skill-background-jobs').open,true);assert.match(f.$('#draft-error').textContent,/已加入/);
+  const poll=async()=>{assert.equal(pending.size,1);const [id,cb]=pending.entries().next().value;pending.delete(id);cb();await flush();};
+  jobs[0].state='running';await poll();assert.match(f.$('#draft-error').textContent,/正在后台生成/);
+  jobs[0]={...jobs[0],state:'succeeded',result:{draft_id:'new-draft'}};
+  items.push({draft_id:'new-draft',name:'新文字助手',revision:1,state:'editing'});
+  await poll();
+  assert.match(f.$('#draft-error').textContent,/草稿已生成/);assert.equal(pending.size,0);
+  assert.match(f.$('#draft-list').children[0].textContent,/新文字助手/);
+  assert.equal(f.editor.controls.get('instructions').value,'尚未保存的方法');
+  assert.equal(f.$('#skill-eval-cases').children[0],row);assert.equal(row.querySelector('[name=prompt]').value,'尚未保存的待测题');
+  assert.equal(f.$('#skill-generate-material').value,'整理我给的文字');assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  assert.equal(f.calls.filter(c=>c.action==='generate').length,1);assert.equal(f.calls.filter(c=>c.path.includes('?id=')).length,1);
+  f.view.dispose();
+});
+
+test('generation terminal notices follow only the latest submitted job including failure cancellation and no-draft results',async()=>{
+  const jobs=[];let sequence=0;
+  const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:`generation-${++sequence}`}:undefined});
+  await f.forms.loadSkillDrafts();
+  const submit=()=>f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));
+  await submit();await submit();
+  jobs.push({job_id:'generation-1',kind:'generation',state:'succeeded',result:{draft_id:'old-result'}});
+  await f.forms.refreshSkillJobs();assert.match(f.$('#draft-error').textContent,/已加入/);
+  jobs.push({job_id:'generation-2',kind:'generation',state:'failed',error:'模型暂时不可用'});
+  await f.forms.refreshSkillJobs();assert.match(f.$('#draft-error').textContent,/生成失败.*模型暂时不可用/);
+  await submit();jobs.push({job_id:'generation-3',kind:'generation',state:'canceled'});
+  await f.forms.refreshSkillJobs();assert.equal(f.$('#draft-error').textContent,'本次生成已取消。');
+  await submit();jobs.push({job_id:'generation-4',kind:'generation',state:'succeeded',result:{classification:'preference'}});
+  await f.forms.refreshSkillJobs();assert.match(f.$('#draft-error').textContent,/提炼已完成/);
+  assert.equal(f.calls.filter(c=>c.path==='/api/skill-drafts'&&!c.action).length,1,'no draft result must not claim a new draft or reload its list');
+  f.view.dispose();
+});
+
+test('a failed completed-draft list refresh preserves the success receipt and recovers without generating again',async()=>{
+  const jobs=[{job_id:'generation',kind:'generation',state:'succeeded',result:{draft_id:'new'}}];let reads=0;
+  const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:'generation'}:undefined,
+    onRequest:(path,options)=>{
+      if(path!=='/api/skill-drafts'||options.body)return;
+      if(++reads===2)throw Error('列表读取超时');
+      return draftListing(reads>2?[{draft_id:'new',name:'已生成的草稿',revision:1,state:'editing'}]:[],jobs);
+    }});
+  await f.forms.loadSkillDrafts();await f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));
+  assert.match(f.$('#draft-error').textContent,/草稿已生成；列表暂未刷新/);
+  await f.$('#skill-refresh-jobs').onclick();
+  assert.match(f.$('#draft-list').children[0].textContent,/已生成的草稿/);assert.doesNotMatch(f.$('#draft-error').textContent,/暂未刷新/);
+  await f.$('#skill-refresh-jobs').onclick();assert.equal(reads,3,'completed list is fetched once after recovery');
+  assert.equal(f.calls.filter(c=>c.action==='generate').length,1);f.view.dispose();
+});
+
+test('leaving during a completed generation list read cannot paint the departed account',async()=>{
+  const gate=deferred();let reads=0;
+  const jobs=[{job_id:'generation',kind:'generation',state:'succeeded',result:{draft_id:'private-draft'}}];
+  const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:'generation'}:undefined,
+    onRequest:(path,options)=>path==='/api/skill-drafts'&&!options.body?(++reads===1?draftListing([],jobs):gate.promise):undefined});
+  await f.forms.loadSkillDrafts();
+  const submit=f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));await flush();
+  f.view.dispose();f.$('#draft-error').textContent='另一个账号';
+  gate.resolve(draftListing([{draft_id:'private-draft',name:'私有草稿',revision:1,state:'editing'}]));await submit;
+  assert.equal(f.$('#draft-list').children.length,0);assert.equal(f.$('#draft-error').textContent,'另一个账号');
+});
+
+test('refreshing the same skill view ignores a late generation receipt from the replaced home',async()=>{
+  const gate=deferred();
+  const f=skillFixture({onAction:action=>action==='generate'?gate.promise:undefined});
+  await f.forms.loadSkillDrafts();
+  const submit=f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));await flush();
+  await f.forms.loadSkillDrafts();f.$('#draft-error').textContent='刷新后的新提示';f.$('#skill-background-jobs').open=false;
+  f.$('#skill-generate-material').value='刷新后新输入';
+  gate.resolve({job_id:'old-generation'});await submit;
+  assert.equal(f.$('#draft-error').textContent,'刷新后的新提示');assert.equal(f.$('#skill-background-jobs').open,false);
+  assert.equal(f.$('#skill-generate-material').value,'刷新后新输入');
+  assert.equal(f.calls.filter(c=>c.action==='jobs').length,0,'late receipt does not start polling for the replaced home');
+  f.view.dispose();
+});
+
+test('another jobs refresh neither cancels nor duplicates a slow completed-draft list read',async()=>{
+  const gate=deferred(),jobs=[{job_id:'generation',kind:'generation',state:'succeeded',result:{draft_id:'new'}}];let reads=0;
+  const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:'generation'}:undefined,
+    onRequest:(path,options)=>path==='/api/skill-drafts'&&!options.body?(++reads===1?draftListing([],jobs):gate.promise):undefined});
+  await f.forms.loadSkillDrafts();
+  const submit=f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));await flush();
+  await f.forms.refreshSkillJobs();assert.equal(reads,2);
+  gate.resolve(draftListing([{draft_id:'new',name:'慢查询后的草稿',revision:1,state:'editing'}]));await submit;
+  assert.match(f.$('#draft-list').children[0].textContent,/慢查询后的草稿/);assert.match(f.$('#draft-error').textContent,/草稿已生成/);
+  assert.equal(reads,2);f.view.dispose();
+});
+
+test('evaluation completion updates its local report and exact task entry while preserving later inputs',async()=>{
+  const jobs=[];let sequence=0;
+  const f=skillFixture({jobs,onAction:action=>action==='evaluate'?{job_id:`evaluation-${++sequence}`}:undefined});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='整理计划';row.querySelector('[name=contains]').value='计划';
+  const submit=()=>f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  await submit();await submit();
+  row.querySelector('[name=prompt]').value='之后编辑的待测题';f.$('#skill-eval-form').oninput();
+  f.editor.controls.get('instructions').value='之后编辑的方法';f.editor.oninput();
+  jobs.push({job_id:'evaluation-1',kind:'evaluation',state:'succeeded',result:reviewReport('evaluation-1')});
+  await f.forms.refreshSkillJobs();assert.match(f.$('#skill-eval-state').textContent,/已排队/);
+  jobs.push({job_id:'evaluation-2',kind:'evaluation',state:'running'});
+  await f.forms.refreshSkillJobs();assert.match(f.$('#skill-eval-state').textContent,/正在评测修订 3/);
+  jobs[1]={...jobs[1],state:'succeeded',result:reviewReport('evaluation-2')};
+  await f.forms.refreshSkillJobs();
+  assert.match(f.$('#skill-eval-state').textContent,/已完成.*不代表通过/);
+  assert.equal(f.$('#skill-eval-open-job').textContent,'查看本次报告');
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/evaluation-2/);assert.doesNotMatch(f.$('#skill-evaluation-report').innerHTML,/data-review-row|尚无独立评测/);
+  assert.equal(row.querySelector('[name=prompt]').value,'之后编辑的待测题');assert.equal(f.editor.controls.get('instructions').value,'之后编辑的方法');
+  assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  const older=new SkillElement(),current=new SkillElement();older.dataset.backgroundJob='evaluation-1';current.dataset.backgroundJob='evaluation-2';
+  f.$('#skill-jobs').queries.set('[data-background-job]',[older,current]);f.$('#skill-background-jobs').open=false;
+  f.$('#skill-eval-open-job').onclick();assert.equal(f.$('#skill-background-jobs').open,true);
+  assert.equal(current.querySelector('[data-report-job]').open,true);assert.notEqual(older.querySelector('[data-report-job]').open,true);
+  f.view.dispose();
+});
+
+test('evaluation terminal notices preserve existing human review and stop following a departed draft',async()=>{
+  const report=reviewReport('previous'),jobs=[];
+  const f=skillFixture({report,jobs,onAction:action=>action==='evaluate'?{job_id:'new-evaluation'}:undefined});
+  const review=attachReviewForm(f);await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='整理计划';row.querySelector('[name=contains]').value='计划';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  review.querySelector('[name=review_note]').value='尚未保存的人工复核';review.oninput();
+  f.$('#skill-evaluation-report').innerHTML='保留原报告和人工复核表单';
+  jobs.push({job_id:'new-evaluation',kind:'evaluation',state:'succeeded',result:reviewReport('new-evaluation')});
+  await f.forms.refreshSkillJobs();assert.equal(f.$('#skill-evaluation-report').innerHTML,'保留原报告和人工复核表单');
+  assert.equal(review.querySelector('[name=review_note]').value,'尚未保存的人工复核');assert.equal(f.forms.canAutoReloadSkillEditor(),false);
+  for(const [state,text] of [['failed',/评测失败.*模型超时/],['canceled',/本次评测已取消/]]){
+    jobs[0]={...jobs[0],state,error:'模型超时'};await f.forms.refreshSkillJobs();assert.match(f.$('#skill-eval-state').textContent,text);
+  }
+  // Simulate leaving this draft while staying in the same view; stale progress
+  // must not overwrite another draft's evaluation status.
+  f.view.replace('skill-draft-detail').dispose();f.$('#skill-eval-state').textContent='另一个草稿';
+  jobs[0].state='succeeded';await f.forms.refreshSkillJobs();assert.equal(f.$('#skill-eval-state').textContent,'另一个草稿');
+  f.view.dispose();
+});
+
 test("publication covers only current reported samples or a matching passing output evaluation", () => {
   const d = editableDraft();
   d.tests.push({revision: 2, profile: "fill", status: "reported"}, {revision: 3, profile: "fill", status: "running"});
