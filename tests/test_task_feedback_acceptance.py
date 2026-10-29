@@ -98,12 +98,19 @@ class TaskFeedbackAcceptanceTests(unittest.TestCase):
 
     def test_report_review_http_enforces_owner_csrf_fields_and_conflicts(self):
         a = self.fixture.service.skill_authoring
+        # This HTTP fixture starts a worker backed by a read-only gateway.
+        # Its synthetic report is driven explicitly below, so it must not race
+        # that background worker for the same queued job.
+        a.workbench.close()
         draft = a.save(OWNER, proposal={'name':'周报复核','description':'整理原文',
             'selection':{'use_when':'整理周报','not_for':'业务查询','output':'周报'},
             'instructions':'只整理原文。'}, request_key='report-review-draft')
         job = a.workbench.evaluate(OWNER,draft_id=draft['draft_id'],expected_revision=1,
             cases=[{'prompt':'明天补测试','contains':['明天']}],request_key='report-review-job')
-        a.workbench.run_once(lambda *_:{'text':'明天补测试。','model':'synthetic'})
+        self.assertTrue(a.workbench.run_once(lambda *_:{'text':'明天补测试。','model':'synthetic'}))
+        report = a.workbench.jobs(OWNER, job['job_id'])
+        self.assertEqual(report['state'], 'succeeded')
+        self.assertIn('0:0:candidate', {row['key'] for row in report['result']['rows']})
         payload = {'job_id':job['job_id'],'row_key':'0:0:candidate','status':'acceptable',
                    'note':'保留原文。','expected_version':0}
         def post(cookies, *, csrf=True, update=None):
