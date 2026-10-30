@@ -3976,7 +3976,8 @@ class CentralCapabilityService:
             failure = classify_runtime_error(exc)
             self.runtime_governance.finish_span(
                 span["span_id"],
-                status="unknown" if failure["code"] == "RESULT_UNKNOWN" else "failed",
+                status=("waiting" if isinstance(exc, RequiresUserAction) else
+                        "unknown" if failure["code"] == "RESULT_UNKNOWN" else "failed"),
                 error_code=failure["code"],
                 side_effect_boundary=boundary,
                 duration_ms=round((perf_counter() - started) * 1000),
