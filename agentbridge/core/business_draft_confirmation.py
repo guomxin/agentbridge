@@ -61,7 +61,7 @@ def ensure_initial(connection, source, draft, now):
     if eligible(source) and latest(connection, draft) is None and draft['state'] not in {'expired', 'finalized'}:
         insert(connection, source, draft, identity=source['form_schema']['_agentbridge_content_identity'],
                fingerprint=source['form_schema']['_agentbridge_review_fingerprint'],
-               review=source['form_schema']['review'], now=now)
+               review={**source['form_schema']['review'], 'snapshot': 'source'}, now=now)
 
 
 def project(connection, source, draft, result, now):
@@ -75,7 +75,7 @@ def project(connection, source, draft, result, now):
         return
     if not result.get('preview'):
         result['ui']['review'] = deepcopy(json.loads(review['review_json']))
-        result['ui']['review']['snapshot'] = 'confirmation'
+        result['ui']['review'].setdefault('snapshot', 'confirmation')
     result['confirmation'] = {'reviewId': review['review_id'], 'expiresAt': review['expires_at']}
     if 'save' in result['allowedActions']:
         result['allowedActions'].append('confirm')
