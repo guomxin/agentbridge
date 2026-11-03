@@ -72,7 +72,7 @@ def business_draft_target(path: str) -> tuple[str, str | None, str] | None:
         return None
     match = re.fullmatch(
         r"/flow/input/([A-Za-z0-9_-]{32,128})(?:/present/([A-Za-z0-9_-]{32,128}))?"
-        r"/draft/(state|values|options|preview|approve|content-restore|content-discard)", path.split("?", 1)[0],
+        r"/draft/(state|values|options|preview|approve|confirm|content-restore|content-discard)", path.split("?", 1)[0],
     )
     return (match[1], match[2], match[3]) if match else None
 
@@ -155,6 +155,7 @@ class BusinessDraftApplication:
                 "preview": {"expectedRevision"},
                 "options": {"expectedRevision"},
                 "approve": {"expectedRevision", "previewId", "requestKey"},
+                "confirm": {"expectedRevision", "reviewId", "requestKey"},
                 "content-restore": {"expectedRevision", "contentId", "contentVersion", "requestKey"},
                 "content-discard": {"expectedRevision", "contentId", "contentVersion", "requestKey"},
             }.get(action)
@@ -173,6 +174,12 @@ class BusinessDraftApplication:
                 value = self.backend.preview(**arguments)
             elif action == "options":
                 value = self.backend.options(**arguments)
+            elif action == "confirm":
+                if not all(isinstance(payload[key], str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", payload[key])
+                           for key in ("reviewId", "requestKey")):
+                    raise ValueError("invalid confirmation")
+                value = self.backend.confirm(**arguments,
+                    review_id=payload["reviewId"], request_key=payload["requestKey"])
             elif action in {"content-restore", "content-discard"}:
                 if (not isinstance(payload["contentId"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", payload["contentId"])
                         or type(payload["contentVersion"]) is not int or payload["contentVersion"] < 1
@@ -255,8 +262,11 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     effect = str(ui.get("effect") or legacy.get("schema", {}).get("effect") or "执行已核对的本次操作")
     submit_label = registered.submit_label
     system_name = str(ui.get("systemName") or legacy.get("schema", {}).get("system") or "业务系统")
-    lead = legacy.get("lead") or ("核对下方原始材料并填写本次意见。检查完成后，再明确确认本次操作。"
-        if kind == "approval" else "填写后自动保存和检查。请核对实际办理内容及执行后果，再确认本次操作。")
+    if ui.get("confirmationMode") == "on_confirm":
+        lead = "请核对下方材料并填写本次意见。意见会自动保存，点击确认时核对当前事项；材料有变化时会请你重新确认。"
+    else:
+        lead = legacy.get("lead") or ("核对下方原始材料并填写本次意见。检查完成后，再明确确认本次操作。"
+            if kind == "approval" else "填写后自动保存和检查。请核对实际办理内容及执行后果，再确认本次操作。")
     controls = {}
     differences = []
     for field in definitions:

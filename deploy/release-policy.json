@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "ec882de1e41f"
+    "b88f250f5c94"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Exact deployed predecessor ec882de1e41f. Record typed RequiresUserAction exceptions as waiting in adapter spans, preserving existing error codes, propagation, failure and unknown classification, and side-effect boundaries. No database schema, authorization, business execution or stored record shape changes. Waiting span status is already supported by the predecessor; rollback preserves all history and only restores its prior classification for future adapter interactions."
+  "dataCompatibility": "reviewed-schema-transition",
+  "reason": "Exact deployed predecessor b88f250f5c94. OA single-opinion approval pages save edits without downstream reads and perform one fresh prepare on explicit confirmation. Add one immutable display-only material review table, its index and trigger; existing tables and rows are unchanged. Each approval plan is still produced by a fresh adapter prepare and recorded atomically with the existing single-use authorization. Older preview/approve clients and the predecessor ignore the additive display table; rollback preserves existing business ledgers and restores the previous interaction behavior. Schema transition was reproduced on a data-free copy of all four production schemas.",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "573440e9a8bbcf071585fc8b29d84a4793578352d958f8fac1501c9b05cd11d7",
+      "afterSha256": "356409691e98c0613429b0162149ebe121f7c102983d9d8addcd5dde14309d6b"
+    }
+  }
 }

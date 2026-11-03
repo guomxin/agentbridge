@@ -19,6 +19,7 @@ from time import perf_counter
 
 from agentbridge.adapters.base import AdapterBusinessRuleRejected, AdapterLoginRequired
 from agentbridge.adapters.taihua import TaihuaDuplicateWorkLog
+from agentbridge.core import business_draft_confirmation
 from agentbridge.core.business_draft_profiles import BY_PREPARE, BATCH_PREPARES, profile_for_source, meeting_times, review_payload, room_choice
 from agentbridge.core import business_content_drafts
 from agentbridge.core.capability_runtime import CapabilityContext
@@ -102,6 +103,7 @@ class BusinessDraftStore:
                 );
             """)
             business_content_drafts.initialize(connection)
+            business_draft_confirmation.initialize(connection)
         self.cleanup()
 
     @contextmanager
@@ -130,6 +132,7 @@ class BusinessDraftStore:
             connection.execute("DELETE FROM business_draft_options WHERE expires_at<=? OR draft_id IN "
                                "(SELECT draft_id FROM business_drafts WHERE state IN ('finalized','expired'))", (now,))
             business_content_drafts.cleanup(connection, datetime.fromisoformat(now))
+            connection.execute("DELETE FROM business_draft_material_reviews WHERE expires_at<=?", (now,))
 
 
 class BusinessDraftService:
@@ -228,6 +231,7 @@ class BusinessDraftService:
                     "VALUES (?,?,?,?,?,?,?,?,?)", (secrets.token_urlsafe(24), source_submission_id, presentation_id,
                      endpoint, hashlib.sha256(token.encode()).hexdigest(), "pending" if source["state"] == "pending" else "consumed",
                      now, source["expires_at"], None if source["state"] == "pending" else now))
+            business_draft_confirmation.ensure_initial(connection, source, draft, self.store.clock())
             return {"state": self._view(connection, draft, presentation_id, endpoint), "csrfToken": token,
                     "maxAge": max(1, int((datetime.fromisoformat(source["expires_at"]) - self.store.clock()).total_seconds()))}
 
@@ -589,6 +593,7 @@ class BusinessDraftService:
         if changed:
             summary["reviewChanged"] = True
         now = self.store.clock()
+        business_draft_confirmation.record_prepared(connection, source, draft, prepared, summary, now)
         expires = min(datetime.fromisoformat(source["expires_at"]), now + timedelta(minutes=5)).isoformat()
         preview_id = secrets.token_urlsafe(24)
         connection.execute("INSERT INTO business_draft_previews VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -669,72 +674,84 @@ class BusinessDraftService:
         checked_version = self._recheck(source_submission_id, presentation_id=presentation_id,
             csrf_token=csrf_token, csrf_cookie=csrf_cookie, expected_revision=expected_revision, preview_id=preview_id)
         with store_transaction(self.store) as connection:
-            source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
-            receipt = connection.execute("SELECT * FROM business_draft_decisions WHERE draft_id=?", (draft["draft_id"],)).fetchone()
-            if receipt:
-                if receipt["request_key"] == request_key and receipt["preview_id"] == preview_id and receipt["revision"] == expected_revision:
-                    return self._view(connection, draft, presentation_id, endpoint)
-                self._conflict(connection, draft, presentation_id, endpoint)
-            self._editable(connection, draft, source, expected_revision, presentation_id, endpoint)
-            if checked_version is not None and checked_version != draft["version"]:
-                self._conflict(connection, draft, presentation_id, endpoint)
-            preview = connection.execute("SELECT * FROM business_draft_previews WHERE preview_id=? AND draft_id=?", (preview_id, draft["draft_id"])).fetchone()
-            now = self.store.clock()
-            if (not preview or draft["state"] != "ready" or draft["preview_id"] != preview_id
-                    or preview["revision"] != expected_revision or now >= datetime.fromisoformat(preview["expires_at"])):
-                raise BusinessDraftError("DRAFT_PREVIEW_STALE", "预检版本已失效，请重新预检后确认。", status=409,
-                                         current=self._view(connection, draft, presentation_id, endpoint))
-            binding = self._authority(connection, source, interaction, task_id)
-            if _json(binding) != preview["binding_json"] or _hash(self._values(connection, source, draft)[0]) != preview["values_hash"]:
-                raise BusinessDraftError("DRAFT_CONTEXT_CHANGED", "账号、任务或业务上下文已变化，请重新预检。", status=409)
-            self._require_complete_review(json.loads(preview["summary_json"]))
-            if _hash(json.loads(preview["plan_json"])) != preview["plan_hash"]:
-                raise BusinessDraftError("DRAFT_PREVIEW_INVALID", "预检记录校验失败。", status=409)
-            ttl = int((datetime.fromisoformat(source["expires_at"]) - now).total_seconds())
-            if ttl < 30:
-                raise BusinessDraftError("DRAFT_EXPIRED", "办理页面即将过期，请从原任务重新准备。", status=409)
-            self.service.field_submissions.submit(source_submission_id, csrf_token=csrf_token, csrf_cookie=csrf_cookie,
-                values=json.loads(preview["values_json"]), presentation_id=presentation_id, connection=connection)
-            profile = profile_for_source(source)
-            operation, _ = self.service.operations.create(user_subject=source["user_subject"], capability_name=source["capability_name"],
-                capability_version=source["capability_version"], input_summary={"input_submission_id": source_submission_id},
-                input_identity=interaction["resume_spec"]["arguments"], idempotency_key="draft-decision:" + draft["draft_id"], connection=connection)
-            authorization = self.service.write_authorizations.create(user_subject=source["user_subject"], system_id=source["system_id"],
-                session_id=source["session_id"], capability_name=profile.commit, capability_version=binding["commitVersion"],
-                prepare_operation_id=operation["operation_id"], supersession_key=source["supersession_key"],
-                plan=json.loads(preview["plan_json"]), summary=json.loads(preview["summary_json"]),
-                card_base_url=self.service.trusted_card_base_url, ttl_seconds=ttl, connection=connection)
-            connection.execute("UPDATE write_authorizations SET state='approved',decided_at=?,updated_at=?,decided_endpoint_id=? WHERE authorization_id=?",
-                               (now.isoformat(), now.isoformat(), endpoint, authorization["authorization_id"]))
-            authorization = _authorization_from_row(self.service.write_authorizations._select(connection, authorization["authorization_id"]), include_plan=False)
-            envelope = self.service._execution_authorization_interaction(authorization, connection=connection)
-            record = _interaction_from_row(self.service.interactions._select(connection, envelope["interactionId"]))
-            operation = self.service.operations.mark_requires_user_action(operation["operation_id"], code="WRITE_AUTHORIZATION_RECORDED",
-                message="用户已在可信草稿页确认并授权提交。", next_action={"type": "resume_interaction", "interaction": envelope}, connection=connection)
-            self.service.tasks.link_operation(task_id=task_id, user_subject=source["user_subject"], operation=operation, connection=connection)
-            self.service.tasks.link_interaction(task_id=task_id, user_subject=source["user_subject"],
-                interaction_record=record, interaction=envelope, connection=connection)
-            if binding["plan"]:
-                self.service.task_plans.mark_step_waiting(binding["plan"]["planId"], user_subject=source["user_subject"],
-                    step_key=binding["plan"]["stepKey"], operation_id=operation["operation_id"],
-                    interaction_id=record["interaction_id"], input_hash=operation["input_hash"], connection=connection)
-            if binding["batch"]:
-                updated = self.service.tasks.record_batch_item_activity(parent_task_id=task_id, user_subject=source["user_subject"],
-                    operation_id=operation["operation_id"], interaction_id=record["interaction_id"], connection=connection)
-                if not updated or updated["batch_id"] != binding["batch"]["batchId"] or updated["current_ordinal"] != binding["batch"]["ordinal"]:
-                    raise BusinessDraftError("DRAFT_BATCH_CONTEXT_CHANGED", "批次事项在决定时发生变化。", status=409)
-                binding = {**binding, "batch": {**binding["batch"], "version": updated["version"]}}
-            receipt_id = secrets.token_urlsafe(24)
-            connection.execute("INSERT INTO business_draft_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (receipt_id, draft["draft_id"], source_submission_id, source["user_subject"], task_id, expected_revision,
-                 preview_id, request_key, authorization["authorization_id"], record["interaction_id"], operation["operation_id"],
-                 preview["plan_hash"], preview["semantic_review_hash"], _json(binding), endpoint, now.isoformat()))
-            connection.execute("UPDATE business_drafts SET state='finalized',version=version+1,values_json='{}',updated_at=? WHERE draft_id=?",
-                               (now.isoformat(), draft["draft_id"]))
-            connection.execute("DELETE FROM business_draft_previews WHERE draft_id=?", (draft["draft_id"],))
-            connection.execute("DELETE FROM business_draft_options WHERE draft_id=?", (draft["draft_id"],))
-            self.contents.delete_finalized(connection, source, draft)
-            return self._view(connection, self._draft(connection, source_submission_id), presentation_id, endpoint)
+            return self._approve_checked(connection, source_submission_id, presentation_id=presentation_id,
+                csrf_token=csrf_token, csrf_cookie=csrf_cookie, expected_revision=expected_revision,
+                preview_id=preview_id, request_key=request_key, checked_version=checked_version)
+
+    def confirm(self, source_submission_id, *, presentation_id=None, csrf_token, csrf_cookie,
+                expected_revision, review_id, request_key):
+        return business_draft_confirmation.confirm(self, source_submission_id,
+            presentation_id=presentation_id, csrf_token=csrf_token, csrf_cookie=csrf_cookie,
+            expected_revision=expected_revision, review_id=review_id, request_key=request_key)
+
+    def _approve_checked(self, connection, source_submission_id, *, presentation_id, csrf_token, csrf_cookie,
+                         expected_revision, preview_id, request_key, checked_version):
+        source, interaction, task_id, endpoint, draft = self._checked(connection, source_submission_id, presentation_id, csrf_token, csrf_cookie)
+        receipt = connection.execute("SELECT * FROM business_draft_decisions WHERE draft_id=?", (draft["draft_id"],)).fetchone()
+        if receipt:
+            if receipt["request_key"] == request_key and receipt["preview_id"] == preview_id and receipt["revision"] == expected_revision:
+                return self._view(connection, draft, presentation_id, endpoint)
+            self._conflict(connection, draft, presentation_id, endpoint)
+        self._editable(connection, draft, source, expected_revision, presentation_id, endpoint)
+        if checked_version is not None and checked_version != draft["version"]:
+            self._conflict(connection, draft, presentation_id, endpoint)
+        preview = connection.execute("SELECT * FROM business_draft_previews WHERE preview_id=? AND draft_id=?", (preview_id, draft["draft_id"])).fetchone()
+        now = self.store.clock()
+        if (not preview or draft["state"] != "ready" or draft["preview_id"] != preview_id
+                or preview["revision"] != expected_revision or now >= datetime.fromisoformat(preview["expires_at"])):
+            raise BusinessDraftError("DRAFT_PREVIEW_STALE", "预检版本已失效，请重新预检后确认。", status=409,
+                                     current=self._view(connection, draft, presentation_id, endpoint))
+        binding = self._authority(connection, source, interaction, task_id)
+        if _json(binding) != preview["binding_json"] or _hash(self._values(connection, source, draft)[0]) != preview["values_hash"]:
+            raise BusinessDraftError("DRAFT_CONTEXT_CHANGED", "账号、任务或业务上下文已变化，请重新预检。", status=409)
+        self._require_complete_review(json.loads(preview["summary_json"]))
+        if _hash(json.loads(preview["plan_json"])) != preview["plan_hash"]:
+            raise BusinessDraftError("DRAFT_PREVIEW_INVALID", "预检记录校验失败。", status=409)
+        ttl = int((datetime.fromisoformat(source["expires_at"]) - now).total_seconds())
+        if ttl < 30:
+            raise BusinessDraftError("DRAFT_EXPIRED", "办理页面即将过期，请从原任务重新准备。", status=409)
+        self.service.field_submissions.submit(source_submission_id, csrf_token=csrf_token, csrf_cookie=csrf_cookie,
+            values=json.loads(preview["values_json"]), presentation_id=presentation_id, connection=connection)
+        profile = profile_for_source(source)
+        operation, _ = self.service.operations.create(user_subject=source["user_subject"], capability_name=source["capability_name"],
+            capability_version=source["capability_version"], input_summary={"input_submission_id": source_submission_id},
+            input_identity=interaction["resume_spec"]["arguments"], idempotency_key="draft-decision:" + draft["draft_id"], connection=connection)
+        authorization = self.service.write_authorizations.create(user_subject=source["user_subject"], system_id=source["system_id"],
+            session_id=source["session_id"], capability_name=profile.commit, capability_version=binding["commitVersion"],
+            prepare_operation_id=operation["operation_id"], supersession_key=source["supersession_key"],
+            plan=json.loads(preview["plan_json"]), summary=json.loads(preview["summary_json"]),
+            card_base_url=self.service.trusted_card_base_url, ttl_seconds=ttl, connection=connection)
+        connection.execute("UPDATE write_authorizations SET state='approved',decided_at=?,updated_at=?,decided_endpoint_id=? WHERE authorization_id=?",
+                           (now.isoformat(), now.isoformat(), endpoint, authorization["authorization_id"]))
+        authorization = _authorization_from_row(self.service.write_authorizations._select(connection, authorization["authorization_id"]), include_plan=False)
+        envelope = self.service._execution_authorization_interaction(authorization, connection=connection)
+        record = _interaction_from_row(self.service.interactions._select(connection, envelope["interactionId"]))
+        operation = self.service.operations.mark_requires_user_action(operation["operation_id"], code="WRITE_AUTHORIZATION_RECORDED",
+            message="用户已在可信草稿页确认并授权提交。", next_action={"type": "resume_interaction", "interaction": envelope}, connection=connection)
+        self.service.tasks.link_operation(task_id=task_id, user_subject=source["user_subject"], operation=operation, connection=connection)
+        self.service.tasks.link_interaction(task_id=task_id, user_subject=source["user_subject"],
+            interaction_record=record, interaction=envelope, connection=connection)
+        if binding["plan"]:
+            self.service.task_plans.mark_step_waiting(binding["plan"]["planId"], user_subject=source["user_subject"],
+                step_key=binding["plan"]["stepKey"], operation_id=operation["operation_id"],
+                interaction_id=record["interaction_id"], input_hash=operation["input_hash"], connection=connection)
+        if binding["batch"]:
+            updated = self.service.tasks.record_batch_item_activity(parent_task_id=task_id, user_subject=source["user_subject"],
+                operation_id=operation["operation_id"], interaction_id=record["interaction_id"], connection=connection)
+            if not updated or updated["batch_id"] != binding["batch"]["batchId"] or updated["current_ordinal"] != binding["batch"]["ordinal"]:
+                raise BusinessDraftError("DRAFT_BATCH_CONTEXT_CHANGED", "批次事项在决定时发生变化。", status=409)
+            binding = {**binding, "batch": {**binding["batch"], "version": updated["version"]}}
+        receipt_id = secrets.token_urlsafe(24)
+        connection.execute("INSERT INTO business_draft_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (receipt_id, draft["draft_id"], source_submission_id, source["user_subject"], task_id, expected_revision,
+             preview_id, request_key, authorization["authorization_id"], record["interaction_id"], operation["operation_id"],
+             preview["plan_hash"], preview["semantic_review_hash"], _json(binding), endpoint, now.isoformat()))
+        connection.execute("UPDATE business_drafts SET state='finalized',version=version+1,values_json='{}',updated_at=? WHERE draft_id=?",
+                           (now.isoformat(), draft["draft_id"]))
+        connection.execute("DELETE FROM business_draft_previews WHERE draft_id=?", (draft["draft_id"],))
+        connection.execute("DELETE FROM business_draft_options WHERE draft_id=?", (draft["draft_id"],))
+        self.contents.delete_finalized(connection, source, draft)
+        return self._view(connection, self._draft(connection, source_submission_id), presentation_id, endpoint)
 
     def _prepare(self, source, task_id, values, *, priority=False, validate=None):
         profile = profile_for_source(source)
@@ -1206,6 +1223,7 @@ class BusinessDraftService:
                     "title": summary.get("title", ""), "effect": summary.get("effect", ""),
                     "fields": [field for field in summary.get("fields", []) if field.get("label") not in {"处理意见", "审批意见", "意见"}],
                     "snapshot": "preview", "reviewChanged": bool(summary.get("reviewChanged"))}
+        business_draft_confirmation.project(connection, source, draft, result, self.store.clock())
         if receipt:
             path = "/flow/authorize/" + receipt["authorization_id"]
             if endpoint:

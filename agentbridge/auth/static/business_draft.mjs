@@ -58,7 +58,7 @@ export function safeResultReturn(navigation, origin) {
 /** A timeout ends this browser wait, never the server operation or its original decision key. */
 export function createDraftTransport({window, apiUrl, csrfToken, onProgress = () => {}, now = Date.now}) {
   const waiting = new Set();
-  const limits = {state: 15000, values: 15000, options: 30000, preview: 45000, approve: 30000,
+  const limits = {state: 15000, values: 15000, options: 30000, preview: 45000, approve: 30000, confirm: 45000,
     'content-restore':45000,'content-discard':15000};
   async function request(action, payload) {
     const controller = new AbortController(), started = now();
@@ -93,7 +93,7 @@ export function createDraftTransport({window, apiUrl, csrfToken, onProgress = ()
           controller.abort();
           const denied = [401, 403, 404, 410].includes(responseStatus);
           reject(Object.assign(new Error(denied ? '办理入口或页面权限已失效，请从原任务重新打开。' :
-            action === 'approve' ? '确认应答等待超时，需查询原回执。' :
+            ['approve', 'confirm'].includes(action) ? '确认应答等待超时，需查询原回执。' :
             '等待应答已超时，本页输入已保留。请重新检查原草稿状态。'),
             {code: 'REQUEST_TIMEOUT', action, ...(denied ? {status: responseStatus} : {})}));
         }, limits[action] || 15000);
@@ -119,6 +119,7 @@ export function createDraftController({initial, request, readValues, writeValues
   let message = "";
   let fieldErrors = {};
   let decision = null;
+  let decisionAction = null;
   let deciding = false;
   let permanentlyLocked = isLocked(initial);
   let receiptDelivered = false;
@@ -130,6 +131,7 @@ export function createDraftController({initial, request, readValues, writeValues
   const live = epoch => active && lifecycle === epoch;
 
   const allowed = action => !permanentlyLocked && current.allowedActions.includes(action);
+  const checkOnConfirm = () => current.ui?.confirmationMode === "on_confirm";
   const optionsFresh = () => viewKind !== "meeting_room" || Boolean(current.options &&
     current.options.revision === current.revision && Date.parse(current.options.expiresAt) > now() &&
     ["start_time", "end_time"].every(name => localDateTime(current.options.dependsOn?.[name]) === localDateTime(readValues()[name])));
@@ -141,13 +143,15 @@ export function createDraftController({initial, request, readValues, writeValues
   };
   const contentAvailable = () => active && !restoring && !needsRead && !contentBusy && !contentRequest && !conflict && !saving && !previewing && !optionsLoading && !deciding && allowed('save') && Date.parse(current.expiresAt)>now();
   const ready = () => active && !contentBusy && !contentRequest && !restoring && !needsRead && saved === edit && !conflict && !saving && !previewing && !optionsLoading && !deciding && roomValid() &&
-    materialReady() && allowed("approve") && current.preview?.revision === current.revision &&
-    Date.parse(current.preview.expiresAt) > now();
+    materialReady() && (checkOnConfirm()
+      ? valid() && allowed("confirm") && Boolean(current.confirmation?.reviewId) && Date.parse(current.confirmation.expiresAt) > now()
+      : allowed("approve") && current.preview?.revision === current.revision && Date.parse(current.preview.expiresAt) > now());
   const view = () => ({current, dirty: saved !== edit, saving, previewing, optionsLoading,contentBusy,contentPending:contentRequest?.action,roomChoiceRequired,
     canRestoreContent:contentAvailable() && Boolean(current.contentDraft?.restore),
     canDiscardContent:contentAvailable() && Boolean(current.contentDraft?.restore || current.contentDraft?.saved),
     optionsFresh: optionsFresh(), materialReady: materialReady(), reviewChanged, conflict, message,
     fieldErrors, locked: permanentlyLocked || deciding, uncertain: deciding && !permanentlyLocked,
+    checking: decisionInFlight && decisionAction === "confirm",
     canApprove: ready(), canEdit: active && allowed("save") && !deciding && !contentBusy && !contentRequest,
     canRetry: !conflict && !permanentlyLocked && (Boolean(message) || needsRead || restoring || contentRequest) && !contentBusy && !saving && !previewing && !optionsLoading && !decisionInFlight});
   function emit() { if (active) render(view()); }
@@ -178,7 +182,7 @@ export function createDraftController({initial, request, readValues, writeValues
     if (error.code === 'REQUEST_TIMEOUT') needsRead = true;
   }
   async function preview(force = false) {
-    if (!active || contentBusy || contentRequest || restoring || needsRead || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
+    if (checkOnConfirm() || !active || contentBusy || contentRequest || restoring || needsRead || previewing || saving || optionsLoading || conflict || deciding || !allowed("preview") || saved !== edit || !valid() || !roomValid() ||
         (!force && (previewAttempt === edit || ready()))) return;
     const epoch = lifecycle;
     const revision = current.revision;
@@ -231,6 +235,7 @@ export function createDraftController({initial, request, readValues, writeValues
     }
   }
   async function prepare(force = false) {
+    if (checkOnConfirm()) return;
     const epoch = lifecycle;
     await loadOptions(force);
     if (live(epoch)) await preview(force);
@@ -294,20 +299,24 @@ export function createDraftController({initial, request, readValues, writeValues
     emit();
     const expired = current.preview ? Date.parse(current.preview.expiresAt) <= now() :
       Boolean(previousPreview && ["editable", "editing"].includes(current.state));
-    if (!message && !conflict && (expired || viewKind === "meeting_room" && !optionsFresh())) await prepare(true);
+    if (!checkOnConfirm() && !message && !conflict && (expired || viewKind === "meeting_room" && !optionsFresh())) await prepare(true);
     return true;
   }
   async function approve(retry = false) {
     if (!active || restoring || permanentlyLocked || decisionInFlight || (deciding && !retry) || (!decision && !ready())) return;
     const epoch = lifecycle;
-    if (!decision) decision = {expectedRevision: current.revision,
-      previewId: current.preview.previewId, requestKey: makeKey()};
+    if (!decision) {
+      decisionAction = checkOnConfirm() ? "confirm" : "approve";
+      decision = {expectedRevision: current.revision,
+        ...(checkOnConfirm() ? {reviewId: current.confirmation.reviewId} : {previewId: current.preview.previewId}),
+        requestKey: makeKey()};
+    }
     deciding = true;
     decisionInFlight = true;
     message = "";
     emit();
     try {
-      const result = await request("approve", decision);
+      const result = await request(decisionAction, decision);
       if (!live(epoch)) return;
       accept(result);
       if (!result.receipt) throw new Error("批准回执暂未返回，正在查询本次提交状态。 ");
@@ -316,10 +325,12 @@ export function createDraftController({initial, request, readValues, writeValues
       if (error.status >= 400 && error.status < 500 && ![408, 425, 429].includes(error.status)) {
         deciding = false;
         decision = null;
+        decisionAction = null;
         fail(error);
         // A changed-material response already contains a newly bound preview.
         // Keep it visible, but only another explicit click may approve it.
-        if (error.code === "DRAFT_REVIEW_CHANGED" && current.preview?.revision === current.revision) {
+        if (error.code === "DRAFT_REVIEW_CHANGED" &&
+            (checkOnConfirm() && current.confirmation?.reviewId || current.preview?.revision === current.revision)) {
           reviewChanged = true;
           previewAttempt = edit;
         } else {
@@ -375,7 +386,7 @@ export function createDraftController({initial, request, readValues, writeValues
           roomChoiceRequired = viewKind === 'meeting_room';
           previewAttempt = optionsAttempt = -1; conflict = null;
         }
-        message = command.action === 'content-restore' ? (viewKind === 'meeting_room' ? '已恢复填写内容；会议室需重新选择，尚未确认提交。' : '已恢复填写内容；正在重新检查当前材料，尚未确认提交。') : '已删除此事项的保留内容。本页输入不变；后续编辑会再次保存。';
+        message = command.action === 'content-restore' ? (viewKind === 'meeting_room' ? '已恢复填写内容；会议室需重新选择，尚未确认提交。' : checkOnConfirm() ? '已恢复填写内容；点击确认时将核对当前事项，尚未提交。' : '已恢复填写内容；正在重新检查当前材料，尚未确认提交。') : '已删除此事项的保留内容。本页输入不变；后续编辑会再次保存。';
         needsRead = false; completed = true;
       }
       contentRequest = null;
@@ -415,7 +426,9 @@ export function createDraftController({initial, request, readValues, writeValues
       }
       else {
         previewAttempt = -1; optionsAttempt = -1;
-        if (saved === edit) await prepare(true); else await save();
+        if (saved === edit && checkOnConfirm()) { message = ""; await poll({restore: true}); }
+        else if (saved === edit) await prepare(true);
+        else await save();
       }
     },
     async adoptServer() {
@@ -1062,12 +1075,14 @@ export function mountBusinessDraft(config, document, window) {
       setText("draft-error", view.message);
       node("draft-error").hidden = !view.message;
       node("draft-material-change").hidden = !view.reviewChanged;
-      statusCopy = view.locked ? (view.current.receipt ? "已确认，正在接续办理" : view.uncertain ? "正在确认提交状态" : "此草稿已停止编辑") :
+      const checkOnConfirm = view.current.ui?.confirmationMode === "on_confirm";
+      statusCopy = view.locked ? (view.current.receipt ? "已确认，正在接续办理" : view.checking ? "正在核对当前事项并确认提交" : view.uncertain ? "正在确认提交状态" : "此草稿已停止编辑") :
         view.contentBusy ? (view.contentPending === 'content-restore' ? '正在读取当前材料并恢复填写内容' : '正在删除此事项的保留内容') : view.contentPending ? '草稿操作回执待核对' :
-        view.conflict ? "需要核对另一页面的修改" : view.saving ? "正在保存草稿" : view.dirty ? "有修改，正在准备检查" :
+        view.conflict ? "需要核对另一页面的修改" : view.saving ? "正在保存草稿" : view.dirty ? (checkOnConfirm ? "有修改，正在准备保存" : "有修改，正在准备检查") :
         view.optionsLoading ? "正在查询空闲会议室" : view.previewing ? (viewKind === "work_log" ? "正在解析项目并检查重复日志" : "正在核对申请信息") :
         !view.materialReady ? "原始材料尚未完整核对，暂不能确认提交" :
-        view.canApprove ? (view.reviewChanged ? "请重新核对更新后的材料，再确认提交" : "已检查，可以确认提交") : "填写完整后自动检查";
+        view.canApprove ? (view.reviewChanged ? "请重新核对更新后的材料，再确认提交" : checkOnConfirm ? "意见已保存，点击确认时核对并提交" : "已检查，可以确认提交") :
+        checkOnConfirm ? "请填写有效意见；点击确认时核对当前事项" : "填写完整后自动检查";
       paintStatus();
       if (node("draft-submit-hint")) setText("draft-submit-hint", problems.length ?
         `还需检查 ${problems.length} 项：${problems.map(item => item.label).join("、")}` : statusCopy);

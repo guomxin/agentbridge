@@ -63,6 +63,141 @@ function harness(request, state = initial()) {
     change(next) {if (controller.state().canEdit) {local = {...local, ...next}; controller.edit();}}};
 }
 
+const confirmationState = () => ({...initial(), values: {opinion: '已核对，同意。'},
+  allowedActions: ['save', 'confirm'], confirmation: {reviewId: 'material-review-1', expiresAt: '2099-01-01T00:00:00Z'},
+  ui: {viewKind: 'approval', confirmationMode: 'on_confirm', review: {title: '当前申请',
+    fields: [{label: '事由', value: '原始事由'}], completeness: {status: 'complete'}}}});
+
+test('opinion autosaves, initial load, polling, restoration and retries never start a preview', async () => {
+  let backend = confirmationState();
+  const h = harness(async (action, payload) => {
+    assert.ok(['values', 'state'].includes(action), `unexpected downstream preparation: ${action}`);
+    if (action === 'values') backend = {...backend, version: backend.version + 1,
+      revision: backend.revision + 1, values: payload.values};
+    return backend;
+  }, backend);
+  h.controller.start(); await flush();
+  assert.equal(h.calls.length, 0);
+  for (const opinion of ['同意', '已核对材料，同意。']) {
+    h.change({opinion});
+    assert.equal(h.controller.state().canApprove, false);
+    await h.controller.save();
+    assert.equal(h.controller.state().canApprove, true);
+  }
+  await h.controller.preview(true);
+  await h.controller.poll();
+  h.controller.suspend(); await h.controller.restore();
+  await h.controller.retry();
+  assert.deepEqual(h.calls.map(call => call.action), ['values', 'values', 'state', 'state', 'state']);
+  assert.equal(h.local().opinion, '已核对材料，同意。');
+});
+
+test('one explicit opinion confirmation sends its displayed review and revision without preview or approve requests', async () => {
+  const state = confirmationState(), pending = deferred();
+  const h = harness(() => pending.promise, state);
+  const confirmation = h.controller.approve();
+  assert.equal(h.controller.state().checking, true);
+  assert.equal(h.controller.state().canEdit, false);
+  await h.controller.approve();
+  assert.deepEqual(h.calls, [{action: 'confirm', payload: {expectedRevision: 0, reviewId: 'material-review-1', requestKey: 'request-1'}}]);
+  pending.resolve({...state, version: 1, state: 'finalized', allowedActions: [], receipt: {requestKey: 'request-1'}});
+  await confirmation;
+  assert.equal(h.controller.state().locked, true);
+  assert.equal(h.receipts.length, 1);
+});
+
+test('changed opinion materials survive another edit and require a new explicit confirmation bound to the updated review', async () => {
+  let backend = confirmationState(), attempts = 0;
+  const h = harness(async (action, payload) => {
+    if (action === 'state') return backend;
+    if (action === 'values') return backend = {...backend, version: backend.version + 1,
+      revision: backend.revision + 1, values: payload.values};
+    assert.equal(action, 'confirm');
+    if (++attempts === 1) {
+      backend = {...backend, version: 1, confirmation: {...backend.confirmation, reviewId: 'material-review-2'},
+        ui: {...backend.ui, review: {...backend.ui.review, reviewChanged: true, fields: [{label: '事由', value: '更新事由'}]}}};
+      throw Object.assign(new Error('材料已更新，请重新核对'), {status: 409, code: 'DRAFT_REVIEW_CHANGED', current: backend});
+    }
+    return {...backend, version: backend.version + 1, state: 'finalized', allowedActions: [], receipt: {requestKey: payload.requestKey}};
+  }, backend);
+  await h.controller.approve();
+  assert.equal(attempts, 1);
+  assert.equal(h.controller.state().reviewChanged, true);
+  assert.equal(h.controller.state().canApprove, true);
+  await h.controller.poll();
+  h.change({opinion: '已按更新材料核对，同意。'}); await h.controller.save();
+  assert.equal(attempts, 1);
+  assert.equal(h.controller.state().current.ui.review.fields[0].value, '更新事由');
+  assert.equal(h.controller.state().current.confirmation.reviewId, 'material-review-2');
+  await h.controller.approve();
+  const calls = h.calls.filter(call => call.action === 'confirm');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].payload, {expectedRevision: 1, reviewId: 'material-review-2', requestKey: 'request-2'});
+  assert.equal(h.local().opinion, '已按更新材料核对，同意。');
+});
+
+test('an uncertain opinion confirmation restores with reads and retries only the original confirmation command', async () => {
+  const state = confirmationState(), pending = deferred();
+  let attempts = 0;
+  const h = harness((action, payload) => {
+    if (action === 'state') return Promise.resolve(state);
+    assert.equal(action, 'confirm');
+    if (++attempts === 1) return pending.promise;
+    return Promise.resolve({...state, version: 1, state: 'finalized', allowedActions: [], receipt: {requestKey: payload.requestKey}});
+  }, state);
+  const confirmation = h.controller.approve();
+  h.controller.suspend(); pending.reject(new TypeError('connection closed'));
+  await confirmation;
+  await h.controller.restore();
+  assert.deepEqual(h.calls.map(call => call.action), ['confirm', 'state']);
+  assert.equal(h.controller.state().canApprove, false);
+  assert.equal(h.controller.state().canEdit, false);
+  assert.equal(h.controller.state().canRetry, true);
+  await h.controller.retry();
+  const calls = h.calls.filter(call => call.action === 'confirm');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].payload, calls[1].payload);
+  assert.equal(h.receipts.length, 1);
+});
+
+test('adopting another page opinion revision uses its material review without an automatic check or decision', async () => {
+  const initialState = confirmationState(), updated = {...initialState, revision: 2, version: 3,
+    values: {opinion: '另一页面的意见'}, confirmation: {...initialState.confirmation, reviewId: 'material-review-2'}};
+  const h = harness(async action => {
+    assert.equal(action, 'state');
+    return updated;
+  }, initialState);
+  h.change({opinion: '本页未保存的意见'});
+  await h.controller.poll();
+  assert.equal(h.controller.state().canApprove, false);
+  assert.equal(h.local().opinion, '本页未保存的意见');
+  await h.controller.adoptServer();
+  assert.equal(h.local().opinion, '另一页面的意见');
+  assert.equal(h.controller.state().current.confirmation.reviewId, 'material-review-2');
+  assert.equal(h.controller.state().canApprove, true);
+  assert.deepEqual(h.calls.map(call => call.action), ['state']);
+});
+
+test('opinion confirmation requires valid fields, complete materials and an unexpired displayed review', async () => {
+  for (const change of [
+    state => state.confirmation.expiresAt = '2000-01-01T00:00:00Z',
+    state => state.confirmation = null,
+    state => state.ui.review.completeness.status = 'partial',
+    state => state.allowedActions = ['save'],
+  ]) {
+    const state = confirmationState(); change(state);
+    const h = harness(async () => { throw new Error('must remain read only'); }, state);
+    assert.equal(h.controller.state().canApprove, false);
+    await h.controller.approve(); await h.controller.preview(true);
+    assert.equal(h.calls.length, 0);
+  }
+  const state = confirmationState();
+  const controller = createDraftController({initial: state, fieldNames: ['opinion'], readValues: () => state.values,
+    writeValues() {}, render() {}, valid: () => false, request: async () => {throw new Error('invalid fields');}});
+  assert.equal(controller.state().canApprove, false);
+  await controller.approve();
+});
+
 test("editing immediately disables a reviewed decision and preserves local values", async () => {
   const state = reviewed(initial());
   let backend = state;
@@ -394,6 +529,24 @@ function mountHarness(state, {fetch, configure} = {}) {
     hide: () => events.get('pagehide')(), restore: () => events.get('pageshow')({persisted: true}),
     edit(name, value) { nodes.get(name).value = value; nodes.get('draft-form').events.input({target: nodes.get(name)}); }};
 }
+
+test('opinion page describes saving and confirmation-time checking without an initial material request', async () => {
+  const state = confirmationState(), pending = deferred();
+  const h = mountHarness(state, {fetch: url => {
+    assert.ok(url.endsWith('/confirm'));
+    return pending.promise;
+  }});
+  await flush();
+  assert.equal(h.requests.length, 0);
+  assert.match(h.nodes.get('draft-status').textContent, /意见已保存，点击确认时核对并提交/);
+  const confirmation = h.controller.approve();
+  assert.match(h.nodes.get('draft-status').textContent, /正在核对当前事项并确认提交/);
+  assert.equal(h.nodes.get('draft-submit').disabled, true);
+  pending.resolve({ok: true, json: async () => ({...state, version: 1, state: 'finalized', allowedActions: [],
+    receipt: {flowUrl: '/flow/authorize/' + 'a'.repeat(43)}})});
+  await confirmation;
+  assert.equal(h.requests.length, 1);
+});
 
 test('candidate cards keep focused radio DOM across polling and disable stale candidates without replacement', async () => {
   let state = meeting(); state.values.room = 'token-1'; state = reviewed(optionsFor(state));

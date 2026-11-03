@@ -240,6 +240,48 @@ class BusinessDraftCardTests(unittest.TestCase):
             presentation_id=PRESENTATION_ID, csrf_token="token", csrf_cookie="cookie",
             expected_revision=4, preview_id="preview-4", request_key="decision-key")
 
+    def test_confirmation_routes_only_the_displayed_review_revision_and_original_request_key(self):
+        self.backend.confirm.return_value = self.state
+        review_id, request_key = "review-" + "r" * 24, "request-" + "k" * 24
+        self.assertEqual(business_draft_target(f"/flow/input/{SOURCE_ID}/draft/confirm"), (SOURCE_ID, None, "confirm"))
+        response = self.app.mutate(SOURCE_ID, presentation_id=PRESENTATION_ID, action="confirm",
+            token="token", csrf_cookie="cookie", content_type="application/json",
+            body=json.dumps({"expectedRevision": 4, "reviewId": review_id, "requestKey": request_key}).encode())
+        self.assertEqual(response.status, 200)
+        self.backend.confirm.assert_called_once_with(source_submission_id=SOURCE_ID,
+            presentation_id=PRESENTATION_ID, csrf_token="token", csrf_cookie="cookie",
+            expected_revision=4, review_id=review_id, request_key=request_key)
+        self.backend.preview.assert_not_called()
+        self.backend.approve.assert_not_called()
+
+    def test_confirmation_rejects_client_supplied_plans_values_and_unbound_review_identifiers(self):
+        valid = {"expectedRevision": 4, "reviewId": "r" * 32, "requestKey": "k" * 32}
+        for payload in [
+            {**valid, "plan": {}}, {**valid, "values": {"opinion": "不能由请求替换意见"}},
+            {**valid, "previewId": "p" * 32}, {**valid, "expectedRevision": True},
+            {**valid, "reviewId": "short"}, {**valid, "reviewId": {}},
+            {**valid, "requestKey": "bad/key"},
+        ]:
+            with self.subTest(payload=payload):
+                response = self.app.mutate(SOURCE_ID, presentation_id=None, action="confirm", token="t",
+                    csrf_cookie="t", content_type="application/json", body=json.dumps(payload).encode())
+                self.assertEqual(response.status, 400)
+        self.backend.confirm.assert_not_called()
+
+    def test_opinion_confirmation_page_explains_save_and_submit_without_automatic_material_checks(self):
+        from agentbridge.core.business_draft_profiles import BY_PREPARE
+        from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+        profile = BY_PREPARE["oa.leave.approval.prepare"]
+        self.state.update(ui={**profile.ui(_TRUSTED_WRITE_DEFINITIONS[profile.prepare]["field_schema"]),
+            "confirmationMode": "on_confirm"}, values={"opinion": "核对后同意。"},
+            confirmation={"reviewId": "r" * 32, "expiresAt": self.state["expiresAt"]}, allowedActions=["save", "confirm"])
+        response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=True)
+        body = response.body.decode()
+        self.assertEqual(response.status, 200)
+        self.assertIn("意见会自动保存，点击确认时核对当前事项", body)
+        self.assertIn('"confirmationMode": "on_confirm"', body)
+        self.assertIn('"reviewId": "' + "r" * 32 + '"', body)
+
     def test_decision_rejects_extra_plan_fields_wrong_types_and_oversized_payload(self):
         for payload in (
             {"expectedRevision": 1, "previewId": "p", "requestKey": "r", "plan": {}},
