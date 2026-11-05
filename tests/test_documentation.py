@@ -75,7 +75,7 @@ class DocumentationTests(unittest.TestCase):
     def test_current_documentation_uses_category_directories(self):
         self.assertEqual(
             {path.name for path in ROOT.glob("*.md")},
-            {"README.md"},
+            {"README.md", "AGENTS.md"},
         )
         self.assertEqual(
             {path.name for path in (ROOT / "docs").glob("*.md")},
