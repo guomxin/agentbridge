@@ -31,7 +31,7 @@ function fixture() {
     messageElement: message => ({dataset: {messageRole: message.role, messageTextHash: textHash(message.text)}}),
     timelineEntryImages: () => [], renderChatTimeline() {},
     markWorkspaceTiming() {}, scrollChat() {}, scheduleTaskSync() {},
-    hydrateSkillCards: async () => {}, isCancellation: () => false,
+    hydrateSkillCards: async () => {}, isCancellation: () => false, readingScroll:null,
     toast: message => assert.fail(message),
   };
   const code = [handler("setTimelineNode", "ingestTimelineEntry"),
