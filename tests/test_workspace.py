@@ -3317,7 +3317,7 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("applyCurrentSnapshot", script)
         self.assertIn("upsertTaskCard", script)
         self.assertIn(
-            'api("/api/current?active_limit=20&recent_limit=8&message_limit=80")',
+            'api("/api/current?active_limit=20&recent_limit=8&message_limit=80&history_limit=32")',
             script,
         )
         self.assertIn(

@@ -56,9 +56,16 @@ class CentralStorageTests(unittest.TestCase):
                     ['index', 'private_business_draft_contents_scope'],
                     ['index', 'private_business_draft_contents_retention'],
                     ['index', 'private_business_draft_contents_expiry'],
+                    ['index', 'agent_tasks_subject_created'],
+                    ['index', 'user_timeline_subject_type_created'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))
+                index_sql = {row[1]: ' '.join(row[3].split()) for row in schema if row[0] == 'index'}
+                self.assertEqual(index_sql['agent_tasks_subject_created'],
+                                 'CREATE INDEX agent_tasks_subject_created ON agent_tasks (user_subject, created_at, task_id)')
+                self.assertEqual(index_sql['user_timeline_subject_type_created'],
+                                 'CREATE INDEX user_timeline_subject_type_created ON user_timeline (user_subject, entry_type, created_at, entry_id)')
                 original_schema = [r for r in schema if r[1] not in {item[1] for item in additions}]
                 self.assertEqual(hashlib.sha256(json.dumps(original_schema, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest(), baseline['schemaSha256'])
                 self.assertEqual(type(instance.business_drafts).__name__, 'BusinessDraftStore')
