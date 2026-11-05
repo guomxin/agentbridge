@@ -19,6 +19,7 @@ from agentbridge.core.central_service import CentralCapabilityService
 from agentbridge.core.user_grants import UserGrantConflict
 from agentbridge.core.task_plans import task_plan_response
 from agentbridge.core.task_projections import workspace_batch_projection
+from agentbridge.core.tasks import TaskNotFound, WORKSPACE_RESPONSE_MAX_CHARACTERS
 from agentbridge.core.timeline_attachments import (
     TimelineAttachmentExpired,
     TimelineAttachmentIntegrityError,
@@ -256,12 +257,27 @@ class WorkspaceApplication:
                 str(item.get("artifact_id") or ""),
             )
         )
-        interactions = []
-        for linked in self.service.tasks.list_task_interactions(
+        linked_interactions = self.service.tasks.list_task_interactions(
             task_id=task_id,
             user_subject=account["user_subject"],
-            limit=100,
-        ):
+            limit=101,
+        )
+        interactions_have_more = len(linked_interactions) > 100
+        linked_interactions = linked_interactions[:100]
+        current_id = task.get("current_interaction_id")
+        if current_id and not any(item["interaction_id"] == current_id for item in linked_interactions):
+            try:
+                linked_interactions.append(self.service.tasks.get_task_interaction(
+                    task_id=task_id,
+                    user_subject=account["user_subject"],
+                    interaction_id=current_id,
+                ))
+            except TaskNotFound:
+                # Never turn a stale or foreign task pointer into an unscoped
+                # interaction lookup. Only the exact owned link may be shown.
+                pass
+        interactions = []
+        for linked in linked_interactions:
             try:
                 response = self.service.get_interaction(
                     user_subject=account["user_subject"],
@@ -319,9 +335,11 @@ class WorkspaceApplication:
             "feedback": self.service.skill_authoring.workbench.task_feedback(account["user_subject"], task_id),
             "plan": task_plan_response(plan) if plan is not None else None,
             "events": [_public_event(event) for event in events],
-            "artifacts": [_public_artifact(item) for item in artifacts],
+            "artifacts": [self._artifact_projection(account, item) for item in artifacts],
             "interaction": interaction,
             "interactions": interactions,
+            "interactionsHasMore": interactions_have_more,
+            "interactionHistoryLimit": 100,
             "batch": workspace_batch_projection(batch),
             **({"oaBatchRemaining":remaining_presentation(self.service, account["user_subject"], task_id)} if batch else {}),
             **business,
@@ -727,10 +745,11 @@ class WorkspaceApplication:
         for task_id, task_artifacts in grouped.items():
             if len(items) >= limit:
                 break
-            task = self.service.tasks.get_task(
-                task_id,
-                user_subject=account["user_subject"],
-            )
+            try:
+                self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
+                task = self.service.tasks.get_task(task_id, user_subject=account["user_subject"])
+            except (KeyError, PermissionError):
+                continue
             task_artifacts.sort(
                 key=lambda item: (
                     str(item.get("created_at") or ""),
@@ -743,7 +762,7 @@ class WorkspaceApplication:
                     "plan": None,
                     "events": [],
                     "artifacts": [
-                        _public_artifact(item) for item in task_artifacts
+                        self._artifact_projection(account, item) for item in task_artifacts
                     ],
                     "interaction": None,
                 }
@@ -765,6 +784,32 @@ class WorkspaceApplication:
         from agentbridge.database.independent import IndependentDatabase
         return IndependentDatabase(self.service.home).read_original(account['user_subject'], source_id, log_id)
 
+    def _database_artifact_identity(self, account: dict, artifact: dict) -> tuple[str, str]:
+        match = re.fullmatch(r"/api/database/reports/([a-z][a-z0-9_-]{0,63})/([0-9a-f]{32})/download", str(artifact.get("download_url") or ""))
+        if not match:
+            raise WorkspaceArtifactError("DATABASE_REPORT_UNAVAILABLE", "原报告记录不可用，请重新查询导出。")
+        owned = self.service.tasks.get_artifact(task_id=artifact["task_id"], artifact_id=artifact["artifact_id"],
+            user_subject=account["user_subject"], include_source_ref=True)
+        if owned.get("source_ref") != f"{match[2]}:{artifact['task_id']}":
+            raise WorkspaceArtifactError("DATABASE_REPORT_UNAVAILABLE", "原报告记录不可用，请重新查询导出。")
+        return match[1], match[2]
+
+    def _artifact_projection(self, account: dict, artifact: dict) -> dict:
+        result = _public_artifact(artifact)
+        if artifact.get("artifact_type") != "database_csv":
+            return result
+        from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
+        from agentbridge.database.reports import Reports
+        try:
+            source_id, report_id = self._database_artifact_identity(account, artifact)
+            retained = Reports(IndependentDatabase(self.service.home)).describe(account["user_subject"], source_id, report_id)
+        except (DatabaseRejected, WorkspaceArtifactError, KeyError):
+            return {**result, "state":"expired", "download_url":None,
+                    "report_state":"unavailable", "can_reissue":False}
+        return {**result, "state":retained["state"], "download_url":retained["download_url"],
+                "expires_at":retained["download_expires_at"], "report_expires_at":retained["report_expires_at"],
+                "report_state":"ready", "can_reissue":retained["can_reissue"]}
+
     def reissue_artifact(
         self,
         account: dict,
@@ -772,6 +817,18 @@ class WorkspaceApplication:
         task_id: str,
         artifact_id: str,
     ) -> dict:
+        self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
+        artifact = self.service.tasks.get_artifact(task_id=task_id, artifact_id=artifact_id,
+            user_subject=account["user_subject"])
+        if artifact.get("artifact_type") == "database_csv":
+            from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
+            from agentbridge.database.reports import Reports
+            try:
+                source_id, report_id = self._database_artifact_identity(account, artifact)
+                Reports(IndependentDatabase(self.service.home)).renew_web_download(account["user_subject"], source_id, report_id)
+            except DatabaseRejected as exc:
+                raise WorkspaceArtifactError("DATABASE_REPORT_UNAVAILABLE", "原报告已过期或访问权限已变化，请重新查询导出。") from exc
+            return self.task_detail(account, task_id)
         result = self.service.reissue_document_download(
             user_subject=account["user_subject"],
             task_id=task_id,
@@ -865,22 +922,22 @@ class WorkspaceApplication:
                 limit=100,
             )
         }
-        return [
-            _public_timeline_entry(
-                entry,
-                source=endpoints.get(entry.get("source_endpoint_id")),
-                is_origin=(
-                    entry.get("source_endpoint_id") == account.get("endpoint_id")
-                ),
-            )
-            for entry in self.service.tasks.list_timeline(
-                user_subject=account["user_subject"],
-                after_sequence=after_sequence,
-                before_sequence=before_sequence,
-                entry_type=entry_type,
-                limit=limit,
-            )
-        ]
+        entries = self.service.tasks.list_timeline(user_subject=account["user_subject"],
+            after_sequence=after_sequence, before_sequence=before_sequence, entry_type=entry_type, limit=limit)
+        attachment_ids = [item.get("attachmentId") for entry in entries
+            for item in _timeline_attachments(entry)]
+        media = self.service.timeline_attachments.public_metadata(user_subject=account["user_subject"],
+            attachment_ids=attachment_ids)
+        projected = []
+        for entry in entries:
+            if _timeline_attachments(entry):
+                entry = {**entry, "payload":{**entry["payload"], "attachments":[
+                    media.get(item.get("attachmentId"), {"type":"image", "attachmentId":item.get("attachmentId"),
+                        "fileName":item.get("fileName", "附加图片"), "state":"unavailable", "mediaUrl":None})
+                    for item in _timeline_attachments(entry)]}}
+            projected.append(_public_timeline_entry(entry, source=endpoints.get(entry.get("source_endpoint_id")),
+                is_origin=entry.get("source_endpoint_id") == account.get("endpoint_id")))
+        return projected
 
     def timeline_cursor(self, account: dict) -> int:
         return self.service.tasks.latest_timeline_sequence(
@@ -1574,7 +1631,7 @@ class WorkspaceApplication:
             or dispatch["idempotency_key"]
         )
         if state == "final":
-            text = _safe_text(item.get("text"), 200_000)
+            text = _safe_text(item.get("text"), WORKSPACE_RESPONSE_MAX_CHARACTERS)
             if text:
                 self._append_workspace_message(
                     account,
@@ -1582,6 +1639,7 @@ class WorkspaceApplication:
                     text=text,
                     message_key=f"workspace:assistant:{run_id}",
                     payload=trial_payload,
+                    required=True,
                 )
             terminal_state = "completed"
         else:
@@ -1821,11 +1879,14 @@ class WorkspaceApplication:
                 raise RuntimeError("workspace endpoint is unavailable")
             return
         try:
-            self.service.tasks.append_timeline_message(
+            append = (self.service.tasks.append_workspace_response
+                      if role == "assistant" and message_key.startswith("workspace:assistant:")
+                      else self.service.tasks.append_timeline_message)
+            append(
                 user_subject=account["user_subject"],
                 source_endpoint_id=endpoint_id,
                 message_key=message_key,
-                role=role,
+                **({} if append == self.service.tasks.append_workspace_response else {"role": role}),
                 text=text,
                 payload=payload,
             )
@@ -2165,6 +2226,12 @@ def _public_artifact(artifact: dict) -> dict:
     }
 
 
+def _timeline_attachments(entry: dict) -> list[dict]:
+    payload = entry.get("payload")
+    raw = payload.get("attachments") if isinstance(payload, dict) else None
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
 def _public_timeline_entry(
     entry: dict,
     *,
@@ -2303,7 +2370,7 @@ def _visible_timestamp(value: Any) -> str | None:
 
 def _message_text(content: Any) -> str:
     if isinstance(content, str):
-        return content[:50_000]
+        return content[:WORKSPACE_RESPONSE_MAX_CHARACTERS]
     if not isinstance(content, list):
         return ""
     parts: list[str] = []
@@ -2314,9 +2381,9 @@ def _message_text(content: Any) -> str:
             text = item.get("text")
             if isinstance(text, str) and text.strip():
                 parts.append(text.strip())
-        if sum(len(part) for part in parts) >= 50_000:
+        if sum(len(part) for part in parts) >= WORKSPACE_RESPONSE_MAX_CHARACTERS:
             break
-    return "\n".join(parts)[:50_000]
+    return "\n".join(parts)[:WORKSPACE_RESPONSE_MAX_CHARACTERS]
 
 
 def _safe_text(value: object, maximum: int) -> str | None:

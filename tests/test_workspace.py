@@ -3325,7 +3325,7 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
             script,
         )
         self.assertIn("loadOlderChatMessages", script)
-        self.assertIn("加载更早消息", script)
+        self.assertIn("加载更早内容", script)
         self.assertIn("chatTimelineOldestSequence", script)
         self.assertIn("chat-history-control", stylesheet)
         self.assertNotIn("images.length === 0 || !entry.entry_id", script)
@@ -3350,7 +3350,7 @@ class WorkspaceStaticAssetTests(unittest.TestCase):
         self.assertIn("timelineReconnectTimer", script)
         self.assertIn("__WORKSPACE_ASSET_VERSION__", page)
         self.assertIn("task.completed", script)
-        self.assertIn("加载较早任务与文件", script)
+        self.assertIn("加载更早内容", script)
         self.assertIn("loadTaskHistory", script)
         self.assertIn("重新生成下载", script)
         self.assertIn("reissueArtifact", script)

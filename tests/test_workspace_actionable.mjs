@@ -167,6 +167,30 @@ test("expired sources lock fresh selection but query recovery preserves its orig
   assert.deepEqual(calls,[{requestKey:"refresh-fixed"},{requestKey:"refresh-fixed"}]);
 });
 
+test("an open query expires into timestamped read-only history without hiding selected-only rows", () => {
+  const document=createDocument(),root=document.createElement('div'),calls=[],timers=[];
+  let clock=Date.parse('2026-11-05T01:00:00Z');
+  const ui=createActionableResults({document,state:{},now:()=>clock,
+    timers:{setTimeout(callback){timers.push(callback);return timers.length;},clearTimeout(){}},
+    prepareTargets:(...args)=>calls.push(args),refreshQuery:async()=>({taskId:'new-query'})});
+  const value={...group(),fetchedAt:'2026-11-05T01:00:00Z',expiresAt:'2026-11-05T01:10:00Z'};
+  ui.render(root,[value]);
+  const checkbox=find(rows(root)[0],'input');checkbox.checked=true;checkbox.events.change();
+  const selectedOnly=descendants(root).find(n=>n.type==='checkbox'&&!rows(root).some(row=>descendants(row).includes(n)));
+  selectedOnly.checked=true;selectedOnly.events.change();
+  assert.equal(rows(root).filter(row=>!row.hidden).length,1);
+  clock=Date.parse('2026-11-05T01:11:00Z');timers.at(-1)();
+  assert.equal(root.hidden,false);assert.equal(rows(root).filter(row=>!row.hidden).length,3);
+  assert.match(root.textContent,/历史 OA 待办查询结果/);
+  assert.match(root.textContent,/查询时间：/);assert.match(root.textContent,/历史结果仍可回看/);
+  assert.equal(selectedOnly.checked,false);assert.equal(selectedOnly.disabled,true);
+  for(const row of rows(root)){assert.equal(find(row,'input').disabled,true);assert.equal(find(row,'button').disabled,true);}
+  find(rows(root)[0],'button').events.click();find(root,'button','准备已选事项（0）').events.click();
+  assert.deepEqual(calls,[]);assert.equal(find(root,'button','重新查询待办').disabled,false);
+  ui.render(root,[{...value,selectionExpired:true,expiresAt:'2099-01-01T00:00:00Z'}]);
+  assert.ok(rows(root).every(row=>find(row,'input').disabled));
+});
+
 test("a lost refresh remains recoverable when its original source disappears before or after acknowledgement", async () => {
   const document=createDocument(), root=document.createElement("div"), state={}, calls=[];
   let reject;

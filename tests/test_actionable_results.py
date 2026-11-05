@@ -211,6 +211,26 @@ class ActionableResultsTests(unittest.TestCase):
                 self.queue(self.body((1,)))
         self.assertEqual(error.exception.code, "ACTION_SOURCE_EXPIRED")
 
+    def test_expired_unprepared_query_retains_owned_readonly_snapshot_and_denies_new_prepare(self):
+        original = self.groups()[0]
+        request = self.body()
+        before = {table: self.count(table) for table in ("operations", "agent_tasks", "write_authorizations", "business_drafts")}
+        with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)), \
+                patch.object(self.service, "invoke", side_effect=AssertionError("history must not invoke")):
+            historical = self.groups()[0]
+            self.assertTrue(historical["selectionExpired"])
+            self.assertEqual(historical["fetchedAt"], original["fetchedAt"])
+            self.assertEqual(historical["expiresAt"], original["expiresAt"])
+            self.assertEqual([item["title"] for item in historical["targets"]], [item["title"] for item in original["targets"]])
+            self.assertTrue(all(not item["enabled"] and item["preparation"] is None for item in historical["targets"]))
+            with self.assertRaises(actions.ActionableResultError) as caught:
+                self.queue(request)
+            self.assertEqual(caught.exception.code, "ACTION_SOURCE_EXPIRED")
+        self.assertEqual(before, {table: self.count(table) for table in before})
+        grant_permissions(self.service.user_grants, OWNER, [])
+        self.assertEqual(self.groups(), [])
+        self.assertEqual(self.fixture.oa.writes, [])
+
     def test_batch_rows_follow_their_own_item_outcomes(self):
         queued = self.queue(self.body((0, 1)))
         self.execute(queued)
@@ -401,7 +421,10 @@ class ActionableResultsTests(unittest.TestCase):
         self.mutate_source(lambda result: result.update(total=11, coverage={"status": "partial", "hasMore": True}))
         self.assertEqual(self.groups()[0]["coverage"], "partial")
         with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)):
-            self.assertEqual(self.groups(), [])
+            historical = self.groups()[0]
+            self.assertEqual(historical["coverage"], "partial")
+            self.assertTrue(historical["selectionExpired"])
+            self.assertTrue(all(not item["enabled"] for item in historical["targets"]))
         with self.assertRaises(actions.ActionableResultError):
             actions.list_actionable_results(self.service, "other-user", self.source["task_id"], include_partial=True)
         original_grants = self.service.user_grants.get(OWNER)["permissions"]
@@ -432,6 +455,10 @@ class ActionableResultsTests(unittest.TestCase):
         group = self.groups()[0]
         self.assertEqual(group["coverage"], "complete")
         self.assertEqual(group["targets"], [])
+        with patch.object(actions, "_now", return_value=actions._now() + timedelta(minutes=11)):
+            historical = self.groups()[0]
+            self.assertEqual(historical["targets"], [])
+            self.assertTrue(historical["selectionExpired"])
 
     def test_foreign_task_operation_and_target_are_rejected(self):
         body = self.body()

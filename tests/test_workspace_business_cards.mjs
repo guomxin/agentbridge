@@ -60,6 +60,26 @@ test('complete empty OA query states zero pending items in both card and detail'
   assert.match(f.chat.textContent,/本次查询没有待办事项/);
 });
 
+test('bounded interaction history states its range while the current form stays independently actionable',()=>{
+  const f=fixture(),current=interaction('current-after-100');
+  const history=Array.from({length:100},(_,index)=>interaction(`old-${index}`,'business_input','completed'));
+  const r=result(1,'waiting_user',[...history,current]);
+  r.interactionsHasMore=true;r.interactionHistoryLimit=100;
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  for(const root of [f.chat,f.detail]) {
+    assert.match(root.textContent,/办理记录（100，部分）/);
+    assert.match(root.textContent,/仅显示前 100 条交互中的办理记录/);
+    assert.match(root.textContent,/当前办理入口单独保留/);
+    assert.ok(links(root).some(link=>link.href==='https://cards.example.test/current-after-100'));
+    assert.ok(!links(root).some(link=>link.href?.includes('/old-')));
+  }
+  const disclosure=findClass(f.detail,'interaction-history');disclosure.open=true;
+  r.task.version++;r.interactions=[history[0],current];r.interactionsHasMore=false;
+  f.upsertTaskCard(r);f.renderTaskDetail(r);
+  assert.equal(disclosure.open,true);assert.doesNotMatch(f.detail.textContent,/仅显示前|，部分/);
+  assert.match(f.detail.textContent,/办理记录（1）/);
+});
+
 test('blocked remaining scope never presents an unverified range as zero matched or missing',()=>{
   const f=fixture(),r=result(1,'succeeded',[]);
   r.actionableResults=[{sourceTaskId:'task',operationId:'blocked-scope',coverage:'partial',

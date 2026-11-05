@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "b88f250f5c94"
+    "2f34830c7380"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "reason": "Exact deployed predecessor b88f250f5c94. OA single-opinion approval pages save edits without downstream reads and perform one fresh prepare on explicit confirmation. Add one immutable display-only material review table, its index and trigger; existing tables and rows are unchanged. Each approval plan is still produced by a fresh adapter prepare and recorded atomically with the existing single-use authorization. Older preview/approve clients and the predecessor ignore the additive display table; rollback preserves existing business ledgers and restores the previous interaction behavior. Schema transition was reproduced on a data-free copy of all four production schemas.",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "573440e9a8bbcf071585fc8b29d84a4793578352d958f8fac1501c9b05cd11d7",
-      "afterSha256": "356409691e98c0613429b0162149ebe121f7c102983d9d8addcd5dde14309d6b"
-    }
-  }
+  "dataCompatibility": "no-migration",
+  "reason": "Exact deployed predecessor 2f34830c7380. Workspace retains read-only expired OA query results without renewing the ten-minute selection window, clarifies history and media retention, renews still-retained authorized CSV download entries, and preserves bounded long replies/current interactions. Existing authorization, material TTL and unknown-outcome non-replay checks remain unchanged. No schema changes; four production schema-only databases were reconstructed and initialized with this candidate with identical schemas. The predecessor can read all additive presentation fields and bounded timeline records."
 }

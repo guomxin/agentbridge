@@ -46,6 +46,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const count=field=>scopes.reduce((sum,item)=>sum+(Number.isSafeInteger(item[field]) ? item[field] : 0),0);
     return `本轮核对原批次剩余 ${count('requestedCount')} 项：仍匹配 ${count('matchedCount')} 项，当前待办未找到 ${count('missingCount')} 项，资格变化 ${count('changedCount')} 项。仅仍匹配项可重新选择；未找到不代表已成功。`;
   };
+  const historicalQuery = result => Boolean(result.actionableResults?.length) && result.actionableResults.every(group =>
+    group.selectionExpired === true || Boolean(group.expiresAt) && Date.parse(group.expiresAt) <= Date.now());
   const queryResultCopy = result => {
     const groups = result.actionableResults || [];
     if (!groups.length) return '';
@@ -54,9 +56,10 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     if (groups.some(group => group.coverage === 'partial')) {
       const totals = groups.map(group => group.coverage === 'partial' ? group.coverageInfo?.reportedTotal : group.targets.length);
       const total = totals.every(value => Number.isSafeInteger(value) && value >= 0) ? totals.reduce((sum, value) => sum + value, 0) : null;
-      return `本次已读取 ${count} 项${total === null ? '' : `，OA 报告共 ${total} 项`}；尚未取全，仅供查看。请重新查询取得完整结果后办理。`;
+      return `${historicalQuery(result) ? '当时' : '本次'}已读取 ${count} 项${total === null ? '' : `，OA 报告共 ${total} 项`}；尚未取全，仅供查看。请重新查询取得完整结果后办理。`;
     }
-    return count ? `本次查询返回 ${count} 项；具体办理状态见各事项。` : '本次查询返回 0 项待办。';
+    const copy = count ? `${historicalQuery(result) ? '当时' : '本次'}查询返回 ${count} 项；具体办理状态见各事项。` : `${historicalQuery(result) ? '当时' : '本次'}查询返回 0 项待办。`;
+    return copy + (historicalQuery(result) ? '选择窗口已到期，结果仅供回看；新办理请重新查询。' : '');
   };
   const pendingQueryWait = result => result.task?.summary?.preparation?.kind === 'oa_pending_query'
     && result.task.status === 'waiting_user' && !actionableTaskInteractions(result).length ? {
@@ -327,9 +330,17 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       !(item.type === "execution_authorization" && item.state === "completed" &&
         item.confirmation?.mode === "single" && item.confirmation.state === "recorded" &&
         recordedInputs.has(item.confirmation.sourceInteractionId)));
-    text(view.summary, `办理记录（${items.length}）`);
-    view.root.hidden = !items.length;
+    const hasMore = result.interactionsHasMore === true;
+    text(view.summary, `办理记录（${items.length}${hasMore ? '，部分' : ''}）`);
+    view.root.hidden = !items.length && !hasMore;
     const nodes = [];
+    if (hasMore) {
+      view.limitNotice ||= element('p', 'application-card-copy interaction-history-limit');
+      const limit = Number.isSafeInteger(result.interactionHistoryLimit) && result.interactionHistoryLimit > 0
+        ? result.interactionHistoryLimit : 100;
+      text(view.limitNotice, `仅显示前 ${limit} 条交互中的办理记录，其余历史未在此页全部显示；当前办理入口单独保留。`);
+      nodes.push(view.limitNotice);
+    }
     for (const interaction of items) {
       let row = view.rows.get(interaction.interactionId);
       if (!row) {
@@ -450,7 +461,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       view.status.className = "application-card-status succeeded";
     }
     text(view.status, result.preparationHealth?.label || recovered?.label || failure?.label || queryWait?.label || (oaQuery && cardStatus === "succeeded" ?
-      result.actionableResults?.some(group => group.coverage === 'partial') ? "未取全" : "已查询" : statusLabel(cardStatus)));
+      historicalQuery(result) ? "历史查询" : result.actionableResults?.some(group => group.coverage === 'partial') ? "未取全" : "已查询" : statusLabel(cardStatus)));
     const scopedQueryCopy=remainingQueryCopy(result);
     if (oaQuery) text(view.title, scopedQueryCopy ? '原批次剩余事项查询' : "OA 待办查询");
     const execution = businessExecutionPresentation(result);
@@ -605,7 +616,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     view.primaryAction = primaryAction;
     text(view.title, displayTaskTitle(taskResultTitle(result)));
     text(view.status, result.preparationHealth?.label || recovered?.label || queryWait?.label ||
-      (task.status === 'succeeded' && result.actionableResults?.some(group => group.coverage === 'partial') ? '未取全' : statusLabel(execution?.running ? "running" : task.status)));
+      (task.status === 'succeeded' && historicalQuery(result) ? '历史查询' : task.status === 'succeeded' && result.actionableResults?.some(group => group.coverage === 'partial') ? '未取全' : statusLabel(execution?.running ? "running" : task.status)));
     view.readOnlyQuery = execution?.readOnlyQuery === true;
     view.resume.hidden = primaryAction.kind === "form";
     text(view.resume, primaryAction.label);

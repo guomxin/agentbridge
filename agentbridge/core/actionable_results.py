@@ -580,10 +580,9 @@ def list_actionable_results(service, subject, source_task_id, *, include_partial
                 visible_rows = []
                 remaining = {"blocked":True, "reason":str(exc) if not isinstance(exc, PermissionError) else "查询权限已变化。",
                     "requestedCount":0, "matchedCount":0, "missingCount":0, "changedCount":0, "items":[]}
-            # Retain historical progress only for queries that actually led to
-            # preparation. Expiry never creates another actionable window.
-            if expired and not preparations:
-                continue
+            # Query expiry closes preparation authority, not the owned result's
+            # read-only history. Every projection still validates the source,
+            # current read grant and any scoped remaining-item boundary.
             targets = []
             for row in visible_rows:
                 target = {"targetKey": _target_key(entry[0], row),
@@ -617,6 +616,7 @@ def list_actionable_results(service, subject, source_task_id, *, include_partial
             finished = _date(operation["finished_at"])
             groups.append({"sourceTaskId": source_task_id, "operationId": entry[0], "title": "OA 待办",
                 "fetchedAt": finished.isoformat(), "expiresAt": (finished + timedelta(seconds=SOURCE_TTL_SECONDS)).isoformat(),
+                "selectionExpired": expired,
                 "coverage": "partial" if partial else "complete", "targets": targets,
                 **({"coverageInfo": {"returnedCount": len(pending["items"]),
                     "reportedTotal": pending["total"] if type(pending.get("total")) is int and pending["total"] >= 0 else None,

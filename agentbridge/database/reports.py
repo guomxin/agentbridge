@@ -153,13 +153,40 @@ class Reports:
             return self._download(owner,sid,args)
 
     def _download(self,owner,sid,args):
-        value=self._load(owner,sid,args['report_id'])
-        value['download_expires_at']=min(value['expires_at'],(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat())
-        self.payloads.save(value['report_id'],value)
-        self.runtime.grants.audit(owner,'database.report.download','succeeded',{'source_id':sid,'report_id':value['report_id']})
+        value=self._renew_download(owner,sid,args['report_id'])
         # Existing host delivery contract consumes this file and hides base64 from the model.
         return {**self._public(value),'download_expires_at':value['download_expires_at'],'downloadExpiresAt':value['download_expires_at'],'schemaVersion':'agentbridge.protected_csv_delivery.v1',
                 'file':{k:value[k] for k in ('filename','content_type','content_base64')}}
+
+    def _renew_download(self,owner,sid,rid):
+        value=self._load(owner,sid,rid)
+        value['download_expires_at']=min(value['expires_at'],(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat())
+        self.payloads.save(value['report_id'],value)
+        self.runtime.grants.audit(owner,'database.report.download','succeeded',{'source_id':sid,'report_id':value['report_id']})
+        return value
+
+    def _web_metadata(self,value):
+        expires=value.get('download_expires_at')
+        ready=isinstance(expires,str) and expires>datetime.now(timezone.utc).isoformat()
+        return {'report_id':value['report_id'],'source_id':value['source_id'],
+                'filename':value['filename'],'byte_size':value['byte_size'],
+                'report_expires_at':value['expires_at'],'download_expires_at':expires,
+                'state':'ready' if ready else 'expired','can_reissue':True,
+                'download_url':f"/api/database/reports/{value['source_id']}/{value['report_id']}/download" if ready else None}
+
+    def describe(self,owner,sid,rid):
+        """Current authenticated retention/entry state; never renew or expose CSV bytes."""
+        if not isinstance(rid,str) or not re.fullmatch('[0-9a-f]{32}',rid):
+            raise DatabaseRejected('DATABASE_REPORT_DENIED')
+        with report_lease(self._lease_path(rid),blocking=True):
+            return self._web_metadata(self._load(owner,sid,rid))
+
+    def renew_web_download(self,owner,sid,rid):
+        """Renew only the owned, retained report's entry without rerunning its query."""
+        if not isinstance(rid,str) or not re.fullmatch('[0-9a-f]{32}',rid):
+            raise DatabaseRejected('DATABASE_REPORT_DENIED')
+        with report_lease(self._lease_path(rid),blocking=True):
+            return self._web_metadata(self._renew_download(owner,sid,rid))
 
     def web_download(self,owner,sid,rid):
         value=self._load(owner,sid,rid)

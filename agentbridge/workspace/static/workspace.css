@@ -1843,3 +1843,9 @@ td {
 .workspace-main { display: flex; flex-direction: column; }
 .workspace-main > .workspace-view { flex: 1; min-height: 0; height: auto; }
 #credential-notice { flex: 0 0 auto; }
+
+/* Local history/media explanations stay within the existing scrolling feed. */
+.history-range-notice { flex-basis:100%; margin:0; color:var(--muted); font-size:12px; text-align:center; overflow-wrap:anywhere; }
+.message-image-record { margin:0; min-width:0; }
+.message-image-record .message-image-button { width:100%; min-height:42px; }
+.message-image-retention { margin-top:4px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }

@@ -4,7 +4,7 @@ import { createResultView, completedInteractionPresentation as presentation,
   taskCardStatusMessage as batchMessage, taskCardStatusForInteraction as cardStatus,
   taskPlanFailurePresentation as failurePresentation, parseTimestampMilliseconds } from "../agentbridge/workspace/static/workspace_results.mjs";
 import { createTaskCards } from "../agentbridge/workspace/static/workspace_cards.mjs";
-import { createDocument } from "./workspace_dom_fixture.mjs";
+import { createDocument, descendants } from "./workspace_dom_fixture.mjs";
 
 test("refreshed timeline preserves user-before-task order within the same millisecond", () => {
   const user = parseTimestampMilliseconds("2026-10-23T02:24:23.516143+00:00");
@@ -34,6 +34,43 @@ test("database CSV artifacts expose only valid authenticated download paths", ()
     assert.equal(links.length, allowed ? 1 : 0);
     if (allowed) assert.equal(links[0].href, path);
   }
+});
+
+test("CSV entry and report expiry update while the page stays open without rerunning a query", () => {
+  const document = createDocument(), root = document.createElement("div");
+  let current = Date.parse("2026-11-05T00:00:00Z"), serial = 0;
+  const pending = new Map(), renewed = [];
+  const timers = {setTimeout(fn) {pending.set(++serial, fn); return serial;}, clearTimeout(id) {pending.delete(id);}};
+  const runTimer = () => {const [id, fn] = pending.entries().next().value; pending.delete(id); fn();};
+  const {appendArtifactList: render} = createResultView({document, timers, now: () => current,
+    reissueArtifact: (...args) => renewed.push(args)});
+  render(root, [{artifact_type:"database_csv", artifact_id:"artifact", filename:"原报告.csv", state:"ready",
+    byte_size:128, download_url:`/api/database/reports/equipment/${"a".repeat(32)}/download`,
+    expires_at:new Date(current + 10).toISOString(), report_expires_at:new Date(current + 20).toISOString(),
+    report_state:"ready", can_reissue:true}], {taskId:"task"});
+  assert.equal(descendants(root).filter(n => n.tag === "a").length, 1);
+  assert.match(root.textContent, /原报告保留至.*下载入口有效至/);
+  current += 11; runTimer();
+  assert.equal(descendants(root).filter(n => n.tag === "a").length, 0);
+  assert.match(root.textContent, /下载入口已过期.*原报告保留至/);
+  const button = descendants(root).find(n => n.tag === "button");
+  assert.equal(button.textContent, "续取原报告下载");
+  button.events.click();
+  assert.equal(renewed[0][0], "task"); assert.equal(renewed[0][1], "artifact");
+  current += 10; runTimer();
+  assert.match(root.textContent, /原报告保留期已结束/);
+  assert.equal(descendants(root).filter(n => n.tag === "button").length, 0);
+  assert.equal(pending.size, 0);
+});
+
+test("unavailable CSV keeps its name and offers neither a link nor renewal", () => {
+  const document = createDocument(), root = document.createElement("div");
+  const {appendArtifactList: render} = createResultView({document});
+  render(root, [{artifact_type:"database_csv", artifact_id:"artifact", filename:"原报告.csv",
+    state:"expired", report_state:"unavailable", can_reissue:false}], {taskId:"task"});
+  assert.match(root.textContent, /原报告.csv.*原报告当前不可用/);
+  assert.equal(descendants(root).filter(n => ["button", "a"].includes(n.tag)).length, 0);
+  assert.doesNotMatch(root.textContent, /报告已过期/);
 });
 test("terminal business results take precedence over interaction state", () => {
   for (const status of ["succeeded", "failed", "partially_succeeded", "outcome_unknown", "canceled"]) {

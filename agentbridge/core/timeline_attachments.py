@@ -243,6 +243,40 @@ class TimelineAttachmentStore:
             )
         return {**_record(row), "body": body}
 
+    def public_metadata(
+        self, *, user_subject: str, attachment_ids: list[str]
+    ) -> dict[str, dict]:
+        """Project owned media without reading bodies, renewing or pruning them.
+
+        Timeline payloads contain the state at message creation. A fresh
+        projection must hide expired media URLs even before maintenance has
+        materialized expiry in the attachment ledger.
+        """
+        subject = _required_text(user_subject, "user_subject", 256)
+        if not isinstance(attachment_ids, list) or len(attachment_ids) > 4000:
+            raise ValueError("timeline attachment metadata request is invalid")
+        ids = list(dict.fromkeys(
+            value for value in attachment_ids
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", value)
+        ))
+        result = {}
+        now = _as_utc(self.clock())
+        with self._connect() as connection:
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    f"SELECT * FROM timeline_attachments WHERE user_subject = ? "
+                    f"AND attachment_id IN ({placeholders})",
+                    (subject, *batch),
+                ).fetchall()
+                for row in rows:
+                    record = _record(row)
+                    if record["state"] == "ready" and _parse_time(record["expires_at"]) <= now:
+                        record["state"] = "expired"
+                    result[record["attachment_id"]] = public_attachment(record)
+        return result
+
     def prune_expired(self, *, now: datetime | None = None) -> int:
         cutoff = _format_time(_as_utc(now or self.clock()))
         with self._connect() as connection:

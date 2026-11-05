@@ -1,3 +1,4 @@
+import { historyPresentation, loadHistoryPage, appendMessageImages } from "./workspace_history.mjs";
 import { createLifecycle, isCancellation } from "./workspace_lifecycle.mjs";
 import { createWorkspaceRequests } from "./workspace_request.mjs";
 import { createResultView, formatTime, parseTimestampMilliseconds, textHash, historyMessageKey, endpointType } from "./workspace_results.mjs";
@@ -36,6 +37,7 @@ const state = {
   chatTimelineOldestSequence: 0,
   chatTimelineHasOlder: false,
   chatTimelineLoadingOlder: false,
+  historyLoading: false,
   legacyHistoryLoaded: false,
   legacyHistoryLoading: false,
   taskHistoryCursor: null,
@@ -85,7 +87,8 @@ const { api, fetchChatStreamResponse } = createWorkspaceRequests({
   addLiveProgress: (...args) => addLiveProgress(...args),
 });
 const { renderMarkdown, groupQueryCards, renderTaskPlan, appendArtifactList } =
-  createResultView({ document, state, reissueArtifact });
+  createResultView({ document, state, reissueArtifact,
+    timers:{setTimeout:(fn,ms)=>sessionScope.timeout(fn,ms),clearTimeout:id=>lifecycle.clearTimer(id)} });
 const { ensureLiveMessage, adoptLiveMessage, handleChatProgress, addLiveProgress,
   handleChatDelta, restoreActiveDispatches } = createChatProgress({
   document, state, $, scrollChat, scheduleChatRefresh, renderMarkdown, attachDispatchCancel,
@@ -177,6 +180,7 @@ function resetWorkspaceState() {
   state.chatTimelineOldestSequence = 0;
   state.chatTimelineHasOlder = false;
   state.chatTimelineLoadingOlder = false;
+  state.historyLoading = false;
   state.legacyHistoryLoaded = false;
   state.legacyHistoryLoading = false;
   state.taskHistoryCursor = null;
@@ -577,35 +581,8 @@ function messageElement(message) {
   if (message.role === "assistant") renderMarkdown(text, message.text);
   else text.textContent = message.text;
   item.append(text);
-  if (Array.isArray(message.images) && message.images.length > 0) {
-    const images = document.createElement("div");
-    images.className = "message-image-list";
-    message.images.forEach((image) => {
-      const source = image.dataUrl || image.mediaUrl;
-      const downloadSource = image.downloadUrl || source;
-      const fileName = image.fileName || "附加图片";
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "message-image-button";
-      open.title = `放大查看 ${fileName}`;
-      open.setAttribute("aria-label", `放大查看 ${fileName}`);
-      const preview = document.createElement("img");
-      preview.src = source;
-      preview.alt = fileName;
-      preview.loading = "lazy";
-      preview.addEventListener("error", () => {
-        preview.classList.add("unavailable");
-        preview.alt = `${fileName}（已不可用）`;
-        open.disabled = true;
-      });
-      open.addEventListener("click", () => {
-        openImageViewer({ source, downloadSource, fileName });
-      });
-      open.append(preview);
-      images.append(open);
-    });
-    item.append(images);
-  }
+  appendMessageImages({document, container:item, images:message.images, formatTime,
+    onOpen:openImageViewer, scope:sessionScope});
   if (message.timestamp || message.sourceLabel) {
     const time = document.createElement("time");
     time.className = "message-meta";
@@ -618,12 +595,22 @@ function messageElement(message) {
   return item;
 }
 
-function openImageViewer({ source, downloadSource, fileName }) {
+function openImageViewer({ source, downloadSource, fileName, expiresAt }) {
   if (!source) return;
   const viewer = $("#image-viewer");
   const image = $("#image-viewer-image");
   const caption = $("#image-viewer-caption");
   const download = $("#image-viewer-download");
+  viewer.dataset.mediaSource = source;
+  const expires = Date.parse(expiresAt || "");
+  if (Number.isFinite(expires)) {
+    const expireViewer = () => {
+      if (viewer.hidden || viewer.dataset.mediaSource !== source) return;
+      if (Date.now() >= expires) { closeImageViewer(); toast("原图保留期限已到，历史消息仍可查看。"); }
+      else sessionScope.timeout(expireViewer, Math.min(2147483647, Math.max(1, expires - Date.now() + 1)));
+    };
+    sessionScope.timeout(expireViewer, Math.min(2147483647, Math.max(1, expires - Date.now() + 1)));
+  }
   image.src = source;
   image.alt = fileName;
   caption.textContent = fileName;
@@ -737,31 +724,32 @@ function renderChatTimeline() {
 
 function olderChatControl() {
   if (!historyControls) {
-    const wrapper = document.createElement("div");
-    wrapper.className = "chat-history-control";
-    const make = (label, handler) => {
-      const button = document.createElement("button");
-      button.type = "button"; button.className = "secondary compact";
-      button.textContent = label; button.addEventListener("click", handler);
-      wrapper.append(button); return button;
-    };
-    historyControls = { wrapper,
-      messages: make("加载更早消息", loadOlderChatMessages),
-      tasks: make("加载较早任务与文件", loadTaskHistory),
-      legacy: make("加载历史会话与助手记录", loadLegacyHistory),
-    };
+    const wrapper = document.createElement("div"); wrapper.className = "chat-history-control";
+    const button = document.createElement("button"); button.type = "button"; button.className = "secondary compact";
+    button.addEventListener("click", loadMoreHistory);
+    const notice = document.createElement("p"); notice.className = "history-range-notice";
+    notice.setAttribute("role", "status"); wrapper.append(button, notice);
+    historyControls = {wrapper, button, notice};
   }
-  for (const [name, visible, loading, label] of [
-    ["messages", state.chatTimelineHasOlder, state.chatTimelineLoadingOlder, "加载更早消息"],
-    ["tasks", state.taskHistoryHasMore, state.taskHistoryLoading, "加载较早任务与文件"],
-    ["legacy", !state.legacyHistoryLoaded, state.legacyHistoryLoading, "加载历史会话与助手记录"],
-  ]) {
-    const button = historyControls[name];
-    button.hidden = !visible; button.disabled = loading;
-    button.textContent = loading ? "正在加载…" : label;
-  }
-  historyControls.wrapper.hidden = !state.chatTimelineHasOlder && !state.taskHistoryHasMore && state.legacyHistoryLoaded;
+  const display = historyPresentation(state);
+  historyControls.button.hidden = !display.pending;
+  historyControls.button.disabled = display.busy;
+  historyControls.button.textContent = display.label;
+  historyControls.notice.textContent = display.notice;
   return historyControls.wrapper;
+}
+
+async function loadMoreHistory() {
+  const scope = sessionScope, reading = readingScroll?.snapshot();
+  try {
+    await loadHistoryPage({state, getScope:() => sessionScope,
+      loadMessages:loadOlderChatMessages, loadTasks:loadTaskHistory, loadLegacy:loadLegacyHistory,
+      render:renderChatTimeline});
+  } catch (error) {
+    if (!isCancellation(error)) toast(`加载历史内容失败：${friendlyError(error)}`, true);
+  } finally {
+    if (scope.current() && reading) readingScroll?.restore(reading);
+  }
 }
 
 async function loadLegacyHistory() {
@@ -1028,8 +1016,7 @@ function timelineEntryImages(entry) {
     .filter(
       (attachment) =>
         attachment?.type === "image" &&
-        typeof attachment.mediaUrl === "string" &&
-        attachment.mediaUrl,
+        (attachment.attachmentId || (typeof attachment.mediaUrl === "string" && attachment.mediaUrl)),
     )
     .sort(
       (left, right) =>
@@ -1042,6 +1029,8 @@ function timelineEntryImages(entry) {
         : attachment.mediaUrl,
       fileName: attachment.fileName || "附加图片",
       mimeType: attachment.mimeType,
+      expiresAt: attachment.expiresAt,
+      state: attachment.state,
     }));
 }
 
@@ -1670,6 +1659,7 @@ async function reissueArtifact(taskId, artifactId, button) {
   const scope = sessionScope;
   const api = scopedApi(scope);
   if (!taskId || !artifactId || button.disabled) return;
+  const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = "正在重新获取";
   try {
@@ -1685,8 +1675,11 @@ async function reissueArtifact(taskId, artifactId, button) {
     scope.assertCurrent();
     if (fresh && state.selectedTaskId === taskId && detailRequest === state.taskDetailRequest) renderTaskDetail(result);
     if (!fresh) scheduleTaskSync(taskId, "task.artifact.refreshed");
+    const artifact = result.artifacts?.find(item => item.artifact_id === artifactId);
     toast(
-      "新的下载链接已生成，30 分钟内有效。",
+      artifact?.state === "ready" && artifact.download_url && artifact.expires_at
+        ? `下载入口已更新，有效至 ${formatTime(artifact.expires_at)}。`
+        : "文件状态已更新，请查看卡片中的下载与保留期限。",
       false,
       `artifact:${artifactId}:reissued`,
     );
@@ -1700,7 +1693,7 @@ async function reissueArtifact(taskId, artifactId, button) {
   } finally {
     if (button.isConnected) {
       button.disabled = false;
-      button.textContent = "重新生成下载";
+      button.textContent = originalLabel;
     }
   }
 }

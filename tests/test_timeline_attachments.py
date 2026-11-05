@@ -90,6 +90,29 @@ class TimelineAttachmentStoreTests(unittest.TestCase):
             with self.assertRaises(TimelineAttachmentExpired):
                 store.ready_payload(created["attachment_id"])
 
+    def test_public_metadata_is_owned_and_marks_expiry_without_mutation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            clock = [datetime(2026, 11, 5, tzinfo=timezone.utc)]
+            store = TimelineAttachmentStore(Path(tmp) / "agentbridge.db", clock=lambda: clock[0])
+            created = store.create_many(user_subject="user-a", message_key="metadata",
+                attachments=[_image("原图.png", b"body")],
+                media_base_url="https://10.10.50.213:8780", ttl_seconds=300)[0]
+            aid = created["attachment_id"]
+            before = store.public_metadata(user_subject="user-a", attachment_ids=[aid])[aid]
+            self.assertEqual(before["state"], "ready")
+            self.assertEqual(before["expiresAt"], created["expires_at"])
+            self.assertEqual(store.public_metadata(user_subject="user-b", attachment_ids=[aid]), {})
+            clock[0] += timedelta(seconds=301)
+            after = store.public_metadata(user_subject="user-a", attachment_ids=[aid])[aid]
+            self.assertEqual(after["state"], "expired")
+            self.assertIsNone(after["mediaUrl"])
+            self.assertEqual(after["fileName"], "原图.png")
+            self.assertNotIn("user_subject", after)
+            self.assertNotIn("body", after)
+            self.assertTrue(store._cache_path(aid).is_file())
+            with store._connect() as db:
+                self.assertEqual(db.execute("SELECT state FROM timeline_attachments WHERE attachment_id=?", (aid,)).fetchone()[0], "ready")
+
     def test_trusted_http_application_serves_inline_image(self) -> None:
         with TemporaryDirectory() as tmp:
             store = TimelineAttachmentStore(Path(tmp) / "agentbridge.db")

@@ -68,7 +68,7 @@ export function createActionableResults({ document, state, prepareTargets,
     return model.group.coverage !== "partial" && !model.group.remaining?.blocked && !expired(model.group) && target.enabled === true && !preparationFor(model, target);
   }
   function expired(group) {
-    return Boolean(group.expiresAt) && !(Date.parse(group.expiresAt) > now());
+    return group.selectionExpired === true || Boolean(group.expiresAt) && !(Date.parse(group.expiresAt) > now());
   }
   function visible(model, target) {
     return (!model.type || target.workflowLabel === model.type) &&
@@ -140,7 +140,7 @@ export function createActionableResults({ document, state, prepareTargets,
     const group = model.group;
     const partial = group.coverage === "partial";
     const scopeBlocked = group.remaining?.blocked === true;
-    if (partial) model.onlySelected = false;
+    if (partial || expired(group)) model.onlySelected = false;
     clearExpiry(model);
     // A read-only verification has its own short evidence lifetime, which can
     // expire after the source query. Keep both boundaries live on open pages.
@@ -168,9 +168,10 @@ export function createActionableResults({ document, state, prepareTargets,
         view.type.children[0].value = ""; view.typeSignature = types.join("|");
       }
       view.search.value = model.search; view.type.value = model.type; view.onlySelected.checked = model.onlySelected;
-      view.onlySelected.disabled = partial;
-      view.title.textContent = scopeBlocked ? "原批次剩余范围待核验" : partial ? "OA 待办查询结果（未取全）" : "选择待办并进入办理";
-      view.explanation.textContent = scopeBlocked ? "原批次剩余范围尚未核验，未展示或开放办理；请回原批次重新核对。" : partial ? "以下是已读取的事项，来源尚未取全，仅供查看。请重新查询取得完整结果后办理。" :
+      view.onlySelected.disabled = partial || expired(group);
+      view.title.textContent = scopeBlocked ? "原批次剩余范围待核验" : expired(group) ? "历史 OA 待办查询结果" : partial ? "OA 待办查询结果（未取全）" : "选择待办并进入办理";
+      view.explanation.textContent = scopeBlocked ? "原批次剩余范围尚未核验，未展示或开放办理；请回原批次重新核对。" : expired(group) ?
+        "以下保留当时查询的只读结果，不代表当前待办状态。已有办理可查看原任务，新办理请重新查询。" : partial ? "以下是已读取的事项，来源尚未取全，仅供查看。请重新查询取得完整结果后办理。" :
         "选择要办理的具体事项，每项核对后确认一次。选择当前可办项仅包括当前筛选结果，未选及不可办事项会保留。";
       for (const target of group.targets) {
         let row = view.rows.get(target.targetKey);
@@ -222,7 +223,7 @@ export function createActionableResults({ document, state, prepareTargets,
       view.count.textContent = scopeBlocked && !partial ? '原批次范围未核验，未开放办理。' : partial ? `${scopeBlocked ? '待办来源已读取' : '已读取'} ${readCount} 项${Number.isSafeInteger(reportedTotal) && reportedTotal >= 0 ? ` · OA 报告共 ${reportedTotal} 项` : ''} · 尚未取全，仅供查看` :
         `共 ${group.targets.length} 项 · 可新办 ${group.targets.filter(t => canPrepare(model, t)).length} 项 · 已有办理 ${continuing} 项 · 当前不可新办 ${unavailable} 项 · 已选 ${model.selected.size} 项`;
       view.empty.hidden = scopeBlocked || group.targets.some(t => visible(model, t));
-      view.empty.textContent = !group.targets.length ? partial ? "尚未取得可展示的事项，请重新查询。" : "本次查询没有待办事项。" :
+      view.empty.textContent = !group.targets.length ? partial ? "尚未取得可展示的事项，请重新查询。" : expired(group) ? "当时查询返回 0 项待办；当前情况请重新查询。" : "本次查询没有待办事项。" :
         "没有符合筛选条件的事项；可修改搜索或类型。";
       view.selectAll.textContent = `选择当前可办 ${available.length} 项`;
       view.selectAll.disabled = model.pending || Boolean(model.request) || !available.length;
@@ -230,8 +231,10 @@ export function createActionableResults({ document, state, prepareTargets,
       view.refresh.hidden = typeof refreshQuery !== "function";
       view.refresh.disabled = model.pending || Boolean(model.request);
       view.refresh.textContent = model.refreshRequest ? "恢复本次查询" : "重新查询待办";
-      view.expiry.textContent = expired(group) ? "本次查询已过期；已有办理可查看原任务，新办理请重新查询。" : partial ? "" : group.expiresAt ?
-        `可选择至 ${new Date(group.expiresAt).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}；已有草稿按各自有效期继续。` : "";
+      const fetchedAt = Date.parse(group.fetchedAt);
+      const fetchedCopy = Number.isFinite(fetchedAt) ? `查询时间：${new Date(fetchedAt).toLocaleString()}。` : "";
+      view.expiry.textContent = fetchedCopy + (expired(group) ? "本次查询的选择窗口已过期，历史结果仍可回看；已有办理可查看原任务，新办理请重新查询。" : partial ? "" : group.expiresAt ?
+        `可选择至 ${new Date(group.expiresAt).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}；已有草稿按各自有效期继续。` : "");
       view.expiry.hidden = !view.expiry.textContent;
       view.submit.disabled = partial || scopeBlocked || model.pending || (!model.request && !model.selected.size);
       view.submit.textContent = model.pending ? "正在准备…" : model.request ? "恢复本次准备" : `准备已选事项（${model.selected.size}）`;

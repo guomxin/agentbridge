@@ -1,5 +1,7 @@
 from datetime import timedelta
 from pathlib import Path
+import json
+import subprocess
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -92,11 +94,70 @@ def test_projection_version_hint_cannot_reuse_expired_query_or_revoked_access(tm
         from agentbridge.core.actionable_results import _now
         with patch("agentbridge.core.actionable_results._now", return_value=_now() + timedelta(minutes=11)):
             refreshed = app.task_projections(account, [case["task_id"]], versions=[version])
-        assert refreshed["items"][0]["detail"]["actionableResults"] == []
+        historical = refreshed["items"][0]["detail"]["actionableResults"][0]
+        assert historical["selectionExpired"] is True
+        assert historical["targets"]
+        assert all(target["enabled"] is False for target in historical["targets"])
         assert refreshed["items"][0]["unchanged"] is False
         grant_permissions(fixture.service.user_grants, account["user_subject"], [])
         denied = app.task_projections(account, [case["task_id"]], versions=[version])
         assert denied == {"items": [], "unavailableTaskIds": [case["task_id"]]}
+        assert fixture.oa.writes == []
+    finally:
+        fixture.close()
+
+
+@pytest.mark.parametrize("kind", ["complete", "empty", "partial"])
+def test_expired_query_projection_renders_readonly_history_in_card_and_detail(tmp_path, kind):
+    fixture = LatencyAcceptanceFixture(Path(tmp_path), seed=False,
+        latency=LatencyContract(io_delay_seconds=0, worker_start_seconds=0))
+    try:
+        case = fixture.add_query_case(case_key="historical-render")
+        if kind != "complete":
+            operation = fixture.service.operations.get(case["operation_id"])
+            pending = operation["result"]
+            if kind == "empty":
+                pending.update(items=[], count=0, source_count=0, total=0)
+            else:
+                pending.update(total=len(pending["items"]) + 1, coverage={"status": "partial", "hasMore": True})
+            with fixture.service.tasks._connect() as connection:
+                connection.execute("UPDATE operations SET result_json=? WHERE operation_id=?", (json.dumps(pending), case["operation_id"]))
+        fresh = fixture.app.task_projections(fixture.account, [case["task_id"]])["items"][0]["detail"]
+        from agentbridge.core.actionable_results import _now
+        with patch("agentbridge.core.actionable_results._now", return_value=_now() + timedelta(minutes=11)):
+            expired = fixture.app.task_projections(fixture.account, [case["task_id"]])["items"][0]["detail"]
+            detail = fixture.app.task_detail(fixture.account, case["task_id"])
+        # The same real BFF projections feed both DOM surfaces; this catches a
+        # backend empty-array/UI-only-expired-group contract disagreement.
+        source = r"""
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {createTaskCards} from './agentbridge/workspace/static/workspace_cards.mjs';
+import {createDocument,descendants} from './tests/workspace_dom_fixture.mjs';
+const {fresh,expired,detail}=JSON.parse(readFileSync(0,'utf8'));
+const document=createDocument(), chat=document.createElement('main'), panel=document.createElement('main');
+const state={taskCards:new Map(),taskCardMeta:new Map()};let prepares=0,refreshes=0;
+const cards=createTaskCards({document,state,$:()=>panel,setTimelineNode(){},renderChatTimeline(){},
+  prepareTargets:()=>{prepares++;},refreshQuery:()=>{refreshes++;},appendArtifactList(){}});
+cards.upsertTaskCard(fresh,{render:false});
+const card=[...state.taskCards.values()][0];
+cards.upsertTaskCard(expired,{render:false});cards.renderTaskDetail(detail);
+assert.equal([...state.taskCards.values()][0],card);
+for(const root of [card,panel]) {
+  assert.match(root.textContent,/历史查询/);
+  assert.match(root.textContent,/查询时间/);
+  assert.match(root.textContent,/历史结果仍可回看/);
+  const rows=descendants(root).filter(n=>n.className==='actionable-result-row');
+  assert.equal(rows.length,expired.actionableResults[0].targets.length);
+  for(const row of rows) for(const button of descendants(row).filter(n=>n.tag==='button'||n.tag==='input')) assert.equal(button.disabled,true);
+  const refresh=descendants(root).find(n=>n.tag==='button'&&n.textContent==='重新查询待办');
+  assert.ok(refresh);assert.equal(refresh.disabled,false);
+  if(!rows.length) assert.match(root.textContent,/当时查询返回 0 项待办/);
+}
+assert.equal(prepares,0);assert.equal(refreshes,0);
+"""
+        subprocess.run(["node", "--input-type=module", "-e", source], input=json.dumps({"fresh": fresh, "expired": expired, "detail": detail}),
+            cwd=Path(__file__).resolve().parents[1], text=True, check=True, capture_output=True, timeout=30)
         assert fixture.oa.writes == []
     finally:
         fixture.close()

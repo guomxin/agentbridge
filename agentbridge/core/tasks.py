@@ -61,6 +61,8 @@ REFRESHABLE_ARTIFACT_TYPES = {
 
 PULL_BASED_CLIENT_TYPES = {"web", "webchat"}
 ORPHAN_TASK_MAX_AGE_MINUTES = 15
+TIMELINE_TEXT_MAX_CHARACTERS = 50_000
+WORKSPACE_RESPONSE_MAX_CHARACTERS = 200_000
 
 
 class TaskNotFound(KeyError):
@@ -2789,6 +2791,34 @@ class TaskHubStore:
                 notify_source=notify_source,
             )
 
+    def append_workspace_response(
+        self,
+        *,
+        user_subject: str,
+        source_endpoint_id: str,
+        message_key: str,
+        text: str,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[dict, bool]:
+        """Persist the bounded full Workspace answer, not a host tool input.
+
+        The general timeline tool keeps its existing 50k contract. Only an
+        owned active Workspace endpoint and an assistant receipt can use this
+        larger local presentation budget; push mirrors remain bounded below.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._append_timeline_message_in_connection(
+                connection,
+                user_subject=user_subject,
+                source_endpoint_id=source_endpoint_id,
+                message_key=message_key,
+                role="assistant",
+                text=text,
+                payload=payload,
+                _workspace_response=True,
+            )
+
     def _append_timeline_message_in_connection(
         self,
         connection: sqlite3.Connection,
@@ -2801,6 +2831,7 @@ class TaskHubStore:
         task_id: str | None = None,
         payload: dict[str, Any] | None = None,
         notify_source: bool = False,
+        _workspace_response: bool = False,
     ) -> tuple[dict, bool]:
         """Append with the caller's transaction; never commit independently."""
         if not connection.in_transaction:
@@ -2809,7 +2840,6 @@ class TaskHubStore:
         message_key = _required_text(message_key, "message_key", 768)
         if role not in {"user", "assistant"}:
             raise ValueError("timeline role is invalid")
-        normalized_text = _timeline_text(text)
         normalized_task_id = (
             _required_text(task_id, "task_id", 128) if task_id else None
         )
@@ -2823,6 +2853,17 @@ class TaskHubStore:
             or endpoint["state"] != "active"
         ):
             raise TaskNotFound("client endpoint not found")
+        if _workspace_response and (
+            endpoint["client_type"] != "web"
+            or role != "assistant"
+            or not message_key.startswith("workspace:assistant:")
+        ):
+            raise ValueError("workspace response source is invalid")
+        normalized_text = _timeline_text(
+            text,
+            maximum=(WORKSPACE_RESPONSE_MAX_CHARACTERS if _workspace_response
+                     else TIMELINE_TEXT_MAX_CHARACTERS),
+        )
         if normalized_task_id:
             self._select_owned_task(
                 connection,
@@ -3051,6 +3092,32 @@ class TaskHubStore:
             }
             for row in rows
         ]
+
+    def get_task_interaction(
+        self,
+        *,
+        task_id: str,
+        user_subject: str,
+        interaction_id: str,
+    ) -> dict:
+        """Read a current interaction only through its exact owned task link."""
+        with self._connect() as connection:
+            self._select_owned_task(connection, task_id, user_subject)
+            row = connection.execute(
+                "SELECT * FROM task_interactions "
+                "WHERE task_id=? AND user_subject=? AND interaction_id=?",
+                (task_id, user_subject, interaction_id),
+            ).fetchone()
+        if row is None:
+            raise TaskNotFound("task interaction not found")
+        return {
+            "task_id": row["task_id"],
+            "interaction_id": row["interaction_id"],
+            "user_subject": row["user_subject"],
+            "linked_at": row["linked_at"],
+            "last_state": row["last_state"],
+            "last_observed_at": row["last_observed_at"],
+        }
 
     def recovery_candidates(
         self,
@@ -4638,12 +4705,18 @@ class TaskHubStore:
             (entry["user_subject"], source_endpoint_id, notify_source),
         ).fetchall()
         entry_payload = json.loads(entry["payload_json"] or "{}")
+        mirrored_text = entry["text"]
+        truncated = len(mirrored_text) > TIMELINE_TEXT_MAX_CHARACTERS
+        if truncated:
+            notice = "\n\n（回复较长，此处仅显示部分内容；完整回复请回 Workspace 查看。）"
+            mirrored_text = mirrored_text[:TIMELINE_TEXT_MAX_CHARACTERS - len(notice)] + notice
         payload = _canonical_json(
             {
                 "entryId": entry["entry_id"],
                 "sequence": entry["sequence"],
                 "role": entry["role"],
-                "text": entry["text"],
+                "text": mirrored_text,
+                **({"textTruncated": True, "originalTextLength": len(entry["text"])} if truncated else {}),
                 "attachments": list(entry_payload.get("attachments") or []),
                 "createdAt": entry["created_at"],
                 "source": {
@@ -4900,9 +4973,9 @@ def _artifact_download_url(value: Any) -> str:
     return normalized
 
 
-def _timeline_text(value: Any) -> str:
+def _timeline_text(value: Any, *, maximum: int = TIMELINE_TEXT_MAX_CHARACTERS) -> str:
     normalized = str(value or "").replace("\0", "").strip()
-    if not normalized or len(normalized) > 50_000:
+    if not normalized or len(normalized) > maximum:
         raise ValueError("timeline text is invalid")
     return normalized
 

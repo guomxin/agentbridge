@@ -589,7 +589,8 @@ export function historyMessageKey(message, index) {
   ].join(":");
 }
 
-export function createResultView({ document, state, reissueArtifact }) {
+export function createResultView({ document, state, reissueArtifact, now = () => Date.now(), timers = globalThis }) {
+  const artifactTimers = new WeakMap();
   const archivedQueries = new WeakMap();
   function renderMarkdown(element, value) {
     const source = String(value ?? "");
@@ -776,6 +777,10 @@ export function createResultView({ document, state, reissueArtifact }) {
     artifacts,
     { compact = false, taskId = null } = {},
   ) {
+    if (artifactTimers.has(container)) {
+      timers.clearTimeout(artifactTimers.get(container));
+      artifactTimers.delete(container);
+    }
     const items = Array.isArray(artifacts) ? artifacts : [];
     if (!items.length) return;
     const section = document.createElement("section");
@@ -784,6 +789,8 @@ export function createResultView({ document, state, reissueArtifact }) {
     heading.className = "task-artifacts-heading";
     heading.textContent = "任务文件";
     section.append(heading);
+    const updates = [];
+    const deadlines = [];
     items.forEach((artifact) => {
       const row = document.createElement("div");
       row.className = "task-artifact";
@@ -794,53 +801,89 @@ export function createResultView({ document, state, reissueArtifact }) {
       name.textContent = artifact.filename || "未命名文件";
       const meta = document.createElement("span");
       meta.className = "task-artifact-meta";
-      meta.textContent = artifact.state === "ready"
-        ? `${formatBytes(artifact.byte_size)} · ${formatTime(artifact.expires_at)} 前可取用`
-        : "下载链接已过期";
       copy.append(name, meta);
       row.append(copy);
-      if (
-        artifact.state === "ready" &&
-        typeof artifact.download_url === "string" &&
-        (/^https:\/\//.test(artifact.download_url) ||
-         (artifact.artifact_type === "database_csv" &&
-          /^\/api\/database\/reports\/[a-z][a-z0-9_-]{0,63}\/[0-9a-f]{32}\/download$/.test(artifact.download_url)))
-      ) {
-        const download = document.createElement("a");
-        download.className = "secondary task-artifact-download";
-        download.href = artifact.download_url;
-        download.target = "_blank";
-        download.rel = "noopener";
-        download.textContent = "下载";
-        row.append(download);
-      } else {
+      const csv = artifact.artifact_type === "database_csv";
+      const entryExpiry = Date.parse(artifact.expires_at || "");
+      const reportExpiry = Date.parse(artifact.report_expires_at || "");
+      if (Number.isFinite(entryExpiry)) deadlines.push(entryExpiry);
+      if (csv && Number.isFinite(reportExpiry)) deadlines.push(reportExpiry);
+      let control = null;
+      let lastPresentation = null;
+      const update = () => {
+        const reportExpired = csv && Number.isFinite(reportExpiry) && reportExpiry <= now();
+        const reportUnavailable = csv && artifact.report_state === "unavailable";
+        const entryExpired = artifact.state === "expired" ||
+          (Number.isFinite(entryExpiry) && entryExpiry <= now());
+        const ready = artifact.state === "ready" && !entryExpired && !reportExpired && !reportUnavailable;
+        const presentation = `${ready}:${entryExpired}:${reportExpired}:${reportUnavailable}`;
+        if (presentation === lastPresentation) return;
+        lastPresentation = presentation;
+        control?.remove();
+        if (reportExpired) meta.textContent = "原报告保留期已结束，请重新查询导出。";
+        else if (reportUnavailable) meta.textContent = "原报告当前不可用，请检查权限或重新查询导出。";
+        else if (csv && Number.isFinite(reportExpiry)) meta.textContent = ready
+          ? `${formatBytes(artifact.byte_size)} · 原报告保留至 ${formatTime(artifact.report_expires_at)} · 下载入口有效至 ${formatTime(artifact.expires_at)}`
+          : `下载入口${entryExpired ? "已过期" : "暂不可用"} · 原报告保留至 ${formatTime(artifact.report_expires_at)}`;
+        else meta.textContent = ready
+          ? `${formatBytes(artifact.byte_size)} · 下载入口有效至 ${formatTime(artifact.expires_at)}`
+          : entryExpired ? "下载入口已过期，文件记录仍保留。" : "下载入口暂不可用。";
+        const validUrl = typeof artifact.download_url === "string" &&
+          (csv
+            ? /^\/api\/database\/reports\/[a-z][a-z0-9_-]{0,63}\/[0-9a-f]{32}\/download$/.test(artifact.download_url)
+            : /^https:\/\//.test(artifact.download_url));
+        if (ready && validUrl) {
+          const download = document.createElement("a");
+          download.className = "secondary task-artifact-download";
+          download.href = artifact.download_url;
+          download.target = "_blank";
+          download.rel = "noopener";
+          download.textContent = "下载";
+          control = download;
+          row.append(control);
+          return;
+        }
         const actions = document.createElement("div");
         actions.className = "task-artifact-actions";
         const state = document.createElement("span");
         state.className = "task-artifact-expired";
-        state.textContent = "已过期";
+        state.textContent = reportExpired ? "报告已过期" : reportUnavailable ? "原报告不可用"
+          : entryExpired ? "入口已过期" : "暂不可用";
         actions.append(state);
-        if (
-          ["certificate_scan", "smartlight_report"].includes(
-            artifact.artifact_type,
-          ) &&
-          taskId &&
-          artifact.artifact_id
-        ) {
+        const renewableCsv = csv && artifact.can_reissue === true && !reportExpired && !reportUnavailable &&
+          Number.isFinite(reportExpiry) && reportExpiry > now();
+        if ((renewableCsv || ["certificate_scan", "smartlight_report"].includes(artifact.artifact_type)) &&
+            taskId && artifact.artifact_id) {
           const reissue = document.createElement("button");
           reissue.type = "button";
           reissue.className = "secondary task-artifact-reissue";
-          reissue.textContent = "重新生成下载";
+          reissue.textContent = csv ? "续取原报告下载" : "重新生成下载";
           reissue.addEventListener("click", () =>
             reissueArtifact(taskId, artifact.artifact_id, reissue),
           );
           actions.append(reissue);
         }
-        row.append(actions);
-      }
+        control = actions;
+        row.append(control);
+      };
+      update();
+      updates.push(update);
       section.append(row);
     });
     container.append(section);
+    const schedule = () => {
+      const future = deadlines.filter(deadline => deadline > now());
+      if (!future.length) { artifactTimers.delete(container); return; }
+      const timer = timers.setTimeout(() => {
+        artifactTimers.delete(container);
+        if (container.isConnected === false) return;
+        updates.forEach(update => update());
+        schedule();
+      }, Math.min(2147483647, Math.max(1, Math.min(...future) - now() + 1)));
+      timer?.unref?.();
+      artifactTimers.set(container, timer);
+    };
+    schedule();
   }
 
   return { renderMarkdown, groupQueryCards, renderTaskPlan, renderTaskPlanResult, appendArtifactList };
