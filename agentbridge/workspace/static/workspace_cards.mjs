@@ -428,9 +428,9 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     markWorkspaceTiming("card_rendered", {taskId:task.task_id, version:Number(task.version), status:task.status});
     markBusinessProjection(result, card);
     updateClock(view.wait, result);
-    const timelineMeta = state.taskCardMeta.get(cardKey) || state.taskCardMeta.get(`${task.task_id}:summary`) || {
-      createdAt: task.created_at, sequence: 0,
-    };
+    const previousMeta = state.taskCardMeta.get(cardKey) || state.taskCardMeta.get(`${task.task_id}:summary`);
+    const timelineMeta = {...previousMeta, createdAt:task.created_at || previousMeta?.createdAt,
+      sequence:previousMeta?.sequence || 0};
     state.taskCardMeta.set(cardKey, timelineMeta);
     setTimelineNode(card, {key:`task:${cardKey}`, createdAt:timelineMeta.createdAt || task.created_at, order:timelineMeta.sequence || 0});
     const active = actionableTaskInteractions(result);

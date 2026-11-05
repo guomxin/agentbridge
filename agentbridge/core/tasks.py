@@ -153,6 +153,9 @@ class TaskHubStore:
                 CREATE INDEX IF NOT EXISTS agent_tasks_subject_status
                 ON agent_tasks (user_subject, status, updated_at);
 
+                CREATE INDEX IF NOT EXISTS agent_tasks_subject_created
+                ON agent_tasks (user_subject, created_at, task_id);
+
                 CREATE TABLE IF NOT EXISTS task_events (
                     event_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
@@ -255,6 +258,9 @@ class TaskHubStore:
 
                 CREATE INDEX IF NOT EXISTS user_timeline_subject_sequence
                 ON user_timeline (user_subject, sequence);
+
+                CREATE INDEX IF NOT EXISTS user_timeline_subject_type_created
+                ON user_timeline (user_subject, entry_type, created_at, entry_id);
 
                 CREATE TABLE IF NOT EXISTS task_continuations (
                     endpoint_id TEXT PRIMARY KEY,
@@ -3017,6 +3023,83 @@ class TaskHubStore:
                 ).fetchall()
                 rows = list(reversed(rows))
         return [_timeline_from_row(row) for row in rows]
+
+    def list_workspace_history(
+        self,
+        *,
+        user_subject: str,
+        before_created_at: str | None = None,
+        before_kind: str | None = None,
+        before_id: str | None = None,
+        limit: int = 32,
+        message_max_sequence: int | None = None,
+    ) -> list[dict]:
+        """Read one bounded creation-ordered page across messages and tasks.
+
+        Task rows are their own durable anchors: old tasks need not have a
+        corresponding timeline event, and later status changes cannot move
+        their position. Each indexed source contributes at most one page.
+        """
+        limit = min(max(int(limit), 1), 33)  # The BFF reserves one lookahead row.
+        cursor = (before_created_at, before_kind, before_id)
+        if any(value is not None for value in cursor) and not all(value is not None for value in cursor):
+            raise ValueError("all workspace history cursor fields are required")
+        if before_kind is not None and before_kind not in {"message", "task"}:
+            raise ValueError("workspace history cursor kind is invalid")
+
+        def bound(kind: str, id_column: str) -> tuple[str, list]:
+            if before_created_at is None:
+                return "", []
+            # Splitting by the constant kind keeps both keyset bounds usable
+            # by their (subject, [type,] created_at, id) indexes.
+            if kind < before_kind:
+                return " AND created_at <= ?", [before_created_at]
+            if kind > before_kind:
+                return " AND created_at < ?", [before_created_at]
+            return f" AND (created_at, {id_column}) < (?, ?)", [before_created_at, before_id]
+
+        message_bound, message_parameters = bound("message", "entry_id")
+        task_bound, task_parameters = bound("task", "task_id")
+        sequence_bound = " AND sequence <= ?" if message_max_sequence is not None else ""
+        parameters = [user_subject, *message_parameters]
+        if message_max_sequence is not None:
+            parameters.append(max(int(message_max_sequence), 0))
+        parameters.extend((limit, user_subject, *task_parameters, limit, limit))
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            rows = connection.execute(
+                f"""
+                WITH messages AS (
+                    SELECT created_at, 'message' AS kind, entry_id AS id
+                    FROM user_timeline
+                    WHERE user_subject = ? AND entry_type = 'chat_message'{message_bound}{sequence_bound}
+                    ORDER BY created_at DESC, entry_id DESC LIMIT ?
+                ), tasks AS (
+                    SELECT created_at, 'task' AS kind, task_id AS id
+                    FROM agent_tasks
+                    WHERE user_subject = ?{task_bound}
+                    ORDER BY created_at DESC, task_id DESC LIMIT ?
+                ), combined AS (
+                    SELECT * FROM messages UNION ALL SELECT * FROM tasks
+                )
+                SELECT * FROM combined
+                ORDER BY created_at DESC, kind DESC, id DESC LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+            message_ids = [row["id"] for row in rows if row["kind"] == "message"]
+            messages = {}
+            if message_ids:
+                placeholders = ",".join("?" for _ in message_ids)
+                messages = {
+                    row["entry_id"]: _timeline_from_row(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM user_timeline WHERE user_subject = ? AND entry_id IN ({placeholders})",
+                        [user_subject, *message_ids],
+                    ).fetchall()
+                }
+            return [{**dict(row), **({"message": messages[row["id"]]} if row["kind"] == "message" else {})}
+                    for row in rows]
 
     def latest_timeline_sequence(self, *, user_subject: str) -> int:
         with self._connect() as connection:

@@ -535,7 +535,57 @@ class WorkspaceApplication:
                           "unchanged": False, "detail": detail})
         return {"items": items, "unavailableTaskIds": unavailable}
 
-    def current(self, account: dict, *, active_limit=20, recent_limit=8, message_limit=80) -> dict:
+    def history_page(self, account: dict, *, before_created_at: str | None = None,
+                     before_kind: str | None = None, before_id: str | None = None,
+                     limit: int = 32, message_max_sequence: int | None = None) -> dict:
+        cursor = (before_created_at, before_kind, before_id)
+        if any(value is not None for value in cursor):
+            if not all(value is not None for value in cursor):
+                raise ValueError("all workspace history cursor fields are required")
+            if (not isinstance(before_created_at, str) or len(before_created_at) > 40
+                    or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:\+00:00|Z)", before_created_at)):
+                raise ValueError("workspace history cursor timestamp must be UTC ISO-8601")
+            # Preserve stored fractional precision: a cursor is a keyset key,
+            # so normalizing .000000 away would skip rows tied at that instant.
+            before_created_at = before_created_at.replace("Z", "+00:00")
+            datetime.fromisoformat(before_created_at)
+            if before_kind not in {"message", "task"}:
+                raise ValueError("workspace history cursor kind is invalid")
+            if not isinstance(before_id, str) or str(UUID(before_id)) != before_id:
+                raise ValueError("workspace history cursor id must be a canonical UUID")
+        limit = min(max(int(limit), 1), 32)
+        rows = self.service.tasks.list_workspace_history(
+            user_subject=account["user_subject"], before_created_at=before_created_at,
+            before_kind=before_kind, before_id=before_id, limit=limit + 1,
+            message_max_sequence=message_max_sequence)
+        has_more, selected = len(rows) > limit, rows[:limit]
+        # Rows descend from newest to oldest. Avoid opening a normal history
+        # page with a prior turn's answer/card but without its user message.
+        # Trimmed rows stay behind the actual returned cursor for the next
+        # page. With no user boundary, return the bounded slice unchanged so
+        # large single turns and task-only histories always make progress.
+        oldest_user = next((index for index in range(len(selected) - 1, -1, -1)
+                            if selected[index]["kind"] == "message"
+                            and selected[index]["message"].get("role") == "user"), None)
+        if oldest_user is not None and oldest_user < len(selected) - 1:
+            selected = selected[:oldest_user + 1]
+            has_more = True
+        messages = self._project_timeline_entries(account,
+            [row["message"] for row in reversed(selected) if row["kind"] == "message"])
+        task_ids = [row["id"] for row in selected if row["kind"] == "task"]
+        projections = self.task_projections(account, task_ids) if task_ids else {
+            "items": [], "unavailableTaskIds": []}
+        return {"schemaVersion": "agentbridge.workspace-history.v1",
+                "timeline": {"items": messages},
+                "cards": [item["detail"] for item in projections["items"]],
+                "unavailableTaskIds": projections["unavailableTaskIds"],
+                "hasMore": has_more,
+                "nextCursor": {"createdAt": selected[-1]["created_at"],
+                               "kind": selected[-1]["kind"], "id": selected[-1]["id"]}
+                if has_more else None}
+
+    def current(self, account: dict, *, active_limit=20, recent_limit=8, message_limit=80,
+                history_limit=0) -> dict:
         active_limit = min(max(int(active_limit), 1), 20)
         recent_limit = min(max(int(recent_limit), 0), 8)
         message_limit = min(max(int(message_limit), 1), 80)
@@ -543,6 +593,25 @@ class WorkspaceApplication:
         # subsequent commits are replayed by SSE, including an explicit zero.
         timeline_cursor = self.timeline_cursor(account)
         event_cursor = self.event_cursor(account)
+        history_limit = min(max(int(history_limit), 0), 32)
+        if history_limit:
+            history = self.history_page(account, limit=history_limit, message_max_sequence=timeline_cursor)
+            active = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=True,
+                                                   limit=active_limit + 1)
+            known = {card["task"]["task_id"] for card in history["cards"]} | set(history["unavailableTaskIds"])
+            extra_ids = [task["task_id"] for task in active[:active_limit] if task["task_id"] not in known]
+            extra = self.task_projections(account, extra_ids) if extra_ids else {"items": [], "unavailableTaskIds": []}
+            messages = history["timeline"]["items"]
+            return {"schemaVersion": "agentbridge.workspace-current.v1",
+                    "cards": history["cards"] + [item["detail"] for item in extra["items"]],
+                    "unavailableTaskIds": history["unavailableTaskIds"] + extra["unavailableTaskIds"],
+                    "timeline": {"items": messages, "cursor": timeline_cursor,
+                                 "oldestSequence": min((entry["sequence"] for entry in messages), default=None),
+                                 "hasMore": history["hasMore"]},
+                    "history": {key: history[key] for key in ("schemaVersion", "hasMore", "nextCursor")},
+                    "dispatches": {"items": self.list_chat_dispatches(account, active_only=True, limit=20)},
+                    "cursors": {"timeline": timeline_cursor, "event": event_cursor},
+                    "hasMoreActive": len(active) > active_limit, "hasMoreRecent": history["hasMore"]}
         active = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=True,
                                                limit=active_limit + 1)
         recent = self.service.tasks.list_tasks(user_subject=account["user_subject"], terminal_only=True,
@@ -914,6 +983,11 @@ class WorkspaceApplication:
         entry_type: str | None = None,
         limit: int = 200,
     ) -> list[dict]:
+        entries = self.service.tasks.list_timeline(user_subject=account["user_subject"],
+            after_sequence=after_sequence, before_sequence=before_sequence, entry_type=entry_type, limit=limit)
+        return self._project_timeline_entries(account, entries)
+
+    def _project_timeline_entries(self, account: dict, entries: list[dict]) -> list[dict]:
         endpoints = {
             endpoint["endpoint_id"]: endpoint
             for endpoint in self.service.tasks.list_endpoints(
@@ -922,8 +996,6 @@ class WorkspaceApplication:
                 limit=100,
             )
         }
-        entries = self.service.tasks.list_timeline(user_subject=account["user_subject"],
-            after_sequence=after_sequence, before_sequence=before_sequence, entry_type=entry_type, limit=limit)
         attachment_ids = [item.get("attachmentId") for entry in entries
             for item in _timeline_attachments(entry)]
         media = self.service.timeline_attachments.public_metadata(user_subject=account["user_subject"],

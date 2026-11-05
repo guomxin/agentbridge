@@ -35,6 +35,11 @@ export function applyCurrentSnapshot(state, snapshot, { ingest, upsert, retire }
   if (initial) {
     state.chatTimelineHasOlder = Boolean(snapshot.timeline?.hasMore);
     state.timelineCursor = Math.max(0, Number(snapshot.cursors?.timeline) || 0);
+    if (snapshot.history?.schemaVersion === "agentbridge.workspace-history.v1") {
+      state.unifiedHistory = true;
+      state.historyHasMore = Boolean(snapshot.history.hasMore);
+      state.historyCursor = snapshot.history.nextCursor || null;
+    }
   }
   state.currentLoaded = true;
   return initial;

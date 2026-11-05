@@ -2,7 +2,57 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createDocument, descendants} from './workspace_dom_fixture.mjs';
-import {historyPresentation, loadHistoryPage, appendMessageImages} from '../agentbridge/workspace/static/workspace_history.mjs';
+import {historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages} from '../agentbridge/workspace/static/workspace_history.mjs';
+import {createProjectionOrder} from '../agentbridge/workspace/static/workspace_projection.mjs';
+
+test('a unified page applies text and cards before advancing its shared cursor without moving SSE replay', () => {
+  const cursor={createdAt:'2026-11-05T00:00:00+00:00',kind:'message',id:'older'};
+  const state={historyCursor:null,timelineCursor:42,localMessages:new Map([['draft','unsent']])};
+  const calls=[];
+  applyHistoryPage(state,{schemaVersion:'agentbridge.workspace-history.v1',
+    cards:[{task:{task_id:'task'}}],timeline:{items:[{entry_type:'chat_message',entry_id:'text'}]},
+    unavailableTaskIds:['revoked'],hasMore:true,nextCursor:cursor},
+    {upsert(detail,options){assert.equal(state.historyCursor,null);assert.equal(options.render,false);calls.push(detail.task.task_id);},
+      ingest(entry,render,advance){assert.equal(state.historyCursor,null);assert.equal(render,false);assert.equal(advance,false);calls.push(entry.entry_id);},
+      retire:id=>calls.push(id)});
+  assert.deepEqual(calls,['task','text','revoked']);
+  assert.deepEqual(state.historyCursor,cursor);assert.equal(state.historyHasMore,true);
+  assert.equal(state.timelineCursor,42);assert.equal(state.localMessages.get('draft'),'unsent');
+});
+
+test('incomplete or stalled unified pages cannot append orphan text or advance the reading window', () => {
+  const cursor={createdAt:'2026-11-05T00:00:00+00:00',kind:'task',id:'same'};
+  const state={historyCursor:cursor,historyHasMore:true};let changes=0;
+  const callbacks={upsert(){changes++;},ingest(){changes++;},retire(){changes++;}};
+  const page={schemaVersion:'agentbridge.workspace-history.v1',cards:[],
+    timeline:{items:[{entry_type:'chat_message',entry_id:'text'}]},unavailableTaskIds:[],hasMore:true,nextCursor:cursor};
+  for (const invalid of [page,{...page,cards:[{}],nextCursor:{...cursor,id:'different'}},
+      {...page,nextCursor:null},{...page,timeline:{items:Array(33).fill(page.timeline.items[0])},hasMore:false}]) {
+    assert.throws(()=>applyHistoryPage(state,invalid,callbacks),/响应不完整/);
+    assert.equal(changes,0);assert.equal(state.historyCursor,cursor);assert.equal(state.historyHasMore,true);
+  }
+});
+
+test('a newer unavailable projection prevents an old history page from reviving the card while its cursor progresses', () => {
+  const state={},order=createProjectionOrder(),cards=new Map();
+  const ticket=order.begin();order.invalidate('revoked');
+  applyHistoryPage(state,{schemaVersion:'agentbridge.workspace-history.v1',cards:[{task:{task_id:'revoked'}}],
+    timeline:{items:[]},unavailableTaskIds:[],hasMore:false,nextCursor:null},
+    {upsert:detail=>{if(order.accept(detail.task.task_id,ticket))cards.set(detail.task.task_id,detail);},ingest(){},retire(){}});
+  assert.equal(cards.size,0);assert.equal(state.historyHasMore,false);
+});
+
+test('unified history states distinguish automatic loading, recovery, failure and exhaustion', () => {
+  const state={unifiedHistory:true,historyHasMore:true,legacyHistoryLoaded:false};
+  assert.match(historyPresentation(state).notice,/向上翻阅.*自动加载/);
+  state.historyRestoring=true;assert.equal(historyPresentation(state).busy,true);
+  assert.match(historyPresentation(state).notice,/恢复上次/);
+  state.historyRestoring=false;state.historyError='网络暂不可用';
+  assert.equal(historyPresentation(state).label,'重试加载历史');
+  assert.equal(historyPresentation(state).notice,'网络暂不可用');
+  state.historyError='';state.historyHasMore=false;state.legacyHistoryLoaded=true;
+  assert.equal(historyPresentation(state).pending,false);assert.match(historyPresentation(state).notice,/加载完毕/);
+});
 
 test('one history action pages each pending source, keeping a failed source retryable', async () => {
   const state = {chatTimelineHasOlder:true, taskHistoryHasMore:true, legacyHistoryLoaded:false};

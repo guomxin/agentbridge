@@ -658,6 +658,7 @@ export function createResultView({ document, state, reissueArtifact, now = () =>
             const summary = document.createElement("summary"); summary.textContent = "历史待办查询 · 选择窗口已到期（展开查看结果）";
             details.append(summary, node); archivedQueries.set(node, details);
           }
+          details.dataset.timelineKey = node.dataset.timelineKey;
           if (node.parentNode && node.parentNode !== details) details.append(node);
           output.push(details);
         } else output.push(node);
@@ -674,6 +675,7 @@ export function createResultView({ document, state, reissueArtifact, now = () =>
     }
     for (const { key, cards, element } of groups.values()) {
       element.className = "message assistant application-card query-group";
+      element.dataset.timelineKey = cards[0].dataset.timelineKey;
       const header = document.createElement("div");
       header.className = "application-card-header";
       const title = document.createElement("strong");

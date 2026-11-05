@@ -1,4 +1,5 @@
-import { historyPresentation, loadHistoryPage, appendMessageImages } from "./workspace_history.mjs";
+import { historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages } from "./workspace_history.mjs";
+import { createHistoryAutoload, restoreHistoryAnchor } from "./workspace_history_autoload.mjs";
 import { createLifecycle, isCancellation } from "./workspace_lifecycle.mjs";
 import { createWorkspaceRequests } from "./workspace_request.mjs";
 import { createResultView, formatTime, parseTimestampMilliseconds, textHash, historyMessageKey, endpointType } from "./workspace_results.mjs";
@@ -38,6 +39,11 @@ const state = {
   chatTimelineHasOlder: false,
   chatTimelineLoadingOlder: false,
   historyLoading: false,
+  unifiedHistory: false,
+  historyCursor: null,
+  historyHasMore: true,
+  historyError: "",
+  historyRestoring: false,
   legacyHistoryLoaded: false,
   legacyHistoryLoading: false,
   taskHistoryCursor: null,
@@ -60,6 +66,7 @@ const state = {
 };
 
 let historyControls = null;
+let historyAutoload = null;
 
 const GATEWAY_STATUS_ONLINE_POLL_MS = 30000;
 const GATEWAY_STATUS_OFFLINE_POLL_MS = 5000;
@@ -181,6 +188,11 @@ function resetWorkspaceState() {
   state.chatTimelineHasOlder = false;
   state.chatTimelineLoadingOlder = false;
   state.historyLoading = false;
+  state.unifiedHistory = false;
+  state.historyCursor = null;
+  state.historyHasMore = true;
+  state.historyError = "";
+  state.historyRestoring = false;
   state.legacyHistoryLoaded = false;
   state.legacyHistoryLoading = false;
   state.taskHistoryCursor = null;
@@ -398,6 +410,10 @@ async function enterWorkspace(account) {
   initialReading = viewState.reading();
   readingScroll?.dispose();
   readingScroll = createReadingScroll({container:$('#chat-messages'),notice:$('#chat-new-content'),save:value => viewState.saveReading(value)});
+  historyAutoload = createHistoryAutoload({container:$('#chat-messages'), scope:accountScope,
+    load:loadMoreHistory, pending:() => historyPresentation(state).pending,
+    ready:() => state.currentLoaded && !state.historyLoading && !state.historyRestoring,
+    active:() => state.activeView === 'chat'});
   $("#auth-view").hidden = true;
   $("#app-view").hidden = false;
   $("#account-name").textContent = account.username;
@@ -547,12 +563,13 @@ async function loadGatewayStatus() {
 }
 
 async function loadChat() {
+  if (state.historyRestoring) return;
   const scope = sessionScope.replace("chat-load");
   const api = scopedApi(scope);
   const container = $("#chat-messages");
   try {
     const ticket = projectionOrder.begin();
-    const snapshot = await api("/api/current?active_limit=20&recent_limit=8&message_limit=80");
+    const snapshot = await api("/api/current?active_limit=20&recent_limit=8&message_limit=80&history_limit=32");
     scope.assertCurrent();
     const initial = applyCurrentSnapshot(state, snapshot, {
       ingest: ingestTimelineEntry,
@@ -562,7 +579,29 @@ async function loadChat() {
     dismissTerminalLiveMessages();
     restoreActiveDispatches(snapshot.dispatches?.items || []);
     renderChatTimeline();
-    if (initial) { readingScroll?.restore(initialReading); initialReading = null; }
+    if (initial) {
+      const reading = initialReading; initialReading = null;
+      if (reading?.anchor && !reading.atBottom) {
+        state.historyRestoring = true;
+        renderChatTimeline();
+        try {
+          const restored = await restoreHistoryAnchor({reading, scope,
+            hasAnchor:key => Boolean([...container.children].some(node => node.dataset.timelineKey === key)),
+            pending:() => historyPresentation(state).pending,
+            load:loadMoreHistory,
+            progress:() => JSON.stringify([state.historyCursor,state.historyHasMore,state.legacyHistoryLoaded]),
+          });
+          scope.assertCurrent();
+          if (restored.status === 'limit') state.historyError = "已恢复部分历史，可继续向上翻阅加载更早内容。";
+          else if (['exhausted','stalled'].includes(restored.status)) state.historyError = "原阅读位置已无法精确恢复，已显示当前可读取的历史内容。";
+        } finally {
+          if (scope.current()) { state.historyRestoring = false; renderChatTimeline(); }
+        }
+      }
+      scope.assertCurrent();
+      readingScroll?.restore(reading);
+      if (!state.historyHasMore && !state.legacyHistoryLoaded && state.unifiedHistory) await loadMoreHistory();
+    }
     markWorkspaceTiming("chat_loaded");
   } catch (error) {
     if (isCancellation(error)) return;
@@ -726,7 +765,10 @@ function olderChatControl() {
   if (!historyControls) {
     const wrapper = document.createElement("div"); wrapper.className = "chat-history-control";
     const button = document.createElement("button"); button.type = "button"; button.className = "secondary compact";
-    button.addEventListener("click", loadMoreHistory);
+    button.addEventListener("click", () => {
+      if (historyAutoload) void historyAutoload.load();
+      else void loadMoreHistory();
+    });
     const notice = document.createElement("p"); notice.className = "history-range-notice";
     notice.setAttribute("role", "status"); wrapper.append(button, notice);
     historyControls = {wrapper, button, notice};
@@ -740,16 +782,54 @@ function olderChatControl() {
 }
 
 async function loadMoreHistory() {
-  const scope = sessionScope, reading = readingScroll?.snapshot();
+  const scope = sessionScope;
+  let reading = readingScroll?.snapshot();
+  if (state.historyLoading) return false;
+  if (state.unifiedHistory) {
+    state.historyLoading = true; state.historyError = ""; renderChatTimeline();
+    try {
+      if (state.historyHasMore) {
+        const query = new URLSearchParams({limit:'32'});
+        if (state.historyCursor) {
+          query.set('before_created_at',state.historyCursor.createdAt);
+          query.set('before_kind',state.historyCursor.kind);
+          query.set('before_id',state.historyCursor.id);
+        }
+        const ticket = projectionOrder.begin();
+        const page = await scopedApi(scope)(`/api/history?${query}`);
+        scope.assertCurrent();
+        reading = readingScroll?.snapshot();
+        applyHistoryPage(state,page,{ingest:ingestTimelineEntry,
+          upsert:(detail,options) => { if (projectionOrder.accept(detail.task.task_id,ticket)) upsertTaskCard(detail,options); },
+          retire:id => { if (projectionOrder.accept(id,ticket)) retireTaskCard(id); }});
+      } else if (!state.legacyHistoryLoaded) {
+        await loadLegacyHistory();
+        reading = readingScroll?.snapshot();
+      }
+      scope.assertCurrent();
+      return true;
+    } catch (error) {
+      reading = readingScroll?.snapshot();
+      if (!isCancellation(error) && scope.current()) state.historyError = `历史内容暂时无法加载：${friendlyError(error)}。请点击重试。`;
+      return false;
+    } finally {
+      if (scope.current()) {
+        state.historyLoading = false; renderChatTimeline();
+        if (reading) readingScroll?.restore(reading);
+      }
+    }
+  }
   try {
     await loadHistoryPage({state, getScope:() => sessionScope,
       loadMessages:loadOlderChatMessages, loadTasks:loadTaskHistory, loadLegacy:loadLegacyHistory,
       render:renderChatTimeline});
   } catch (error) {
     if (!isCancellation(error)) toast(`加载历史内容失败：${friendlyError(error)}`, true);
+    return false;
   } finally {
     if (scope.current() && reading) readingScroll?.restore(reading);
   }
+  return true;
 }
 
 async function loadLegacyHistory() {
@@ -775,9 +855,13 @@ async function loadLegacyHistory() {
     scope.assertCurrent();
     state.legacyHistoryLoaded = true;
   } catch (error) {
-    if (!isCancellation(error)) toast(`加载历史会话失败：${friendlyError(error)}`, true);
+    throw error;
   } finally {
-    if (scope.current()) { state.legacyHistoryLoading = false; renderChatTimeline(); }
+    if (scope.current()) {
+      const reading = readingScroll?.snapshot();
+      state.legacyHistoryLoading = false; renderChatTimeline();
+      if (reading) readingScroll?.restore(reading);
+    }
   }
 }
 
@@ -1442,6 +1526,7 @@ function startWorkspaceObservers() {
 }
 
 function stopWorkspaceObservers() {
+  historyAutoload?.dispose(); historyAutoload = null;
   state.eventSource?.close();
   state.eventSource = null;
   lifecycle.clearTimer(state.timelineReconnectTimer);

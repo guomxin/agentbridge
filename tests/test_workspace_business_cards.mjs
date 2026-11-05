@@ -22,6 +22,15 @@ function result(version, status, interactions) {
 const findClass = (root, name) => descendants(root).find(node => node.className.split(" ").includes(name));
 const links = root => descendants(root).filter(node => node.tag === "a" && !node.hidden);
 
+test('an old task keeps its creation position after a newer event first seeds its metadata',()=>{
+  const positions=[],f=fixture({setTimelineNode:(node,value)=>positions.push(value)});
+  f.state.taskCardMeta.set('task:summary',{createdAt:'2026-11-05T09:00:00Z',sequence:500});
+  const r=result(1,'succeeded',[]);f.upsertTaskCard(r);
+  assert.equal(positions.at(-1).createdAt,r.task.created_at);
+  r.task.version++;r.task.updated_at='2026-11-05T10:00:00Z';f.upsertTaskCard(r);
+  assert.equal(positions.at(-1).createdAt,r.task.created_at);
+});
+
 test('partial OA query cards and details show accurate coverage beside a long preserved history',()=>{
   const f=fixture({refreshQuery:async()=>({taskId:'new-query'})});
   for(let i=0;i<160;i++){

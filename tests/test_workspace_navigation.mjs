@@ -39,6 +39,16 @@ test('reading restore follows a stable item when preceding messages changed heig
   item.offsetTop=500;scroll.restore(saved);assert.equal(container.scrollTop,550);
 });
 
+test('prepending history at the very top preserves the first item below the history control',() => {
+  const document=createDocument(),container=document.createElement('div'),notice=document.createElement('button'),item=document.createElement('article');
+  item.dataset.timelineKey='first';item.offsetTop=80;container.append(item);
+  Object.assign(container,{scrollTop:0,scrollHeight:2000,clientHeight:400});
+  const scroll=createReadingScroll({container,notice});container.events.scroll();const saved=scroll.snapshot();
+  assert.equal(saved.anchor,'first');assert.equal(saved.offset,-80);
+  item.offsetTop=680;container.scrollHeight=2600;scroll.restore(saved);
+  assert.equal(container.scrollTop,600);
+});
+
 function handoffFixture() {
   const timers=new Map();let sequence=0;
   const lifecycle=createLifecycle({timers:{setTimeout:(fn)=>{timers.set(++sequence,fn);return sequence;},clearTimeout:id=>timers.delete(id)}});

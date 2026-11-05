@@ -26,6 +26,8 @@ WORKSPACE_NODE = (
     "tests/test_workspace_gateway_client.mjs",
     "tests/test_workspace_gateway_history.mjs",
     "tests/test_workspace_history.mjs",
+    "tests/test_workspace_history_autoload.mjs",
+    "tests/test_workspace_history_integration.mjs",
     "tests/test_workspace_card_messages.mjs",
     "tests/test_workspace_business_cards.mjs",
     "tests/test_workspace_progress.mjs",

@@ -334,7 +334,15 @@ def create_workspace_http_server(
                     self._json(200, application.current(account,
                         active_limit=_query_int(query, "active_limit", 20),
                         recent_limit=_query_int(query, "recent_limit", 8),
-                        message_limit=_query_int(query, "message_limit", 80)))
+                        message_limit=_query_int(query, "message_limit", 80),
+                        history_limit=_query_int(query, "history_limit", 0)))
+                    return
+                if route.path == "/api/history":
+                    self._json(200, application.history_page(account,
+                        before_created_at=_query_value(query, "before_created_at"),
+                        before_kind=_query_value(query, "before_kind"),
+                        before_id=_query_value(query, "before_id"),
+                        limit=_query_int(query, "limit", 32)))
                     return
                 if route.path == "/api/tasks/history":
                     self._json(200, application.task_history(account,

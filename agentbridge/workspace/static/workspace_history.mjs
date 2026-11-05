@@ -1,13 +1,38 @@
 // History is loaded in bounded pages; loading is separate from retention.
 export function historyPresentation(state) {
-  const pending = state.chatTimelineHasOlder || state.taskHistoryHasMore || !state.legacyHistoryLoaded;
-  const busy = Boolean(state.historyLoading || state.chatTimelineLoadingOlder || state.taskHistoryLoading || state.legacyHistoryLoading);
+  const pending = (state.unifiedHistory ? state.historyHasMore : state.chatTimelineHasOlder || state.taskHistoryHasMore) || !state.legacyHistoryLoaded;
+  const busy = Boolean(state.historyRestoring || state.historyLoading || state.chatTimelineLoadingOlder || state.taskHistoryLoading || state.legacyHistoryLoading);
+  if (state.unifiedHistory) return {pending, busy,
+    label: busy ? "正在加载历史内容…" : state.historyError ? "重试加载历史" : "加载更早内容",
+    notice: state.historyRestoring ? "正在恢复上次阅读的位置…" : state.historyError ||
+      (pending ? "向上翻阅会自动加载更早的消息和结果卡片。" : "当前可读取的消息和任务已加载完毕。旧会话仅补充最近120条文字，旧图片不在补充范围。"),
+  };
   return { pending, busy,
     label: busy ? "正在加载历史内容…" : "加载更早内容",
     notice: state.legacyHistoryLoaded
       ? "已加载当前范围的消息和任务。旧会话仅补充最近120条文字，不代表全部历史；旧图片不在此补充范围。" + (pending ? "仍有更早消息或任务，可继续加载。" : "当前可分页读取的消息和任务已加载完毕。")
       : "当前先显示近期内容；更早消息、任务、文件和旧会话记录可统一加载。",
   };
+}
+
+// A complete server page shares one creation cursor across text and cards.
+// Validate before touching the view; advance only after every row is applied.
+export function applyHistoryPage(state, page, {ingest, upsert, retire}) {
+  const messages = page?.timeline?.items;
+  if (page?.schemaVersion !== "agentbridge.workspace-history.v1" || !Array.isArray(messages) ||
+      !Array.isArray(page.cards) || !Array.isArray(page.unavailableTaskIds) || typeof page.hasMore !== "boolean" ||
+      messages.length + page.cards.length + page.unavailableTaskIds.length > 32 ||
+      messages.some(entry => entry?.entry_type !== "chat_message" || !entry.entry_id) ||
+      page.cards.some(detail => !detail?.task?.task_id) ||
+      (page.hasMore && (!page.nextCursor?.createdAt || !["message", "task"].includes(page.nextCursor.kind) || !page.nextCursor.id)) ||
+      (page.hasMore && JSON.stringify(page.nextCursor) === JSON.stringify(state.historyCursor))) {
+    throw new Error("历史内容响应不完整，请重试加载。");
+  }
+  for (const detail of page.cards) upsert(detail, {render:false});
+  for (const entry of messages) ingest(entry, false, false);
+  for (const id of page.unavailableTaskIds) retire(id);
+  state.historyCursor = page.nextCursor || null;
+  state.historyHasMore = page.hasMore;
 }
 
 export async function loadHistoryPage({state, getScope, loadMessages, loadTasks, loadLegacy, render}) {

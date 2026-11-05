@@ -32,10 +32,16 @@ export function createWorkspaceViewState({storage, getAccountId, now = Date.now}
 
 export function createReadingScroll({container, notice, save = () => {}}) {
   let following = true;
+  const position = node => {
+    if (node.getBoundingClientRect && container.getBoundingClientRect) {
+      return node.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+    }
+    return node.offsetTop;
+  };
   const snapshot = () => {
-    const anchor = [...(container.children || [])].filter(node => node.dataset?.timelineKey &&
-      Number.isFinite(node.offsetTop) && node.offsetTop <= container.scrollTop).at(-1);
-    return {top:container.scrollTop,atBottom:following,anchor:anchor?.dataset.timelineKey || '',offset:anchor ? container.scrollTop-anchor.offsetTop : 0};
+    const items = [...(container.children || [])].filter(node => node.dataset?.timelineKey && Number.isFinite(position(node)));
+    const anchor = items.filter(node => position(node) <= container.scrollTop).at(-1) || items[0];
+    return {top:container.scrollTop,atBottom:following,anchor:anchor?.dataset.timelineKey || '',offset:anchor ? container.scrollTop-position(anchor) : 0};
   };
   const onScroll = () => {
     following = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
@@ -53,7 +59,7 @@ export function createReadingScroll({container, notice, save = () => {}}) {
     if (!value || value.atBottom) update({force:true});
     else {
       const anchor = [...(container.children || [])].find(node => value.anchor && node.dataset?.timelineKey === value.anchor);
-      const top = anchor && Number.isFinite(anchor.offsetTop) ? anchor.offsetTop + value.offset : value.top;
+      const top = anchor && Number.isFinite(position(anchor)) ? position(anchor) + value.offset : value.top;
       following = false; container.scrollTop = Math.min(top, Math.max(0,container.scrollHeight-container.clientHeight)); notice.hidden = true;
     }
   }, dispose() { container.removeEventListener?.('scroll',onScroll); notice.removeEventListener?.('click',showLatest); }};

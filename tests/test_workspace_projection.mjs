@@ -18,6 +18,19 @@ function harness(options = {}) {
 }
 const item = id => ({taskId:id, detail:{task:{task_id:id}}});
 
+test('unified current snapshot establishes a shared history window only once while refreshing live cards', () => {
+  const state={timelineCursor:0};
+  const cursor={createdAt:'2026-11-05T00:00:00+00:00',kind:'task',id:'first-page'};
+  const snapshot={schemaVersion:'agentbridge.workspace-current.v1',cursors:{timeline:10},cards:[],timeline:{items:[]},
+    history:{schemaVersion:'agentbridge.workspace-history.v1',hasMore:true,nextCursor:cursor}};
+  const callbacks={ingest(){},upsert(){},retire(){}};
+  applyCurrentSnapshot(state,snapshot,callbacks);
+  assert.equal(state.unifiedHistory,true);assert.deepEqual(state.historyCursor,cursor);assert.equal(state.historyHasMore,true);
+  state.historyCursor={...cursor,id:'older-loaded-page'};state.historyHasMore=false;state.timelineCursor=11;
+  applyCurrentSnapshot(state,snapshot,callbacks);
+  assert.equal(state.historyCursor.id,'older-loaded-page');assert.equal(state.historyHasMore,false);assert.equal(state.timelineCursor,11);
+});
+
 test('a burst deduplicates IDs, bounds each request and renders each batch once', async () => {
   const h=harness();
   for(let i=0;i<65;i++) {h.queue.enqueue(String(i));h.queue.enqueue(String(i));}
