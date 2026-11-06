@@ -178,7 +178,7 @@ def proposals():
     return {
         'weekly': {'name': '周报整理助手', 'description': '把用户提供的原始事项整理为忠实的周报。',
             'selection': {'use_when': '用户要写周报或归纳本周工作', 'not_for': '数学、翻译、闲聊、业务查询或提交', 'output': '完成、风险、计划，保留未完成和不确定状态'},
-            'instructions': '只依据用户原文，不补事实、原因、风险推测或后续承诺。先判断有无明确完成项；没有则完成栏只写未提供，不放未完成状态。完成栏仅放明确已完成事项；未开始、未完成放待办或风险并保留原状态。计划栏仅放原文明示安排，保留原时间及不确定性。没有信息的栏目写未提供；缺原文先询问。只有用户要求逐句核对原文时，使用 authoring resource 按本轮 binding_id 读取可选资料 references/weekly-check.md 并依照其中格式输出核对。普通周报无需加载该资料。',
+            'instructions': '只依据用户原文，不补事实、原因、风险推测或后续承诺。先判断有无明确完成项；没有则完成栏只写未提供，不放未完成状态。完成栏仅放明确已完成事项；原文明说未开始、未完成的事项保留原状态，可归为待办。风险栏只列原文明说的问题或阻塞。计划栏仅放原文明示安排，保留原时间及不确定性；一项计划本身不能用来判断当前状态或风险。没有信息的栏目写未提供；缺原文先询问。只有用户要求逐句核对原文时，使用 authoring resource 按本轮 binding_id 读取可选资料 references/weekly-check.md 并依照其中格式输出核对。普通周报无需加载该资料。',
             'profiles': {'use': {}}, 'required_resources': {'use': []},
             'references': {'references/weekly-check.md': '逐句核对格式：增加“原文核对”小节，分别标注每条“原文状态”和“周报归类”。测试还没补必须归入风险/待办并保留未完成状态，不得写已完成；除非原文明示计划，不得改写为后续计划。'}},
         'plan': {'name': '计划整理助手', 'description': '把用户的待办想法整理为下一步行动计划。',
@@ -619,15 +619,19 @@ def observe(case, payload, events, calls, skills, exit_code, resource_calls=()):
     result = payload.get('result', payload) if isinstance(payload, dict) else {}
     text = '\n'.join(str(item.get('text', '')) for item in result.get('payloads', []) if isinstance(item, dict))
     successful = [event for event in events if event.get('status') == 'succeeded']
-    expected = skills.get(case.get('skill'))
-    selection = any(event['skill_id'] == expected for event in successful) if expected else not successful
+    expected = {skills[case['skill']]} if case.get('skill') is not None else set()
+    actual = {event['skill_id'] for event in successful}
+    failed = [{key: event.get(key) for key in ('skill_id', 'status', 'error_code')}
+              for event in events if event.get('status') != 'succeeded']
     metadata = result.get('meta', {})
     agent_meta = metadata.get('agentMeta') or {}
     return {'output': text, 'runtime_metadata': metadata,
+        'skill_loads': {'expected': sorted(expected), 'successful': sorted(actual), 'failed_attempts': failed},
         'model_observed': {'provider': agent_meta.get('provider'), 'model': agent_meta.get('model')}, 'checks': {
         'agent_finished': exit_code == 0 and payload is not None,
-        'skill_selection': selection,
-        'required_resources': case.get('skill') != 'evidence' or any('references/evidence.md' in event.get('loaded_resources', []) for event in successful),
+        'skill_selection': actual == expected,
+        'required_resources': case.get('skill') != 'evidence' or any(event['skill_id'] in expected and
+            'references/evidence.md' in event.get('loaded_resources', []) for event in successful),
         'synthetic_read': not case.get('read') or bool(calls),
         'no_read': not case.get('no_read') or not calls,
         'optional_resource': (any(call['path'] == case['optional_resource'] for call in resource_calls)
@@ -648,7 +652,7 @@ def main():
     parser.add_argument('--source-config', type=Path)
     parser.add_argument('--source-agent-dir', type=Path)
     parser.add_argument('--timeout', type=int, default=150)
-    parser.add_argument('--cases', help='Comma-separated IDs; default all 20')
+    parser.add_argument('--cases', help='Comma-separated IDs; default all cases in the selected suite')
     parser.add_argument('--suite', choices=('selection', 'authoring'), default='selection')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--prepare', action='store_true', help='Offline seed/config validation; no authentication or model')

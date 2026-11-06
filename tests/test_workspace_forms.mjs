@@ -1545,6 +1545,29 @@ test('historical use feedback starts with a blank redacted question and retains 
   f.view.dispose();
 });
 
+test('catalog feedback and unsuitable use generate distinct editable cases with preserved origins', async () => {
+  const items = [
+    {feedback_id:'a',rating:'incorrect',profile:'preview',comment:'不要写进入验证阶段',source:{kind:'catalog',prompt:'不复制目录原文'}},
+    {feedback_id:'b',rating:'not_applicable',profile:'preview',source:{kind:'binding',load_event_id:'activity',prompt:'不复制使用原文'}},
+  ];
+  const f=skillFixture({onAction:action => action === 'inspect' ? {...quality('检查'),feedback:{items}} : undefined});
+  await f.forms.showSkillDraft('draft');
+  for (const item of f.$('#skill-feedback-list').children) item.children[2].onclick();
+  const [output,trigger]=f.$('#skill-eval-cases').children;
+  assert.equal(output.querySelector('[name=prompt]').value,'');
+  assert.equal(output.querySelector('[name=kind]').value,'output');
+  assert.equal(trigger.querySelector('[name=prompt]').value,'');
+  assert.equal(trigger.querySelector('[name=kind]').value,'trigger_false');
+  output.querySelector('[name=prompt]').value='写成周报：完成联调，下周补测试。';
+  output.querySelector('[name=excludes]').value='进入验证阶段';
+  trigger.querySelector('[name=prompt]').value='帮我润色：明天补测试。';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  const cases=f.calls.find(c=>c.action==='evaluate').data.cases;
+  assert.deepEqual(cases.map(({feedback_id,kind,expected_trigger})=>[feedback_id,kind,expected_trigger]),[['a','output',undefined],['b','trigger',false]]);
+  assert.deepEqual(cases[1].contains,[]);assert.deepEqual(cases[1].excludes,[]);
+  f.view.dispose();
+});
+
 
 test('automatic version refresh waits for unsaved evaluation inputs and pending editor work', async () => {
   const f=skillFixture();await f.forms.showSkillDraft('draft');

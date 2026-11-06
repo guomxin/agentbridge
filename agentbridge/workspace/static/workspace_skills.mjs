@@ -682,13 +682,21 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     };
     const carried = controls.evaluation();
     const stored = quality.pending_cases;
+    const feedbackItems = [...(quality.feedback?.items || [])];
+    const feedbackSource = source => source.load_event_id ? '助手使用记录'
+      : ({sample:'试用样例',binding:'任务使用',catalog:'目录反馈'}[source.kind] || '未记录');
     let pendingVersion = stored?.version || 0;
     const restored = carried?.value || stored?.value;
     $('#skill-eval-cases').replaceChildren();
     if (restored?.cases.length) {
       for (const row of restored.cases) {
+        let origin = carried ? '保留的待运行样例，请核对当前修订。' : `已保存待测题目，来源修订 ${stored.source_revision}${stored.source_revision !== d.revision ? '；修订已变化，请核对当前模式' : ''}。`;
+        if (row.feedback_id) {
+          const feedback = feedbackItems.find(item => item.feedback_id === row.feedback_id);
+          origin += feedback ? ` 关联${feedbackSource(feedback.source || {})}：${feedback.comment || '未填写说明'}` : ' 已关联原反馈。';
+        }
         add({prompt: row.prompt, profile: row.profile, kind: row.kind === 'output' ? 'output' : 'trigger',
-          expected_trigger: row.kind === 'trigger_true', feedback_id: row.feedback_id, contains: row.contains.split('\n'), excludes: row.excludes.split('\n')}, carried ? '保留的待运行样例，请核对当前修订。' : `已保存待测题目，来源修订 ${stored.source_revision}${stored.source_revision !== d.revision ? '；修订已变化，请核对当前模式' : ''}。`);
+          expected_trigger: row.kind === 'trigger_true', feedback_id: row.feedback_id, contains: row.contains.split('\n'), excludes: row.excludes.split('\n')}, origin);
       }
     } else add(undefined, '', true);
     $('#skill-eval-form').querySelector('[name=repeats]').value = restored?.repeats || '1';
@@ -760,7 +768,6 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     $('#skill-sample-list').querySelectorAll('[data-sample-case]').forEach(button => {
       button.onclick=()=>{const sample=d.tests.find(t=>t.test_id===button.dataset.sampleCase);if(sample)reuse([{prompt:sample.prompt,profile:sample.profile}], `来源：修订 ${sample.revision} 的${profileLabel(sample.profile)}试用样例。请补上“应包含/不应包含”的内容。`);};
     });
-    const feedbackItems = [...(quality.feedback?.items || [])];
     const renderFeedback = () => {
       if (!scope.current()) return;
       const list = $('#skill-feedback-list');
@@ -774,7 +781,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         const version = source.revision ? `修订 ${source.revision}` : feedback.version?.startsWith('draft:') ? `修订 ${feedback.version.slice(6)}` : `版本 ${feedback.version || '未记录'}`;
         const mode = feedback.profile && feedback.profile !== 'unknown' ? profileLabel(feedback.profile) : '模式未记录';
         summary.textContent = `${version} · ${mode} · ${{useful:'有帮助',incorrect:'结果有误',not_applicable:'不适用'}[feedback.rating] || feedback.rating}`;
-        const note = document.createElement('p'); note.textContent = `来源：${source.load_event_id ? '助手使用记录' : ({sample:'试用样例',binding:'任务使用',catalog:'目录反馈'}[source.kind] || '未记录')}。${feedback.comment || '未填写说明。'}`;
+        const note = document.createElement('p'); note.textContent = `来源：${feedbackSource(source)}。${feedback.comment || '未填写说明。'}`;
         item.append(summary, note);
         const progress=feedback.progress;
         if(progress){
@@ -789,10 +796,16 @@ export function createSkillForms({ document, state, $, api: request, switchView,
             item.append(open,result);
           }
         }
-        if ((source.kind === 'sample' && source.prompt) || source.kind === 'binding') {
-          const button = document.createElement('button'); button.type='button';button.className='secondary';button.textContent=source.kind === 'sample' ? '转成验收样例' : '整理成脱敏验收样例';
-          button.onclick=()=>reuse([{prompt:source.prompt || '', profile:source.profile || feedback.profile, feedback_id:feedback.feedback_id}],
-            `来源：${version} 的${mode}反馈。纠错说明：${feedback.comment || '未填写'} 请填写脱敏问题及“应包含/不应包含”；不自动复制业务原文，反馈不会自动成为验收条件。`);
+        const sample = source.kind === 'sample' && Boolean(source.prompt);
+        if (sample || source.kind === 'binding' || source.kind === 'catalog') {
+          const trigger = feedback.rating === 'not_applicable';
+          const seed = {prompt:sample ? source.prompt : '', profile:source.profile || feedback.profile,
+            feedback_id:feedback.feedback_id, kind:trigger ? 'trigger' : 'output', ...(trigger ? {expected_trigger:false} : {})};
+          const hint = trigger ? '请填写脱敏问法。默认检查“不应使用”，无需填写关键词，也可改选测试内容。'
+            : '请填写脱敏问题及“应包含/不应包含”；不自动复制业务原文，反馈不会自动成为验收条件。';
+          const button = document.createElement('button'); button.type='button';button.className='secondary';
+          button.textContent = sample ? '转成验收样例' : '整理成脱敏验收样例';
+          button.onclick = () => reuse([seed], `来源：${version} · ${mode} · ${feedbackSource(source)}。纠错说明：${feedback.comment || '未填写'} ${hint}`);
           item.append(button);
         }
         list.append(item);

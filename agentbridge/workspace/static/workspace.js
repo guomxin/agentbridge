@@ -57,6 +57,8 @@ const state = {
   taskCards: new Map(),
   taskFeedback: new Map(),
   skillCards: new Map(),
+  recentSkillEvents: [],
+  skillHistoryRead: null,
   taskCardMeta: new Map(),
   queryGroupOpen: new Map(),
   taskSyncTimers: new Map(),
@@ -177,6 +179,8 @@ function resetWorkspaceState() {
     state[name].clear();
   }
   state.tasks = [];
+  state.recentSkillEvents = [];
+  state.skillHistoryRead = null;
   state.selectedTaskId = null;
   state.taskDetailRequest += 1;
   state.composerAttachments = [];
@@ -579,20 +583,31 @@ async function loadChat() {
     dismissTerminalLiveMessages();
     restoreActiveDispatches(snapshot.dispatches?.items || []);
     renderChatTimeline();
+    const skillRead = state.unifiedHistory ? hydrateSkillCards() : null;
     if (initial) {
       const reading = initialReading; initialReading = null;
       if (reading?.anchor && !reading.atBottom) {
         state.historyRestoring = true;
         renderChatTimeline();
         try {
+          let missingSkillNotice = '';
+          if (reading.anchor.startsWith("skill:")) {
+            const events = await (skillRead || hydrateSkillCards());
+            if (!events?.some(event => `skill:${event.event_id}` === reading.anchor)) {
+              missingSkillNotice = events ? '近期助手记录中没有上次阅读的卡片，已显示当前对话。'
+                : '助手使用记录暂时无法加载，已显示当前对话，稍后会自动重试。';
+            }
+          }
+          scope.assertCurrent();
           const restored = await restoreHistoryAnchor({reading, scope,
             hasAnchor:key => Boolean([...container.children].some(node => node.dataset.timelineKey === key)),
-            pending:() => historyPresentation(state).pending,
+            pending:() => !missingSkillNotice && historyPresentation(state).pending,
             load:loadMoreHistory,
             progress:() => JSON.stringify([state.historyCursor,state.historyHasMore,state.legacyHistoryLoaded]),
           });
           scope.assertCurrent();
-          if (restored.status === 'limit') state.historyError = "已恢复部分历史，可继续向上翻阅加载更早内容。";
+          if (restored.status === 'exhausted' && missingSkillNotice) toast(missingSkillNotice, false, 'skill-reading-anchor');
+          else if (restored.status === 'limit') state.historyError = "已恢复部分历史，可继续向上翻阅加载更早内容。";
           else if (['exhausted','stalled'].includes(restored.status)) state.historyError = "原阅读位置已无法精确恢复，已显示当前可读取的历史内容。";
         } finally {
           if (scope.current()) { state.historyRestoring = false; renderChatTimeline(); }
@@ -802,6 +817,7 @@ async function loadMoreHistory() {
         applyHistoryPage(state,page,{ingest:ingestTimelineEntry,
           upsert:(detail,options) => { if (projectionOrder.accept(detail.task.task_id,ticket)) upsertTaskCard(detail,options); },
           retire:id => { if (projectionOrder.accept(id,ticket)) retireTaskCard(id); }});
+        addVisibleSkillCards();
       } else if (!state.legacyHistoryLoaded) {
         await loadLegacyHistory();
         reading = readingScroll?.snapshot();
@@ -851,9 +867,8 @@ async function loadLegacyHistory() {
       setTimelineNode(item, { key, createdAt: message.timestamp, order: index });
       state.historyMessages.set(key, item);
     }
-    await hydrateSkillCards({ render: false, scope });
-    scope.assertCurrent();
     state.legacyHistoryLoaded = true;
+    if (!state.unifiedHistory) void hydrateSkillCards();
   } catch (error) {
     throw error;
   } finally {
@@ -1242,19 +1257,39 @@ function scrollChat(options) {
   readingScroll?.update(options);
 }
 
-async function hydrateSkillCards({ render = true, scope = sessionScope } = {}) {
-  const api = scopedApi(scope);
-  const account = state.account;
-  try {
-    const result = await api("/api/skills/history");
-    if (!scope.current() || state.account !== account) return;
-    for (const event of result.items || []) {
-      if (!state.skillCards.has(event.event_id)) {
-        state.skillCards.set(event.event_id, renderSkillCard(event));
-      }
+function addVisibleSkillCards() {
+  // The central history cursor gives the lower time bound of the loaded pages.
+  const since = state.unifiedHistory && state.historyHasMore
+    ? parseTimestampMilliseconds(state.historyCursor?.createdAt) : -Infinity;
+  let added = false;
+  for (const event of state.recentSkillEvents) {
+    if (event.event_id && !state.skillCards.has(event.event_id) &&
+        parseTimestampMilliseconds(event.created_at) >= since) {
+      state.skillCards.set(event.event_id, renderSkillCard(event));
+      added = true;
     }
-    if (render) renderChatTimeline();
-  } catch { /* Keep existing evidence; absence of a response is not a failed Skill. */ }
+  }
+  return added;
+}
+
+async function hydrateSkillCards() {
+  if (state.skillHistoryRead) return state.skillHistoryRead;
+  const scope = sessionScope;
+  const account = state.account;
+  if (!account || !state.currentLoaded) return;
+  const read = scopedApi(scope)("/api/skills/history").then(result => {
+    if (!scope.current() || state.account !== account || !Array.isArray(result.items)) return;
+    state.recentSkillEvents = result.items;
+    if (addVisibleSkillCards()) {
+      const reading = readingScroll?.snapshot();
+      renderChatTimeline();
+      if (reading) readingScroll?.restore(reading);
+    }
+    return state.recentSkillEvents;
+  }).catch(() => { /* Keep the last known events and retry on the next reconciliation. */ });
+  state.skillHistoryRead = read;
+  try { return await read; }
+  finally { if (state.skillHistoryRead === read) state.skillHistoryRead = null; }
 }
 
 function retireTaskCard(taskId) {
@@ -1576,7 +1611,7 @@ async function reconcileTimeline() {
   } finally {
     if (!scope.current()) return;
     state.timelineReconcileActive = false;
-    if (state.legacyHistoryLoaded) await hydrateSkillCards({ scope });
+    if (state.currentLoaded && (state.unifiedHistory || state.legacyHistoryLoaded)) await hydrateSkillCards();
   }
 }
 

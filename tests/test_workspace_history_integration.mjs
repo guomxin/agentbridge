@@ -34,7 +34,7 @@ const page = ({messages = [], cards = [], hasMore = true, id = 'older'} = {}) =>
 // Exercise the actual page and refresh handlers. Only transport and DOM row
 // rendering are replaced; the shared page validation, ordering and reading
 // anchor calculations use their production implementations.
-function harness({initialReading = null} = {}) {
+function harness({initialReading = null, realSkills = false} = {}) {
   const document = createDocument(), container = document.createElement('main');
   const notice = document.createElement('button'), existing = document.createElement('article');
   existing.dataset.timelineKey = 'existing'; existing.offsetTop = 200; container.append(existing);
@@ -43,14 +43,15 @@ function harness({initialReading = null} = {}) {
   const state = {unifiedHistory:true, historyHasMore:true, historyCursor:cursor('initial'),
     historyLoading:false, historyRestoring:false, historyError:'', legacyHistoryLoaded:true,
     legacyHistoryLoading:false, currentLoaded:true, timelineCursor:70,
-    localMessages:new Map([['draft', draft.value]]), syncedMessages:new Map(), historyMessages:new Map()};
+    localMessages:new Map([['draft', draft.value]]), syncedMessages:new Map(), historyMessages:new Map(),
+    account:{accountId:'alice'}, skillCards:new Map(), recentSkillEvents:[], skillHistoryRead:null};
   const cards = new Map(), timeline = new Map(), renders = [], restores = [], requests = [], errors = [], timings = [];
   const lifecycle = createLifecycle(), scope = lifecycle.scope();
   const reading = createReadingScroll({container, notice});
   container.events.scroll();
   const readingScroll = {snapshot:() => reading.snapshot(), restore(value) { restores.push(value); reading.restore(value); }};
   const renderChatTimeline = () => {
-    const rows = [...cards.values(), ...timeline.values(), ...state.historyMessages.values()];
+    const rows = [...cards.values(), ...timeline.values(), ...state.historyMessages.values(), ...state.skillCards.values()];
     rows.forEach((node, index) => { node.offsetTop = 80 + index * 40; });
     existing.offsetTop = 200 + rows.length * 40;
     container.scrollHeight = 3000 + rows.length * 40;
@@ -83,16 +84,24 @@ function harness({initialReading = null} = {}) {
     $:selector => selector === '#chat-messages' ? container : draft,
     messageElement(message) { const node = document.createElement('article'); node.textContent = message.text; return node; },
     historyMessageKey, parseTimestampMilliseconds, textHash,
-    hydrateSkillCards:async() => {},
+    hydrateSkillCards:async() => {}, addVisibleSkillCards:() => false,
+    renderSkillCard(event) {
+      const node = document.createElement('article'); node.dataset.timelineKey = `skill:${event.event_id}`;
+      return node;
+    },
     dismissTerminalLiveMessages() {}, restoreActiveDispatches() {},
     markWorkspaceTiming:name => timings.push(name),
   };
-  const functions = new Function(...Object.keys(bindings),
-    [implementation('setTimelineNode', false), implementation('loadLegacyHistory'),
-      implementation('loadMoreHistory'), implementation('loadChat')].join('\n') +
-    ';return {loadMoreHistory,loadChat,replaceAccount(scope,scroll){sessionScope=scope;readingScroll=scroll;}};')(...Object.values(bindings));
+  const implementations = [implementation('setTimelineNode', false), implementation('loadLegacyHistory'),
+    implementation('loadMoreHistory'), implementation('loadChat'), implementation('reconcileTimeline')];
+  if (realSkills) {
+    delete bindings.hydrateSkillCards; delete bindings.addVisibleSkillCards;
+    implementations.push(implementation('hydrateSkillCards'), implementation('addVisibleSkillCards', false));
+  }
+  const functions = new Function(...Object.keys(bindings), implementations.join('\n') +
+    ';return {loadMoreHistory,loadChat,reconcileTimeline,hydrateSkillCards,replaceAccount(scope,scroll){sessionScope=scope;readingScroll=scroll;}};')(...Object.values(bindings));
   return {state, scope, lifecycle, cards, timeline, renders, restores, requests, errors, timings, draft,
-    container, existing, ...functions,
+    container, document, existing, ...functions,
     scroll(top) { container.scrollTop = top; container.events.scroll(); },
   };
 }
@@ -205,4 +214,88 @@ test('refresh loads the saved reading window without manual input and fences ano
   assert.equal(h.cards.has('paired-query'), true); assert.deepEqual(h.state.historyCursor, cursor('restored-window'));
   assert.equal(h.draft.value, '尚未发送的输入草稿'); assert.deepEqual(h.errors, []);
   assert.ok(h.timings.includes('chat_loaded'));
+});
+
+test('initial chat shows recent skill events without loading older history and preserves each existing feedback card', async () => {
+  const h = harness({realSkills:true});
+  Object.assign(h.state, {currentLoaded:false, legacyHistoryLoaded:false});
+  const loading = h.loadChat();
+  h.requests[0].resolve({schemaVersion:'agentbridge.workspace-current.v1',cards:[],timeline:{items:[]},
+    history:{schemaVersion:'agentbridge.workspace-history.v1',hasMore:true,nextCursor:cursor('first')},cursors:{timeline:70}});
+  await loading;
+  assert.deepEqual(h.requests.map(r => r.path.split('?')[0]), ['/api/current','/api/skills/history']);
+  assert.equal(h.state.legacyHistoryLoaded,false);
+  const recent={event_id:'recent',created_at:'2026-11-06T12:01:00Z'};
+  const older={event_id:'older',created_at:'2026-11-04T10:01:00Z'};
+  h.scroll(170);
+  h.requests[1].resolve({items:[recent,older]}); await flush();
+  assert.deepEqual([...h.state.skillCards.keys()],['recent']);
+  assert.equal(h.container.scrollTop,210);
+  const card=h.state.skillCards.get('recent');
+  const note=h.document.createElement('textarea');note.value='这次只想润色';card.append(note);
+  const paging=h.loadMoreHistory();
+  h.requests[2].resolve({...page({messages:['older-page']}),nextCursor:{...cursor('second'),createdAt:'2026-11-03T00:00:00Z'}});
+  assert.equal(await paging,true);
+  assert.deepEqual([...h.state.skillCards.keys()],['recent','older']);
+  const refresh=h.reconcileTimeline();
+  h.requests[3].resolve({items:[],cursor:71});await flush();
+  assert.equal(h.requests[4].path,'/api/skills/history');
+  h.requests[4].resolve({items:[{event_id:'new',created_at:'2026-11-06T12:10:00Z'},recent,older]});await refresh;
+  assert.equal(h.state.skillCards.size,3);assert.equal(h.state.skillCards.get('recent'),card);assert.equal(note.value,'这次只想润色');
+});
+
+test('a failed skill fetch can retry while legacy history is still unloaded, and late old-account activity is discarded', async () => {
+  const h=harness({realSkills:true});h.state.legacyHistoryLoaded=false;
+  const first=h.hydrateSkillCards(),sameRead=h.hydrateSkillCards();
+  assert.equal(h.requests.length,1);
+  h.requests[0].reject(new Error('网络超时'));await Promise.all([first,sameRead]);
+  assert.equal(h.state.skillHistoryRead,null);assert.equal(h.errors.length,0);
+  const retry=h.hydrateSkillCards();
+  assert.equal(h.requests[1].path,'/api/skills/history');
+  h.scope.dispose(); h.state.account={accountId:'bob'};h.state.skillHistoryRead=null;
+  h.replaceAccount(h.lifecycle.scope(),null);
+  const next=h.hydrateSkillCards();
+  h.requests[1].resolve({items:[{event_id:'alice-private',created_at:'2026-11-06T16:00:00Z'}]});await retry;
+  assert.equal(h.state.skillCards.size,0);assert.notEqual(h.state.skillHistoryRead,null);
+  h.requests[2].resolve({items:[{event_id:'bob',created_at:'2026-11-06T16:00:00Z'}]});await next;
+  assert.deepEqual([...h.state.skillCards.keys()],['bob']);
+});
+
+function restoringSkill() {
+  const reading={top:170,atBottom:false,anchor:'skill:old-anchor',offset:8};
+  const h=harness({realSkills:true,initialReading:reading});
+  Object.assign(h.state,{currentLoaded:false,legacyHistoryLoaded:false});
+  const loading=h.loadChat();
+  h.requests[0].resolve({schemaVersion:'agentbridge.workspace-current.v1',cards:[],timeline:{items:[]},
+    history:{schemaVersion:'agentbridge.workspace-history.v1',hasMore:true,nextCursor:cursor('recent')},cursors:{timeline:70}});
+  return {h,loading,reading};
+}
+
+test('a failed skill-anchor read falls back without paging chat and retries on the next skill fetch',async()=>{
+  const {h,loading}=restoringSkill();await flush();
+  assert.equal(h.requests[1].path,'/api/skills/history');
+  h.requests[1].reject(new Error('临时断开'));await loading;
+  assert.equal(h.requests.length,2);assert.equal(h.state.historyHasMore,true);
+  assert.equal(h.state.historyError,'');assert.equal(h.container.scrollTop,170);
+  assert.match(h.errors.join(''),/暂时无法加载.*自动重试/);
+  const retry=h.hydrateSkillCards();h.requests[2].resolve({items:[{event_id:'recent',created_at:'2026-11-06T00:00:00Z'}]});
+  await retry;assert.deepEqual([...h.state.skillCards.keys()],['recent']);
+});
+
+test('an anchor outside the recent skill events cannot be recovered by paging ordinary chat history',async()=>{
+  const {h,loading}=restoringSkill();await flush();
+  h.requests[1].resolve({items:[{event_id:'another',created_at:'2026-11-06T00:00:00Z'}]});await loading;
+  assert.equal(h.requests.length,2);assert.equal(h.state.historyHasMore,true);
+  assert.equal(h.state.historyError,'');assert.equal(h.container.scrollTop,170);
+  assert.match(h.errors.join(''),/近期助手记录中没有/);
+});
+
+test('a known skill anchor on an earlier page still restores its original offset',async()=>{
+  const {h,loading,reading}=restoringSkill();await flush();
+  h.requests[1].resolve({items:[{event_id:'old-anchor',created_at:'2026-11-04T12:00:00Z'}]});await flush();
+  assert.match(h.requests[2].path,/^\/api\/history\?/);
+  h.requests[2].resolve({...page({messages:['earlier-text']}),nextCursor:{...cursor('earlier'),createdAt:'2026-11-03T00:00:00Z'}});
+  await loading;
+  assert.equal(h.requests.length,3);assert.deepEqual(h.errors,[]);
+  assert.equal(h.container.scrollTop,h.state.skillCards.get('old-anchor').offsetTop+reading.offset);
 });

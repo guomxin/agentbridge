@@ -1,4 +1,7 @@
 [
+  {"id":"same-material-polish","prompt":"帮我润色：明天补测试。","skill":null,"no_read":true,"contains":["测试"],"manual":"保留明天补测试的意思，直接润色，不套用周报或计划结构。"},
+  {"id":"same-material-plan","prompt":"列个计划：明天补测试。","skill":"plan","no_read":true,"contains":["测试"],"manual":"按计划整理，只保留原文安排，不新增负责人、目的或效果。"},
+  {"id":"same-material-weekly","prompt":"写成周报：明天补测试。","skill":"weekly","no_read":true,"contains":["测试"],"manual":"把明天补测试放在计划，保留原时间；检查是否从计划中推断了原文没有的当前状态、完成事项或风险。"},
   {"id":"weekly-direct","prompt":"帮我写周报：联调完成了，登录问题还没定位，下周继续查。","skill":"weekly","contains":["联调","登录","下周"],"excludes":["登录问题已解决"]},
   {"id":"weekly-optional","prompt":"写周报并逐句核对原文：联调做完了，测试还没补。","skill":"weekly","optional_resource":"references/weekly-check.md","contains":["联调","测试","原文核对"],"excludes":["测试已完成"],"manual":"只说测试未完成，不能自动改写成后续计划；原文未提供计划。"},
   {"id":"weekly-plan","prompt":"写个周报：计划明天补测试，今天还没开始。","skill":"weekly","contains":["明天","测试"],"excludes":["已完成测试"]},

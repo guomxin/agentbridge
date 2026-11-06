@@ -181,10 +181,30 @@ class SkillHostAcceptanceTests(unittest.TestCase):
         result = observe({'skill': None}, None, [], [], {}, 'timeout')
         self.assertFalse(result['checks']['agent_finished'])
 
-    def test_cases_include_twenty_natural_prompts_and_independent_boundaries(self):
+    def test_selection_counts_exact_successful_skills_and_preserves_failed_attempts(self):
+        skills = {'weekly': 'weekly-id', 'plan': 'plan-id'}
+        weekly = {'skill_id': 'weekly-id', 'status': 'succeeded'}
+        plan = {'skill_id': 'plan-id', 'status': 'succeeded'}
+        denied = {'skill_id': 'plan-id', 'status': 'failed', 'error_code': 'SKILL_UNAVAILABLE'}
+        for event_list, expected_skill, matches in [
+            ([weekly, plan], 'weekly', False), ([weekly, weekly, denied], 'weekly', True),
+            ([weekly], None, False), ([denied], None, True), ([denied], 'plan', False),
+        ]:
+            with self.subTest(events=event_list, expected=expected_skill):
+                result = observe({'skill': expected_skill}, {'payloads': [{'text': '明天补测试。'}]},
+                                 event_list, [], skills, 0)
+                self.assertEqual(result['checks']['skill_selection'], matches)
+                self.assertEqual(result['skill_loads']['failed_attempts'], [denied] if denied in event_list else [])
+        self.assertEqual(observe({'skill': None}, None, [denied], [], skills, 1)['skill_loads']['successful'], [])
+
+    def test_cases_include_same_material_different_goals_and_independent_boundaries(self):
         cases = json.loads(CASES_PATH.read_text())
-        self.assertEqual(len(cases), 20)
-        self.assertEqual(len({case['id'] for case in cases}), 20)
+        self.assertEqual(len(cases), 23)
+        self.assertEqual(len({case['id'] for case in cases}), len(cases))
+        contrasts = [case for case in cases if case['id'].startswith('same-material-')]
+        self.assertEqual({case['skill'] for case in contrasts}, {None, 'plan', 'weekly'})
+        self.assertEqual(len(contrasts), 3)
+        self.assertTrue(all(case['no_read'] and case['prompt'].endswith('：明天补测试。') for case in contrasts))
         self.assertTrue(any(case.get('owner') == BOB and case.get('no_read') for case in cases))
         self.assertTrue(any(case.get('follow_up') for case in cases))
         self.assertEqual({case.get('skill') for case in cases}, {'weekly', 'plan', 'evidence', None})
