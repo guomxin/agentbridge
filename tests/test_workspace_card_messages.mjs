@@ -22,6 +22,8 @@ test("database CSV artifacts expose only valid authenticated download paths", ()
   const path = `/api/database/reports/taihua_primary/${"a".repeat(32)}/download`;
   for (const [type, url, state, allowed] of [
     ["database_csv", path, "ready", true],
+    ["database_csv", path + "?artifact_id=01234567-89ab-cdef-0123-456789abcdef", "ready", true],
+    ["database_csv", path + "?artifact_id=../wrong", "ready", false],
     ["database_csv", path, "expired", false],
     ["database_csv", path.replace("taihua_primary", "../other"), "ready", false],
     ["database_csv", "javascript:alert(1)", "ready", false],
@@ -32,7 +34,7 @@ test("database CSV artifacts expose only valid authenticated download paths", ()
     const flatten = (n) => [n, ...n.children.flatMap(flatten)];
     const links = flatten(root).filter(n => n.tag === "a");
     assert.equal(links.length, allowed ? 1 : 0);
-    if (allowed) assert.equal(links[0].href, path);
+    if (allowed) assert.equal(links[0].href, url);
   }
 });
 

@@ -354,7 +354,8 @@ def create_admin_http_server(
                     result = control_plane.save_database_grants(
                         actor=actor, request_ip=self.client_address[0],
                         user_subject=_required_string(body, 'user_subject'), capabilities=body['capabilities'],
-                        expected_revision=body['expected_revision'], reason=_required_string(body, 'reason'), source_id=body.get('source_id','taihua_primary'))
+                        expected_revision=body['expected_revision'], reason=_required_string(body, 'reason'),
+                        source_id=_required_string(body, 'source_id'))
                     self._json(200, result)
                     return
                 if route.path == "/api/skill-reviews":

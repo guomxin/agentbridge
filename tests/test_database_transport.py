@@ -21,7 +21,7 @@ class TransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             configured_source(root)
             runtime = IndependentDatabase(root)
-            runtime.grants.set('reader', ['database.logs.query'])
+            runtime.grants.set('reader', ['database.logs.query'], source_id='taihua_primary')
             with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_CAPABILITY_DENIED'):
                 runtime.execute('reader', 'database.free.read', {
                     'sql': "SELECT id FROM analysis.work_logs WHERE content LIKE '%无法登录%'"})
@@ -63,7 +63,7 @@ class TransportTests(unittest.TestCase):
             for budget in (4000,6000,12000,14000):
                 with self.subTest(capability=capability,mode=mode,budget=budget),tempfile.TemporaryDirectory() as root:
                     runtime,conn,cursor=scopes.ScopeTests().fixture(root)
-                    runtime.grants.set('reader',[capability])
+                    runtime.grants.set('reader',[capability], source_id='taihua_primary')
                     original=conn.execute.side_effect
                     def execute(sql,params=None):
                         r=original(sql,params)

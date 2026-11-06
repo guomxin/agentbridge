@@ -832,7 +832,7 @@ export function createResultView({ document, state, reissueArtifact, now = () =>
           : entryExpired ? "下载入口已过期，文件记录仍保留。" : "下载入口暂不可用。";
         const validUrl = typeof artifact.download_url === "string" &&
           (csv
-            ? /^\/api\/database\/reports\/[a-z][a-z0-9_-]{0,63}\/[0-9a-f]{32}\/download$/.test(artifact.download_url)
+            ? /^\/api\/database\/reports\/[a-z][a-z0-9_-]{0,63}\/[0-9a-f]{32}\/download(?:\?artifact_id=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})?$/.test(artifact.download_url)
             : /^https:\/\//.test(artifact.download_url));
         if (ready && validUrl) {
           const download = document.createElement("a");

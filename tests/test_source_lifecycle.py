@@ -101,7 +101,7 @@ class SourceLifecycleTests(unittest.TestCase):
         (root / 'source.json').write_text(json.dumps(asdict(LegacySourceConfig(
             enabled=True, username='fixture', privileges_reviewed=True))))
         DataSourceSecretStore(root / 'credentials').save('taihua_primary:1', {'password': 'fixture-only'})
-        runtime.grants.set('a', ['database.logs.query'])
+        runtime.grants.set('a', ['database.logs.query'], source_id='taihua_primary')
         self.assertEqual(runtime.catalog('a')['sources'][0]['source_id'], 'taihua_primary')
         sources = Sources(runtime.home)
         sources.write('taihua_primary', 'disable', revision=1, actor='test', reason='fixture')

@@ -30,7 +30,7 @@ def main():
         runtime = module.IndependentDatabase.__new__(module.IndependentDatabase)
         runtime.home = args.home
         runtime.grants = module.DatabaseGrants(Path(root)/'grants.sqlite3')
-        runtime.grants.set('content-acceptance', list(module.CAPABILITIES))
+        runtime.grants.set('content-acceptance', list(module.CAPABILITIES), source_id='taihua_primary')
         checks, facts = [], {}
 
         def call(capability, arguments):
@@ -115,7 +115,7 @@ def main():
             after = result['next_cursor']
         assert len(ids) == expected_count
         checks.append('comment_timestamp_pagination_reconciles')
-        runtime.grants.set('content-acceptance', ['database.logs.content_analyze'])
+        runtime.grants.set('content-acceptance', ['database.logs.content_analyze'], source_id='taihua_primary')
         for denied in ('database.comments.analyze','database.free.read'):
             try:
                 call(denied, comments_window)

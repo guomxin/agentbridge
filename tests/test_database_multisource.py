@@ -24,7 +24,7 @@ class MultiSourceTests(unittest.TestCase):
             grants=DatabaseGrants(path)
             self.assertEqual(grants.get('a')['revision'],4)
             self.assertEqual(grants.get('a','other')['capabilities'],[])
-            grants.set('a',[])
+            grants.set('a',[], source_id='taihua_primary')
             self.assertEqual(DatabaseGrants(path).get('a')['capabilities'],[])
 
     def test_catalog_source_filter_grants_and_disable(self):
@@ -32,7 +32,7 @@ class MultiSourceTests(unittest.TestCase):
             configured_source(home)
             configured_source(home,'equipment',pack='generic')
             runtime=IndependentDatabase(home)
-            runtime.grants.set('a',['database.logs.analyze'])
+            runtime.grants.set('a',['database.logs.analyze'], source_id='taihua_primary')
             runtime.grants.set('b',['database.free.read'],source_id='equipment')
             self.assertEqual([x['source_id'] for x in runtime.catalog('a')['sources']],['taihua_primary'])
             with self.assertRaises(DatabaseRejected): runtime.catalog('a','equipment')
@@ -132,7 +132,7 @@ class MultiSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             configured_source(home)
             runtime=IndependentDatabase(home)
-            runtime.grants.set('a',['database.free.read','database.report.export'])
+            runtime.grants.set('a',['database.free.read','database.report.export'], source_id='taihua_primary')
             reports=Reports(runtime)
             args={'query_capability':'database.free.read','query_arguments':{'sql':'select 1'},'request_key':'failure'}
             with patch.object(runtime,'_execute',side_effect=DatabaseRejected('DATABASE_QUERY_FAILED')) as execute:

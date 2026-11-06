@@ -81,8 +81,8 @@ INPUT_SCHEMAS = {
     'database.logs.analyze': object_schema({**FILTER_PROPERTIES,
         'baseline_start_date': {'type': 'string', 'format': 'date',
                                 'description': '双周比较的基期开始日期。基期、本期各七天，基期须在本期之前且不重叠。输出两个窗口、各指标两期值、本期减基期的差值和变化百分比（基期为零时为空）。'},
-        'group_by': {'enum': ['none', 'day', 'month', 'person', 'department', 'project'],
-                     'description': '普通统计省略时按日分组；双周比较省略或指定 none，返回两期汇总。'}}, DATES),
+        'group_by': {'enum': ['none', 'day', 'month', 'person', 'department', 'project', 'project_hours_top10'],
+                     'description': '普通统计省略时按日分组。project_hours_top10 对筛选范围内全部项目按登记工时降序取前十，同工时按项目 ID 升序，未关联项目另列、不占名次。双周比较省略或指定 none，返回两期汇总。'}}, DATES),
     'database.logs.content_analyze': object_schema({**FILTER_PROPERTIES, **PAGE_PROPERTIES,
         'mode': {'enum': list(CONTENT_MODES), 'default': 'summary'}}, DATES),
     'database.comments.analyze': object_schema({**FILTER_PROPERTIES, **PAGE_PROPERTIES,
@@ -267,12 +267,25 @@ def _compile_single_window(capability, arguments, *, source_scope=''):
             groups = {'day': ('l.log_date', 'l.log_date'),
                       'month': ("date_trunc('month',l.log_date)::date", "date_trunc('month',l.log_date)::date"),
                       'person': ('l.user_id', 'u.fullname'), 'department': ('u.dept_id', 'd.name'),
-                      'project': ('l.project_id', 'p.name'), 'none': ('NULL::text', 'NULL::text')}
+                      'project': ('l.project_id', 'p.name'),
+                      'project_hours_top10': ('l.project_id', "CASE WHEN l.project_id IS NULL THEN '未关联项目' ELSE p.name END"),
+                      'none': ('NULL::text', 'NULL::text')}
             group = arguments.get('group_by', 'day')
             key, label = groups[group]
             metrics = ', '.join(f'{expression} AS {name}' for name, expression in LOG_METRICS.items())
-            sql = f'SELECT {key} AS group_id,{label} AS group_label,{metrics}'
-            return QueryPlan(prefix + sql + base + (' GROUP BY 1,2 ORDER BY 1 NULLS LAST' if group != 'none' else ''), params,
+            sql = f'SELECT {key} AS group_id,{label} AS group_label,{metrics}' + base
+            if group != 'none':
+                sql += ' GROUP BY 1,2'
+            if group == 'project_hours_top10':
+                sql = f'''SELECT * FROM (
+                    SELECT grouped.*, CASE WHEN group_id IS NOT NULL THEN row_number() OVER (
+                        PARTITION BY (group_id IS NULL) ORDER BY registered_hours DESC, group_id ASC
+                    ) END AS project_rank
+                    FROM ({sql}) grouped
+                ) ranked WHERE project_rank <= 10 OR group_id IS NULL ORDER BY project_rank NULLS LAST'''
+            elif group != 'none':
+                sql += ' ORDER BY 1 NULLS LAST'
+            return QueryPlan(prefix + sql, params,
                              department_roots=roots, include_descendants=descendants)
         page_size = arguments.get('page_size', 200 if capability == 'database.logs.query' else 50)
         max_chars = arguments.get('max_chars', 12000)

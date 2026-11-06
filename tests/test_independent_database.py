@@ -19,7 +19,7 @@ class IndependentDatabaseTests(unittest.TestCase):
             service.home = Path(root)
             configured_source(root)
             runtime = IndependentDatabase(root)
-            runtime.grants.set('central-a',['database.logs.analyze'])
+            runtime.grants.set('central-a',['database.logs.analyze'], source_id='taihua_primary')
             server = create_central_mcp_server(service=service,identity_store=store,
                 config=validate_central_mcp_server_config(host='127.0.0.1',port=8790,public_base_url='http://testserver',tls_cert=None,tls_key=None),
                 auth_card_base_url='http://127.0.0.1:8780')
@@ -31,10 +31,10 @@ class IndependentDatabaseTests(unittest.TestCase):
                 with patch.object(IndependentDatabase,'_execute',return_value={'query_id':'q','sql_sha256':'h','truncated':False}) as execute:
                     self.assertEqual(call('database_execute',{'capability':'database.logs.analyze','arguments':{}})['status'],'succeeded')
                     self.assertEqual(execute.call_args.args[0],'central-a')
-                    runtime.grants.set('central-a',[])
+                    runtime.grants.set('central-a',[], source_id='taihua_primary')
                     self.assertEqual(call('database_execute',{'capability':'database.logs.analyze','arguments':{}})['code'],'DATABASE_CAPABILITY_DENIED')
                     self.assertEqual(execute.call_count,1)
-                    runtime.grants.set('central-a',['database.logs.content_analyze','database.comments.analyze'])
+                    runtime.grants.set('central-a',['database.logs.content_analyze','database.comments.analyze'], source_id='taihua_primary')
                     discovered = call('database_capabilities',{})['sources'][0]['capabilities']
                     self.assertEqual({item['name'] for item in discovered}, {'database.logs.content_analyze','database.comments.analyze'})
                     self.assertTrue(all('input_schema' not in item for item in discovered))
@@ -51,11 +51,11 @@ class IndependentDatabaseTests(unittest.TestCase):
             b = DatabaseGrants(Path(root)/'grants.db')
             with self.assertRaises(DatabaseRejected):
                 a.authorize('a','database.free.read')
-            a.set('a',['database.free.read'])
+            a.set('a',['database.free.read'], source_id='taihua_primary')
             self.assertEqual(b.authorize('a','database.free.read')['revision'],1)
             with self.assertRaises(DatabaseRejected):
                 b.authorize('b','database.free.read')
-            a.set('a',[])
+            a.set('a',[], source_id='taihua_primary')
             with self.assertRaises(DatabaseRejected):
                 b.authorize('a','database.free.read')
 

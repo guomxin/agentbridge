@@ -34,7 +34,7 @@ class ScopeTests(unittest.TestCase):
     def fixture(self, root):
         configured_source(root)
         runtime = IndependentDatabase(root)
-        runtime.grants.set('reader', ['database.directory', 'database.logs.content_analyze'])
+        runtime.grants.set('reader', ['database.directory', 'database.logs.content_analyze'], source_id='taihua_primary')
         conn = MagicMock()
         def execute(sql, params=None):
             result = MagicMock()

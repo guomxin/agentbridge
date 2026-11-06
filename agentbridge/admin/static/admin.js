@@ -656,7 +656,17 @@ async function openDatabaseGrants(userSubject, sourceId) {
   if (!sourceId) {
     const sources = await read("/api/database-sources");
     if (!sources.items.length) { toast("请先在数据库页面接入数据源"); return; }
-    openModal({title: `${userSubject} · 选择数据源`, submit: "查看能力", body: `<label>数据源<select name="source">${sources.items.map(r => `<option value="${escapeHtml(r.source_id)}">${escapeHtml((r.active || r.draft).name)} · ${escapeHtml(r.source_id)}</option>`).join("")}</select></label>`, action: async form => { const id = form.get("source"); closeModal(); await openDatabaseGrants(userSubject, id); }}); return;
+    const placeholder = sources.items.length > 1 ? '<option value="" selected disabled>请选择数据源</option>' : "";
+    const options = sources.items.map(r => `<option value="${escapeHtml(r.source_id)}">${escapeHtml((r.active || r.draft).name)} · ${escapeHtml(r.source_id)}</option>`);
+    openModal({title: `${userSubject} · 选择数据源`, submit: "查看能力",
+      body: `<label>数据源<select name="source" required>${placeholder}${options.join("")}</select></label>`,
+      action: async form => {
+        const id = form.get("source");
+        if (!id) throw new Error("请选择数据源");
+        closeModal();
+        await openDatabaseGrants(userSubject, id);
+      }});
+    return;
   }
   const request = state.databaseGrantRequest = (state.databaseGrantRequest || 0) + 1;
   const config = await read(`/api/database-grants?user=${encodeURIComponent(userSubject)}&source=${encodeURIComponent(sourceId)}`);

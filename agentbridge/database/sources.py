@@ -118,6 +118,11 @@ class Sources:
     def capabilities(config):
         return COMMON + (TAIHUA if config['template_pack']=='taihua_logs' else [])
 
+    def grantable_capabilities(self, sid):
+        self.migrate()
+        record = self.get(sid)
+        return self.capabilities(record['active'] or record['draft'])
+
     def write(self, sid, action, *, revision, actor, reason, config=None, password=None):
         source_id(sid)
         if type(revision) is not int or revision<0 or not isinstance(reason,str) or not reason.strip():

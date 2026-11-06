@@ -17,7 +17,7 @@ def main():
         runtime = module.IndependentDatabase.__new__(module.IndependentDatabase)
         runtime.home = args.home
         runtime.grants = module.DatabaseGrants(Path(root)/'grants.db')
-        runtime.grants.set('acceptance',list(module.CAPABILITIES))
+        runtime.grants.set('acceptance',list(module.CAPABILITIES), source_id='taihua_primary')
         checks = []
         def call(capability, arguments):
             return runtime.execute('acceptance',capability,arguments)
@@ -46,7 +46,7 @@ def main():
         details = call('database.logs.query',{'start_date':'2017-01-01','end_date_exclusive':'2026-09-12'})
         assert details['truncated'] and len(details['rows']) == 200
         checks.append('bounded_details')
-        runtime.grants.set('acceptance',[])
+        runtime.grants.set('acceptance',[], source_id='taihua_primary')
         try:
             call('database.free.read',{'sql':'SELECT 1'})
         except module.DatabaseRejected as exc:

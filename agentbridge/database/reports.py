@@ -30,8 +30,9 @@ def _csv_cell(value):
 
 
 class Reports:
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, check_query=None):
         self.runtime=runtime
+        self.check_query=check_query
         self.path=runtime.home/'database'/'reports.sqlite3'
         self.payloads=ProtectedJsonStore(runtime.home/'database'/'reports',purpose='agentbridge.database-csv.v1')
         with closing(sqlite3.connect(self.path)) as c,c:
@@ -144,10 +145,16 @@ class Reports:
         if not row or row[0]!='ready' or row[1]<=datetime.now(timezone.utc).isoformat(): raise DatabaseRejected('DATABASE_REPORT_UNAVAILABLE')
         try: value=self.payloads.load(rid)
         except (OSError,ValueError): raise DatabaseRejected('DATABASE_REPORT_UNAVAILABLE') from None
+        if (value.get('report_id'), value.get('owner'), value.get('source_id')) != (rid, owner, sid):
+            raise DatabaseRejected('DATABASE_REPORT_DENIED')
+        if self.check_query is not None:
+            self.check_query(value['query_capability'])
         grant,record=self.runtime.snapshot(owner,value['query_capability'],sid)
         export_grant,_=self.runtime.snapshot(owner,'database.report.export',sid)
         if grant!=value['grant'] or export_grant!=value['export_grant'] or record['revision']!=value['source_revision']:
             raise DatabaseRejected('DATABASE_AUTHORIZATION_CHANGED')
+        if min(row[1], value['expires_at']) <= datetime.now(timezone.utc).isoformat():
+            raise DatabaseRejected('DATABASE_REPORT_UNAVAILABLE')
         return value
 
     def _public(self,value):

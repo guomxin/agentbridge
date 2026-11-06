@@ -1096,13 +1096,15 @@ class AdminHttpServerTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     cookies[role] = _cookies(headers)
 
-                def save(subject, caps, revision, *, role="admin", **overrides):
+                def save(subject, caps, revision, *, role="admin", source_id="taihua_primary", **overrides):
                     args = {"origin": origin, "cookies": cookies[role],
                             "csrf": cookies[role]["agentbridge_admin_csrf"]}
                     args.update(overrides)
-                    return _request(port, "POST", "/api/database-grants", body={
-                        "user_subject": subject, "capabilities": caps,
-                        "expected_revision": revision, "reason": "dynamic grant acceptance"}, **args)
+                    body = {"user_subject": subject, "capabilities": caps,
+                            "expected_revision": revision, "reason": "dynamic grant acceptance"}
+                    if source_id is not None:
+                        body["source_id"] = source_id
+                    return _request(port, "POST", "/api/database-grants", body=body, **args)
 
                 self.assertEqual(_request(port, "GET", "/api/database-grants?user=guomao")[0], 401)
                 status, _, config = _request(port, "GET", "/api/database-grants?user=guomao", cookies=cookies["auditor"])
@@ -1158,6 +1160,23 @@ class AdminHttpServerTests(unittest.TestCase):
                 self.assertEqual(revoked["after"]["revision"], 2)
                 with closing(sqlite3.connect(control.database_grants.path)) as connection:
                     self.assertEqual(connection.execute("SELECT count(*) FROM database_audit WHERE capability='database.grants'").fetchone()[0], 4)
+
+                original = control.database_grants.get("guomao", "taihua_primary")
+                with self.assertRaises((TypeError, ValueError)):
+                    control.save_database_grants(actor={"username":"admin", "role":"admin"}, request_ip="127.0.0.1",
+                        user_subject="guomao", capabilities=[], expected_revision=original["revision"], reason="fixture")
+                with self.assertRaises((TypeError, ValueError)):
+                    control.database_grants.set("guomao", [])
+                self.assertEqual(save("guomao", [], original["revision"], source_id=None)[0], 400)
+                self.assertEqual(control.database_grants.get("guomao", "taihua_primary"), original)
+                configured_source(tmp, "team_logs")
+                status, _, saved = save("guomao", ["database.schema"], 0, source_id="team_logs")
+                self.assertEqual(status, 200)
+                self.assertEqual(saved["source_id"], "team_logs")
+                other = control.database_grants.get("guomao", "team_logs")
+                self.assertEqual(save("guomao", [], original["revision"], source_id=None)[0], 400)
+                self.assertEqual(control.database_grants.get("guomao", "team_logs"), other)
+                self.assertEqual(control.database_grants.get("guomao", "taihua_primary"), original)
             finally:
                 server.shutdown()
                 server.server_close()

@@ -137,6 +137,38 @@ def test_database_grant_editor_persists_and_auditor_cannot_edit(console):
             browser.close()
 
 
+def test_multiple_sources_require_a_choice_before_loading_grants(console, tmp_path):
+    browser_api = pytest.importorskip("playwright.sync_api")
+    expect = browser_api.expect
+    origin, _, _ = console
+    configured_source(tmp_path, "team_logs")
+    with browser_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            grant_requests = []
+            page.on("request", lambda req: grant_requests.append(req.url) if "/api/database-grants?" in req.url else None)
+            page.goto(origin)
+            page.locator('[name="username"]').fill("admin")
+            page.locator('[name="password"]').fill(PASSWORD)
+            page.locator('#login-form button[type="submit"]').click()
+            page.locator('#nav [data-view="users"]').click()
+            page.get_by_role("button", name="fixture-user用户操作").click()
+            page.locator('[data-database-grants="fixture-user"]').click()
+            sources = page.locator('#modal select[name="source"]')
+            expect(sources).to_have_value("")
+            page.locator("#modal-submit").click()
+            expect(page.locator("#modal-title")).to_have_text("fixture-user · 选择数据源")
+            assert grant_requests == []
+
+            sources.select_option("team_logs")
+            page.locator("#modal-submit").click()
+            expect(page.locator("#modal-title")).to_have_text("fixture-user · team_logs")
+            assert grant_requests == [f"{origin}/api/database-grants?user=fixture-user&source=team_logs"]
+        finally:
+            browser.close()
+
+
 def test_skill_configuration_is_scoped_and_auditor_is_readonly(console):
     browser_api = pytest.importorskip("playwright.sync_api")
     expect = browser_api.expect

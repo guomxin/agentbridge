@@ -87,7 +87,7 @@ class EvidenceTests(unittest.TestCase):
                 cursor.fetchmany.side_effect = [[]]
                 with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_LOG_NOT_FOUND'):
                     runtime.read_original('reader', 'taihua_primary', '1')
-                runtime.grants.set('reader', ['database.logs.analyze'])
+                runtime.grants.set('reader', ['database.logs.analyze'], source_id='taihua_primary')
                 with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_CAPABILITY_DENIED'):
                     runtime.read_original('reader', 'taihua_primary', '1')
                 with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_CAPABILITY_DENIED'):

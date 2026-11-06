@@ -2346,6 +2346,20 @@ class TaskHubStore:
             ).fetchone()
         return _task_from_row(row), _event_from_row(event), False
 
+    def database_report_artifacts(self, user_subject, source_id, report_id):
+        """Resolve saved report links to their owning tasks, including expired entries."""
+        path = f"/api/database/reports/{source_id}/{report_id}/download"
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT artifact_id, task_id, download_url, source_ref FROM task_artifacts
+                   WHERE user_subject=? AND artifact_type='database_csv'
+                   AND (download_url=? OR source_ref LIKE ?)""",
+                (user_subject, path, report_id + ':%'),
+            ).fetchall()
+        if any(row['download_url'] != path or row['source_ref'] != f"{report_id}:{row['task_id']}" for row in rows):
+            raise PermissionError("database report artifact reference is inconsistent")
+        return {row['artifact_id']: row['task_id'] for row in rows}
+
     def get_artifact(
         self,
         *,

@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "3ff5dac9842c"
+    "884fa18d3d94"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Reviewed deployed predecessor 3ff5dac9842c. Report selection is checked at submission in the existing transaction. The frozen approval report, saved cases, feedback links and database schema remain readable by the predecessor. No new persisted execution contract or business authorization is introduced."
+  "dataCompatibility": "reviewed-forward-only",
+  "reason": "Reviewed production predecessor 884fa18d3d94. No database schema or historic report migration. Automatic fallback after candidate start would re-enable downloading task-disallowed reports and writing grants to an implicit source."
 }

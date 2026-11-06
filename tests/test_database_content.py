@@ -117,7 +117,7 @@ class ContentQueryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             configured_source(root)
             runtime = IndependentDatabase(root)
-            runtime.grants.set('a', ['database.logs.content_analyze'])
+            runtime.grants.set('a', ['database.logs.content_analyze'], source_id='taihua_primary')
             item = runtime.catalog('a')['capabilities'][0]
             self.assertIn('mode', item['input_schema']['properties'])
             self.assertFalse(item['input_schema']['additionalProperties'])
@@ -128,7 +128,7 @@ class ContentExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             configured_source(root)
             runtime = IndependentDatabase(root)
-            runtime.grants.set('a', ['database.logs.content_analyze'])
+            runtime.grants.set('a', ['database.logs.content_analyze'], source_id='taihua_primary')
             with patch.object(runtime, '_execute') as load:
                 with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_CAPABILITY_DENIED'):
                     runtime.execute('a', 'database.comments.analyze', WINDOW)
@@ -159,7 +159,7 @@ class ContentExecutionTests(unittest.TestCase):
                 self.assertEqual(last['coverage'], 'page')
                 # Revocation during a read must prevent the enriched evidence from returning.
                 def revoke(_):
-                    runtime.grants.set('a', [])
+                    runtime.grants.set('a', [], source_id='taihua_primary')
                     return []
                 cursor.fetchmany.side_effect = revoke
                 with self.assertRaisesRegex(DatabaseRejected, 'DATABASE_AUTHORIZATION_CHANGED'):

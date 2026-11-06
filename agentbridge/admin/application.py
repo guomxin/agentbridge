@@ -587,10 +587,7 @@ class AdminControlPlane:
         if not isinstance(user_subject, str) or not any(user['user_subject'] == user_subject for user in self.users()):
             raise KeyError('中央账号不存在')
         from agentbridge.database.sources import Sources
-        sources=Sources(self.service.home)
-        sources.migrate()
-        record=sources.get(source_id)
-        available=sources.capabilities(record['active'] or record['draft'])
+        available = Sources(self.service.home).grantable_capabilities(source_id)
         return {'user_subject': user_subject, 'source_id':source_id, **self.database_grants.get(user_subject,source_id),
                 'available': [{'name':name,'description':description,'advanced':name == 'database.free.read'}
                               for name,description in DATABASE_CAPABILITIES.items() if name in available],
@@ -679,7 +676,7 @@ class AdminControlPlane:
                 "gateway_restart_required": False}
 
     def save_database_grants(self, *, actor: dict, request_ip: str, user_subject: str,
-                             capabilities: list[str], expected_revision: int, reason: str, source_id='taihua_primary') -> dict:
+                             capabilities: list[str], expected_revision: int, reason: str, source_id: str) -> dict:
         _require_admin(actor)
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError('授权版本无效')

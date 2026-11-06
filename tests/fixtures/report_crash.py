@@ -12,7 +12,7 @@ from tests.database_fixtures import configured_source
 home, stage = sys.argv[1:]
 configured_source(home)
 runtime=IndependentDatabase(home)
-runtime.grants.set('a',['database.free.read','database.report.export'])
+runtime.grants.set('a',['database.free.read','database.report.export'], source_id='taihua_primary')
 reports=Reports(runtime)
 
 def stop():

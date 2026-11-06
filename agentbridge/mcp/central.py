@@ -1014,14 +1014,19 @@ def create_central_mcp_server(
                 raise SkillRejected("SKILL_BINDING_INVALID", "业务助手上下文无效")
             await _require_registered_host_call(ctx, service=service, identity=identity,
                 minimum_level="L3" if task_id else "L1", task_id=task_id, require_coordinator_lease=bool(task_id))
-            binding = await asyncio.to_thread(service.skills.binding, identity["user_subject"], meta["bindingId"])
-            validate_binding(service, identity["user_subject"], binding, capability=capability)
-            if source_id and binding["settings"]["source_id"] and source_id != binding["settings"]["source_id"]:
-                raise SkillRejected("SKILL_SOURCE_MISMATCH", "数据源与本次业务助手选择不一致")
-            if task_id:
-                await asyncio.to_thread(service.skills.attach, identity["user_subject"], task_id, meta["bindingId"])
-        await asyncio.to_thread(service.validate_skill_task, identity["user_subject"], task_id,
-                                capability=capability, source_id=source_id)
+
+        def check_capability(name):
+            if meta:
+                binding = service.skills.binding(identity["user_subject"], meta["bindingId"])
+                validate_binding(service, identity["user_subject"], binding, capability=name)
+                if source_id and binding["settings"]["source_id"] and source_id != binding["settings"]["source_id"]:
+                    raise SkillRejected("SKILL_SOURCE_MISMATCH", "数据源与本次业务助手选择不一致")
+                if task_id:
+                    service.skills.attach(identity["user_subject"], task_id, meta["bindingId"])
+            service.validate_skill_task(identity["user_subject"], task_id, capability=name, source_id=source_id)
+
+        await asyncio.to_thread(check_capability, capability)
+        return check_capability
 
     @mcp.tool(name="agentbridge_skill_catalog", title="业务助手目录",
         description="列出当前用户获分配的业务 Skill、任务目标、版本、可用功能和依赖，供选择适用助手。目录不包含完整执行规则。",
@@ -3750,7 +3755,7 @@ def create_central_mcp_server(
                      "日志 query/content_analyze 可用 log_id 单独读取无需日期；内容默认 evidence_format=compact，max_chars=12000 控制完整响应容量。source_label/source_url 用于用户查看原文，后台保留 evidence_id。长单篇 content_complete=false 时用 log_id、next_text_offset作为text_offset、source_revision_hash作为expected_revision续读到next_text_offset=null；不要漏读片段。"
                      "部门条件支持 department_id 或 department_ids（互斥），include_descendants=true 包含同源当前组织树下属，不按未知 status 排除；读取 resolved_department_scope 核验范围。无历史归属还原。目录部门返回 parent_id（若源支持），可按 parent_id 筛直接子级；after_id 使用 next_after_id 翻页。名称空候选可缩短关键词重查，重名须消歧。"
                      "database.logs.query/analyze/content_analyze 按时间查询须传 start_date、end_date_exclusive（query/content_analyze 按 log_id 单篇读取例外）；可选 user_id、department_id、project_id、log_type=DAILY/WEEKLY、keyword 或 keywords、keyword_mode=any/all。"
-                     "logs.analyze 可选 group_by=none/day/month/person/department/project。logs.content_analyze 的 mode=summary/topics/progress/issues/experience/collaboration/changes。"
+                     "logs.analyze 可选 group_by=none/day/month/person/department/project/project_hours_top10。查询登记工时最高的十个项目用 project_hours_top10，在全部匹配项目中排名，同工时按项目 ID 升序；未关联项目单列，不占名次。logs.content_analyze 的 mode=summary/topics/progress/issues/experience/collaboration/changes。"
                      "database.comments.analyze 单独授权，mode=feedback/questions/followup，date_basis=comment_created_at/log_date，search_in=comments/logs/both，commenter_id 筛评论作者，user_id 筛日志作者。"
                      "明细与内容/评论证据支持 page_size、order=asc/desc、after；保持筛选条件，用 next_cursor 读到 has_more=false，按 evidence_id 引用和去重并核对 total_matching。跨请求不是冻结快照。"
                      "analysis.status=evidence_ready 表示证据准备好，由当前智能体按 instructions 完成归纳；未读完须说明部分覆盖。"
@@ -3762,20 +3767,32 @@ def create_central_mcp_server(
     async def database_execute(ctx: Context, capability: str, arguments: dict[str, Any], source_id: str | None = None) -> dict[str, Any]:
         from agentbridge.database.independent import IndependentDatabase, DatabaseRejected, rejection_result
         identity = _request_identity(identity_store)
+        query_capability = arguments.get('query_capability') if capability == 'database.report.export' else None
 
         async def check_context(selected_source):
-            await require_skill_context(ctx, identity, capability=capability, source_id=selected_source)
-            # Export reruns the query under the same task and source contract.
-            if capability == 'database.report.export' and isinstance(arguments.get('query_capability'), str):
-                await require_skill_context(ctx, identity, capability=arguments['query_capability'], source_id=selected_source)
+            validate = await require_skill_context(ctx, identity, capability=capability, source_id=selected_source)
+            if isinstance(query_capability, str):
+                await asyncio.to_thread(validate, query_capability)
+            return validate
 
-        await check_context(source_id)
+        validate = await check_context(source_id)
         try:
             runtime = IndependentDatabase(service.home, original_base_url=workspace_base_url)
             if source_id is None:
                 source_id = await asyncio.to_thread(runtime.resolve_omitted_source, identity['user_subject'])
-                await check_context(source_id)
-            result = await asyncio.to_thread(runtime.execute, identity['user_subject'], capability, arguments, source_id)
+                validate = await check_context(source_id)
+            if capability == 'database.report.download':
+                # Reports calls this with authenticated metadata under its lease, before renewing the entry.
+                def check_report_query(saved_capability):
+                    nonlocal query_capability
+                    validate(capability)
+                    validate(saved_capability)
+                    query_capability = saved_capability
+
+                result = await asyncio.to_thread(runtime.execute, identity['user_subject'], capability, arguments, source_id,
+                                                 check_report_query=check_report_query)
+            else:
+                result = await asyncio.to_thread(runtime.execute, identity['user_subject'], capability, arguments, source_id)
         except DatabaseRejected as exc:
             return rejection_result(exc)
         _request_identity(identity_store)

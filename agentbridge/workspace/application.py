@@ -841,11 +841,37 @@ class WorkspaceApplication:
     def analytics_report(self, account: dict, report_id: str) -> dict:
         raise WorkspaceArtifactError('CAPABILITY_RETIRED', '旧数据库报告入口已退役。请重新查询导出。')
 
-    def database_report(self, account: dict, source_id: str, report_id: str) -> dict:
+    def _database_reports(self, subject, source_id, task_id):
+        from agentbridge.core.business_skills import SkillRejected
         from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
         from agentbridge.database.reports import Reports
+
+        def check_query(query_capability):
+            try:
+                self.service.require_task_result_access(user_subject=subject, task_id=task_id)
+                for capability in ('database.report.download', query_capability):
+                    self.service.validate_skill_task(subject, task_id, capability=capability, source_id=source_id)
+            except (SkillRejected, PermissionError, KeyError):
+                raise DatabaseRejected('DATABASE_REPORT_DENIED') from None
+
+        return Reports(IndependentDatabase(self.service.home), check_query=check_query if task_id else None)
+
+    def database_report(self, account: dict, source_id: str, report_id: str, *, artifact_id=None) -> dict:
+        from agentbridge.database.independent import DatabaseRejected
+        subject = account['user_subject']
         try:
-            return Reports(IndependentDatabase(self.service.home)).web_download(account['user_subject'],source_id,report_id)
+            links = self.service.tasks.database_report_artifacts(subject, source_id, report_id)
+            if artifact_id is not None:
+                if artifact_id not in links:
+                    raise DatabaseRejected('DATABASE_REPORT_DENIED')
+                task = links[artifact_id]
+            else:
+                if len(links) > 1:
+                    raise DatabaseRejected('DATABASE_REPORT_DENIED')
+                task = next(iter(links.values()), None)
+            return self._database_reports(subject, source_id, task).web_download(subject, source_id, report_id)
+        except PermissionError as exc:
+            raise WorkspaceArtifactError('DATABASE_REPORT_DENIED', '此文件不可下载，请检查权限或重新导出。') from exc
         except DatabaseRejected as exc:
             raise WorkspaceArtifactError(str(exc),'此文件不可下载，请检查权限或重新导出。') from exc
 
@@ -867,12 +893,14 @@ class WorkspaceApplication:
         result = _public_artifact(artifact)
         if artifact.get("artifact_type") != "database_csv":
             return result
-        from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
-        from agentbridge.database.reports import Reports
+        from agentbridge.database.independent import DatabaseRejected
         try:
             source_id, report_id = self._database_artifact_identity(account, artifact)
-            retained = Reports(IndependentDatabase(self.service.home)).describe(account["user_subject"], source_id, report_id)
-        except (DatabaseRejected, WorkspaceArtifactError, KeyError):
+            subject = account['user_subject']
+            retained = self._database_reports(subject, source_id, artifact['task_id']).describe(subject, source_id, report_id)
+            if retained['download_url'] and len(self.service.tasks.database_report_artifacts(subject, source_id, report_id)) > 1:
+                retained['download_url'] += '?artifact_id=' + artifact['artifact_id']
+        except (DatabaseRejected, WorkspaceArtifactError, KeyError, PermissionError):
             return {**result, "state":"expired", "download_url":None,
                     "report_state":"unavailable", "can_reissue":False}
         return {**result, "state":retained["state"], "download_url":retained["download_url"],
@@ -890,11 +918,11 @@ class WorkspaceApplication:
         artifact = self.service.tasks.get_artifact(task_id=task_id, artifact_id=artifact_id,
             user_subject=account["user_subject"])
         if artifact.get("artifact_type") == "database_csv":
-            from agentbridge.database.independent import IndependentDatabase, DatabaseRejected
-            from agentbridge.database.reports import Reports
+            from agentbridge.database.independent import DatabaseRejected
             try:
                 source_id, report_id = self._database_artifact_identity(account, artifact)
-                Reports(IndependentDatabase(self.service.home)).renew_web_download(account["user_subject"], source_id, report_id)
+                subject = account['user_subject']
+                self._database_reports(subject, source_id, task_id).renew_web_download(subject, source_id, report_id)
             except DatabaseRejected as exc:
                 raise WorkspaceArtifactError("DATABASE_REPORT_UNAVAILABLE", "原报告已过期或访问权限已变化，请重新查询导出。") from exc
             return self.task_detail(account, task_id)

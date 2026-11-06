@@ -19,7 +19,7 @@ CAPABILITIES = {
     'database.schema': '数据库结构与口径',
     'database.directory': '人员、部门和项目检索（用于消歧及选择查询条件）',
     'database.logs.query': '日志正文检索（日期、人员、当前部门、项目、字面关键词，支持分页与来源）',
-    'database.logs.analyze': '日志统计分析（按日、月、人员、部门或项目，支持两周总量比较）',
+    'database.logs.analyze': '日志统计分析（按日、月、人员、部门或项目，支持项目登记工时前十和两周总量比较）',
     'database.logs.content_analyze': '日志正文证据读取（筛选、分页、段落及来源；不生成总结或业务判断，归纳方法由适用业务助手提供）',
     'database.comments.analyze': '日志评论分析（评论及关联日志正文；反馈、问答与跟进证据）',
     'database.free.read': '高级：自由只读查询分析（此数据源全部开放对象，支持两时间窗口比较）',
@@ -102,7 +102,7 @@ class DatabaseGrants:
             row = c.execute('SELECT capabilities,revision FROM source_grants WHERE subject=? AND source=?', (subject,source_id)).fetchone()
         return {'capabilities': json.loads(row[0]) if row else [], 'revision': row[1] if row else 0}
 
-    def set(self, subject, capabilities, *, expected_revision=None, change_actor=None, reason=None, source_id=LEGACY):
+    def set(self, subject, capabilities, *, source_id, expected_revision=None, change_actor=None, reason=None):
         validate_source_id(source_id)
         if not isinstance(subject, str) or not subject.strip() or len(subject) > 256:
             raise ValueError('中央账号无效')
@@ -325,7 +325,7 @@ class IndependentDatabase:
                 'queried_at': result['queried_at'], 'revision': text_revision(row['content']),
                 'paragraphs': [{'number': i, 'text': text} for i, text in enumerate(plain_text(row['content']).split('\n'), 1)]}
 
-    def execute(self, subject, capability, arguments, source_id=None, *, original=False):
+    def execute(self, subject, capability, arguments, source_id=None, *, original=False, check_report_query=None):
         if source_id is None:
             source_id = self.resolve_omitted_source(subject)
         try:
@@ -335,7 +335,7 @@ class IndependentDatabase:
         if capability in ('database.report.export','database.report.download'):
             from agentbridge.database.reports import Reports
             self.snapshot(subject, 'database.report.export', source_id)
-            reports=Reports(self)
+            reports=Reports(self, check_query=check_report_query)
             return reports.export(subject,source_id,arguments) if capability.endswith('export') else reports.download(subject,source_id,arguments)
         grant=self.grants.authorize(subject,capability,source_id)
         if not _SLOTS.acquire(blocking=False): raise DatabaseRejected('DATABASE_BUSY')
@@ -466,6 +466,8 @@ class IndependentDatabase:
             'queried_at':datetime.now(timezone.utc).isoformat(),'columns':columns,'rows':rows[:row_limit],
             'truncated':len(rows)>row_limit,'row_limit':row_limit,'notes':NOTES if config['template_pack']=='taihua_logs' else [],
             'sql_sha256':hashlib.sha256(statement.encode()).hexdigest(),'executed_sql':statement}
+        if capability == 'database.logs.analyze' and arguments.get('group_by') == 'project_hours_top10':
+            result['notes'] = [*result['notes'], '名次按筛选范围内全部关联项目的登记工时降序排列；同工时按项目 ID 升序取前十。未关联项目若有记录则在末行单列，名次为空。']
         if resolved_scope is not None:
             result['resolved_department_scope']=resolved_scope
         # JSON/JavaScript cannot round-trip bigint IDs as numbers.
@@ -505,15 +507,24 @@ def main():
     parser = argparse.ArgumentParser(description='独立数据库能力；本机管理员调用入口，不接受业务系统身份。')
     parser.add_argument('--home', type=Path, required=True)
     parser.add_argument('--subject', required=True)
-    parser.add_argument('--source-id')
+    parser.add_argument('--source-id', type=validate_source_id, help='授权或撤权时必填，指定要修改的数据源')
     parser.add_argument('action', choices=['catalog','execute','grant'])
     parser.add_argument('--capability', choices=list(CAPABILITIES))
     parser.add_argument('--arguments-file', type=Path)
     parser.add_argument('--capabilities', nargs='*', choices=list(CAPABILITIES), default=[])
     args = parser.parse_args()
+    if args.action == 'grant':
+        if args.source_id is None:
+            parser.error('grant 必须通过 --source-id 指定要修改的数据源')
+        try:
+            available = Sources(args.home).grantable_capabilities(args.source_id)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if not set(args.capabilities).issubset(available):
+            parser.error('此数据源不支持所选能力')
     runtime = IndependentDatabase(args.home)
     if args.action == 'grant':
-        result = runtime.grants.set(args.subject,args.capabilities,source_id=args.source_id if args.source_id is not None else LEGACY)
+        result = runtime.grants.set(args.subject, args.capabilities, source_id=args.source_id)
     elif args.action == 'catalog':
         result = runtime.catalog(args.subject,args.source_id)
     else:
