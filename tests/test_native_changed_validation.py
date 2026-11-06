@@ -38,6 +38,7 @@ def repo(tmp_path):
         shutil.copyfile(ROOT / 'scripts' / script, destination)
     write(root, 'README.md', '# Fixture\n')
     write(root, '.gitignore', 'output/\n__pycache__/\n.pytest_cache/\n')
+    write(root, 'pytest.ini', '[pytest]\nmarkers = browser: uses a real browser (local validation only)\n')
     write(root, HISTORY, 'export const value = 1;\n')
     write(root, 'prod.py', 'value = 1\n')
     write(root, 'tests/test_documentation.py',
