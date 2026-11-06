@@ -401,7 +401,14 @@ class SkillWorkbench:
         return sorted(found, key=lambda x: -x['score'])[:5]
 
     def export(self, owner, draft_id):
-        return export_standard(self.authoring.get(owner, draft_id)['bundle'])
+        with closing(self.store.connect()) as db:
+            draft = self.authoring._owned(db, owner, draft_id)
+            row, bundle = self.authoring._bundle(db, draft_id, draft['revision'])
+            # The first import already froze the external title. It survives
+            # edits to the display name, including for pre-existing drafts.
+            first, original = (row, bundle) if draft['revision'] == 1 else self.authoring._bundle(db, draft_id, 1)
+            imported_name = original['manifest']['name'] if json.loads(first['provenance_json'])['kind'] == 'import' else None
+        return export_standard(bundle, imported_name=imported_name)
 
     def import_package(self, owner, *, package, request_key):
         return self.authoring.save(owner, proposal=import_standard(package), request_key=request_key, provenance={'kind': 'import'})

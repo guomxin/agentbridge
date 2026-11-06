@@ -25,12 +25,55 @@ class SkillStandardMetadataTests(unittest.TestCase):
         proposal = proposal_from_bundle(bundle)
         self.assertEqual(self.a.export('alice', draft['draft_id'])['proposal']['standard_metadata'], metadata)
         proposal['instructions'] += '\nKeep plans separate.'
+        proposal['name'] = '更新后的显示标题'
         self.a.save('alice', draft_id=draft['draft_id'], expected_revision=1, proposal=proposal, request_key='edit')
         exported = self.a.workbench.export('alice', draft['draft_id'])
         imported = import_standard(exported)
+        self.assertEqual(imported['name'], 'text-helper')
         self.assertEqual(imported['standard_metadata'], metadata)
         self.assertEqual(imported['instructions'], proposal['instructions'])
         self.assertEqual(imported['profiles'], {'use': {}})
+        other = self.a.workbench.import_package('bob', package=exported, request_key='import')
+        self.assertNotEqual(other['skill_id'], draft['skill_id'])
+        self.assertEqual(self.a.workbench.export('bob', other['draft_id']), exported)
+        with self.assertRaises(KeyError):
+            self.a.workbench.export('bob', draft['draft_id'])
+
+    def test_export_uses_original_import_name_only_for_a_valid_external_name(self):
+        proposal = import_standard(self.package)
+        for provenance, title, use_original in [
+            ('request', 'text-helper', False), ('import', '中文草稿', False),
+            ('import', '2-' + 'x' * 62, True),
+        ]:
+            with self.subTest(provenance=provenance, title=title):
+                saved = self.a.save('alice', proposal={**proposal, 'name': title}, request_key=title+provenance,
+                                    provenance={'kind': provenance})
+                exported = self.a.workbench.export('alice', saved['draft_id'])
+                self.assertEqual(import_standard(exported)['name'], title if use_original else saved['skill_id'])
+
+    def test_full_resource_budget_survives_standard_headers_utf8_and_json_escapes(self):
+        for c in ('文', '📎', '\x01'):
+            with self.subTest(c=repr(c)):
+                resources = {'SKILL.md': c * 40_000, 'references/example.md': c * 8_000}
+                proposal = {**import_standard(self.package), 'instructions': resources['SKILL.md'],
+                    'description': '字段\u0085包括\u2028换行\u2029记号',
+                    'references': {'references/example.md': resources['references/example.md']},
+                    'standard_metadata': {'license': 'M' + ('\x01' * 999), 'compatibility': '文' * 500}}
+                saved = self.a.save('alice', proposal=proposal, request_key='edge-' + repr(c))
+                pack = self.a.workbench.export('alice', saved['draft_id'])
+                again = self.a.workbench.import_package('bob', package=pack, request_key='edge-' + repr(c))
+                self.assertEqual(self.a.get('bob', again['draft_id'])['bundle']['resources'], resources)
+                self.assertEqual(self.a.workbench.export('bob', again['draft_id']), pack)
+                pack['files']['references/example.md'] += 'x'
+                with self.assertRaisesRegex(ValueError, '48,000'):
+                    self.a.workbench.import_package('bob', package=pack, request_key='over')
+
+    def test_standard_header_and_file_envelope_are_bounded(self):
+        source = self.package['files']['SKILL.md']
+        with self.assertRaisesRegex(ValueError, '元数据头'):
+            import_standard({**self.package, 'files': {'SKILL.md': source.replace('name:', '#' + 'x'*16_384 + '\nname:')}})
+        with self.assertRaisesRegex(ValueError, '384 KiB'):
+            import_standard({**self.package, 'files': {'SKILL.md': source, 'references/' + '文'*140_000 + '.md': 'x'}})
 
     def test_pasted_and_builtin_frontmatter_exports_have_one_header(self):
         proposal = import_standard(self.package)

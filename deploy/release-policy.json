@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1930d9aa0a0d"
+    "1c6c5669516a"
   ],
-  "dataCompatibility": "reviewed-forward-only",
-  "reason": "No database migration. Automatic fallback after candidate start could reintroduce stale run binding attribution, expand an explicitly empty skill publication scope, and admit new jobs for archived drafts."
+  "dataCompatibility": "no-migration",
+  "reason": "Standard file import and export use the existing immutable draft revisions, provenance and unchanged resource contract. No stored fields, authority or database schema change; the predecessor can read all saved drafts."
 }

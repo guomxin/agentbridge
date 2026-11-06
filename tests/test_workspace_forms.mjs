@@ -570,22 +570,27 @@ test('a native export that crossed 100 KB only because of its source imports the
   assert.deepEqual(denied.mutations,[]);assert.match(denied.message,/草稿内容不能超过 100 KB/);
 });
 
-test('old and standard draft files keep the 100 KB boundary and the hard maximum is checked before reading',async()=>{
+test('standard packages can use the bounded file budget while native limits remain unchanged',async()=>{
   const sized=(value,size)=>{
     const raw=JSON.stringify(value);return new Blob([raw,' '.repeat(size-new Blob([raw]).size)]);
   };
-  for(const value of [{format:'agentbridge.skill-draft.v1',proposal:{name:'旧包'}},{format:'agentskills.files.v1',files:[]}]){
-    const edge=await importDraftFile(sized(value,100_000));assert.equal(edge.mutations.length,1);
-    const over=await importDraftFile(sized(value,100_001));assert.deepEqual(over.mutations,[]);assert.match(over.message,/100 KB/);
-  }
+  const value={format:'agentbridge.skill-draft.v1',proposal:{name:'旧包'}};
+  const edge=await importDraftFile(sized(value,100_000));assert.equal(edge.mutations.length,1);
+  const over=await importDraftFile(sized(value,100_001));assert.deepEqual(over.mutations,[]);assert.match(over.message,/100 KB/);
+  const aboveNative=await importDraftFile(sized(value,256*1024+1));assert.deepEqual(aboveNative.mutations,[]);assert.match(aboveNative.message,/256 KiB/);
+  const pack={format:'agentskills.files.v1',files:{'SKILL.md':'---\nname: text-helper\ndescription: Read supplied text\n---\n\n'+'\u0001'.repeat(40_000),
+    'references/example.md':'\u0001'.repeat(8000)}};
+  assert.ok(jsonFile(pack).size>256*1024);
+  const standard=await importDraftFile(jsonFile(pack));assert.equal(standard.message,'');assert.equal(standard.mutations.length,1);
+  assert.equal(standard.mutations[0].action,'import_standard');assert.deepEqual(standard.mutations[0].data.package,pack);
   for(const source of [{}, {revision:2,content_hash:'a'.repeat(64),extra:true,
                             manifest:{schemaVersion:'agentbridge.skills.v1',entrypoint:'SKILL.md',version:'0.0.0'}}]){
     const bogus=await importDraftFile(sized({format:'agentbridge.skill-draft.v1',proposal:{name:'假来源'},source},100_001));
     assert.deepEqual(bogus.mutations,[]);assert.match(bogus.message,/100 KB/);
   }
   let reads=0;
-  const absoluteMax=await importDraftFile({size:256*1024+1,async text(){reads++;return '{}';}});
-  assert.equal(reads,0);assert.deepEqual(absoluteMax.mutations,[]);assert.match(absoluteMax.message,/256 KiB/);
+  const absoluteMax=await importDraftFile({size:384*1024+1,async text(){reads++;return '{}';}});
+  assert.equal(reads,0);assert.deepEqual(absoluteMax.mutations,[]);assert.match(absoluteMax.message,/384 KiB/);
 });
 
 test("leave dialog has explicit actions, Escape stays, and account disposal closes a pending decision", async () => {

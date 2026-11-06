@@ -2743,6 +2743,59 @@ class WorkspaceGatewayClientTests(unittest.TestCase):
 
 
 class WorkspaceHttpServerTests(unittest.TestCase):
+    def test_large_standard_import_is_limited_to_the_authenticated_import_action(self) -> None:
+        with TemporaryDirectory() as tmp:
+            service = _service(tmp)
+            _create_account(service, user_subject="user-a", username="alice", endpoint_key="alice", client_type="web")
+            application = WorkspaceApplication(service=service, gateway=FakeGateway())
+            port = _free_port()
+            origin = f"http://127.0.0.1:{port}"
+            server = create_workspace_http_server(
+                config=validate_workspace_server_config(host="127.0.0.1", port=port, public_base_url=origin,
+                                                        tls_cert=None, tls_key=None), application=application)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, headers, _ = _request(port, "POST", "/api/login", origin=origin,
+                                               body={"username": "alice", "password": PASSWORD})
+                self.assertEqual(status, 200)
+                cookies = _cookies(headers)
+                auth = dict(cookies=cookies, csrf=cookies["agentbridge_workspace_csrf"])
+                path = "/api/skill-drafts"
+                document = "文" * 40_000
+                reference = "📌" * 8_000
+                package = {"format": "agentskills.files.v1", "files": {
+                    "SKILL.md": "---\nname: original-name\ndescription: 整理正文\n---\n\n" + document,
+                    "references/example.md": reference,
+                }}
+                body = json.dumps({"action": "import_standard", "data": {
+                    "package": package, "request_key": "http-standard-import"}},
+                    ensure_ascii=False, separators=(",", ":")).encode()
+                self.assertGreater(len(body), 128 * 1024)
+                self.assertEqual(_request(port, "POST", path, body=body, origin=origin)[0], 401)
+                self.assertEqual(_request(port, "POST", path, body=body, origin=origin, cookies=cookies)[0], 401)
+
+                # The JSON object is unchanged by padding, so these failures must
+                # come from the wire byte budget, before any action is dispatched.
+                ordinary = b'{"action":"list","data":{}}'
+                for target, raw in [(path, ordinary.ljust(128 * 1024 + 1)),
+                                    ("/api/logout", b"{}".ljust(128 * 1024 + 1)),
+                                    (path, body.ljust(386 * 1024 + 1))]:
+                    with self.subTest(target=target, length=len(raw)):
+                        status, _, _ = _request(port, "POST", target, body=raw, origin=origin, **auth)
+                        self.assertEqual(status, 400)
+                self.assertEqual(service.skill_authoring.list("user-a")["items"], [])
+                status, _, saved = _request(port, "POST", path, body=body.ljust(386 * 1024), origin=origin, **auth)
+                self.assertEqual(status, 200, saved)
+                detail = service.skill_authoring.get("user-a", saved["draft_id"])
+                self.assertEqual(detail["bundle"]["resources"], {
+                    "SKILL.md": document, "references/example.md": reference})
+                self.assertEqual(detail["bundle"]["manifest"]["name"], "original-name")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_image_rejection_precedes_sse_and_late_failure_stays_sse(self) -> None:
         with TemporaryDirectory() as tmp:
             service = _service(tmp)
@@ -3422,7 +3475,7 @@ def _request(
     method: str,
     path: str,
     *,
-    body: dict | None = None,
+    body: dict | bytes | None = None,
     origin: str | None = None,
     cookies: dict[str, str] | None = None,
     csrf: str | None = None,
@@ -3431,7 +3484,7 @@ def _request(
     headers = {"Host": f"127.0.0.1:{port}"}
     payload = None
     if body is not None:
-        payload = json.dumps(body).encode("utf-8")
+        payload = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     if origin:
         headers["Origin"] = origin

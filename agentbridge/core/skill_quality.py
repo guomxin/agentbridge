@@ -9,6 +9,8 @@ import json
 import re
 from copy import deepcopy
 
+from agentbridge.core.business_skills import MAX_SKILL_RESOURCE_CHARS
+
 # Preserve existing imports while keeping contracts separate from quality helpers.
 from agentbridge.core.skill_contracts import (
     SkillAuthoringData, SkillDatabaseDependencies, SkillDependencies,
@@ -340,7 +342,25 @@ def normalize_standard_metadata(value):
     return normalized
 
 
-def export_standard(bundle):
+STANDARD_FILE_BYTES = 384 * 1024
+# The supported scalar fields together take at most ~12,000 characters
+# even if every character of their JSON-quoted YAML values needs escaping.
+STANDARD_HEADER_CHARS = 16 * 1024
+_STANDARD_NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
+
+
+def _standard_name(value):
+    return isinstance(value, str) and len(value) <= 64 and bool(_STANDARD_NAME.fullmatch(value))
+
+
+def _check_standard_file_size(package):
+    # Use the Workspace download representation so excessive path/envelope
+    # overhead cannot produce a file the same importer cannot read.
+    if len(json.dumps(package, ensure_ascii=False, indent=2).encode()) > STANDARD_FILE_BYTES:
+        raise ValueError('标准文件包不能超过 384 KiB')
+
+
+def export_standard(bundle, *, imported_name=None):
     m = bundle['manifest']
     embedded, body = standard_document(bundle['resources']['SKILL.md'])
     metadata = {k: embedded[k] for k in ('license', 'compatibility') if k in embedded}
@@ -349,9 +369,15 @@ def export_standard(bundle):
         raise ValueError('正文与标准元数据冲突，请先修正草稿')
     metadata.update(declared)
     metadata = normalize_standard_metadata(metadata)
+    name = imported_name if _standard_name(imported_name) else m['id']
     header = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in [
-        ('name', m['id']), ('description', m['description']), *metadata.items()])
-    return {'format': 'agentskills.files.v1', 'files': {**bundle['resources'], 'SKILL.md': f'---\n{header}\n---\n\n{body}'}}
+        ('name', name), ('description', m['description']), *metadata.items()])
+    # These literal separators would break a quoted YAML scalar into lines.
+    for char in ('\u0085', '\u2028', '\u2029'):
+        header = header.replace(char, f'\\u{ord(char):04x}')
+    package = {'format': 'agentskills.files.v1', 'files': {**bundle['resources'], 'SKILL.md': f'---\n{header}\n---\n\n{body}'}}
+    _check_standard_file_size(package)
+    return package
 
 
 def import_standard(package):
@@ -361,12 +387,19 @@ def import_standard(package):
     files = package.get('files')
     if not isinstance(files, dict) or not 1 <= len(files) <= 16 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in files.items()):
         raise ValueError('Skill 文件映射无效')
-    if sum(len(v) for v in files.values()) > 48000:
+    raw_chars = sum(len(v) for v in files.values())
+    if raw_chars > MAX_SKILL_RESOURCE_CHARS + STANDARD_HEADER_CHARS:
         raise ValueError('Skill 包过大')
+    _check_standard_file_size({'format': package['format'], 'files': files})
     source = files.get('SKILL.md', '')
     meta, body = standard_document(source, required=True)
+    header_chars = len(source) - len(body)
+    if header_chars > STANDARD_HEADER_CHARS:
+        raise ValueError('标准文件的元数据头过长')
+    if raw_chars - header_chars > MAX_SKILL_RESOURCE_CHARS:
+        raise ValueError('正文和参考资料合计不能超过 48,000 字符')
     name = meta.get('name', '')
-    if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name) or len(name) > 64:
+    if not _standard_name(name):
         raise ValueError('标准名称必须是最多 64 字符的小写字母数字及连字符')
     desc = meta.get('description', '')
     if not desc or len(desc) > 500:

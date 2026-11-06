@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from agentbridge.auth.server import validate_auth_server_config
+from agentbridge.core.skill_quality import STANDARD_FILE_BYTES
 from agentbridge.core.tasks import TaskNotFound
 from agentbridge.core.commit_notifications import current_version, wait_for_change
 from agentbridge.core.http_streams import CLIENT_DISCONNECT_ERRORS, peer_disconnected
@@ -34,6 +35,8 @@ from agentbridge.workspace.stores import (
 
 MAX_BODY_BYTES = 128 * 1024
 MAX_CHAT_BODY_BYTES = 18 * 1024 * 1024
+# Leave room for the action envelope and request key around a full file.
+MAX_STANDARD_IMPORT_BODY_BYTES = STANDARD_FILE_BYTES + 2 * 1024
 SESSION_COOKIE = "agentbridge_workspace_session"
 CSRF_COOKIE = "agentbridge_workspace_csrf"
 ENROLLMENT_COOKIE = "agentbridge_workspace_enrollment"
@@ -559,6 +562,17 @@ def create_workspace_http_server(
             if account is None:
                 return
             try:
+                if route.path == "/api/skill-drafts":
+                    body = self._read_json(max_bytes=MAX_STANDARD_IMPORT_BODY_BYTES)
+                    if int(self.headers["Content-Length"]) > MAX_BODY_BYTES and (
+                        body.get("action") != "import_standard" or set(body) != {"action", "data"}
+                    ):
+                        raise ValueError("invalid request body length")
+                    result = application.service.skill_authoring.dispatch(
+                        account["user_subject"], body.get("action"), body.get("data", {})
+                    )
+                    self._json(200, result)
+                    return
                 body = self._read_json(
                     max_bytes=(
                         MAX_CHAT_BODY_BYTES
@@ -566,9 +580,6 @@ def create_workspace_http_server(
                         else MAX_BODY_BYTES
                     )
                 )
-                if route.path == "/api/skill-drafts":
-                    self._json(200, application.service.skill_authoring.dispatch(account["user_subject"], body.get("action"), body.get("data", {})))
-                    return
                 if route.path == "/api/skill-regressions":
                     if not isinstance(body, dict) or set(body) != {'draft_id', 'expected_revision', 'job_id'}:
                         raise ValueError('常用回归题需要草稿、修订和报告标识')

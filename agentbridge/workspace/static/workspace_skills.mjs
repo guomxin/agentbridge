@@ -8,8 +8,12 @@ const profileLabel = profile => Object.hasOwn(profileLabels, profile) ? profileL
 
 async function readDraftImport(file) {
   const draftLimit = 100_000;
-  if (file.size > 256 * 1024) throw new Error('文件不能超过 256 KiB。');
+  if (file.size > 384 * 1024) throw new Error('文件不能超过 384 KiB。');
   const value = JSON.parse(await file.text());
+  // Standard packages count decoded text and references on the server.
+  // UTF-8 and JSON escaping can make a valid 48,000-character export larger.
+  if (value?.format === 'agentskills.files.v1') return value;
+  if (file.size > 256 * 1024) throw new Error('原生草稿文件不能超过 256 KiB。');
   if (file.size <= draftLimit) return value;
 
   // Only the proposal will be saved. Allow extra bytes for native revision
@@ -22,7 +26,7 @@ async function readDraftImport(file) {
       typeof source.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(source.content_hash) ||
       manifest?.schemaVersion !== 'agentbridge.skills.v1' || manifest.id !== source.skill_id ||
       manifest.version !== '0.0.0' || manifest.entrypoint !== 'SKILL.md') {
-    throw new Error('标准文件包或未带原生修订信息的草稿不能超过 100 KB。');
+    throw new Error('未带原生修订信息的草稿不能超过 100 KB。');
   }
   const bytes = data => new Blob([JSON.stringify(data, null, 2)]).size;
   const previousSize = bytes({format:value.format, proposal:value.proposal});

@@ -17,6 +17,7 @@ from agentbridge.core.skill_execution import effective_skill_execution, validate
 
 PROTOCOL = "agentbridge.skills.v1"
 META_KEY = "agentbridge/skill"
+MAX_SKILL_RESOURCE_CHARS = 48_000
 
 
 class SkillRejected(ValueError):
@@ -65,7 +66,7 @@ def validate_skill_bundle(manifest, resources):
         path = PurePosixPath(name)
         if path.is_absolute() or ".." in path.parts or "\\" in name or ":" in name or path.suffix != ".md" or not isinstance(content, str):
             raise ValueError("invalid Skill resource")
-    if sum(len(v) for v in resources.values()) > 48000:
+    if sum(len(v) for v in resources.values()) > MAX_SKILL_RESOURCE_CHARS:
         raise ValueError("Skill resource budget exceeded")
     if not isinstance(manifest.get("profiles"), dict) or not manifest["profiles"] or manifest.get("executionMode") not in ("read_exploration", "durable_plan", "controlled_action"):
         raise ValueError("invalid Skill execution contract")
