@@ -548,6 +548,22 @@ test('opinion page describes saving and confirmation-time checking without an in
   assert.equal(h.requests.length, 1);
 });
 
+test('work log keeps the project code and duplicate check without repeating the resolved project name', async () => {
+  const state = reviewed(initial());
+  Object.assign(state.preview.summary, {fields:[{label:'所属项目',value:'项目'}],
+    duplicateCheck:{message:'无同日重复'}});
+  const h = mountHarness(state);
+  await flush();
+  assert.equal(h.nodes.get('review-project').hidden,true);
+  assert.equal(h.nodes.get('review-project-code').textContent,'P001');
+  assert.equal(h.nodes.get('review-duplicate').textContent,'无同日重复');
+  const different = reviewed(initial());
+  different.preview.summary.fields = [{label:'所属项目',value:'来源中的另一名称'}];
+  const second = mountHarness(different); await flush();
+  assert.equal(second.nodes.get('review-project').hidden,false);
+  assert.equal(second.nodes.get('review-project').textContent,'项目');
+});
+
 test('candidate cards keep focused radio DOM across polling and disable stale candidates without replacement', async () => {
   let state = meeting(); state.values.room = 'token-1'; state = reviewed(optionsFor(state));
   const h = mountHarness(state); await flush();
@@ -795,9 +811,8 @@ test('reward information and each named allocation open as read-only source mate
   ]};
   renderEvidence(document, target, review, 'intellectual_property_reward');
   let nodes = descendants(target);
-  for (const id of ['reward-information', 'reward-allocations']) {
-    assert.equal(nodes.find(node => node.dataset.group === `material:${id}`).open, true);
-  }
+  assert.equal(nodes.find(node => node.dataset.group === 'material:reward-information').open, false);
+  assert.equal(nodes.find(node => node.dataset.group === 'material:reward-allocations').open, true);
   assert.deepEqual(nodes.filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => [
     node.dataset.rowId, ...node.children.map(cell => cell.textContent),
   ]), [['record-a', '奖励人甲', '1200.00'], ['record-b', '奖励人乙', '800.00']]);
@@ -988,7 +1003,7 @@ test('meeting invitation exposes exact title time place and expanded body', () =
   assert.ok(target.textContent.includes('正文保留08:50原始说明'));
 });
 
-test('settlement account and full expense rows open read-only and preserve row identities', () => {
+test('settlement keeps full source fields available, opens expenses and folds empty payments', () => {
   const document = createDocument(), target = document.createElement('div');
   target.querySelectorAll = selector => selector === 'details' ? descendants(target).filter(node => node.tag === 'details') : [];
   const review = {title: '合成业务结算单', fields: [
@@ -1009,9 +1024,14 @@ test('settlement account and full expense rows open read-only and preserve row i
   ]};
   renderEvidence(document, target, review, 'business_settlement');
   let nodes = descendants(target);
-  for (const id of ['settlement-information', 'settlement-expenses', 'settlement-payments']) {
-    assert.equal(nodes.find(node => node.dataset.group === `material:${id}`).open, true);
+  for (const [id, open] of [['settlement-information',false], ['settlement-expenses',true], ['settlement-payments',false]]) {
+    assert.equal(nodes.find(node => node.dataset.group === `material:${id}`).open, open);
   }
+  const expenseIndex = nodes.findIndex(node => node.dataset.group === 'material:settlement-expenses');
+  assert.ok(expenseIndex < nodes.findIndex(node => node.className === 'material-directory'));
+  const amount = nodes.find(node => node.className === 'review-amount');
+  assert.equal(amount.textContent,'155.00');
+  assert.match(amount.attributes['aria-label'], /应付金额合计.*查看原字段/);
   assert.deepEqual(nodes.filter(node => node.tag === 'tr' && node.dataset.rowId).map(node => node.dataset.rowId),
     ['expense-a', 'expense-b', 'payment-empty']);
   for (const value of ['合成收款人', 'SYNTHETIC-ACCOUNT', '100.00', '55.00', '155.00']) {
@@ -1022,6 +1042,21 @@ test('settlement account and full expense rows open read-only and preserve row i
   renderEvidence(document, target, review, 'business_settlement');
   nodes = descendants(target);
   assert.equal(nodes.find(node => node.dataset.group === 'material:settlement-expenses').open, false);
+});
+
+test('conflicting account values have separate actionable source links without displaying both numbers by default', () => {
+  const doc=createDocument(), target=doc.createElement('div');target.querySelectorAll=()=>[];
+  renderEvidence(doc,target,{fields:[{label:'收款账号',value:'0001'}],sections:[
+    {id:'settlement-information',kind:'facts',fields:[{label:'收款账号',value:'0002'}]}
+  ]},'business_settlement');
+  const nodes=descendants(target), warning=nodes.find(node=>node.tag==='p' && node._text.includes('有不同值'));
+  assert.ok(warning);
+  assert.equal(warning.children.length,2);
+  const values=warning.children.map(link=>{
+    link.events.click({preventDefault(){}});
+    return doc.activeElement.children[1].textContent;
+  });
+  assert.deepEqual(values,['0001','0002']);
 });
 
 function transportHarness() {
@@ -1138,6 +1173,29 @@ test('material differences match field identity across inserted decision fields 
   assert.deepEqual(reviewDifferences(before,after),{total:2,items:[
     {label:'事由',before:'原事由',after:'新事由'},
     {label:'费用明细 · 金额',before:'20',after:'30'}]});
+});
+
+test('a changed settlement fact and its known projection produce one precise material change', () => {
+  const review = value => ({kind:'business_settlement', fields:[{label:'收款账号',value}], sections:[
+    {id:'settlement-information',title:'业务结算信息',kind:'facts',fields:[{label:'收款账号',value}]}
+  ]});
+  const diff = reviewDifferences(review('0001'),review('0002'));
+  assert.deepEqual(diff,{total:1,items:[{label:'业务结算信息 · 收款账号',before:'0001',after:'0002'}]});
+  const next = review('0002');
+  next.fields[0].value='0003'; // A mismatch in the source projection is not a duplicate.
+  assert.equal(reviewDifferences(review('0001'),next).total,2);
+});
+
+test('material changes distinguish equal independent rows and retain a source reordering', () => {
+  const review = rows => ({sections:[{id:'settlement-expenses',title:'费用明细',kind:'table',
+    columns:[{key:'amount',label:'金额'}],rows:rows.map(([id,amount])=>({id,cells:{amount}}))}]});
+  const before=review([['line-a','65.00'],['line-b','65.00']]);
+  const changed=review([['line-a','90.00'],['line-b','90.00']]);
+  assert.deepEqual(reviewDifferences(before,changed).items.map(item=>item.label),
+    ['费用明细 · 第 1 行 · 金额','费用明细 · 第 2 行 · 金额']);
+  const reordered = review([['line-b','65.00'],['line-a','65.00']]);
+  assert.deepEqual(reviewDifferences(before,reordered).items,
+    [{label:'费用明细 · 行顺序',before:'按原表顺序',after:'原表行号：2、1'}]);
 });
 
 test('long reading expands without altering content and a collapsed disclosure stays user controlled', () => {

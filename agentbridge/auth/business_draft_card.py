@@ -12,7 +12,7 @@ from agentbridge.auth.field_card import _document, _render_control, _render_revi
 from agentbridge.auth.reading_content import project_draft_state
 from agentbridge.adapters.taihua import TAIHUA_WORK_LOG_FIELD_CARD_SCHEMA
 from agentbridge.adapters.seeyon_meeting_room_application import MEETING_ROOM_APPLICATION_FIELD_CARD_SCHEMA
-from agentbridge.adapters.seeyon_pending_actions import LEAVE_APPROVAL_FIELD_CARD_SCHEMA
+from agentbridge.adapters.seeyon_pending_actions import BUSINESS_SETTLEMENT_APPROVAL_FIELD_CARD_SCHEMA, LEAVE_APPROVAL_FIELD_CARD_SCHEMA
 from agentbridge.core.business_draft_profiles import PROFILES, profile_for_source
 
 
@@ -25,7 +25,7 @@ UI_PROFILES = {
         "lead": "调整时间后会重新查询空闲会议室。请明确选择房间，再核对本次申请。"},
     "oa.leave.approval": {"prepare": "oa.leave.approval.prepare", "viewKind": "approval",
         "schema": LEAVE_APPROVAL_FIELD_CARD_SCHEMA, "title": "审批请假申请", "submitLabel": "确认并审批通过",
-        "lead": "先核对申请材料，再填写本次处理意见。确认后仅审批通过这条请假申请。"},
+        "lead": "先核对申请材料，再填写本次处理意见。"},
 }
 _SCRIPT = Path(__file__).with_name("static").joinpath("business_draft.mjs")
 _BATCH_SCRIPT = Path(__file__).with_name("static").joinpath("batch_view.mjs")
@@ -259,7 +259,21 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
         order = ("purpose", "subject", "start_time", "end_time", "room")
         definitions = sorted(definitions, key=lambda field: order.index(field["name"]) if field["name"] in order else len(order))
     title = str(ui.get("title") or registered.title)
-    effect = str(ui.get("effect") or legacy.get("schema", {}).get("effect") or "执行已核对的本次操作")
+    preview = state.get("preview") or {}
+    review = (preview.get("summary") if preview.get("revision") == state.get("revision") else None) or ui.get("review") or {}
+    default_effect = str(ui.get("effect") or registered.effect or legacy.get("schema", {}).get("effect") or "执行已核对的本次操作")
+    if registered.review_kind == "business_settlement":
+        default_effect = BUSINESS_SETTLEMENT_APPROVAL_FIELD_CARD_SCHEMA["effect"]
+    # Keep the bound effect verbatim. Some previews describe the resulting
+    # state only, so retain the additional action scope alongside that effect.
+    effect_scope = {
+        "attendance_confirmation": "按单据已有的考勤结果提交意见，不改变只读的异议选择。",
+        "workflow_revoke": "此操作无法在 AgentBridge 中恢复，可能通知处理人并留下 OA 审计记录。",
+        "alarm_remark": "留空会清除原备注。",
+    }.get(registered.review_kind)
+    effect = review.get("effect") or default_effect
+    scope_html = (f'<span id="review-effect-scope"{"" if review.get("effect") else " hidden"}> {escape(effect_scope)}</span>'
+                  if effect_scope else "")
     submit_label = registered.submit_label
     system_name = str(ui.get("systemName") or legacy.get("schema", {}).get("system") or "业务系统")
     if ui.get("confirmationMode") == "on_confirm":
@@ -287,19 +301,19 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
     config = json.dumps({"state": state, "csrfToken": token, "apiUrl": path + "/draft",
                         "fieldNames": [field["name"] for field in definitions], "fields": definitions, "viewKind": kind},
                         ensure_ascii=False).replace("<", "\\u003c")
-    has_evidence = kind == "approval" or bool(ui.get("review"))
+    has_evidence = kind == "approval" or bool(review)
     form_controls = _group_controls(controls, kind=kind, review_kind=ui.get("reviewKind", registered.review_kind))
     batch = state.get("batch") or {}
     batch_html = (f'<p class="draft-batch">批次第 {int(batch["ordinal"])} / {int(batch["totalCount"])} 项'
                   ' · 本次确认仅处理当前项，其他项仍需分别核对。</p>'
                   if type(batch.get("ordinal")) is int and type(batch.get("totalCount")) is int
                   and 0 < batch["ordinal"] <= batch["totalCount"] else "") + '<section id="draft-batch-list" hidden></section>'
-    evidence = _render_review(ui.get("review"), element_id="draft-evidence-title") if has_evidence else ""
-    review_body = ('<dl><dt>实际项目</dt><dd id="review-project"></dd><dt>项目编码</dt><dd id="review-project-code"></dd>'
-                   '<dt>重复检查</dt><dd id="review-duplicate"></dd><dt>执行后果</dt><dd id="review-effect"></dd></dl>'
-                   '<details><summary>查看将提交的日志正文</summary><pre id="review-content"></pre></details>'
-                   if kind == "work_log" else
-                   '<dl id="review-fields"></dl><p class="review-effect" id="review-effect"></p>')
+    evidence = _render_review({**review, "effect": ""}, element_id="draft-evidence-title") if review else ""
+    log_check = ('''<section id="draft-review" class="draft-review" aria-labelledby="review-title" hidden>
+      <h2 id="review-title">项目与重复检查</h2>
+      <dl><dt id="review-project-label">实际项目</dt><dd id="review-project"></dd><dt>项目编码</dt><dd id="review-project-code"></dd>
+          <dt>重复检查</dt><dd id="review-duplicate"></dd></dl>
+    </section>''' if kind == "work_log" else "")
     body = f"""
 <style nonce="{nonce}">
   [hidden] {{display:none!important}} .draft-card {{width:760px}} .draft-lead {{color:var(--muted);font-size:14px;line-height:1.6}}
@@ -307,7 +321,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   .draft-card .field:has(#project) {{grid-column:1/-1}} .draft-status {{margin:18px 0 10px;color:var(--teal-dark);font-size:13px;line-height:1.6}}
   .draft-fields {{margin:24px 0}} .draft-fields h2 {{font-size:16px;margin:0 0 14px}} .draft-fields .form-grid {{margin-top:0}}
   .draft-outcome,.draft-batch {{padding:12px 14px;background:var(--subtle-bg);color:var(--subtle-ink);border-left:3px solid var(--teal);font-size:13px;line-height:1.6}}
-  .draft-outcome strong {{display:block;margin-bottom:4px}} .material-excerpt {{font-size:13px;color:var(--muted);line-height:1.7;white-space:pre-wrap}}
+  .draft-outcome {{margin:12px 0}} .draft-outcome strong {{margin-right:6px}} #review-effect-scope {{display:block}} .material-excerpt {{font-size:13px;color:var(--muted);line-height:1.7;white-space:pre-wrap}}
   .draft-review {{margin:20px 0;background:var(--subtle-bg);color:var(--subtle-ink);--ink:var(--subtle-ink);--muted:var(--subtle-muted);border:1px solid var(--line);border-radius:6px;padding:18px}}
   .draft-review h2,.draft-conflict h2 {{font-size:17px;margin:0 0 12px}} .draft-review dl {{margin:0;display:grid;grid-template-columns:110px 1fr;gap:10px}}
   .draft-review dt {{color:var(--muted);font-size:13px}} .draft-review dd {{margin:0;overflow-wrap:anywhere;font-size:14px;line-height:1.6;white-space:pre-wrap}}
@@ -337,6 +351,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   .review-focus>div {{min-width:0;padding:12px;background:var(--subtle-bg);color:var(--subtle-ink);border-radius:6px}}
   .review-focus h3,.material-directory h3 {{font-size:14px;margin:0 0 8px}}
   .review-focus p {{font-size:13px;line-height:1.7;margin:6px 0;overflow-wrap:anywhere;white-space:pre-wrap}}
+  .review-focus a.review-amount {{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}}
   .review-missing {{color:var(--muted)}} .review-focus a,.material-directory a,.review-row a {{color:var(--teal-dark);text-underline-offset:3px}}
   .material-directory {{border:1px solid var(--line);padding:12px;margin:16px 0;border-radius:6px}}
   .material-directory>div {{display:flex;gap:8px 16px;flex-wrap:wrap}} .material-directory a {{font-size:13px;line-height:1.8;overflow-wrap:anywhere}}
@@ -387,7 +402,7 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
   <p class="draft-lead">{escape(lead)}</p>
   <p id="draft-expiry" class="draft-expiry" role="status"></p>
   <nav class="draft-nav" aria-label="办理页导航"><a href="#card-title">事项概览</a><a id="draft-evidence-link" href="#draft-evidence"{' hidden' if not has_evidence else ''}>核对材料</a><a href="#draft-form">填写与确认</a></nav>
-  {batch_html}<p class="draft-outcome"><strong>本次确认后的操作</strong>{escape(effect)}</p>
+  {batch_html}
   <div class="draft-material-layout{' material-side-by-side' if ui.get('reviewKind') in {'efficiency_data', 'quarterly_performance'} else ''}">
     <div id="draft-evidence" class="draft-evidence"{' hidden' if not has_evidence else ''}>{evidence}</div>
     <section id="draft-material-previews" aria-label="材料文件预览" hidden></section>
@@ -411,13 +426,12 @@ def _render_page(state: dict, token: str, path: str, nonce: str) -> str:
         <button id="draft-keep-local" type="button" class="secondary">按本页内容更新草稿</button>
       </div>
     </section>
-    <section id="draft-review" class="draft-review" aria-labelledby="review-title" hidden>
-      <h2 id="review-title">核对本次操作</h2>{review_body}
-    </section>
+    {log_check}
+    <p class="draft-outcome"><strong>执行后果</strong><span id="review-effect" data-fallback="{escape(default_effect, quote=True)}">{escape(effect)}</span>{scope_html}</p>
     <div class="draft-submit-bar"><span id="draft-submit-hint"></span><button id="draft-submit" data-agentbridge-action-label="{escape(submit_label)}" type="submit" disabled>{escape(submit_label)}</button></div>
     <button id="draft-retry" type="button" class="secondary" hidden>重新检查</button>
   </form>
-  <footer>确认后的操作：{escape(effect.rstrip('。'))}。草稿仅保存在可信办理服务中；页面到期后，请从原任务重新打开。</footer>
+  <footer>草稿仅保存在可信办理服务中。页面到期后，请从原任务重新打开。</footer>
   <noscript><p class="notice">此办理页需要 JavaScript。请启用后刷新；页面不会自动提交。</p></noscript>
 </section></main>
 <script type="module" nonce="{nonce}">

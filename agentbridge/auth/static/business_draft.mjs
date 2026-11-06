@@ -470,7 +470,7 @@ export const REVIEW_DESIGNS = {
   efficiency_data: {title: "效能数据材料", family: "document", keys: ["统计周期", "周期", "部门", "部门名称", "指标名称", "指标值"]},
   travel_expense: {title: "差旅报销材料", family: "expense", keys: ["姓名", "应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项", "关联出差申请单"]},
   business_trip: {title: "出差行程", family: "journey", keys: ["申请人", "出差始发地", "出差目的地", "出差开始时间", "出差结束时间", "出差工具", "出差天数", "出差小时数", "出差事由"]},
-  business_settlement: {title: "业务结算单材料", family: "expense", keys: ["流水号", "姓名", "发起部门", "日期", "结算方式", "费用归属部门", "结算实体", "费用归属事项", "应付金额合计", "账户类型", "收款账户名称", "收款账号", "收款账户开户行"]},
+  business_settlement: {title: "业务结算单材料", family: "expense", keys: ["流水号", "姓名", "发起部门", "日期", "结算方式", "费用归属部门", "结算实体", "费用归属事项", "应付金额合计", "账户类型", "收款账户名称"]},
   labor_contract_renewal: {title: "劳动合同续签材料", family: "personnel", keys: ["员工信息", "合同期限", "综合评价", "续签建议", "综合评价指导意见"]},
   intellectual_property_declaration: {title: "知识产权申报材料", family: "ownership", keys: ["申报名称", "知识产权类型", "申请人", "申请部门", "权属类型", "权属单位", "发明/设计人", "申请用途"]},
   intellectual_property_reward: {title: "知识产权奖励知会材料", family: "ownership", keys: ["申请人", "工号", "所属部门", "申请日期", "奖项名称", "奖励金额", "奖励事由", "团队负责人", "团队负责人部门"]},
@@ -498,7 +498,7 @@ export const REVIEW_FOCUS = {
   efficiency_data: [["统计周期", ["统计周期", "周期"]], ["所属部门", ["部门", "部门名称"]], ["明确提供的指标", ["指标名称", "指标值"]]],
   travel_expense: [["金额与费用归属", ["应付金额合计", "费用归算类型", "费用归属部门", "费用归属事项"]], ["人员与关联申请", ["姓名", "关联出差申请单"]]],
   business_trip: [["行程与交通", ["出差始发地", "出差目的地", "出差工具"]], ["时段与口径", ["出差开始时间", "出差结束时间", "出差天数", "出差小时数"]], ["出差事由", ["出差事由"]]],
-  business_settlement: [["账面金额与归属", ["应付金额合计", "费用归属部门", "费用归属事项", "结算实体"]], ["收款对象", ["账户类型", "收款账户名称", "收款账号", "收款账户开户行"]]],
+  business_settlement: [["应付金额与费用归属", ["应付金额合计", "费用归属部门", "费用归属事项", "结算实体"]], ["收款对象", ["收款账户名称", "账户类型"]]],
   labor_contract_renewal: [["员工与期限", ["员工信息", "合同期限"]], ["原续签意见", ["综合评价", "续签建议", "综合评价指导意见"]]],
   intellectual_property_declaration: [["申报与权属", ["申报名称", "知识产权类型", "权属类型", "权属单位"]], ["申请主体", ["申请人", "申请部门", "发明/设计人"]]],
   intellectual_property_reward: [["原奖项与金额", ["奖项名称", "奖励金额", "奖励事由"]], ["人员与部门", ["申请人", "所属部门", "团队负责人", "团队负责人部门"]]],
@@ -528,18 +528,106 @@ export function reviewSourceFields(review) {
   return result;
 }
 
-export function reviewFocus(review, kind) {
-  // Source projections may repeat a fact in overview and original sections.
-  // Collapse only identical summary entries; all original rows remain below.
-  const seen = new Set();
-  const fields = reviewSourceFields(review).filter(field => {
+const ROW_LABELS = new Map([
+  ['settlement-expenses', (n, label) => `费用明细 ${n} · ${label}`],
+  ['settlement-payments', (n, label) => `付款记录 ${n} · ${label}`],
+  ['handover-work', (n, label) => `工作明细${n} · ${label}`],
+  ['handover-finance', (n, label) => `财务明细${n} · ${label}`],
+  ['flight-legs', (n, label) => `航段${n} · ${label}`],
+  ['reward-allocations', (n, label) => label === '奖励人姓名' ? `奖励人 ${n}` : label === '奖励金额明细' ? `奖励金额 ${n}（元）` : null],
+]);
+
+function hasChangedDetailNotice(review) {
+  const first = review?.fields?.[0];
+  return review?.reviewChanged === true && first?.label === '详情变化' &&
+    first.value === '填写意见后单据内容发生变化，请按当前详情重新核对本次授权。';
+}
+
+function pendingHeaderStart(review) {
+  const i = hasChangedDetailNotice(review) ? 1 : 0;
+  return review?.fields?.[i]?.label === '事项' && review.fields[i + 1]?.label === '发起人' && review.fields[i + 2]?.label === '日期' ? i : -1;
+}
+
+function flatReviewLabel(kind, header, anchor, label) {
+  if (kind === 'business_settlement' && label === '日期' && header !== -1) {
+    return anchor === `review-field-${header + 2}` ? '待办日期' : '结算单日期';
+  }
+  if (kind === 'business_settlement' && label === '附件数量') return '页面识别的附件链接数（费用凭证见明细）';
+  return label;
+}
+
+// Match the flat projection used by legacy cards to specific source sections,
+// never to an arbitrary row with the same value. Ambiguous matches stay separate.
+export function reviewSourceAliases(review, kind = review?.kind || '') {
+  const original = new Map(), structured = new Map(), aliases = new Map();
+  const factSections = {business_settlement:['settlement-information'], intellectual_property_reward:['reward-information'], meeting_reply:['meeting'],
+    weekly_report:['current-week','next-week']};
+  const originalFacts = new Map(), structuredFacts = new Map();
+  const uniqueFact = (map, field, anchor) => map.set(field.label, map.has(field.label) ? null : {field, anchor});
+  const key = (label, value) => JSON.stringify([label, String(value ?? '')]);
+  const index = (map, label, value, reading, anchor) => {
+    const id = key(label, value);
+    map.set(id, map.has(id) ? null : {anchor, reading});
+  };
+  for (const [i, section] of (Array.isArray(review?.sections) ? review.sections : []).entries()) {
+    const prefix = `review-section-${i}`;
+    if (section?.kind === 'facts' && (section.id === 'original-fields' || (Object.hasOwn(factSections, kind) && factSections[kind].includes(section.id)))) {
+      const map = section.id === 'original-fields' ? original : structured;
+      for (const [j, field] of (section.fields || []).entries()) {
+        if (!field?.label) continue;
+        const anchor = `${prefix}-field-${j}`;
+        index(map, field.label, field.value, field.reading, anchor);
+        uniqueFact(map === original ? originalFacts : structuredFacts, field, anchor);
+      }
+    }
+    const rowLabel = ROW_LABELS.get(section?.id);
+    if (section?.kind === 'table' && rowLabel) {
+      for (const [j, row] of (section.rows || []).entries()) {
+        for (const col of section.columns || []) {
+          const label = col?.label && rowLabel(j + 1, col.label);
+          if (label && row?.cells && Object.hasOwn(row.cells, col.key)) {
+            index(structured, label, row.cells[col.key], row.readings?.[col.key], `${prefix}-row-${j}`);
+          }
+        }
+      }
+    }
+  }
+  const header = pendingHeaderStart(review), projectedFacts = new Set();
+  for (const [i, field] of (Array.isArray(review?.fields) ? review.fields : []).entries()) {
+    if (!field?.label || (header !== -1 && i < header + 3)) continue;
+    const id = key(field.label, field.value);
+    const match = structured.has(id) ? structured.get(id) : original.get(id);
+    if (match && (!field.reading || JSON.stringify(field.reading) === JSON.stringify(match.reading))) {
+      aliases.set(`review-field-${i}`, match.anchor);
+      projectedFacts.add(match.anchor);
+    }
+  }
+  // A week's sections select rows directly from original-fields. A master
+  // field must also appear in the verified form's own flat projection.
+  for (const [label, raw] of originalFacts) {
+    const target = structuredFacts.get(label);
+    if (!raw || !target || (kind !== 'weekly_report' && !projectedFacts.has(target.anchor))) continue;
+    if (raw.field.value === target.field.value && JSON.stringify(raw.field.reading) === JSON.stringify(target.field.reading)) {
+      aliases.set(raw.anchor, target.anchor);
+    }
+  }
+  return aliases;
+}
+
+export function reviewFocus(review, kind, aliases = reviewSourceAliases(review, kind), sourceFields = reviewSourceFields(review)) {
+  // Collapse copies in the focus only. All source groups and their independent
+  // rows remain addressable, including equal line items and conflicting values.
+  const fields = new Map();
+  for (const field of sourceFields) {
+    if (!field.value.trim()) continue;
     const key = JSON.stringify([field.label, field.value]);
-    if (seen.has(key)) return false;
-    seen.add(key); return true;
+    if (!fields.has(key)) fields.set(key, {...field, sourceAnchor:aliases.get(field.sourceAnchor) || field.sourceAnchor});
+  }
+  return (Object.hasOwn(REVIEW_FOCUS, kind) ? REVIEW_FOCUS[kind] : []).map(([title, labels]) => {
+    const matches = [...fields.values()].filter(field => labels.includes(field.label));
+    matches.sort((a,b) => labels.indexOf(a.label) - labels.indexOf(b.label));
+    return {title, fields:matches, missing:!matches.length};
   });
-  return (Object.hasOwn(REVIEW_FOCUS, kind) ? REVIEW_FOCUS[kind] : []).map(([title, labels]) => ({title,
-    fields:fields.filter(field => labels.includes(field.label) && field.value.trim()),
-    missing:!fields.some(field => labels.includes(field.label) && field.value.trim())}));
 }
 
 export function reviewSections(review, kind = "") {
@@ -548,14 +636,15 @@ export function reviewSections(review, kind = "") {
   const keys = design ? new Set(["事项", "发起人", "日期", ...design.keys]) : KEY_REVIEW_LABELS;
   const addGroup = (name, item) => { if (!groups.has(name)) groups.set(name, []); groups.get(name).push(item); };
   const normalize = (fields, prefix) => (Array.isArray(fields) ? fields : []).map((item, index) => item && typeof item === "object"
-    ? {...item, sourceAnchor:`${prefix}-${index}`, label: String(item.label ?? "").trim(), value: String(item.value ?? "").trim()} : null).filter(Boolean)
-    .filter(item => item.label && item.value);
+    ? {...item, sourceAnchor:`${prefix}-${index}`, label: String(item.label ?? "").trim(), value: String(item.value ?? "")} : null).filter(Boolean)
+    .filter(item => item.label && item.value.trim());
   for (const item of normalize(review?.fields, 'review-field')) {
+    if (item.sourceAnchor === 'review-field-0' && hasChangedDetailNotice(review)) continue;
     const group = /^(航段\d+|工作明细\d+|财务明细\d+)\s*·/.exec(item.label);
     const long = item.value.length > 180 || item.value.split("\n").length > 3;
     if (group) addGroup(group[1], item);
     else if (keys.has(item.label)) {
-      overview.push(long ? {...item, sourceAnchor:undefined, fullAnchor:item.sourceAnchor, reading: undefined, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
+      overview.push(long ? {...item, sourceAnchor:undefined, fullAnchor:item.sourceAnchor, fullValue:item.value, reading: undefined, value: item.value.slice(0, 160).replaceAll("\n", " ") + "…（全文见下方）"} : item);
       if (long) addGroup(item.label + " · 全文", item);
     } else addGroup(long ? item.label : "其他申请信息", item);
   }
@@ -650,16 +739,22 @@ export function renderEvidence(document, target, review, kind = "") {
   section.setAttribute("aria-labelledby", "draft-evidence-title");
   const kicker = document.createElement("p"); kicker.className = "review-kicker"; kicker.textContent = design?.title || "办理依据";
   const heading = document.createElement("h2"); heading.id = "draft-evidence-title"; heading.textContent = review?.title || design?.title || "办理详情";
-  const effect = document.createElement("p"); effect.className = "review-effect"; effect.textContent = review?.effect || "";
   const facts = document.createElement("dl"); facts.className = "review-key-facts";
   const weeklySections = (review?.sections || []).filter(item => ["current-week", "next-week"].includes(item?.id));
-  const originalFields = reviewSourceFields(review);
-  const canonical = new Map();
-  if (kind === 'weekly_report') {
-    for (const field of originalFields.filter(item => item.sourceAnchor.startsWith('review-field-'))) {
-      const source = originalFields.find(item => item.sourceAnchor.startsWith('review-section-') && item.label === field.label && item.value === field.value);
-      if (source) canonical.set(field.sourceAnchor, source.sourceAnchor);
+  const weeklyAnchors = new Set();
+  for (const [i, section] of (review?.sections || []).entries()) {
+    if (['current-week','next-week'].includes(section?.id)) {
+      (section.fields || []).forEach((_, j) => weeklyAnchors.add(`review-section-${i}-field-${j}`));
     }
+  }
+  const canonical = reviewSourceAliases(review, kind);
+  const sourceFields = reviewSourceFields(review);
+  const focusGroups = reviewFocus(review, kind, canonical, sourceFields);
+  const focusKeys = new Set(focusGroups.flatMap(group => group.fields.map(field => JSON.stringify([field.label, field.value]))));
+  const header = pendingHeaderStart(review);
+  function contextualField(item) {
+    const anchor = item.sourceAnchor || item.fullAnchor;
+    return {...item, label:flatReviewLabel(kind, header, anchor, item.label)};
   }
   const sourceNodes = new Map();
   const register = (id, node) => { node.id = id; if (!Number.isInteger(node.tabIndex) || node.tabIndex < 0) node.tabIndex = -1; sourceNodes.set(id, node); };
@@ -678,30 +773,80 @@ export function renderEvidence(document, target, review, kind = "") {
     return link;
   };
   const focus = document.createElement('section'); focus.className = 'review-focus'; focus.setAttribute('aria-label','材料核对要点');
-  for (const group of reviewFocus(review, kind)) {
+  for (const group of focusGroups.filter(group => !group.missing)) {
     const box = document.createElement('div'), title = document.createElement('h3'); title.textContent = group.title; box.append(title);
-    if (group.missing) {
-      const missing = document.createElement('p'); missing.className = 'review-missing';
-      missing.textContent = '原材料未提供独立字段，请查看下方原文或原图。'; box.append(missing);
-    } else {
-      for (const field of group.fields) {
-        const item = document.createElement('p');
-        item.textContent = kind === 'weekly_report' ? `${field.label} ` : `${field.label}：${field.value.length > 160 ? field.value.slice(0,160) + '…' : field.value} `;
-        item.append(linkTo(field.sourceAnchor, '查看原字段')); box.append(item);
+    for (const field of group.fields) {
+      const item = document.createElement('p');
+      const sourceWeek = kind === 'weekly_report' && weeklyAnchors.has(field.sourceAnchor);
+      const sourceTitle = field.label === '事项' && field.value === review?.title;
+      if (sourceWeek || sourceTitle) {
+        item.append(linkTo(field.sourceAnchor, field.label));
+      } else {
+        item.textContent = field.label + '：';
+        const excerpt = field.value.length > 160 ? field.value.slice(0,160) + '…' : field.value;
+        const valueLink = linkTo(field.sourceAnchor, excerpt);
+        valueLink.setAttribute('aria-label', `${field.label}：${excerpt}，查看原字段`);
+        if (['应付金额合计','奖励金额'].includes(field.label)) valueLink.className = 'review-amount';
+        item.append(valueLink);
       }
+      box.append(item);
     }
     focus.append(box);
+  }
+  if (kind === 'business_settlement') {
+    const collect = label => {
+      const values = new Map();
+      for (const field of sourceFields) if (field.label === label && field.value.trim() && !values.has(field.value))
+        values.set(field.value, canonical.get(field.sourceAnchor) || field.sourceAnchor);
+      return values;
+    };
+    const accounts = collect('收款账号'), banks = collect('收款账户开户行');
+    if (accounts.size || banks.size) {
+      const accountLink = document.createElement('p');
+      if (accounts.size > 1 || banks.size > 1) {
+        accountLink.textContent = '收款账户资料有不同值，请分别核对：';
+        for (const [label, values] of [['账号',accounts],['开户行',banks]]) {
+          Array.from(values.values()).forEach((anchor, i) => accountLink.append(linkTo(anchor,`${label} ${i + 1} `)));
+        }
+      } else accountLink.append(linkTo((accounts.size ? accounts : banks).values().next().value,'查看收款账户详情'));
+      focus.append(accountLink);
+    }
+  }
+  const missingTitles = focusGroups.filter(group => group.missing).map(group => group.title);
+  if (missingTitles.length) {
+    const missing = document.createElement('p'); missing.className = 'review-missing';
+    missing.textContent = `${missingTitles.join('、')}：原材料未提供独立字段，请查看下方原文或原图。`;
+    focus.append(missing);
   }
   const directory = document.createElement('nav'); directory.className = 'material-directory'; directory.setAttribute('aria-label','原始材料目录');
   const directoryTitle = document.createElement('h3'); directoryTitle.textContent = '原始材料目录'; directory.append(directoryTitle);
   const directoryItems = document.createElement('div'); directory.append(directoryItems);
   let directoryCount = 0;
   const addDirectory = (id, title) => { directoryItems.append(linkTo(id,title)); directoryCount++; };
-  const duplicatedWeekly = item => canonical.has(item.sourceAnchor || item.fullAnchor);
-  appendReviewRows(document, facts, overview.filter(item => !duplicatedWeekly(item)), true, register, linkTo);
-  section.append(kicker, heading, effect, focus, directory, facts);
+  const financialTable = kind === 'business_settlement' ? 'settlement-expenses' :
+    kind === 'intellectual_property_reward' ? 'reward-allocations' : null;
+  const secondaryFacts = [], focusOriginals = [], overviewFields = [];
+  for (const item of overview) {
+    const anchor = item.sourceAnchor || item.fullAnchor;
+    // The complete value of a long excerpt already belongs to its full-text group.
+    const fullValue = item.fullValue ?? item.value;
+    const focused = focusKeys.has(JSON.stringify([item.label, fullValue]));
+    const repeatedTitle = item.label === '事项' && fullValue === review?.title;
+    if ((focused || repeatedTitle) && !canonical.has(anchor)) {
+      if (!item.fullAnchor) focusOriginals.push(item);
+    } else if (!focused && !repeatedTitle && !(kind === 'weekly_report' && canonical.has(anchor)) && !canonical.get(anchor)?.includes('-row-')) {
+      if (financialTable && !['事项','姓名','申请人','流水号'].includes(item.label)) secondaryFacts.push(item);
+      else overviewFields.push(contextualField(item));
+    }
+  }
+  facts.hidden = !overviewFields.length;
+  appendReviewRows(document, facts, overviewFields, true, register, linkTo);
+  section.append(kicker, heading, focus, facts, directory);
+  if (secondaryFacts.length) groups.unshift(['单据补充信息', secondaryFacts]);
+  if (focusOriginals.length) groups.push(['核对字段原文', focusOriginals]);
   for (const [name, fields] of groups) {
-    const visibleFields = fields.filter(item => !duplicatedWeekly(item));
+    const visibleFields = fields.filter(item => fields === secondaryFacts || !canonical.has(item.sourceAnchor || item.fullAnchor))
+      .map(contextualField);
     if (!visibleFields.length) continue;
     const detail = document.createElement("details"); detail.className = "review-group";
     detail.dataset.group = name; detail.open = opened.get(name) || false;
@@ -717,16 +862,22 @@ export function renderEvidence(document, target, review, kind = "") {
     const materialCount = material.kind === 'table' ? ` · ${Array.isArray(material.rows) ? material.rows.length : 0} 行` : '';
     addDirectory(sectionId, String(material.title || '原始材料') + materialCount);
     detail.dataset.group = `material:${String(material.id || material.title || "")}`;
-    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs", "reward-information", "reward-allocations", "settlement-information", "settlement-expenses", "settlement-payments"].includes(material.id) ||
+    const emptyPayment = material.id === 'settlement-payments' && material.kind === 'table' &&
+      material.rows?.length > 0 && material.columns?.length > 0 && material.rows.every(row =>
+        row?.cells && material.columns.every(col => col?.key && Object.hasOwn(row.cells, col.key)) &&
+        Object.values(row.cells).every(value => typeof value === 'string' && !value.trim()));
+    const primary = ["current-week", "next-week", "handover-work", "handover-finance", "flight-legs", "reward-allocations", "settlement-expenses"].includes(material.id) ||
+      (material.id === 'settlement-payments' && !emptyPayment) ||
       material.id === "body" && design?.family === "document" && (kind !== "weekly_report" || !weeklySections.length);
     detail.open = opened.has(detail.dataset.group) ? opened.get(detail.dataset.group) : primary;
-    const summary = document.createElement("summary"); summary.textContent = String(material.title || "原始材料");
+    const summary = document.createElement("summary"); summary.textContent = emptyPayment ?
+      (review.completeness?.status === 'complete' && !review.truncated ? '付款登记：无已登记付款' : '付款登记：所见原始行为空') : String(material.title || "原始材料");
     detail.append(summary);
     if (material.kind === "facts") {
       const rows = document.createElement("dl");
       appendReviewRows(document, rows, (Array.isArray(material.fields) ? material.fields : []).map((field, index) => field && ({...field,sourceAnchor:`${sectionId}-field-${index}`})).filter(Boolean), true, register, linkTo); detail.append(rows);
     } else if (material.kind === "text") {
-      if (!primary && String(material.text || "").length > 1800) {
+      if (!primary && material.id !== 'body' && String(material.text || "").length > 1800) {
         const excerpt = document.createElement("p"); excerpt.className = "material-excerpt";
         excerpt.textContent = String(material.text).slice(0, 240) + "…（展开下方查看完整材料）";
         section.append(excerpt);
@@ -787,6 +938,8 @@ export function renderEvidence(document, target, review, kind = "") {
     if (kind === "weekly_report" && ["current-week", "next-week"].includes(material.id)) {
       if (!weeklyGrid) { weeklyGrid = document.createElement("div"); weeklyGrid.className = "material-primary-grid"; section.append(weeklyGrid); }
       weeklyGrid.append(detail);
+    } else if (financialTable && material.id === financialTable) {
+      section.insertBefore(detail, directory);
     } else section.append(detail);
   }
   const previewIds = new Set();
@@ -820,41 +973,110 @@ export function renderEvidence(document, target, review, kind = "") {
   target.replaceChildren(section); target.dataset.signature = signature;
 }
 
-/** Display-only differences in source material; never changes the reviewed contract. */
+/** A display-only comparison. The server's material check remains authoritative. */
 export function reviewDifferences(previous, next) {
   const source = review => {
-    const entries = [];
-    const occurrences = new Map();
-    const identity = (scope, label) => {
-      const key = JSON.stringify([scope, label]), ordinal = occurrences.get(key) || 0;
-      occurrences.set(key, ordinal + 1);
-      return JSON.stringify([scope, label, ordinal]);
+    const entries = new Map(), occurrences = new Map(), targets = new Map(), orders = new Map();
+    const aliases = reviewSourceAliases(review);
+    const header = pendingHeaderStart(review), originalLines = new Map();
+    const renderedPage = review?.materialsVersion === '1' && review.completeness?.scope === 'rendered_detail' &&
+      review.completeness.status === 'complete' && !review.truncated;
+    const identity = (...path) => {
+      const key = JSON.stringify(path), ordinal = occurrences.get(key) || 0;
+      occurrences.set(key, ordinal + 1); return JSON.stringify([...path, ordinal]);
     };
-    for (const field of review?.fields || []) {
-      if (["处理意见", "本次操作", "回复说明", "参会意向"].includes(field.label)) continue;
-      entries.push([identity("field", String(field.label)), String(field.label), String(field.value ?? "")]);
+    const add = (id, label, value, anchor, alias) => {
+      entries.set(id, {label, value: String(value ?? ''), alias});
+      if (anchor) {
+        if (!targets.has(anchor)) targets.set(anchor, []);
+        targets.get(anchor).push(id);
+      }
+    };
+    for (const [i, field] of (review?.fields || []).entries()) {
+      if (!field || (i === 0 && hasChangedDetailNotice(review)) || ["处理意见", "本次操作", "回复说明", "参会意向"].includes(field.label)) continue;
+      const anchor = `review-field-${i}`;
+      add(identity('field', field.label), flatReviewLabel(review.kind, header, anchor, String(field.label)), field.value, null, aliases.get(anchor));
     }
     for (const group of review?.groups || []) {
-      const groupKey = identity("group", String(group.title || "申请明细"));
-      for (const field of group.fields || []) {
-        entries.push([identity(groupKey, String(field.label)), `${group.title || "申请明细"} · ${field.label}`, String(field.value ?? "")]);
+      const groupKey = identity('group', group.title);
+      for (const field of group.fields || []) add(identity(groupKey, field.label), `${group.title || "申请明细"} · ${field.label}`, field.value);
+    }
+    for (const [si, section] of (review?.sections || []).entries()) {
+      const title = String(section.title || "原始材料"), sectionKey = identity('section', section.id || title);
+      const anchor = `review-section-${si}`;
+      if (section.kind === 'facts') {
+        for (const [fi, field] of (section.fields || []).entries()) {
+          if (!field) continue;
+          const id = identity(sectionKey, field.label), fieldAnchor = `${anchor}-field-${fi}`;
+          add(id, `${title} · ${field.label}`, field.value, fieldAnchor, aliases.get(fieldAnchor));
+          // The controlled HTML reader joins the cells of a <tr> with a space
+          // in full-page text, and removes a terminal colon from the field label.
+          if (renderedPage && section.id === 'original-fields' && field.value && !String(field.value).includes('\n')) {
+            for (const colon of ['', ':', '：']) {
+              const line = `${field.label}${colon} ${field.value}`;
+              originalLines.set(line, originalLines.has(line) ? null : {id, colon});
+            }
+          }
+        }
+      } else if (section.kind === 'table') {
+        const rows = section.rows || [];
+        const ids = rows.map(row => row.id);
+        if (ids.length > 1 && ids.every(id => typeof id === 'string' && id) && new Set(ids).size === ids.length) orders.set(sectionKey, {title, ids});
+        for (const [ri, row] of rows.entries()) {
+          const rowKey = identity(sectionKey, 'row', row.id ?? ri), rowAnchor = `${anchor}-row-${ri}`;
+          // Use stable row identity for comparison and only its human-readable position for the label.
+          for (const column of section.columns || []) {
+            add(identity(rowKey, column.key), `${title} · 第 ${ri + 1} 行 · ${column.label || column.key}`, row.cells?.[column.key], rowAnchor);
+          }
+        }
+      } else if (section.kind === 'text') {
+        add(sectionKey, title, section.text);
+        if (renderedPage && section.id === 'body') entries.get(sectionKey).fullPage = true;
       }
     }
-    for (const section of review?.sections || []) {
-      const text = section.kind === "text" ? String(section.text || "") : section.kind === "facts" ?
-        (section.fields || []).map(field => `${field.label}：${field.value ?? ""}`).join("\n") :
-        (section.rows || []).map(row => (section.columns || []).map(column => `${column.label}：${row.cells?.[column.key] ?? ""}`).join("；")).join("\n");
-      entries.push([identity("section", String(section.id || section.title || "原始材料")), String(section.title || "原始材料"), text]);
-    }
-    entries.push(["attachments", "附件清单", (review?.attachments || []).map(item => item.name || "未命名附件").join("\n")]);
-    return new Map(entries.map(([key, label, value]) => [key, {label, value}]));
+    add('attachments', '附件清单', (review?.attachments || []).map(item => item.name || "未命名附件").join("\n"));
+    return {entries, targets, orders, originalLines};
   };
-  const before = source(previous), after = source(next), changes = [];
-  for (const key of new Set([...before.keys(), ...after.keys()])) {
-    if (before.get(key)?.value === after.get(key)?.value) continue;
-    const shorten = value => value === undefined ? "（无）" : value.length > 1200 ? value.slice(0, 1200) + "…（节选，请核对下方完整材料）" : value || "（空）";
-    changes.push({label: after.get(key)?.label || before.get(key).label,
-      before: shorten(before.get(key)?.value), after: shorten(after.get(key)?.value)});
+  const before = source(previous), after = source(next), keys = new Set([...before.entries.keys(), ...after.entries.keys()]);
+  const shorten = value => value === undefined ? "（无）" : value.length > 1200 ? value.slice(0, 1200) + "…（节选，请核对下方完整材料）" : value || "（空）";
+  const changes = [];
+  function repeatsOnlyOriginalRows(a, b) {
+    if (!a?.fullPage || !b?.fullPage) return false;
+    const oldLines = a.value.split('\n'), newLines = b.value.split('\n');
+    if (oldLines.length !== newLines.length) return false;
+    const counts = lines => {
+      const result = new Map();
+      for (const line of lines) result.set(line, (result.get(line) || 0) + 1);
+      return result;
+    };
+    const oldCounts = counts(oldLines), newCounts = counts(newLines);
+    return oldLines.every((line, i) => {
+      if (line === newLines[i]) return true;
+      const old = before.originalLines.get(line), next = after.originalLines.get(newLines[i]);
+      return old && next && old.id === next.id && old.colon === next.colon &&
+        before.entries.get(old.id).value !== after.entries.get(next.id).value &&
+        oldCounts.get(line) === 1 && newCounts.get(newLines[i]) === 1;
+    });
+  }
+  for (const key of keys) {
+    const a = before.entries.get(key), b = after.entries.get(key);
+    if (a?.value === b?.value) continue;
+    if (repeatsOnlyOriginalRows(a, b)) continue;
+    // Suppress a projected field only when both versions resolve to the same unique changed source cell.
+    // Two equally valued independent rows, conflicting projections or unrecognised legacy sources stay distinct.
+    if (a?.alias && b?.alias) {
+      const oldIds = before.targets.get(a.alias) || [], newIds = new Set(after.targets.get(b.alias) || []);
+      const mirror = oldIds.filter(id => newIds.has(id) && before.entries.get(id)?.value === a.value && after.entries.get(id)?.value === b.value);
+      if (mirror.length === 1) continue;
+    }
+    changes.push({label: (b || a).label, before: shorten(a?.value), after: shorten(b?.value)});
+  }
+  for (const [key, old] of before.orders) {
+    const current = after.orders.get(key);
+    if (!current || old.ids.length !== current.ids.length) continue;
+    const positions = new Map(old.ids.map((id, i) => [id, i + 1]));
+    if (!current.ids.every(id => positions.has(id)) || current.ids.every((id, i) => id === old.ids[i])) continue;
+    changes.push({label: current.title + ' · 行顺序', before: '按原表顺序', after: shorten('原表行号：' + current.ids.map(id => positions.get(id)).join('、'))});
   }
   return {items: changes.slice(0, 20), total: changes.length};
 }
@@ -911,7 +1133,8 @@ export function mountBusinessDraft(config, document, window) {
   }
   let contentIntent = null;
   let statusCopy = '';
-  let displayedReview = config.state.preview?.summary || config.state.ui?.review || {};
+  let displayedReview = (config.state.preview?.revision === config.state.revision && config.state.preview?.summary) || config.state.ui?.review || {};
+  let displayedReviewId = config.state.confirmation?.reviewId;
   let materialDiff = null;
   const waiting = new Map();
   function paintStatus() {
@@ -1084,8 +1307,11 @@ export function mountBusinessDraft(config, document, window) {
         view.canApprove ? (view.reviewChanged ? "请重新核对更新后的材料，再确认提交" : checkOnConfirm ? "意见已保存，点击确认时核对并提交" : "已检查，可以确认提交") :
         checkOnConfirm ? "请填写有效意见；点击确认时核对当前事项" : "填写完整后自动检查";
       paintStatus();
-      if (node("draft-submit-hint")) setText("draft-submit-hint", problems.length ?
-        `还需检查 ${problems.length} 项：${problems.map(item => item.label).join("、")}` : statusCopy);
+      const hint = node("draft-submit-hint");
+      if (hint) {
+        hint.hidden = !problems.length;
+        hint.textContent = problems.length ? `还需检查 ${problems.length} 项：${problems.map(item => item.label).join("、")}` : "";
+      }
       node("draft-conflict").hidden = !view.conflict;
       if (view.conflict) {
         const local = readValues();
@@ -1101,11 +1327,13 @@ export function mountBusinessDraft(config, document, window) {
       const summary = !view.conflict ? preview?.summary : null;
       const currentReview = preview?.summary || view.current.ui?.review || {};
       materials?.render(currentReview);
-      if (view.reviewChanged) {
+      const reviewId = view.current.confirmation?.reviewId;
+      if (view.reviewChanged && (currentReview !== displayedReview || reviewId !== displayedReviewId)) {
         const diff = reviewDifferences(displayedReview, currentReview);
-        if (diff.total) materialDiff = diff;
-      }
+        if (diff.total || reviewId !== displayedReviewId) materialDiff = diff;
+      } else if (!view.reviewChanged) materialDiff = null;
       displayedReview = currentReview;
+      displayedReviewId = reviewId;
       const diffTarget = node("draft-material-diff");
       if (diffTarget && view.reviewChanged && diffTarget.dataset.signature !== JSON.stringify(materialDiff)) {
         diffTarget.replaceChildren(); diffTarget.dataset.signature = JSON.stringify(materialDiff);
@@ -1121,23 +1349,19 @@ export function mountBusinessDraft(config, document, window) {
       if (node('draft-evidence')) node('draft-evidence').hidden = !hasSourceReview;
       if (node('draft-evidence-link')) node('draft-evidence-link').hidden = !hasSourceReview;
       if (hasSourceReview) renderEvidence(document, node("draft-evidence"), currentReview, view.current.ui?.reviewKind || "");
-      node("draft-review").hidden = !summary;
-      if (summary) {
-        setText("review-effect", summary.effect || view.current.ui?.effect || "执行已核对的本次操作");
-        const normalized = Array.isArray(summary.fields) ? summary.fields : [];
-        if (viewKind === "work_log") {
-          setText("review-project", summary.project?.name || "未关联项目");
-          setText("review-project-code", summary.project ? summary.project.code || "未提供编码" : "—");
-          setText("review-duplicate", summary.duplicateCheck?.message || "未发现日期、工时、项目和内容完全相同的日志");
-          setText("review-content", normalized.find(item => item.label === "日志内容")?.value ?? readValues().content);
-        } else {
-          const shown = viewKind === "approval" ? normalized.filter(item => ["本次操作", "处理意见"].includes(item.label)) : normalized;
-          const signature = JSON.stringify(shown);
-          if (node("review-fields").dataset.signature !== signature) {
-            node("review-fields").replaceChildren(); appendReviewRows(document, node("review-fields"), shown, false);
-            node("review-fields").dataset.signature = signature;
-          }
-        }
+      const outcome = node("review-effect");
+      if (outcome) outcome.textContent = currentReview.effect || outcome.dataset.fallback || view.current.ui?.effect || "执行已核对的本次操作";
+      const scope = node("review-effect-scope");
+      if (scope) scope.hidden = !currentReview.effect;
+      const logCheck = node("draft-review");
+      if (logCheck) logCheck.hidden = !summary || viewKind !== "work_log";
+      if (summary && viewKind === "work_log") {
+        const project = summary.project?.name || (summary.project === null ? "未关联项目" : "");
+        const alreadyShown = (summary.fields || []).some(field => field.label === "所属项目" && (field.value === project || !project));
+        setText("review-project", project || "未提供项目核验结果");
+        for (const id of ["review-project", "review-project-label"]) if (node(id)) node(id).hidden = alreadyShown;
+        setText("review-project-code", summary.project ? summary.project.code || "未提供编码" : "—");
+        setText("review-duplicate", summary.duplicateCheck?.message || "未提供重复检查结果");
       }
       form.dataset.agentbridgeDirty = String(view.dirty && !view.locked);
       form.dataset.agentbridgeBusy = String(view.saving || view.previewing || view.optionsLoading || view.uncertain || view.contentBusy || Boolean(view.contentPending));

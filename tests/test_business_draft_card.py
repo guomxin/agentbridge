@@ -112,6 +112,53 @@ class BusinessDraftCardTests(unittest.TestCase):
                 self.assertEqual(saved.status, 200)
                 self.assertEqual(self.backend.save.call_args.kwargs["values"], values)
 
+    def test_single_effect_at_confirmation_includes_the_bound_scope_even_without_a_preview(self):
+        from agentbridge.core.business_draft_profiles import BY_ID
+        from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+        for identity, source_effect, expected in (
+            ("oa.business_settlement.approval", "当前结算审批，不执行付款", "当前结算审批，不执行付款"),
+            ("oa.business_settlement.approval", "", "不登记或执行付款"),
+            ("oa.intellectual_property_reward.acknowledgement", "仅记录本人的阅办知会", "仅记录本人的阅办知会"),
+            ("smartlight.alarm.remark.update", "", "留空会清除原备注"),
+        ):
+            with self.subTest(identity=identity, source_effect=source_effect):
+                profile = BY_ID[identity]
+                ui = profile.ui(_TRUSTED_WRITE_DEFINITIONS[profile.prepare]["field_schema"])
+                ui["review"] = {"title": "原始事项", "effect": source_effect, "fields": []}
+                if profile.view_kind == "approval":
+                    ui["confirmationMode"] = "on_confirm"
+                self.state.update(ui=ui, values={name: "" for name in profile.fields})
+                response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=False)
+                self.assertEqual(response.status, 200)
+                markup = response.body.decode().split('<script type="module"')[0]
+                self.assertNotIn('id="draft-review"', markup)
+                before, outcome = markup.split('<p class="draft-outcome">')
+                note, after = outcome.split('</p>', 1)
+                self.assertNotIn(expected, before)
+                self.assertIn(expected, note)
+                self.assertNotIn(expected, after)
+                self.assertIn('id="draft-submit"', after)
+
+    def test_initial_markup_keeps_current_previewed_remark_and_ignores_a_stale_preview(self):
+        from agentbridge.core.business_draft_profiles import BY_ID
+        from agentbridge.core.write_catalog import _TRUSTED_WRITE_DEFINITIONS
+        profile = BY_ID["smartlight.alarm.remark.update"]
+        self.state.update(ui=profile.ui(_TRUSTED_WRITE_DEFINITIONS[profile.prepare]["field_schema"]),
+                          revision=3, values={"remark": ""})
+        for revision, current in ((3, True), (2, False)):
+            with self.subTest(preview_revision=revision):
+                self.state["preview"] = {"revision": revision, "summary": {
+                    "title": "修改告警", "effect": "修改当前告警，可再次写入原值恢复",
+                    "fields": [{"label": "新备注", "value": "（清除备注）"}],
+                }}
+                response = self.app.get_card(SOURCE_ID, presentation_id=None, csrf_cookie="", secure_cookie=False)
+                self.assertEqual(response.status, 200)
+                markup = response.body.decode().split('<script type="module"')[0]
+                self.assertEqual("（清除备注）" in markup, current)
+                self.assertEqual("修改当前告警，可再次写入原值恢复" in markup, current)
+                self.assertIn('type="submit" disabled', markup)
+                self.assertIn("<noscript>", markup)
+
     def test_only_new_marked_bound_taihua_sources_upgrade_while_legacy_keeps_form(self):
         self.assertTrue(self.app.supports(self.context()))
         for key, value in (("task_id", None), ("kind", "authorize")):

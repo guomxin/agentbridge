@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "6247a1d31b41"
+    "628faf4645fd"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "reason": "Exact deployed predecessor 6247a1d31b41. Adds only non-unique agent_tasks_subject_created and user_timeline_subject_type_created indexes for bounded chronological Workspace history pagination. Schema-only copies of all four production databases were reconstructed and initialized through Central, Admin, MCP identity, Workspace and independent database stores. Tables, columns, triggers, user_version and the other three database schemas remain unchanged; no business rows or authorization/material expiry semantics are migrated. Existing prepare-authorize-commit-verify and unknown-outcome non-replay boundaries remain unchanged.",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "356409691e98c0613429b0162149ebe121f7c102983d9d8addcd5dde14309d6b",
-      "afterSha256": "fccf13649bb39013cf41d22bc572f14c1f383c4493a7b18a1ec89d34fc7e7a5f"
-    }
-  }
+  "dataCompatibility": "no-migration",
+  "reason": "Verified deployed predecessor 628faf4645fd. Only trusted review presentation changes: source materials, persisted drafts, authorization, snapshots, expiry and business verification semantics remain compatible. No database schema, configuration or stored data migration."
 }
