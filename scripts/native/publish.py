@@ -46,6 +46,29 @@ def compatibility(current, candidate, policy, resume=False):
     return 'compatible'
 
 
+def candidate_artifact(*, require_receipt):
+    """Reuse only a receipt and wheel accepted by the formal verifier."""
+    verify = [sys.executable, ROOT / 'scripts/agentbridge_artifact.py', 'verify', '--root', ROOT]
+    if require_receipt:
+        return json.loads(run(verify)), 'reused'
+    receipt = ROOT / 'output/release-validation/full.json'
+    if receipt.is_file():
+        try:
+            previous = read(receipt)
+        except (ValueError, FileNotFoundError):
+            previous = {}
+        if isinstance(previous, dict) and previous.get('status') == 'running':
+            raise ValueError('Full validation is in progress or was interrupted; finish it before publishing')
+        try:
+            verified = run(verify)
+        except RuntimeError:
+            pass  # Changed inputs require a new Full before any deployment.
+        else:
+            return json.loads(verified), 'reused'
+    validate(full=True)
+    return json.loads(run(verify)), 'full'
+
+
 class Publisher:
     def __init__(self, args):
         self.args = args
@@ -91,7 +114,7 @@ class Publisher:
                 'releasePreflight': preflight, 'currentRelease': current,
                 'unitHashes': {n: sha(v) for n, v in self.units.items()},
                 'resumeCompletion': self.args.resume, 'productionActions': False,
-                'validation': 'reuse_receipt' if self.args.reuse_validation or self.args.resume else 'full',
+                'validation': 'reuse_receipt' if self.args.reuse_validation or self.args.resume else 'reuse_if_valid_else_full',
                 'requiredAcceptance': ['governance', 'TLS/readiness', 'release-smoke', 'backup',
                     'gateway-runtime', 'conditional-restart', 'pending-warmup', 'identity-isolation'],
                 'blockers': ([] if branch_ok else ['candidate must be integrated into main']) +
@@ -160,9 +183,7 @@ class Publisher:
         if any(not re.fullmatch(r'[A-Za-z0-9_.@-]+=[A-Za-z0-9_.-]+', e) for e in self.args.expect_endpoint):
             raise ValueError('Invalid endpoint expectation')
         before = lifecycle.fingerprint(host)
-        if not (self.args.reuse_validation or self.args.resume):
-            validate(full=True)
-        artifact = json.loads(run([sys.executable, ROOT / 'scripts/agentbridge_artifact.py', 'verify', '--root', ROOT]))
+        artifact, validation_mode = candidate_artifact(require_receipt=self.args.reuse_validation or self.args.resume)
         test_run([sys.executable, '-m', 'unittest', 'tests.test_runtime_governance', 'tests.test_runtime_backup'])
         # Recheck before the first remote mutation, after potentially long validation.
         if git('rev-parse', 'HEAD') != self.commit or self.plan()['blockers']:
@@ -197,4 +218,4 @@ class Publisher:
         run(['git', 'push', '--porcelain', 'origin', 'HEAD:refs/heads/main'], env=git_env)
         if run(['git', 'ls-remote', '--exit-code', 'origin', 'refs/heads/main'], env=git_env).split()[0] != self.commit:
             raise ValueError('GitHub verification mismatch')
-        return {'status': 'succeeded', 'commit': self.commit, 'acceptance': result, 'pushed': True}
+        return {'status': 'succeeded', 'commit': self.commit, 'acceptance': result, 'validation': validation_mode, 'pushed': True}

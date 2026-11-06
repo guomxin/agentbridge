@@ -84,7 +84,7 @@ def read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def plan(root, *, mcp_app=False, for_ci=False):
+def plan(root, *, mcp_app=False, for_ci=False, ci_output=CI_OUTPUT):
     root = Path(root).resolve()
     patterns = ("test_*.mjs", "test_*.js", "*.test.mjs", "*.test.js")
     discovered = {p.relative_to(root).as_posix() for pattern in patterns
@@ -113,7 +113,7 @@ def plan(root, *, mcp_app=False, for_ci=False):
         stages.append({"id": name, "command": command, "cwd": cwd, "testFiles": list(files),
                        "report": report, "reportKind": report_kind, "timeoutSeconds": timeout})
 
-    output = CI_OUTPUT if for_ci else "output/release-validation"
+    output = str(ci_output) if for_ci else "output/release-validation"
     if not for_ci:
         add("browser-runtime", [python, "-m", "playwright", "install", "chromium"])
     add("public-content", [python, "scripts/check_public_content.py"])
@@ -140,9 +140,12 @@ def plan(root, *, mcp_app=False, for_ci=False):
         raise ValueError("OpenClaw npm test changed; update the shared validation plan")
     add("openclaw-pack", [npm, "run", "pack:check"], cwd="integrations/openclaw-agentbridge")
     if mcp_app or for_ci:
+        app = read(root / "integrations/mcp-app/package.json")
+        if app.get("scripts", {}).get("test") != "node --test tests/*.test.mjs":
+            raise ValueError("MCP App npm test changed; update the shared validation plan")
         add("mcp-app-test", [npm, "test"], cwd="integrations/mcp-app",
             files=sorted(p.relative_to(root).as_posix() for p in
-                         (root / "integrations/mcp-app/tests").glob("*.test.*")))
+                         (root / "integrations/mcp-app/tests").glob("*.test.mjs")))
     if mcp_app:
         add("mcp-app-check", [npm, "run", "check"], cwd="integrations/mcp-app")
         add("mcp-app-build", [npm, "run", "build"], cwd="integrations/mcp-app")

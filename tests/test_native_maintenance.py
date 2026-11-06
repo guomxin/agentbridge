@@ -169,6 +169,38 @@ def test_targeted_validation_never_invokes_full_runner():
     assert all('full' not in call.args[0] for call in execute.call_args_list)
 
 
+@pytest.mark.parametrize('state,strict,events', [
+    ('valid', False, ['verify']), ('missing', False, ['full', 'verify']),
+    ('invalid', False, ['verify', 'full', 'verify']),
+    ('invalid', True, ['verify']), ('running', False, []),
+])
+def test_publish_reuses_only_verified_evidence(tmp_path, monkeypatch, state, strict, events):
+    monkeypatch.setattr(publish, 'ROOT', tmp_path)
+    receipt = tmp_path / 'output/release-validation/full.json'
+    if state != 'missing':
+        common.save(receipt, {'status': 'running' if state == 'running' else 'succeeded'})
+    calls = []
+    def verify(command):
+        assert command[2:] == ['verify', '--root', tmp_path]
+        calls.append('verify')
+        if state == 'invalid' and 'full' not in calls:
+            raise RuntimeError('wheel or inputs changed')
+        return '{"wheel":"verified.whl"}'
+    def full(*, full):
+        assert full
+        calls.append('full')
+    monkeypatch.setattr(publish, 'run', verify)
+    monkeypatch.setattr(publish, 'validate', full)
+    if state == 'running' or (strict and state == 'invalid'):
+        with pytest.raises((ValueError, RuntimeError)):
+            publish.candidate_artifact(require_receipt=strict)
+    else:
+        artifact, mode = publish.candidate_artifact(require_receipt=strict)
+        assert artifact['wheel'] == 'verified.whl'
+        assert mode == ('full' if 'full' in events else 'reused')
+    assert calls == events
+
+
 def test_offline_plan_never_connects_and_reports_branch_blocker():
     publisher = object.__new__(publish.Publisher)
     publisher.args = argparse.Namespace(resume=False, reuse_validation=False)

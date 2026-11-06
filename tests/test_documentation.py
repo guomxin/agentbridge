@@ -16,7 +16,11 @@ class DocumentationTests(unittest.TestCase):
         facts = code_facts()
         self.assertEqual(sum(sum(counts.values()) for counts in facts['systems'].values()), facts['capabilityTotal'])
         text = (ROOT / 'docs/项目当前状态.md').read_text(encoding='utf-8')
-        self.assertIn(render(facts), text)
+        generated = render(facts)
+        begin, *_, end = generated.splitlines()
+        self.assertEqual(text.count(begin), 1)
+        self.assertEqual(text.count(end), 1)
+        self.assertIn(generated, text)
         for field in ('deployment', 'automaticValidation', 'businessAcceptance'):
             self.assertEqual(facts[field], 'not_asserted')
 
