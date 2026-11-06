@@ -78,7 +78,7 @@ class SkillJobExecutorTests(unittest.TestCase):
             '0:0:candidate', '0:0:without_skill', '1:0:candidate', '1:0:without_skill',
         ])
         self.assertEqual(rows[0]['model'], 'before-restart')
-        self.assertEqual(after['result']['scores']['candidate'], {'passed': 2, 'total': 2})
+        self.assertEqual(after['result']['scores']['candidate'], {'passed': 2, 'total': 2, 'skipped': 0})
         self.assertFalse(restarted.run_once(lambda *_: self.fail('completed job must not run again')))
 
     def test_three_call_slices_resume_without_replaying_or_consuming_retries(self):
@@ -104,6 +104,30 @@ class SkillJobExecutorTests(unittest.TestCase):
         self.assertAlmostEqual(done['progress_stats']['usage']['cost_estimate_usd'], .06)
         self.assertTrue(done['progress_stats']['usage_complete'])
         self.assertTrue(done['progress_stats']['cost_complete'])
+
+    def test_pre_upgrade_job_keeps_receipt_and_old_prompts_across_slices_and_restart(self):
+        template = self.evaluation(repeats=3)
+        with closing(self.workbench.store.connect()) as db:
+            payload = json.loads(db.execute('SELECT payload_json FROM skill_jobs WHERE job_id=?', (template['job_id'],)).fetchone()[0])
+        self.assertEqual(payload.pop('evaluation_protocol'), 'neutral-text-v1')
+        self.workbench.cancel('alice', template['job_id'])
+        legacy = self.workbench._job_queue().enqueue('alice', 'evaluation', payload, 'before-upgrade')
+        replay = self.workbench.evaluate('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+            cases=payload['cases'], repeats=3, request_key='before-upgrade')
+        self.assertEqual(replay['job_id'], legacy['job_id'])
+        systems = []
+        def complete(system, _prompt):
+            systems.append(system)
+            return {'text': '计划已记录', 'model': 'fixture'}
+        self.workbench.run_once(complete)
+        self.assertEqual(self.workbench.jobs('alice', legacy['job_id'])['progress'], 3)
+        restarted = self.restart().skill_authoring.workbench
+        restarted.run_once(complete)
+        report = restarted.jobs('alice', legacy['job_id'])['result']
+        self.assertEqual(report['evaluation_protocol'], 'legacy-text-v1')
+        self.assertTrue(report['passed'])
+        self.assertEqual(len(systems), 6)
+        self.assertTrue(all('忠实输入，区分计划与完成。' in system for system in systems))
 
     def test_another_owner_runs_between_large_evaluation_slices(self):
         alice = self.evaluation(repeats=3)

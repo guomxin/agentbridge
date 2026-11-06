@@ -6,7 +6,7 @@ import json
 import unittest
 
 from agentbridge.core.central_service import CentralCapabilityService
-from agentbridge.core.skill_quality import compare_reports
+from agentbridge.core.skill_quality import candidate_matrix_passed, compare_reports, report_score_counts
 from agentbridge.core.user_grants import UserGrantConflict
 
 
@@ -170,6 +170,75 @@ class SkillReportReviewTests(unittest.TestCase):
         comparison = compare_reports(first,second)
         self.assertEqual(comparison['models'],'changed')
         self.assertEqual(comparison['regressed_cases'],[])
+
+    def test_changed_evaluation_protocol_suppresses_regression_even_with_identical_models_and_cases(self):
+        first = self.evaluate()
+        second = self.evaluate('second', text='已完成')
+        self.assertEqual(compare_reports(first, second)['regressed_cases'], [0])
+        first.pop('evaluation_protocol')  # Historical reports have no protocol field.
+        comparison = compare_reports(first, second)
+        self.assertTrue(comparison['inputs_equal'])
+        self.assertEqual(comparison['models'], 'known_same')
+        self.assertFalse(comparison['protocols_equal'])
+        self.assertEqual(comparison['regressed_cases'], [])
+        second['evaluation_protocol'] = 'legacy-text-v1'
+        self.assertTrue(compare_reports(first, second)['protocols_equal'])
+        self.assertEqual(compare_reports(first, second)['regressed_cases'], [0])
+
+    def test_display_scores_reconstruct_only_complete_historical_variants(self):
+        report = {'cases': [{}, {}], 'repeats': 1,
+                  'scores': {'published': {'passed': 1, 'total': 2}, 'candidate': {'passed': 2, 'total': 2}},
+                  'rows': [{'variant':'published', 'case':0, 'repeat':0, 'output':'合成输出', 'passed':True},
+                           {'variant':'published', 'case':1, 'repeat':0, 'skipped':'线上版本无此模式', 'passed':False},
+                           {'variant':'candidate', 'case':0, 'repeat':0, 'output':'合成输出', 'passed':True}]}
+        original = deepcopy(report)
+        counts = report_score_counts(report)
+        self.assertEqual(counts['published'], {'passed': 1, 'total': 1, 'skipped': 1})
+        self.assertEqual(counts['candidate'], report['scores']['candidate'])
+        self.assertIsNot(counts['candidate'], report['scores']['candidate'])
+        self.assertEqual(report, original)
+        for bad in ({'case': 0}, {'case': True}, {'repeat': 1}, {'output': '矛盾的输出'}, {'skipped': True}):
+            with self.subTest(bad=bad):
+                conflicting = deepcopy(report)
+                conflicting['rows'][1].update(bad)
+                self.assertEqual(report_score_counts(conflicting)['published'], report['scores']['published'])
+
+    def test_empty_or_incomplete_candidate_matrix_cannot_be_reported_as_passed(self):
+        report = self.evaluate(repeats=2)
+        self.assertTrue(candidate_matrix_passed(report))
+        candidates = [row for row in report['rows'] if row['variant'] == 'candidate']
+        for rows in ([], [candidates[0]] * 2, [candidates[0], {**candidates[1], 'skipped': '不适用'}]):
+            with self.subTest(rows=rows):
+                self.assertFalse(candidate_matrix_passed({**report, 'rows': rows}))
+        self.assertFalse(candidate_matrix_passed({**report, 'cases': [], 'rows': []}))
+
+    def test_reading_historical_job_and_frozen_review_projects_skips_without_rewriting_evidence(self):
+        report = self.evaluate()
+        for field in ('evaluation_protocol', 'display_scores', 'reviews'):
+            report.pop(field, None)
+        for score in report['scores'].values():
+            score.pop('skipped')
+        report['scores']['published'] = {'passed': 0, 'total': 1}
+        report['rows'].append({'key':'0:0:published', 'case':0, 'repeat':0, 'variant':'published',
+                               'passed':False, 'skipped':'线上版本无此模式'})
+        raw = json.dumps(report, ensure_ascii=False)
+        with closing(self.workbench.store.connect()) as db, db:
+            db.execute('UPDATE skill_jobs SET result_json=? WHERE job_id=?', (raw, report['job_id']))
+        request = self.authoring.submit('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+            expected_report_job_id=report['job_id'], request_key='freeze-old-report', reason='核对旧版报告')
+        with closing(self.workbench.store.connect()) as db:
+            frozen = db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request['request_id'],)).fetchone()[0]
+        self.assertNotIn('display_scores', json.loads(frozen)['evaluation'])
+        displays = (self.workbench.jobs('alice', report['job_id'])['result'],
+                    self.workbench.inspect('alice', self.draft['draft_id'])['evaluation'],
+                    self.authoring.review_detail(request['request_id'])['quality']['evaluation'])
+        for display in displays:
+            self.assertEqual(display['scores']['published'], {'passed': 0, 'total': 1})
+            self.assertEqual(display['display_scores']['published'], {'passed': 0, 'total': 0, 'skipped': 1})
+            self.assertNotIn('evaluation_protocol', display)
+        with closing(self.workbench.store.connect()) as db:
+            self.assertEqual(db.execute('SELECT result_json FROM skill_jobs WHERE job_id=?', (report['job_id'],)).fetchone()[0], raw)
+            self.assertEqual(db.execute('SELECT snapshot_json FROM skill_review_quality WHERE request_id=?', (request['request_id'],)).fetchone()[0], frozen)
 
     def test_candidate_problems_need_exact_admin_reasons_and_keep_frozen_reviews(self):
         report = self.evaluate()

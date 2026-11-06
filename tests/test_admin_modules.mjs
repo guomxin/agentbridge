@@ -239,6 +239,18 @@ test('approval renders only server-scoped frozen candidate problems for explicit
   assert.match(readonly,/候选版本：3\/3/);
 });
 
+test('admin displays a skipped historical control from frozen rows without changing its stored score',()=>{
+  const evaluation = {passed:true, scores:{published:{passed:0,total:1}},
+    display_scores:{published:{passed:0,total:0,skipped:1}}, cases:[{kind:'trigger',profile:'detail'}],
+    rows:[{case:0,variant:'published',passed:false,skipped:'旧版本无此模式'}]};
+  const q={evaluation,diagnostics:{checks:[],message:''},diff:[],audience_diff:{added:[],removed:[]}};
+  const html=skillReviewQualityHtml(q,['detail']);
+  assert.match(html,/未测 · 实测 0 · 已跳过 1/);
+  assert.match(html,/原报告汇总 0\/1/);
+  assert.match(html,/助手级适用判断/);
+  assert.deepEqual(evaluation.scores.published,{passed:0,total:1});
+});
+
 test('approval requires every frozen problem reason while return and rejection remain usable',()=>{
   const problems=[{row_key:'0:0:candidate'},{row_key:'0:2:candidate'}];
   const values=new Map([['decision','approve'],['reason','核对完毕'],['reviewed_tests','on'],['problem_resolution_0','  限定范围可接受  ']]);

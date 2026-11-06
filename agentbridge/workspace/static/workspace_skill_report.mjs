@@ -22,6 +22,7 @@ export function comparisonText(comparison) {
   if (!comparison) return '';
   if (comparison.same_report) return '当前报告就是固定题的来源报告，尚无新的对照。';
   if (!comparison.inputs_equal) return '题目、断言或重复次数已变化，分数不直接比较。';
+  if (comparison.protocols_equal === false) return '题目相同，评测提示或评分规则已变化，本次不判定退步。';
   const model = {known_same:'候选输出记录的模型一致；不代表全部运行环境一致。',changed:'候选输出模型已变化，结果仅供参考，不判定退步。',unknown:'候选输出模型或结果记录不完整，无法确认可比性。'}[comparison.models];
   return `与固定题来源修订 ${comparison.source_revision} 比较：题目、断言和重复次数一致。${model || ''}`;
 }
@@ -46,16 +47,38 @@ export function skillReportHtml(report, comparison = null, editable = false) {
     groups.get(index).push(row);
   }
   const groupRows = [...groups].sort(([a],[b]) => Number(regressions.has(b))-Number(regressions.has(a)) || a-b);
-  const result = groupRows.map(([index,rows]) => `<details data-report-case="${escape(index)}" ${regressions.has(index)?'open':''}><summary>${regressions.has(index)?'上次通过 → 本次失败 · ':''}第 ${Number(index)+1} 题 · ${escape(report.cases?.[index]?.prompt || rows[0]?.prompt || '历史样例')}</summary>${rows.map(r=>{
+  const outputHtml = r => {
+    const testCase = report.cases?.[r.case];
+    const profile = testCase?.kind === 'trigger' ? '助手级适用判断' : testCase?.profile || '未记录模式';
     if (r.skipped) {
-      return `<section class="skill-report-output"><p><strong>${escape(names[r.variant] || r.variant)}</strong> · ${escape(report.cases?.[r.case]?.profile || '未记录模式')} · 第 ${Number(r.repeat || 0)+1} 次 · 已跳过</p><p>${escape(r.skipped)}</p></section>`;
+      return `<section class="skill-report-output"><p><strong>${escape(names[r.variant] || r.variant)}</strong> · ${escape(profile)} · 第 ${Number(r.repeat || 0)+1} 次 · 已跳过</p><p>${escape(r.skipped)}</p></section>`;
     }
     const review=reviews[r.key] || {status:'unreviewed',note:'',version:0};
-    return `<section class="skill-report-output"><p><strong>${escape(names[r.variant] || r.variant)}</strong> · ${escape(report.cases?.[r.case]?.profile || '未记录模式')} · 第 ${Number(r.repeat || 0)+1} 次 · 自动断言${r.passed?'通过':'未通过'}</p><pre>${escape(r.output || r.skipped)}</pre><p>${escape(r.model || '模型未记录')} · ${r.elapsed_ms || 0} 毫秒</p>${(r.checks || []).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'适用场景判断'}：${escape(c.value || '')}</p>`).join('')}
+    const elapsed = amount(r.elapsed_ms) === null ? '耗时未记录' : `${countText(r.elapsed_ms)} 毫秒`;
+    return `<section class="skill-report-output"><p><strong>${escape(names[r.variant] || r.variant)}</strong> · ${escape(profile)} · 第 ${Number(r.repeat || 0)+1} 次 · 自动断言${r.passed?'通过':'未通过'}</p><pre>${escape(r.output || r.skipped)}</pre><p>${escape(r.model || '模型未记录')} · ${elapsed}</p>${(r.checks || []).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'适用场景判断'}：${escape(c.value || '')}</p>`).join('')}
       ${editable && report.job_id && r.key && r.output ? `<form data-review-row="${escape(r.key)}" class="draft-editor"><label>人工复核<select name="review_status">${Object.entries(reviewLabels).map(([v,label])=>`<option value="${v}" ${v===review.status?'selected':''}>${label}</option>`).join('')}</select></label><label>复核说明<textarea name="review_note" maxlength="1000" placeholder="例如：明天不能归到下周，不要补效果。">${escape(review.note)}</textarea></label><button type="submit" class="secondary">保存复核</button><p role="status">${escape(reviewLabels[review.status])}${review.version?' · 已保存':''}</p></form>` : `<p>人工复核：${escape(reviewLabels[review.status] || '未复核')}${review.note?' · '+escape(review.note):''}</p>`}</section>`;
-  }).join('')}</details>`).join('');
+  };
+  const order = ['candidate','published','without_skill'];
+  const result = groupRows.map(([index, rows]) => {
+    const repeats = new Map();
+    for (const row of rows) {
+      const repeat = row.repeat ?? 0;
+      if (!repeats.has(repeat)) repeats.set(repeat, []);
+      repeats.get(repeat).push(row);
+    }
+    const outputs = [...repeats].sort(([a],[b]) => a-b).map(([, group]) =>
+      `<div class="skill-report-comparison">${group.sort((a,b) => order.indexOf(a.variant)-order.indexOf(b.variant)).map(outputHtml).join('')}</div>`).join('');
+    return `<details data-report-case="${escape(index)}" ${regressions.has(index)?'open':''}><summary>${regressions.has(index)?'上次通过 → 本次失败 · ':''}第 ${Number(index)+1} 题 · ${escape(report.cases?.[index]?.prompt || rows[0]?.prompt || '历史样例')}</summary>${outputs}</details>`;
+  }).join('');
+  const scores = Object.entries(report.display_scores || report.scores || {}).map(([key, score]) => {
+    const counts = score.skipped === undefined ? `${countText(score.passed)}/${countText(score.total)}（历史汇总）`
+      : `${score.total ? `${countText(score.passed)}/${countText(score.total)} 通过` : '未测'} · 实测 ${countText(score.total)} · 已跳过 ${countText(score.skipped)}`;
+    const original = report.scores?.[key];
+    const prior = original && original.total !== score.total ? `（原报告汇总 ${countText(original.passed)}/${countText(original.total)}）` : '';
+    return `<span>${escape(names[key] || key)}：${counts}${prior}</span>`;
+  });
   return `<p>${escape(report.name || '助手')} · 修订 ${escape(report.revision)} · ${escape(report.job_id || '')}</p>${skillProgressHtml(report.progress_stats)}<p><strong>${report.passed?'所列断言通过':'存在未通过断言'}</strong> · 仍需人工检查语义正确性</p><p>${escape(report.limitations)}</p>
-    <div class="draft-actions">${Object.entries(report.scores || {}).map(([k,v])=>`<span>${escape(names[k] || k)}：${v.passed}/${v.total}</span>`).join('')}</div>
+    <div class="draft-actions">${scores.join('')}</div>
     <p data-review-summary>${skillReviewSummary(report)}</p>
     ${comparison?`<p data-report-comparison>${escape(comparisonText(comparison))}</p>${comparison.regressed_cases?.length?`<p data-regression-note>候选退步题 ${comparison.regressed_cases.length} 道，已优先展开。</p>`:''}`:''}${result}`;
 }

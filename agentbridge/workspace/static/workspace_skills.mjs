@@ -6,6 +6,31 @@ import { createSkillConfigurationEditor, configurationProposal } from "./workspa
 const profileLabels = {preview: "草稿预览", fill: "准备填单", review: "总结与复核", track: "进展追踪", search: "案例检索", single: "单项办理", batch: "批量办理", use: "使用"};
 const profileLabel = profile => Object.hasOwn(profileLabels, profile) ? profileLabels[profile] : profile;
 
+async function readDraftImport(file) {
+  const draftLimit = 100_000;
+  if (file.size > 256 * 1024) throw new Error('文件不能超过 256 KiB。');
+  const value = JSON.parse(await file.text());
+  if (file.size <= draftLimit) return value;
+
+  // Only the proposal will be saved. Allow extra bytes for native revision
+  // metadata without expanding the original budget for draft content.
+  const source = value?.source, manifest = source?.manifest;
+  if (value?.format !== 'agentbridge.skill-draft.v1' || !value.proposal || typeof value.proposal !== 'object' ||
+      Array.isArray(value.proposal) || Object.keys(value).length !== 3 ||
+      !Number.isSafeInteger(source?.revision) || source.revision < 1 || Object.keys(source).length !== 4 ||
+      typeof source.skill_id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(source.skill_id) ||
+      typeof source.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(source.content_hash) ||
+      manifest?.schemaVersion !== 'agentbridge.skills.v1' || manifest.id !== source.skill_id ||
+      manifest.version !== '0.0.0' || manifest.entrypoint !== 'SKILL.md') {
+    throw new Error('标准文件包或未带原生修订信息的草稿不能超过 100 KB。');
+  }
+  const bytes = data => new Blob([JSON.stringify(data, null, 2)]).size;
+  const previousSize = bytes({format:value.format, proposal:value.proposal});
+  const sourceSize = bytes(value) - previousSize;
+  if (previousSize > draftLimit || file.size - sourceSize > draftLimit) throw new Error('草稿内容不能超过 100 KB。');
+  return value;
+}
+
 export function skillCatalogModes(profiles) {
   return Object.entries(profiles).map(([id, state]) => {
     const missing = state.missing || [];
@@ -185,7 +210,18 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       $("#draft-auto").onchange=async e=>{try { const result = await navigateAfterAction(scope, async permit => {await draftAction("preferences",{value:{auto_draft:e.target.checked},expected_revision:data.preferences.revision}); await loadSkillDrafts(permit);}); if (result === false) e.target.checked=!e.target.checked; } catch(err){if(!scope.current()||isCancellation(err))return;$("#draft-error").textContent=err.message;e.target.checked=!e.target.checked;} };
       $("#draft-import").onclick=()=>{
         const input=document.createElement("input");input.type="file";input.accept="application/json,.json";
-        input.onchange=async()=>{try {const f=input.files[0];if(!f)return;if(f.size>100000)throw new Error("文件不能超过100KB");const v=JSON.parse(await f.text());scope.assertCurrent();await navigateAfterAction(scope, async permit => {if(v.format==="agentskills.files.v1")await draftAction("import_standard",{package:v,request_key:crypto.randomUUID()});else if(v.format==="agentbridge.skill-draft.v1")await draftAction("save",{proposal:v.proposal,request_key:crypto.randomUUID(),provenance:{kind:"import"}});else throw new Error("不支持的草稿格式");await loadSkillDrafts(permit);});}catch(err){if(!scope.current()||isCancellation(err))return;$("#draft-error").textContent=err.message;}};input.click();
+        input.onchange=async()=>{
+          try {
+            const file=input.files[0];if(!file)return;
+            const value=await readDraftImport(file);scope.assertCurrent();
+            await navigateAfterAction(scope, async permit => {
+              if(value.format==="agentskills.files.v1")await draftAction("import_standard",{package:value,request_key:crypto.randomUUID()});
+              else if(value.format==="agentbridge.skill-draft.v1")await draftAction("save",{proposal:value.proposal,request_key:crypto.randomUUID(),provenance:{kind:"import"}});
+              else throw new Error("不支持的草稿格式");
+              await loadSkillDrafts(permit);
+            });
+          } catch(err){if(scope.current()&&!isCancellation(err))$("#draft-error").textContent=err.message;}
+        };input.click();
       };
       renderDraftList(data.items);
     } catch(e){if(!scope.current()||isCancellation(e))return false;root.textContent=e.message;return false;}

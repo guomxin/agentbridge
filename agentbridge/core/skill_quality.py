@@ -7,6 +7,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from copy import deepcopy
 
 # Preserve existing imports while keeping contracts separate from quality helpers.
 from agentbridge.core.skill_contracts import (
@@ -138,6 +139,44 @@ def validate_pending_cases(value, profiles):
 
 
 EVALUATION_SCHEMA = 'agentbridge.skill-evaluation.v2'
+EVALUATION_PROTOCOL = 'neutral-text-v1'
+LEGACY_EVALUATION_PROTOCOL = 'legacy-text-v1'
+
+
+def variant_score(rows):
+    tested = [row for row in rows if not row.get('skipped')]
+    return {'passed': sum(row['passed'] is True for row in tested),
+            'total': len(tested), 'skipped': len(rows) - len(tested)}
+
+
+def report_score_counts(report):
+    """Display counts from a complete variant matrix without rewriting a frozen report."""
+    if not isinstance(report, dict) or not isinstance(report.get('scores'), dict):
+        return {}
+    scores = deepcopy(report['scores'])
+    cases, repeats, rows = report.get('cases'), report.get('repeats'), report.get('rows')
+    if (not isinstance(cases, list) or not 1 <= len(cases) <= 12 or type(repeats) is not int or
+            not 1 <= repeats <= 3 or not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)):
+        return scores
+    expected = {(case, repeat) for case in range(len(cases)) for repeat in range(repeats)}
+    for name in scores:
+        variant = [row for row in rows if row.get('variant') == name]
+        if len(variant) != len(expected):
+            continue
+        positions = set()
+        for row in variant:
+            case, repeat = row.get('case'), row.get('repeat')
+            if type(case) is not int or type(repeat) is not int:
+                break
+            if row.get('skipped'):
+                if not isinstance(row['skipped'], str) or not row['skipped'].strip() or row.get('output'):
+                    break
+            elif type(row.get('passed')) is not bool or not isinstance(row.get('output'), str) or not row['output'].strip():
+                break
+            positions.add((case, repeat))
+        if positions == expected:
+            scores[name] = variant_score(variant)
+    return scores
 
 
 def _candidate_case_results(report, cases):
@@ -168,6 +207,15 @@ def _candidate_case_results(report, cases):
     if set(found) != expected:
         raise ValueError('评测行未覆盖全部样例与重复次数')
     return [all(found[index, repeat] for repeat in range(repeats)) for index in range(len(cases))]
+
+
+def candidate_matrix_passed(report):
+    """A score summary cannot make missing, skipped or duplicate candidate outputs pass."""
+    try:
+        cases = validate_cases(report['cases'])
+        return all(_candidate_case_results(report, cases))
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def publication_evidence(bundle, revision, tested_profiles, report):
@@ -340,10 +388,13 @@ def compare_reports(source, current):
     """Compare fixed questions and aligned candidate rows, never infer environment equality."""
     if not source or not current:
         return None
+    source_protocol = source.get('evaluation_protocol', LEGACY_EVALUATION_PROTOCOL)
+    current_protocol = current.get('evaluation_protocol', LEGACY_EVALUATION_PROTOCOL)
     result = {'source_job_id': source.get('job_id'), 'source_revision': source.get('revision'),
               'same_report': bool(source.get('job_id') and source.get('job_id') == current.get('job_id')),
+              'protocols_equal': source_protocol == current_protocol and source_protocol in (EVALUATION_PROTOCOL, LEGACY_EVALUATION_PROTOCOL),
               'inputs_equal': False, 'models': 'unknown', 'regressed_cases': [],
-              'limitations': '仅比较题目、断言、重复次数及候选输出记录的模型；不证明运行环境完全一致。'}
+              'limitations': '按题目、断言、重复次数、评测规则及候选输出记录的模型进行比较；不证明运行环境完全一致。'}
     try:
         old_cases, new_cases = validate_cases(source.get('cases')), validate_cases(current.get('cases'))
         result['inputs_equal'] = case_fingerprint(old_cases, source['repeats']) == case_fingerprint(new_cases, current['repeats'])
@@ -357,7 +408,7 @@ def compare_reports(source, current):
         old_models, new_models = models(source), models(current)
         if old_models is not None and new_models is not None:
             result['models'] = 'known_same' if old_models == new_models else 'changed'
-        if result['models'] == 'known_same' and not result['same_report']:
+        if result['protocols_equal'] and result['models'] == 'known_same' and not result['same_report']:
             result['regressed_cases'] = [i for i, passed in enumerate(old_passed) if passed and not new_passed[i]]
     except (ValueError, KeyError, TypeError):
         # Older/incomplete reports remain readable, without claiming comparability.

@@ -11,9 +11,9 @@ from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agentbridge.core.business_skills import _json, skill_catalog
-from agentbridge.core.skill_quality import (bundle_diff, diagnostics, export_standard,
+from agentbridge.core.skill_quality import (EVALUATION_PROTOCOL, bundle_diff, diagnostics, export_standard,
     import_standard, proposal_from_bundle, publication_evidence, similarity, validate_cases, case_fingerprint, compare_reports,
-    validate_pending_cases)
+    validate_pending_cases, report_score_counts)
 from agentbridge.core.skill_job_executor import SkillJobDependencies, SkillJobExecutor
 from agentbridge.core.skill_job_queue import SkillJobQueue
 from agentbridge.core.skill_ranking import rank_skill_candidates
@@ -107,7 +107,11 @@ class SkillWorkbench:
         with closing(self.store.connect()) as db:
             for job in [result] if job_id else result['items']:
                 if job['kind'] == 'evaluation' and job['state'] == 'succeeded':
-                    job['result'] = self._report_reviews(db, owner, job['result'])
+                    report = self._report_reviews(db, owner, job['result'])
+                    if report and isinstance(report.get('scores'), dict):
+                        job['result'] = {**report, 'display_scores': report_score_counts(report)}
+                    else:
+                        job['result'] = report
         return result
 
     @staticmethod
@@ -218,6 +222,7 @@ class SkillWorkbench:
             if previous is None:
                 draft = self._require_job_draft(db, owner, target)
                 _, bundle = self.authoring._bundle(db, draft_id, expected_revision)
+                target['evaluation_protocol'] = EVALUATION_PROTOCOL
                 if any(c['profile'] not in bundle['manifest']['profiles'] for c in cases):
                     raise ValueError('评测模式不存在')
                 for case in cases:
@@ -230,6 +235,9 @@ class SkillWorkbench:
                 baseline = json.loads(row[0]) if row else None
             else:
                 bundle, baseline = previous['bundle'], previous['baseline']
+                # Keep a pre-upgrade request's original hash when reading its receipt.
+                if 'evaluation_protocol' in previous:
+                    target['evaluation_protocol'] = previous['evaluation_protocol']
             return {**target, 'bundle': bundle, 'baseline': baseline, 'cases': cases, 'repeats': repeats}
         return self._enqueue(owner, 'evaluation', prepare, request_key)
 
@@ -340,7 +348,9 @@ class SkillWorkbench:
         regression = self.regression(owner, draft_id)
         source = self.jobs(owner, regression['job_id'])['result'] if regression and report else None
         return {'diagnostics': diagnostics(draft['bundle']), 'diff': bundle_diff(before, draft['bundle']),
-                'published_version': pub['version'] if pub else None, 'evaluation': report,
+                'published_version': pub['version'] if pub else None,
+                'evaluation': ({**report, 'display_scores': report_score_counts(report)}
+                               if report and isinstance(report.get('scores'), dict) else report),
                 'regression': regression, 'comparison': compare_reports(source, report),
                 'previous_report': previous_report, 'pending_cases':pending, 'feedback': {'items': feedback},
                 'publication_evidence': publication_evidence(draft['bundle'], draft['revision'], draft['tested_profiles'], report),

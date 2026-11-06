@@ -475,7 +475,7 @@ const editableDraft = (id = "draft") => ({...draft(id), revision: 3,
   tests: [{revision: 3, profile: "preview", status: "reported", prompt: "归纳计划", output: "计划"}],
 });
 
-function skillFixture({initial = editableDraft(), jobs = [], report = null, onAction, onRequest, timers, confirm = () => false, refuseNavigation = false} = {}) {
+function skillFixture({initial = editableDraft(), jobs = [], report = null, onAction, onRequest, createElement = () => new SkillElement(), timers, confirm = () => false, refuseNavigation = false} = {}) {
   const nodes = new Map();
   const $ = selector => { if (!nodes.has(selector)) nodes.set(selector, new SkillElement()); return nodes.get(selector); };
   const view = createLifecycle({timers}).scope();
@@ -528,7 +528,7 @@ function skillFixture({initial = editableDraft(), jobs = [], report = null, onAc
       if (refuseNavigation || !await forms.canLeaveSkillEditor(permit)) return false;
       navigations.push(value); return true;
   };
-  const forms = createSkillForms({document: {createElement: () => new SkillElement()}, $, state: {activeView: "skills"}, api, eventTarget, confirm,
+  const forms = createSkillForms({document: {createElement}, $, state: {activeView: "skills"}, api, eventTarget, confirm,
     FormData: SkillFormData, getScope: () => view, switchView, startTrial: async (trial, permit) => {
       if (await switchView("chat", permit) === false) return false;
       trials.push(trial); $("#chat-form textarea[name='message']").value = ""; return true;
@@ -536,6 +536,57 @@ function skillFixture({initial = editableDraft(), jobs = [], report = null, onAc
   return {forms, $, view, editor, drafts, calls, navigations, windowEvents, trials};
 }
 const submitEvent = target => ({target, preventDefault() {}});
+
+async function importDraftFile(file) {
+  let input;
+  const fixture=skillFixture({createElement:tag=>{
+    const node=new SkillElement();if(tag==='input')input=node;return node;
+  },onAction:action=>action==='import_standard'?{draft_id:'imported'}:undefined});
+  await fixture.forms.loadSkillDrafts();
+  fixture.$('#draft-import').onclick();input.files=[file];await input.onchange();
+  const mutations=fixture.calls.filter(c=>['save','import_standard'].includes(c.action));
+  const message=fixture.$('#draft-error').textContent;
+  fixture.view.dispose();return {mutations,message};
+}
+const jsonFile = value => new Blob([JSON.stringify(value,null,2)]);
+
+test('a native export that crossed 100 KB only because of its source imports the original proposal',async()=>{
+  const profiles=Object.fromEntries([...'abcdefgh'].map(p=>[p,{description:'资'.repeat(400),all:[],any:[],
+    execution:{effects:['read'],allow_batch:false,capabilities:[]}}]));
+  const proposal={name:'长资料草稿',instructions:'文'.repeat(27_000),profiles};
+  const original={format:'agentbridge.skill-draft.v1',proposal};
+  const source={skill_id:'usr-private',revision:2,content_hash:'a'.repeat(64),
+    manifest:{id:'usr-private',version:'0.0.0',schemaVersion:'agentbridge.skills.v1',entrypoint:'SKILL.md',profiles}};
+  assert.ok(jsonFile(original).size<=100_000);assert.ok(jsonFile({...original,source}).size>100_000);
+  for(const pack of [original,{...original,source}]){
+    const {mutations,message}=await importDraftFile(jsonFile(pack));
+    assert.equal(message,'');assert.equal(mutations.length,1);assert.equal(mutations[0].action,'save');
+    assert.deepEqual(mutations[0].data.proposal,proposal);
+    assert.deepEqual(Object.keys(mutations[0].data).sort(),['proposal','provenance','request_key']);
+    assert.deepEqual(mutations[0].data.provenance,{kind:'import'});
+  }
+  const tooLarge={...original,proposal:{...proposal,instructions:'文'.repeat(34_000)},source};
+  const denied=await importDraftFile(jsonFile(tooLarge));
+  assert.deepEqual(denied.mutations,[]);assert.match(denied.message,/草稿内容不能超过 100 KB/);
+});
+
+test('old and standard draft files keep the 100 KB boundary and the hard maximum is checked before reading',async()=>{
+  const sized=(value,size)=>{
+    const raw=JSON.stringify(value);return new Blob([raw,' '.repeat(size-new Blob([raw]).size)]);
+  };
+  for(const value of [{format:'agentbridge.skill-draft.v1',proposal:{name:'旧包'}},{format:'agentskills.files.v1',files:[]}]){
+    const edge=await importDraftFile(sized(value,100_000));assert.equal(edge.mutations.length,1);
+    const over=await importDraftFile(sized(value,100_001));assert.deepEqual(over.mutations,[]);assert.match(over.message,/100 KB/);
+  }
+  for(const source of [{}, {revision:2,content_hash:'a'.repeat(64),extra:true,
+                            manifest:{schemaVersion:'agentbridge.skills.v1',entrypoint:'SKILL.md',version:'0.0.0'}}]){
+    const bogus=await importDraftFile(sized({format:'agentbridge.skill-draft.v1',proposal:{name:'假来源'},source},100_001));
+    assert.deepEqual(bogus.mutations,[]);assert.match(bogus.message,/100 KB/);
+  }
+  let reads=0;
+  const absoluteMax=await importDraftFile({size:256*1024+1,async text(){reads++;return '{}';}});
+  assert.equal(reads,0);assert.deepEqual(absoluteMax.mutations,[]);assert.match(absoluteMax.message,/256 KiB/);
+});
 
 test("leave dialog has explicit actions, Escape stays, and account disposal closes a pending decision", async () => {
   const scope = createLifecycle().scope(), body = new Element();

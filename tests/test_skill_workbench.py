@@ -44,7 +44,15 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.run_jobs(complete)
         report = self.w.jobs('alice', j['job_id'])['result']
         self.assertEqual(len(calls), 4)
-        self.assertEqual(report['scores']['candidate'], {'passed': 2, 'total': 2})
+        self.assertEqual(report['scores']['candidate'], {'passed': 2, 'total': 2, 'skipped': 0})
+        self.assertEqual(report['evaluation_protocol'], 'neutral-text-v1')
+        without_skill = [system for system, _ in calls if 'SKILL.md' not in system]
+        self.assertEqual(len(without_skill), 2)
+        for system in without_skill:
+            self.assertIn('合成文字', system)
+            self.assertIn('业务工具', system)
+            self.assertNotIn('计划', system)
+            self.assertNotIn('完成', system)
         self.assertTrue(report['passed']); self.assertTrue(report['semantic_review_required'])
         self.assertEqual(report['content_hash'], self.a.get('alice', self.d['draft_id'])['bundle']['content_hash'])
         with self.assertRaises(KeyError): self.w.jobs('bob', j['job_id'])
@@ -675,6 +683,37 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.assertEqual(report['revision'],1)
         self.assertEqual(report['baseline'], {'version':'1.0.0','content_hash':original['content_hash']})
         self.assertEqual(self.s.skills.current(self.d['skill_id'])['manifest']['version'],'1.0.1')
+
+    def test_absent_published_mode_skips_output_and_shared_trigger_without_counting_a_model_call(self):
+        self._publish_sample(1)  # The published version has only the use profile.
+        target = self.a.save('alice', draft_id=self.d['draft_id'], expected_revision=1, request_key='add-review',
+            proposal={**self.p, 'profiles': {'use': {}, 'check': {'description': '核对文字'}}})
+        cases = [{'prompt': '整理', 'profile': 'use', 'contains': ['通过']},
+                 {'prompt': '核对', 'profile': 'check', 'contains': ['通过']},
+                 {'prompt': '选择助手', 'profile': 'check', 'kind': 'trigger', 'expected_trigger': True}]
+        job = self.w.evaluate('alice', draft_id=target['draft_id'], expected_revision=2,
+                              cases=cases, request_key='test-new-mode')
+        trigger_systems = []
+        def complete(system, prompt):
+            if prompt == '选择助手':
+                trigger_systems.append(system)
+                return {'text': 'false' if system.endswith('null') else 'true'}
+            return {'text': '通过'}
+        self.run_jobs(complete)
+        report = self.w.jobs('alice', job['job_id'])['result']
+        self.assertEqual(report['scores']['published'], {'passed': 1, 'total': 1, 'skipped': 2})
+        self.assertEqual(report['scores']['candidate'], {'passed': 3, 'total': 3, 'skipped': 0})
+        self.assertTrue(report['passed'])
+        skipped = [r for r in report['rows'] if r.get('skipped')]
+        self.assertEqual([(r['variant'], r['case']) for r in skipped], [('published', 1), ('published', 2)])
+        self.assertTrue(all('output' not in row for row in skipped))
+        self.assertEqual(report['progress_stats']['completed'], 9)
+        self.assertEqual(report['progress_stats']['model_calls'], 7)
+        self.assertEqual(self.w.jobs('alice', job['job_id'])['progress_stats'], report['progress_stats'])
+        self.assertEqual(len(trigger_systems), 2)
+        self.assertTrue(all('整个助手' in prompt for prompt in trigger_systems))
+        self.assertFalse(any('核对文字' in prompt or 'SKILL.md' in prompt for prompt in trigger_systems))
+        self.assertEqual(self.w.inspect('alice', target['draft_id'])['publication_evidence']['shared']['case_indexes'], [2])
 
 
 

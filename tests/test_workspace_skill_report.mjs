@@ -25,6 +25,21 @@ test('new job does not inherit review and historical job reports stay read only'
  assert.match(skillReportHtml(null),/尚无独立评测/);
 });
 
+test('compares results within each attempt, with zero measured controls and changed protocols shown explicitly',()=>{
+ const r=report(); r.cases=[{prompt:'合成材料',profile:'detail'}];
+ r.rows=[{case:0,repeat:0,variant:'without_skill',output:'对照输出',passed:true},
+  {case:0,repeat:0,variant:'published',skipped:'旧模式未配置',passed:false},
+  {case:0,repeat:0,variant:'candidate',output:'候选输出',passed:true}];
+ r.scores={candidate:{passed:1,total:1},published:{passed:0,total:1},without_skill:{passed:1,total:1}};
+ r.display_scores={candidate:{passed:1,total:1,skipped:0},published:{passed:0,total:0,skipped:1},without_skill:{passed:1,total:1,skipped:0}};
+ const html=skillReportHtml(r,{source_revision:1,inputs_equal:true,protocols_equal:false,models:'known_same'});
+ assert.match(html,/历史线上对照（版本未记录）：未测 · 实测 0 · 已跳过 1/);
+ assert.match(html,/原报告汇总 0\/1/);
+ assert.match(html,/评测提示或评分规则已变化/);
+ assert.match(html,/class="skill-report-comparison"[\s\S]*候选输出[\s\S]*旧模式未配置[\s\S]*对照输出/);
+ assert.doesNotMatch(html,/0 毫秒/);
+});
+
 test('an unavailable published mode has no automatic failure or review left to do',()=>{
  const r=report();
  r.rows=[r.rows[0],{key:'0:0:published',case:0,variant:'published',repeat:0,passed:false,skipped:'线上版本无此模式'}];

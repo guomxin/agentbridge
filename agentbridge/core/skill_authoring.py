@@ -16,7 +16,7 @@ from uuid import uuid4
 from agentbridge.core.business_skills import PROTOCOL, _json, validate_skill_bundle
 from agentbridge.core.skill_actions import dispatch_skill_action
 from agentbridge.core.skill_quality import (candidate_review_problems, normalize_standard_metadata,
-    proposal_from_bundle, publication_evidence, standard_document)
+    proposal_from_bundle, publication_evidence, report_score_counts, standard_document)
 from agentbridge.core.user_grants import UserGrantConflict
 
 _REPORT_NOT_SPECIFIED = object()
@@ -410,6 +410,9 @@ class SkillAuthoring:
                 # Older pending requests use the same frozen report; never fetch
                 # live review notes into an already submitted request.
                 snapshot['candidate_problems'] = candidate_review_problems(snapshot.get('evaluation'), json.loads(r['profiles_json']))
+                report = snapshot.get('evaluation')
+                if report and isinstance(report.get('scores'), dict):
+                    snapshot['evaluation'] = {**report, 'display_scores': report_score_counts(report)}
             return {**self._review_public(r),'bundle':bundle, 'quality': snapshot, 'tests':[dict(t) for t in db.execute(
                 "SELECT t.profile,t.prompt,t.output,t.status FROM skill_draft_tests t JOIN skill_review_tests e USING(test_id) WHERE e.request_id=?",(request_id,))]}
 
@@ -541,8 +544,14 @@ class SkillAuthoring:
             return self._receipt(db,owner,request_key,digest,{'draft_id':draft_id,'revision':rev,'status':'draft_saved','published':False})
 
     def export(self, owner, draft_id):
-        draft=self.get(owner,draft_id)
-        return {'format':'agentbridge.skill-draft.v1','proposal':proposal_from_bundle(draft['bundle'])}
+        draft = self.get(owner, draft_id)
+        bundle = draft['bundle']
+        # Importers still save only the proposal as a new draft. The immutable
+        # manifest preserves the original ID and declared resource order for
+        # consumers that verify an independently identified source revision.
+        return {'format': 'agentbridge.skill-draft.v1', 'proposal': proposal_from_bundle(bundle),
+                'source': {'skill_id': draft['skill_id'], 'revision': draft['revision'],
+                           'content_hash': bundle['content_hash'], 'manifest': bundle['manifest']}}
 
     def dispatch(self, owner, action, data):
         return dispatch_skill_action(self, owner, action, data)

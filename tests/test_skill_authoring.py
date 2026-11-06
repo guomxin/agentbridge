@@ -146,6 +146,9 @@ class SkillAuthoringTests(unittest.TestCase):
 
     def test_import_revalidates_and_drops_identity_and_history(self):
         d=self.draft();export=self.a.export('alice',d['draft_id'])
+        original = self.a.get('alice', d['draft_id'])
+        self.assertEqual(export['source'], {'skill_id': original['skill_id'], 'revision': original['revision'],
+            'content_hash': original['bundle']['content_hash'], 'manifest': original['bundle']['manifest']})
         imported=self.a.save('bob',proposal=export['proposal'],request_key='import',provenance={'kind':'import'})
         self.assertNotEqual(d['skill_id'],imported['skill_id'])
         self.assertEqual(self.a.get('bob',imported['draft_id'])['tests'],[])

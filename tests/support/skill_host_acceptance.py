@@ -34,6 +34,7 @@ from agentbridge.workspace.gateway import OpenClawGatewayClient, GatewayRequestE
 from agentbridge.workspace.server import create_workspace_http_server, validate_workspace_server_config
 from tests.authorization_fixtures import grant_permissions
 from tests.support.interaction_acceptance import free_port, write_metadata
+from tests.support.skill_host_acceptance_candidate import load_candidate
 from tests.test_workspace import PASSWORD, _create_account
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -166,6 +167,9 @@ class SyntheticWorker:
 
 class SyntheticReadService(CentralCapabilityService):
     def invoke(self, *, capability_name, **kwargs):
+        if getattr(self, 'text_only', False):
+            self.denied_business_attempts.append({'capability': capability_name})
+            raise PermissionError('SYNTHETIC_ONLY: business calls are disabled in candidate replay')
         if capability_name not in READS:
             raise PermissionError('SYNTHETIC_ONLY: unknown and write capabilities are disabled')
         return super().invoke(capability_name=capability_name, **kwargs)
@@ -204,7 +208,11 @@ def proposals():
 
 
 class SkillHostAcceptance:
-    def __init__(self, home: Path, *, authoring=False):
+    def __init__(self, home: Path, *, authoring=False, candidate=None):
+        if authoring and candidate:
+            raise ValueError('Choose one acceptance suite')
+        self.candidate = candidate
+        self.candidate_copy = None
         self.home = home.expanduser().resolve()
         if self.home.exists() and any(self.home.iterdir()):
             raise ValueError('An empty isolated home is required; existing runtimes are never reused')
@@ -223,6 +231,8 @@ class SkillHostAcceptance:
         self.service = SyntheticReadService(home=self.home / 'central', base_url='https://oa.invalid',
             smartlight_base_url='https://smartlight.invalid/smartlight',
             trusted_card_base_url='http://127.0.0.1:1', worker_factory=lambda session, adapter: SyntheticWorker(session))
+        self.service.text_only = candidate is not None
+        self.service.denied_business_attempts = []
         self.calls = []
         self.resource_calls = []
         self.authoring_calls = []
@@ -231,7 +241,7 @@ class SkillHostAcceptance:
         for system, adapter in self.service._adapters_by_system.items():
             adapter.invoke_capability = self._invoke
             self.service._worker_factories_by_system[system] = lambda session, adapter: SyntheticWorker(session)
-        grant_permissions(self.service.user_grants, ALICE, ['oa.workflow.read'])
+        grant_permissions(self.service.user_grants, ALICE, [] if candidate else ['oa.workflow.read'])
         grant_permissions(self.service.user_grants, BOB, [])
         session = self.service.sessions.get_or_create(user_subject=ALICE, system_id='oa', expected_principal_ref=ALICE)
         self.service.sessions.activate(session['session_id'], observed_principal_ref=ALICE)
@@ -239,7 +249,12 @@ class SkillHostAcceptance:
         self.identities = McpIdentityTokenStore(self.service.db_path)
         self.tokens = {owner: self.identities.issue(user_subject=owner, expected_principal_ref=owner, ttl_seconds=14400)['token'] for owner in (ALICE, BOB)}
         write_metadata(self.home / 'synthetic-identities.json', self.tokens)
-        self.skills = {} if authoring else self._seed()
+        try:
+            self.skills = {} if authoring else self._seed()
+        except Exception:
+            if self.previous_key is None: os.environ.pop('AGENTBRIDGE_SESSION_KEY_FILE', None)
+            else: os.environ['AGENTBRIDGE_SESSION_KEY_FILE'] = self.previous_key
+            raise
         if authoring:
             self.authoring_seed = self._seed_authoring()
         real_dispatch = self.service.skill_authoring.dispatch
@@ -249,6 +264,8 @@ class SkillHostAcceptance:
             try:
                 if authoring:
                     self._check_authoring_action(owner, action, data)
+                elif candidate and owner != ALICE:
+                    raise PermissionError('SYNTHETIC_ONLY: only the candidate fixture owner may read its resources')
                 elif action not in {'resource', 'discover'}:
                     raise PermissionError('SYNTHETIC_ONLY: skill authoring mutations and evaluations are disabled')
                 result = real_dispatch(owner, action, data)
@@ -269,7 +286,7 @@ class SkillHostAcceptance:
         self.app = None
         self.stop_event = threading.Event()
         self.log_levels = {}
-        self.report = {'fixture': FIXTURE, 'candidate': str(ROOT), 'suite': 'authoring' if authoring else 'selection', 'cases': [],
+        self.report = {'fixture': FIXTURE, 'candidate': str(ROOT), 'suite': 'candidate' if candidate else 'authoring' if authoring else 'selection', 'cases': [],
             'evidence_boundary': {'host': 'actual isolated Workspace grant -> agentbridge.workspace.bind -> chat.send -> same-socket authoritative history; no local fallback',
                                  'central': 'candidate real MCP, authorization and skill stores',
                                  'business': 'synthetic read-only OA; no production business evidence',
@@ -277,6 +294,14 @@ class SkillHostAcceptance:
         if authoring:
             self.report['authoring_seed'] = self.authoring_seed
             self.report['evidence_boundary']['evaluation'] = 'precompleted synthetic text report; only actual host control-plane calls are under test, not evaluator or output quality'
+        if candidate:
+            self.report['candidate_replay'] = {'expected_source': candidate.identity, 'source_hash_recomputed': True,
+                'input_hashes': candidate.input_hashes, 'isolated_copy': self.candidate_copy,
+                'scope': 'verified native text-only draft; same method in an isolated synthetic publication',
+                'source_identity_basis': 'caller supplied the original ID, revision and hash separately; content verified against that hash',
+                'synthetic_redacted_declared': True,
+                'automatic_status': 'not_run', 'semantic_review': 'pending'}
+            self.report['evidence_boundary']['business'] = 'text-only candidate; business capabilities denied'
 
     def _check_authoring_action(self, owner, action, data):
         if owner != ALICE or action not in AUTHORING_ACTIONS or not isinstance(data, dict):
@@ -363,18 +388,30 @@ class SkillHostAcceptance:
     def _seed(self):
         authoring = self.service.skill_authoring
         result = {}
-        for kind, proposal in proposals().items():
+        for kind, proposal in ({'candidate': self.candidate.proposal} if self.candidate else proposals()).items():
             draft = authoring.save(ALICE, proposal=proposal, request_key='fixture-' + kind)
+            if self.candidate:
+                saved = authoring.get(ALICE, draft['draft_id'])
+                if not self.candidate.matches_copy(saved['bundle']) or draft['skill_id'] == self.candidate.identity['skill_id']:
+                    raise ValueError('隔离导入后的方法与原始修订不一致，停止回放')
             for profile in proposal['profiles']:
                 trial = authoring.test_start(ALICE, draft_id=draft['draft_id'], expected_revision=1, profile=profile,
                     prompt='合成夹具种子，不是模型评测。', request_key=f'fixture-test-{kind}-{profile}')
                 authoring.test_result(ALICE, test_id=trial['test_id'], output='合成夹具种子，不是模型评测或业务核验。')
             review = authoring.submit(ALICE, draft_id=draft['draft_id'], expected_revision=1,
-                request_key='fixture-publish-' + kind, reason='隔离宿主验收的合成种子', audience=[ALICE, BOB])
+                request_key='fixture-publish-' + kind, reason='隔离宿主验收的合成种子', audience=[ALICE] if self.candidate else [ALICE, BOB])
             authoring.decide(actor={'role': 'admin', 'username': 'synthetic-reviewer'},
                 request_id=review['request_id'], decision='approve', reason='仅隔离夹具', reviewed_tests=True,
                 manual_quality_reason='合成种子用于装载测试，不证明真实模型或业务质量。')
             result[kind] = draft['skill_id']
+            if self.candidate:
+                published = self.service.skills.current(draft['skill_id'])
+                if not self.candidate.matches_copy(published):
+                    raise ValueError('隔离发布后的方法与原始修订不一致，停止回放')
+                self.candidate_copy = {'draft_id': draft['draft_id'], 'skill_id': draft['skill_id'],
+                    'draft_revision': saved['revision'], 'draft_content_hash': saved['bundle']['content_hash'],
+                    'version': published['manifest']['version'], 'published_content_hash': published['content_hash'],
+                    'owner': ALICE, 'method_matches_source': True}
         return result
 
     def account(self, owner, name):
@@ -409,6 +446,10 @@ class SkillHostAcceptance:
         private_text(self.home / 'gateway-token', token)
         config = host_config(self.home, mcp_url=mcp_url or self.start_mcp(), gateway_port=self.gateway_port,
                              gateway_token=token, provider_plugin=provider_plugin, model=model)
+        if self.candidate:
+            config['tools']['allow'] = ['agentbridge_identity_status', 'agentbridge_skill_catalog',
+                                        'agentbridge_skill_get', 'agentbridge_skill_authoring']
+            config['plugins']['entries']['agentbridge-interactions']['config']['boundSkillToolGuard'] = True
         write_metadata(self.home / 'openclaw.json', config)
         self.env = isolated_environment(self.home, self.tokens, ca)
         self.report['model_requested'] = model
@@ -494,6 +535,31 @@ class SkillHostAcceptance:
             events = {row[0] for row in db.execute('SELECT event_id FROM skill_load_events WHERE user_subject=?', (owner,))}
         return events, len(self.calls), len(self.resource_calls)
 
+    def candidate_bindings(self, owner, events):
+        """Read the binding linked to each actual successful load event."""
+        from agentbridge.core.business_skills import validate_skill_bundle
+        result = []
+        with closing(self.service.skills.connect()) as db:
+            for event in events:
+                if event.get('status') != 'succeeded':
+                    continue
+                row = db.execute('''SELECT b.binding_id,b.skill_id,b.profile,b.version,v.content_hash,v.payload_json
+                    FROM skill_load_events e JOIN skill_bindings b ON b.binding_id=e.dedupe_key AND b.user_subject=e.user_subject
+                    JOIN skill_versions v ON v.skill_id=b.skill_id AND v.version=b.version
+                    WHERE e.event_id=? AND e.user_subject=?''', (event['event_id'], owner)).fetchone()
+                evidence = {'event_id': event['event_id'], 'verified': False}
+                if row:
+                    snapshot = json.loads(row['payload_json'])
+                    frozen = validate_skill_bundle(snapshot['manifest'], snapshot['resources'])
+                    evidence.update({key: row[key] for key in ('binding_id', 'skill_id', 'profile', 'version', 'content_hash')})
+                    evidence['verified'] = (owner == ALICE and row['skill_id'] == self.candidate_copy['skill_id']
+                        and row['version'] == self.candidate_copy['version']
+                        and all(event.get(key) == row[key] for key in ('skill_id', 'profile', 'version'))
+                        and frozen['content_hash'] == snapshot['content_hash'] == row['content_hash'] == self.candidate_copy['published_content_hash']
+                        and self.candidate.matches_copy(frozen))
+                result.append(evidence)
+        return result
+
     def run_case(self, case, *, node, openclaw, timeout):
         owner = case.get('owner', ALICE)
         account = self.accounts[owner]
@@ -516,6 +582,7 @@ class SkillHostAcceptance:
         for step, prompt in enumerate([case['prompt']] + ([case['follow_up']] if case.get('follow_up') else [])):
             before, calls_before, resources_before = self.snapshot(owner)
             authoring_before = len(self.authoring_calls)
+            denied_before = len(self.service.denied_business_attempts)
             prompt_file = self.home / 'evidence' / f"{case['id']}-{step}.prompt.txt"
             private_text(prompt_file, prompt)
             started = time.monotonic()
@@ -545,6 +612,21 @@ class SkillHostAcceptance:
             observations = observe(case if step == 0 else {'skill': expected}, payload, events,
                                    self.calls[calls_before:], self.skills, code, self.resource_calls[resources_before:],
                                    resource_attempts=resource_attempts)
+            if self.candidate:
+                bindings = self.candidate_bindings(owner, events)
+                observations['loaded_candidate_bindings'] = bindings
+                binding_ids = {entry['binding_id'] for entry in bindings if entry['verified']}
+                checks = observations['checks']
+                checks['candidate_binding_verified'] = (bool(bindings) == bool(case['skill'])
+                    and all(entry['verified'] for entry in bindings)
+                    and all(entry['binding_id'] in binding_ids for entry in self.resource_calls[resources_before:]))
+                checks['model_observed'] = all(observations['model_observed'].values())
+                checks['assistant_output_received'] = bool(observations['output'].strip())
+                observations['denied_business_attempts'] = self.service.denied_business_attempts[denied_before:]
+                checks['no_business_attempts'] = not observations['denied_business_attempts']
+                checks['no_rejected_loads_or_authoring'] = (all(event.get('status') == 'succeeded' for event in events)
+                    and all(entry['status'] == 'succeeded' for entry in self.authoring_calls[authoring_before:]))
+                observations['paraphrase_of'] = case.get('paraphrase_of')
             if case.get('authoring_check'):
                 control = self.authoring_observation(case['authoring_check'], self.authoring_calls[authoring_before:])
                 observations['authoring'] = control
@@ -596,6 +678,13 @@ class SkillHostAcceptance:
     def save_report(self):
         self.report['updated_at'] = datetime.now(timezone.utc).isoformat()
         write_metadata(self.home / 'evidence/report.json', self.report)
+
+    def candidate_passed(self):
+        rows = self.report['cases']
+        identity = self.report['code_identity']
+        return ([row['id'] for row in rows] == [case['id'] for case in self.candidate.cases]
+                and all(all(row['checks'].values()) for row in rows)
+                and all(identity[key] for key in ('relevant_content_unchanged', 'git_head_unchanged', 'tracked_diff_unchanged')))
 
     def finalize_source_identity(self):
         end = source_identity()
@@ -674,7 +763,12 @@ def main():
     parser.add_argument('--source-agent-dir', type=Path)
     parser.add_argument('--timeout', type=int, default=150)
     parser.add_argument('--cases', help='Comma-separated IDs; default all cases in the selected suite')
-    parser.add_argument('--suite', choices=('selection', 'authoring'), default='selection')
+    parser.add_argument('--suite', choices=('selection', 'authoring', 'candidate'), default='selection')
+    parser.add_argument('--candidate-export', type=Path, help='Local native v1 draft export, text-only and redacted')
+    parser.add_argument('--candidate-cases', type=Path, help='Local agentbridge.skill-host-cases.v1 synthetic questions')
+    parser.add_argument('--expect-skill-id', help='Original skill ID from the source draft detail')
+    parser.add_argument('--expect-revision', type=int, help='Original revision from the source draft detail')
+    parser.add_argument('--expect-content-hash', help='Original frozen bundle hash from the source draft detail')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--prepare', action='store_true', help='Offline seed/config validation; no authentication or model')
     mode.add_argument('--run', action='store_true', help='Actual Gateway agent RPC, distinct synthetic private session per case')
@@ -683,10 +777,25 @@ def main():
     if not args.prepare and (not args.source_config or not args.source_agent_dir):
         parser.error('--run/--serve require explicit model source config and source agent directory')
     selected = set(args.cases.split(',')) if args.cases else None
-    cases = AUTHORING_CASES if args.suite == 'authoring' else json.loads(CASES_PATH.read_text())
+    candidate = None
+    candidate_args = (args.candidate_export, args.candidate_cases, args.expect_skill_id, args.expect_revision, args.expect_content_hash)
+    if args.suite == 'candidate':
+        if args.cases is not None or not all(candidate_args):
+            parser.error('candidate requires both local input files and the independent source ID, revision and hash; run the complete supplied case set')
+        try:
+            candidate = load_candidate(args.candidate_export, args.candidate_cases, {
+                'skill_id': args.expect_skill_id, 'revision': args.expect_revision, 'content_hash': args.expect_content_hash})
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+            # Pydantic errors can include raw method text; avoid echoing external material.
+            parser.error('Invalid candidate input: ' + (str(exc) if type(exc) is ValueError else type(exc).__name__))
+    elif any(value is not None for value in candidate_args):
+        parser.error('candidate inputs require --suite candidate')
+    cases = candidate.cases if candidate else AUTHORING_CASES if args.suite == 'authoring' else json.loads(CASES_PATH.read_text())
     if selected and not selected <= {case['id'] for case in cases}:
         parser.error('Unknown case ID')
-    fixture = SkillHostAcceptance(args.home, authoring=args.suite == 'authoring')
+    fixture = SkillHostAcceptance(args.home, authoring=args.suite == 'authoring', candidate=candidate)
+    if candidate:
+        fixture.report['candidate_replay']['mode'] = 'run' if args.run else 'serve' if args.serve else 'prepare'
     try:
         fixture.configure(provider_plugin=args.provider_plugin.resolve(), model=args.model, ca=args.ca,
                           mcp_url='http://127.0.0.1:1/mcp' if args.prepare else None)
@@ -711,9 +820,12 @@ def main():
                           'model_run_attempted': args.run, 'gateway_started': not args.prepare}), flush=True)
     finally:
         fixture.finalize_source_identity()
+        if candidate and args.run:
+            fixture.report['candidate_replay']['automatic_status'] = 'passed' if fixture.candidate_passed() else 'failed'
         fixture.save_report()
         fixture.close()
+    return int(bool(candidate and args.run and not fixture.candidate_passed()))
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

@@ -1,11 +1,14 @@
 """Offline safety and evidence checks for the optional real-model host harness."""
 import json
 import hashlib
+from contextlib import ExitStack, redirect_stdout
 from copy import deepcopy
+from io import StringIO
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -13,8 +16,9 @@ from unittest.mock import patch
 from agentbridge.core.business_skills import skill_bundle, skill_catalog, validate_binding
 from tests.support.skill_host_acceptance import (
     ALICE, BOB, AUTHORING_CASES, CASES_PATH, ROOT, SkillHostAcceptance, host_config,
-    compare_source_identity, isolated_environment, observe, source_identity,
+    compare_source_identity, isolated_environment, main as harness_main, observe, source_identity,
 )
+from tests.support.skill_host_acceptance_candidate import load_candidate
 
 
 class SkillHostAcceptanceTests(unittest.TestCase):
@@ -148,6 +152,131 @@ class SkillHostAcceptanceTests(unittest.TestCase):
         self.assertEqual(states['a']['execution']['effects'], ['read'])
         self.assertEqual(states['a']['execution']['capabilities'], [])
         self.assertNotEqual(states['a']['description'], states['b']['description'])
+
+    def candidate_input(self, *, permissions=None):
+        source = SkillHostAcceptance(self.home / 'source')
+        self.addCleanup(source.close)
+        authoring = source.service.skill_authoring
+        proposal = {'name': '发布说明', 'description': '按材料写发布说明。', 'instructions': '仅依据给出的材料。',
+            'selection': {'use_when': '整理发布说明', 'not_for': '普通润色', 'output': '简报或核对清单'},
+            'profiles': {'summary': {'description': '给读者做简报', **(permissions or {})}, 'audit': {'description': '给审核人做核对清单'}},
+            'references': {'references/z.md': '按原文概括。', 'references/a.md': '核对遗漏。'},
+            'required_resources': {'summary': ['references/z.md'], 'audit': ['references/a.md']}}
+        draft = authoring.save(ALICE, proposal=proposal, request_key='candidate')
+        proposal['instructions'] += '不得补写效果。'
+        authoring.save(ALICE, draft_id=draft['draft_id'], expected_revision=1, proposal=proposal, request_key='candidate-rev2')
+        original = authoring.get(ALICE, draft['draft_id'])
+        expected = {'skill_id': original['skill_id'], 'revision': 2, 'content_hash': original['bundle']['content_hash']}
+        export_path, cases_path = (self.home / 'candidate.json').resolve(), (self.home / 'cases.json').resolve()
+        export_path.write_text(json.dumps(authoring.export(ALICE, draft['draft_id']), ensure_ascii=False, sort_keys=True))
+        cases = {'format':'agentbridge.skill-host-cases.v1', 'synthetic_redacted': True, 'cases': [
+            {'id':'base', 'prompt':'写个发布简报：手册已更新。', 'profile':'summary', 'manual':'保留更新。',
+             'forbidden_resources':['references/a.md']},
+            {'id':'held-out', 'prompt':'把手册更新这件事简短说给读者。', 'profile':'summary', 'manual':'不补效果。', 'paraphrase_of':'base'},
+            {'id':'adjacent', 'prompt':'只润色：手册已更新。', 'profile':None, 'manual':'直接润色。'}]}
+        cases_path.write_text(json.dumps(cases, ensure_ascii=False))
+        return export_path, cases_path, expected
+
+    def test_candidate_separates_verified_original_copy_publication_and_actual_event_binding(self):
+        export, cases, expected = self.candidate_input()
+        candidate = load_candidate(export, cases, expected)
+        self.assertEqual(list(candidate.proposal['references']), ['references/z.md', 'references/a.md'])
+        self.assertEqual(candidate.cases[0]['required_resources'], ['SKILL.md', 'references/z.md'])
+        fixture = SkillHostAcceptance(self.home / 'copy', candidate=candidate)
+        self.addCleanup(fixture.close)
+        replay = fixture.report['candidate_replay']
+        self.assertEqual(replay['automatic_status'], 'not_run'); self.assertEqual(replay['expected_source'], expected)
+        copy = replay['isolated_copy']
+        self.assertNotEqual(copy['skill_id'], expected['skill_id'])
+        self.assertNotEqual(copy['draft_content_hash'], expected['content_hash'])
+        self.assertNotEqual(copy['published_content_hash'], copy['draft_content_hash'])
+        self.assertEqual(copy['draft_revision'], 1)
+        self.assertEqual(skill_catalog(fixture.service, BOB)['items'], [])
+        store = fixture.service.skills
+        bid = store.bind(ALICE, copy['skill_id'], 'summary')
+        details = store.binding(ALICE, bid)
+        store.record_load(ALICE, copy['skill_id'], 'summary', 'SKILL.md',
+            {'status':'succeeded', 'binding_id':bid, 'version':details['version'], **skill_bundle(details)})
+        events = store.load_history(ALICE)
+        record = fixture.candidate_bindings(ALICE, events)[0]
+        self.assertTrue(record['verified'])
+        self.assertEqual((record['binding_id'],record['content_hash']), (bid,copy['published_content_hash']))
+        self.assertFalse(fixture.candidate_bindings(BOB, events)[0]['verified'])
+        self.assertFalse(fixture.candidate_bindings(ALICE, [{**events[0], 'profile':'audit'}])[0]['verified'])
+        self.assertFalse(fixture.candidate_bindings(ALICE, [{**events[0], 'event_id':'unknown'}])[0]['verified'])
+        with self.assertRaises(PermissionError):
+            fixture.service.invoke(user_subject=ALICE, capability_name='oa.workflow.pending.list', arguments={})
+        self.assertEqual(fixture.service.denied_business_attempts, [{'capability':'oa.workflow.pending.list'}])
+        with self.assertRaises(PermissionError):
+            fixture.service.skill_authoring.dispatch(ALICE, 'submit', {})
+        with self.assertRaises(PermissionError):
+            fixture.service.skill_authoring.dispatch(BOB, 'discover', {})
+
+    def test_candidate_requires_matching_independent_source_and_frozen_proposal(self):
+        export, cases, expected = self.candidate_input()
+        package = json.loads(export.read_text())
+        for invalid in ({**expected, 'revision':1}, {**expected, 'skill_id':'different'}, {**expected, 'content_hash':'a'*64}):
+            with self.subTest(expected=invalid), self.assertRaisesRegex(ValueError, '预期修订'):
+                load_candidate(export, cases, invalid)
+        for patcher, message in [
+            (lambda x:x.pop('source'), '来源'),
+            (lambda x:x['proposal'].update(instructions='改动后的正文'), '固定修订'),
+            (lambda x:x['source']['manifest']['resources'].reverse(), '固定修订'),
+            (lambda x:x['proposal'].update(description='悄悄换简介'), '固定修订'),
+            (lambda x:x['source'].update(revision=True), '预期修订'),
+            (lambda x:x['proposal']['references'].update({'../outside.md':'文本'}), '资料必须')]:
+            altered=deepcopy(package);patcher(altered);export.write_text(json.dumps(altered,ensure_ascii=False))
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                load_candidate(export,cases,expected)
+
+    def test_candidate_rejects_a_valid_business_contract_instead_of_silently_removing_its_tools(self):
+        export, cases, expected = self.candidate_input(permissions={'all':['oa.workflow.read']})
+        with self.assertRaisesRegex(ValueError, '纯文字只读'):
+            load_candidate(export, cases, expected)
+
+    def test_candidate_rejects_unsafe_files_and_malformed_holdouts_before_host_authentication(self):
+        export,cases,expected=self.candidate_input()
+        symlink=self.home.resolve()/'indirect';symlink.symlink_to(export)
+        with self.assertRaises(OSError):load_candidate(symlink,cases,expected)
+        parent=self.home.resolve()/'via-directory';parent.symlink_to(self.home.resolve(),target_is_directory=True)
+        with self.assertRaises(OSError):load_candidate(parent/export.name,cases,expected)
+        package=json.loads(cases.read_text())
+        for change in [lambda x:x.update(synthetic_redacted=False),lambda x:x['cases'][0].update(id='../case'),
+            lambda x:x['cases'][0].update(owner=BOB),lambda x:x['cases'][0].update(prompt='联系 a@example.test'),
+            lambda x:x['cases'][1].update(profile='audit'),lambda x:x['cases'][1].update(paraphrase_of='missing'),
+            lambda x:x['cases'][1].update(prompt=x['cases'][0]['prompt']+'！'),lambda x:x['cases'][1].update(prompt='仅依据给出的材料。'),
+            lambda x:x['cases'][0].update(forbidden_resources=['references/z.md']),
+            lambda x:x['cases'][0].update(optional_resource='../../outside.md')]:
+            data=deepcopy(package);change(data);cases.write_text(json.dumps(data,ensure_ascii=False))
+            with self.assertRaises(ValueError):load_candidate(export,cases,expected)
+        cases.write_bytes(b'x'*(65536+1))
+        with self.assertRaises(ValueError):load_candidate(export,cases,expected)
+        export.write_bytes(b'x'*(256*1024+1))
+        with self.assertRaises(ValueError):load_candidate(export,cases,expected)
+
+    def test_candidate_cli_preserves_failed_evidence_and_preparing_a_copy_never_counts_as_running_it(self):
+        export,cases,expected=self.candidate_input()
+        def synthetic_failure(fixture, case, **_):
+            row={'id':case['id'], 'step':0, 'checks':{'agent_finished':False}, 'semantic_pass':None}
+            fixture.report['cases'].append(row)
+            return [row]
+        for mode, wanted_exit, wanted_state in [('prepare',0,'not_run'), ('run',1,'failed')]:
+            run_home=self.home/('cli-'+mode)
+            args=['skill_host_acceptance','--suite','candidate','--'+mode,'--home',str(run_home),
+                  '--node','/synthetic/node','--openclaw','/synthetic/openclaw','--provider-plugin','/synthetic/provider',
+                  '--candidate-export',str(export),'--candidate-cases',str(cases),'--expect-skill-id',expected['skill_id'],
+                  '--expect-revision','2','--expect-content-hash',expected['content_hash'],
+                  '--source-config','/synthetic/config','--source-agent-dir','/synthetic/agent']
+            with self.subTest(mode=mode), ExitStack() as mocks:
+                mocks.enter_context(patch.object(sys,'argv',args));mocks.enter_context(redirect_stdout(StringIO()))
+                for method in ('configure','validate_host','prepare_provider','prepare_auth','start_gateway'):
+                    mocks.enter_context(patch.object(SkillHostAcceptance,method))
+                mocks.enter_context(patch.object(SkillHostAcceptance,'run_case',synthetic_failure))
+                self.assertEqual(harness_main(),wanted_exit)
+            report=json.loads((run_home/'evidence/report.json').read_text())
+            self.assertEqual(report['candidate_replay']['automatic_status'],wanted_state)
+            self.assertEqual(report['candidate_replay']['semantic_review'],'pending')
+            self.assertEqual(len(report['cases']),0 if mode=='prepare' else 3)
 
     def test_optional_reference_requires_explicit_read_and_authoring_writes_are_denied(self):
         fixture = self.fixture()

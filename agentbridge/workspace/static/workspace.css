@@ -1801,6 +1801,10 @@ td {
 .draft-editor { display: grid; gap: 12px; margin: 20px 0; max-width: 850px; }
 .draft-editor label { display: grid; gap: 6px; }
 .draft-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.skill-report-comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 12px; margin-block: 12px; }
+.skill-report-output { min-width: 0; border-inline-start: 2px solid #dce3ec; padding-inline-start: 10px; overflow-wrap: anywhere; }
+.skill-report-output pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.skill-report-output .draft-editor { min-width: 0; }
 .draft-auto { display: flex; align-items: center; gap: 8px; margin: 16px 0; }
 .draft-auto input { width: auto; }
 #draft-list { display: flex; flex-wrap: wrap; gap: 8px; }
