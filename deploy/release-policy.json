@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "628faf4645fd"
+    "2cfbc8dda315"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Verified deployed predecessor 628faf4645fd. Only trusted review presentation changes: source materials, persisted drafts, authorization, snapshots, expiry and business verification semantics remain compatible. No database schema, configuration or stored data migration."
+  "dataCompatibility": "reviewed-forward-only",
+  "reason": "Verified deployed predecessor 2cfbc8dda315. No schema or data migration. A queued database request without a source must stop when several sources are visible. The predecessor sends this request to the legacy source, including after a retry from an existing host. Automatic rollback after candidate start would reopen this known routing error."
 }

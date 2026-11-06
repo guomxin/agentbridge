@@ -1,11 +1,13 @@
 """Short-lived, owner/source-bound CSV delivery; no historical result API."""
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import base64
 import csv
 import hashlib
 import io
 import json
+import math
 import re
 import sqlite3
 from uuid import uuid4
@@ -15,6 +17,16 @@ from agentbridge.database.independent import DatabaseRejected, _SLOTS, _SOURCE_L
 import threading
 import time
 from agentbridge.database.report_lease import report_lease
+
+
+def _csv_cell(value):
+    if (type(value) is int or (type(value) is float and math.isfinite(value))
+            or (type(value) is Decimal and value.is_finite())):
+        return value
+    text = '' if value is None else str(value)
+    if text.lstrip().startswith(('=', '+', '-', '@')) or text.startswith(('\t', '\r')):
+        return "'" + text
+    return text
 
 
 class Reports:
@@ -102,11 +114,8 @@ class Reports:
             result=self.runtime._execute(owner,cap,query,grant,sid,export=True)
             stream=io.StringIO(newline='')
             writer=csv.writer(stream)
-            def cell(value):
-                value='' if value is None else str(value)
-                return "'"+value if value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r')) else value
-            writer.writerow([cell(k) for k in result['columns']])
-            for row in result['rows']: writer.writerow([cell(row.get(k)) for k in result['columns']])
+            writer.writerow([_csv_cell(k) for k in result['columns']])
+            for row in result['rows']: writer.writerow([_csv_cell(row.get(k)) for k in result['columns']])
             data=stream.getvalue().encode('utf-8-sig')
             if len(data)>record['active']['export_bytes']: raise DatabaseRejected('DATABASE_EXPORT_LIMIT_EXCEEDED')
             self.runtime.unchanged(owner,cap,sid,grant,record)

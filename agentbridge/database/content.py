@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 from html.parser import HTMLParser
 import json
@@ -61,6 +61,14 @@ PAGE_PROPERTIES = {
                             'scope': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'}}, ('date', 'id', 'scope')),
 }
 DATES = ('start_date', 'end_date_exclusive')
+LOG_METRICS = {
+    'log_count': 'count(*)',
+    'registered_hours': 'COALESCE(sum(l.hours),0)',
+    'logged_person_days': 'count(DISTINCT (l.user_id,l.log_date))',
+    'people': 'count(DISTINCT l.user_id)',
+    'unassigned_project_logs': 'count(*) FILTER(WHERE l.project_id IS NULL)',
+    'unassigned_project_hours': 'COALESCE(sum(l.hours) FILTER(WHERE l.project_id IS NULL),0)',
+}
 INPUT_SCHEMAS = {
     'database.schema': object_schema({}),
     'database.directory': object_schema({'entity': {'enum': ['users', 'departments', 'projects']},
@@ -71,7 +79,10 @@ INPUT_SCHEMAS = {
         'page_size': {**PAGE_PROPERTIES['page_size'], 'default': 200},
         'order': {'enum': ['asc', 'desc'], 'default': 'desc'}}, DATES),
     'database.logs.analyze': object_schema({**FILTER_PROPERTIES,
-        'group_by': {'enum': ['none', 'day', 'month', 'person', 'department', 'project'], 'default': 'day'}}, DATES),
+        'baseline_start_date': {'type': 'string', 'format': 'date',
+                                'description': '双周比较的基期开始日期。基期、本期各七天，基期须在本期之前且不重叠。输出两个窗口、各指标两期值、本期减基期的差值和变化百分比（基期为零时为空）。'},
+        'group_by': {'enum': ['none', 'day', 'month', 'person', 'department', 'project'],
+                     'description': '普通统计省略时按日分组；双周比较省略或指定 none，返回两期汇总。'}}, DATES),
     'database.logs.content_analyze': object_schema({**FILTER_PROPERTIES, **PAGE_PROPERTIES,
         'mode': {'enum': list(CONTENT_MODES), 'default': 'summary'}}, DATES),
     'database.comments.analyze': object_schema({**FILTER_PROPERTIES, **PAGE_PROPERTIES,
@@ -125,6 +136,48 @@ def positive_id(raw):
 
 def compile_query(capability, arguments, *, source_scope=''):
     """Only SQL identifiers below are interpolated; all user values are bound."""
+    if capability == 'database.logs.analyze' and isinstance(arguments, dict) and 'baseline_start_date' in arguments:
+        return _compile_week_comparison(arguments)
+    return _compile_single_window(capability, arguments, source_scope=source_scope)
+
+
+def _compile_week_comparison(arguments):
+    week = timedelta(days=7)
+    try:
+        baseline_start = date.fromisoformat(arguments['baseline_start_date'])
+        baseline_end = baseline_start + week
+        start, end = (date.fromisoformat(arguments[name]) for name in DATES)
+        if end - start != week or baseline_end > start or arguments.get('group_by', 'none') != 'none':
+            raise ValueError()
+    except (KeyError, ValueError, TypeError, OverflowError):
+        raise ValueError('INVALID_DATABASE_ARGUMENTS') from None
+
+    filters = arguments.copy()
+    del filters['baseline_start_date']
+    filters['group_by'] = 'none'
+    current = _compile_single_window('database.logs.analyze', filters)
+    baseline = _compile_single_window('database.logs.analyze', {
+        **filters, 'start_date': baseline_start.isoformat(), 'end_date_exclusive': baseline_end.isoformat(),
+    })
+    # Both ordinary summaries always produce one row, including for an empty window.
+    metric_rows = ' UNION ALL '.join(
+        f"SELECT {position} AS position, '{name}' AS metric, CAST(b.{name} AS numeric) AS baseline_value, "
+        f"CAST(c.{name} AS numeric) AS current_value FROM baseline b CROSS JOIN current_week c"
+        for position, name in enumerate(LOG_METRICS)
+    )
+    statement = f'''WITH baseline AS ({baseline.statement}), current_week AS ({current.statement}),
+        metrics AS ({metric_rows})
+        SELECT CAST(%s AS text) AS baseline_start_date, CAST(%s AS text) AS baseline_end_date_exclusive,
+               CAST(%s AS text) AS start_date, CAST(%s AS text) AS end_date_exclusive,
+               metric, baseline_value, current_value, current_value - baseline_value AS delta,
+               round((current_value - baseline_value) * 100.0 / NULLIF(baseline_value, 0), 2) AS change_percent
+        FROM metrics ORDER BY position'''
+    bounds = [value.isoformat() for value in (baseline_start, baseline_end, start, end)]
+    return QueryPlan(statement, baseline.params + current.params + bounds,
+                     department_roots=current.department_roots, include_descendants=current.include_descendants)
+
+
+def _compile_single_window(capability, arguments, *, source_scope=''):
     schema = INPUT_SCHEMAS[capability]
     if not isinstance(arguments, dict) or set(arguments) - set(schema['properties']):
         raise ValueError('INVALID_DATABASE_ARGUMENTS')
@@ -217,10 +270,8 @@ def compile_query(capability, arguments, *, source_scope=''):
                       'project': ('l.project_id', 'p.name'), 'none': ('NULL::text', 'NULL::text')}
             group = arguments.get('group_by', 'day')
             key, label = groups[group]
-            sql = f'''SELECT {key} AS group_id,{label} AS group_label,count(*) AS log_count,
-              COALESCE(sum(l.hours),0) AS registered_hours,count(DISTINCT (l.user_id,l.log_date)) AS logged_person_days,
-              count(DISTINCT l.user_id) AS people,count(*) FILTER(WHERE l.project_id IS NULL) AS unassigned_project_logs,
-              COALESCE(sum(l.hours) FILTER(WHERE l.project_id IS NULL),0) AS unassigned_project_hours'''
+            metrics = ', '.join(f'{expression} AS {name}' for name, expression in LOG_METRICS.items())
+            sql = f'SELECT {key} AS group_id,{label} AS group_label,{metrics}'
             return QueryPlan(prefix + sql + base + (' GROUP BY 1,2 ORDER BY 1 NULLS LAST' if group != 'none' else ''), params,
                              department_roots=roots, include_descendants=descendants)
         page_size = arguments.get('page_size', 200 if capability == 'database.logs.query' else 50)

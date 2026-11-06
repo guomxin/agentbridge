@@ -19,7 +19,7 @@ CAPABILITIES = {
     'database.schema': '数据库结构与口径',
     'database.directory': '人员、部门和项目检索（用于消歧及选择查询条件）',
     'database.logs.query': '日志正文检索（日期、人员、当前部门、项目、字面关键词，支持分页与来源）',
-    'database.logs.analyze': '日志统计分析（按日、月、人员、部门或项目）',
+    'database.logs.analyze': '日志统计分析（按日、月、人员、部门或项目，支持两周总量比较）',
     'database.logs.content_analyze': '日志正文证据读取（筛选、分页、段落及来源；不生成总结或业务判断，归纳方法由适用业务助手提供）',
     'database.comments.analyze': '日志评论分析（评论及关联日志正文；反馈、问答与跟进证据）',
     'database.free.read': '高级：自由只读查询分析（此数据源全部开放对象，支持两时间窗口比较）',
@@ -57,6 +57,7 @@ def rejection_result(exc):
         'DATABASE_CONTENT_CHANGED': '正文在续读期间发生变化，请从开头重新读取，不能拼接不同版本。',
         'DATABASE_LOG_NOT_FOUND': '这条日志不存在或已删除。',
         'DATABASE_CAPABILITY_DENIED': '当前账号未获准使用此数据源能力。',
+        'DATABASE_SOURCE_SELECTION_REQUIRED': '当前账号可访问多个数据源，请明确选择本次使用的来源。',
         'DATABASE_QUERY_FAILED': '数据库查询未完成，请检查数据源结构与可用性；不要据此判断没有记录。',
         'DATABASE_FUNCTION_DENIED': 'SQL 使用了未获准的函数；请核对受支持的查询写法，不能原样重试或扩大查询范围。',
     }
@@ -66,6 +67,7 @@ def rejection_result(exc):
         'DATABASE_SQL_UNSUPPORTED': {'action':'unsupported', 'retry_same_request':False, 'instruction':'组织下级使用标准日志查询 include_descendants；不重复此 SQL。'},
         'INVALID_DATABASE_ARGUMENTS': {'action':'inspect_schema', 'retry_same_request':False, 'instruction':'用 database_capabilities 的 source_id、capability 获取单项参数，修正后重试。'},
         'DATABASE_CAPABILITY_DENIED': {'action':'check_authorization', 'retry_same_request':False, 'instruction':'重新检查当前授权目录；不切换数据源或能力绕过权限。'},
+        'DATABASE_SOURCE_SELECTION_REQUIRED': {'action':'select_source', 'retry_same_request':False, 'instruction':'用 database_capabilities 查看可用来源；按用户指定或已确认的来源传 source_id，来源不明确时请用户选择。'},
         'DATABASE_AUTHORIZATION_CHANGED': {'action':'check_authorization', 'retry_same_request':False},
         'DATABASE_SCOPE_CHANGED': {'action':'restart_pagination', 'retry_same_request':False, 'instruction':'保留范围，从第一页重新核验；不拼接变化前后的页。'},
         'DATABASE_CONTENT_CHANGED': {'action':'restart_document', 'retry_same_request':False, 'instruction':'重新读取同一 log_id 的首片段，使用新版本续读。'},
@@ -253,7 +255,7 @@ class IndependentDatabase:
                 result['sources'].pop()
                 result.update(has_more=True, next_after_source_id=result['sources'][-1]['source_id'])
                 break
-        result['selection_required'] = source_id is None
+        result['selection_required'] = source_id is None and full['selection_required']
         return result
 
     def catalog(self, subject, source_id=None):
@@ -277,9 +279,17 @@ class IndependentDatabase:
             return items[0]
         result={'sources':items,'requires_business_session':False,'selection_required':len(items)>1}
         # Temporary legacy response projection only for the original source.
-        legacy=next((x for x in items if x['source_id']==LEGACY),None)
-        if legacy: result.update(source_id=LEGACY,capabilities=legacy['capabilities'])
+        if len(items) == 1 and items[0]['source_id'] == LEGACY:
+            result.update(source_id=LEGACY,capabilities=items[0]['capabilities'])
         return result
+
+    def resolve_omitted_source(self, subject):
+        sources = self.catalog(subject)['sources']
+        if not sources:
+            raise DatabaseRejected('DATABASE_CAPABILITY_DENIED')
+        if len(sources) != 1:
+            raise DatabaseRejected('DATABASE_SOURCE_SELECTION_REQUIRED')
+        return sources[0]['source_id']
 
     def snapshot(self, subject, capability, source_id):
         grant=self.grants.authorize(subject,capability,source_id)
@@ -315,9 +325,16 @@ class IndependentDatabase:
                 'queried_at': result['queried_at'], 'revision': text_revision(row['content']),
                 'paragraphs': [{'number': i, 'text': text} for i, text in enumerate(plain_text(row['content']).split('\n'), 1)]}
 
-    def execute(self, subject, capability, arguments, source_id=LEGACY, *, original=False):
+    def execute(self, subject, capability, arguments, source_id=None, *, original=False):
+        if source_id is None:
+            source_id = self.resolve_omitted_source(subject)
+        try:
+            validate_source_id(source_id)
+        except ValueError:
+            raise DatabaseRejected('INVALID_DATABASE_ARGUMENTS') from None
         if capability in ('database.report.export','database.report.download'):
             from agentbridge.database.reports import Reports
+            self.snapshot(subject, 'database.report.export', source_id)
             reports=Reports(self)
             return reports.export(subject,source_id,arguments) if capability.endswith('export') else reports.download(subject,source_id,arguments)
         grant=self.grants.authorize(subject,capability,source_id)
@@ -341,7 +358,7 @@ class IndependentDatabase:
             if acquired: slot.release()
             _SLOTS.release()
 
-    def _execute(self, subject, capability, arguments, grant, source_id=LEGACY, *, export=False, original=False):
+    def _execute(self, subject, capability, arguments, grant, source_id, *, export=False, original=False):
         import psycopg
         from agentbridge.database.sources import connect, check_role
         current,record=self.snapshot(subject,capability,source_id)
@@ -477,7 +494,10 @@ class IndependentDatabase:
             result['columns']=list(result['rows'][0]) if result['rows'] else columns
             from agentbridge.database.evidence import prepare_evidence_page
             result=prepare_evidence_page(result,plan,arguments,getattr(self,'original_base_url',''))
-        if not export and len(json.dumps(result,default=str).encode())>1048576: raise DatabaseRejected('DATABASE_RESULT_TOO_LARGE')
+        # CSV needs the database types to distinguish numeric changes from formula-like text.
+        if export:
+            return result
+        if len(json.dumps(result,default=str).encode())>1048576: raise DatabaseRejected('DATABASE_RESULT_TOO_LARGE')
         return json.loads(json.dumps(result,default=str))
 
 
@@ -485,7 +505,7 @@ def main():
     parser = argparse.ArgumentParser(description='独立数据库能力；本机管理员调用入口，不接受业务系统身份。')
     parser.add_argument('--home', type=Path, required=True)
     parser.add_argument('--subject', required=True)
-    parser.add_argument('--source-id', default=LEGACY)
+    parser.add_argument('--source-id')
     parser.add_argument('action', choices=['catalog','execute','grant'])
     parser.add_argument('--capability', choices=list(CAPABILITIES))
     parser.add_argument('--arguments-file', type=Path)
@@ -493,12 +513,16 @@ def main():
     args = parser.parse_args()
     runtime = IndependentDatabase(args.home)
     if args.action == 'grant':
-        result = runtime.grants.set(args.subject,args.capabilities,source_id=args.source_id)
+        result = runtime.grants.set(args.subject,args.capabilities,source_id=args.source_id if args.source_id is not None else LEGACY)
     elif args.action == 'catalog':
         result = runtime.catalog(args.subject,args.source_id)
     else:
         arguments = json.loads(args.arguments_file.read_text(encoding='utf-8-sig')) if args.arguments_file else {}
-        result = runtime.execute(args.subject,args.capability,arguments,args.source_id)
+        try:
+            result = runtime.execute(args.subject,args.capability,arguments,args.source_id)
+        except DatabaseRejected as exc:
+            print(json.dumps(rejection_result(exc), ensure_ascii=False))
+            raise SystemExit(1) from None
     print(json.dumps(result,ensure_ascii=False,default=str,indent=2))
 
 if __name__ == '__main__':
