@@ -129,6 +129,26 @@ class SkillHostAcceptanceTests(unittest.TestCase):
         self.assertFalse(bob['profiles']['use']['available'])
         self.assertFalse(fixture.service.skills.load_history(ALICE))
 
+    def test_handoff_modes_have_the_same_read_only_scope_and_separate_pinned_materials(self):
+        fixture = self.fixture()
+        skill_id = fixture.skills['handoff']
+        states = {}
+        for profile, required, optional in [('a', 'references/note.md', 'references/questions.md'),
+                                            ('b', 'references/questions.md', 'references/note.md')]:
+            with self.subTest(profile=profile):
+                binding_id = fixture.service.skills.bind(ALICE, skill_id, profile)
+                binding = fixture.service.skills.binding(ALICE, binding_id)
+                validate_binding(fixture.service, ALICE, binding)
+                states[profile] = binding['snapshot']['manifest']['profiles'][profile]
+                bundle = skill_bundle(binding)
+                self.assertEqual(bundle['loaded_resources'], ['SKILL.md', required])
+                self.assertEqual(bundle['optional_resources'], [optional])
+                self.assertNotIn('## ' + optional, bundle['content'])
+        self.assertEqual(states['a']['execution'], states['b']['execution'])
+        self.assertEqual(states['a']['execution']['effects'], ['read'])
+        self.assertEqual(states['a']['execution']['capabilities'], [])
+        self.assertNotEqual(states['a']['description'], states['b']['description'])
+
     def test_optional_reference_requires_explicit_read_and_authoring_writes_are_denied(self):
         fixture = self.fixture()
         sid = fixture.skills['weekly']
@@ -183,8 +203,8 @@ class SkillHostAcceptanceTests(unittest.TestCase):
 
     def test_selection_counts_exact_successful_skills_and_preserves_failed_attempts(self):
         skills = {'weekly': 'weekly-id', 'plan': 'plan-id'}
-        weekly = {'skill_id': 'weekly-id', 'status': 'succeeded'}
-        plan = {'skill_id': 'plan-id', 'status': 'succeeded'}
+        weekly = {'skill_id': 'weekly-id', 'profile': 'use', 'status': 'succeeded'}
+        plan = {'skill_id': 'plan-id', 'profile': 'use', 'status': 'succeeded'}
         denied = {'skill_id': 'plan-id', 'status': 'failed', 'error_code': 'SKILL_UNAVAILABLE'}
         for event_list, expected_skill, matches in [
             ([weekly, plan], 'weekly', False), ([weekly, weekly, denied], 'weekly', True),
@@ -197,9 +217,31 @@ class SkillHostAcceptanceTests(unittest.TestCase):
                 self.assertEqual(result['skill_loads']['failed_attempts'], [denied] if denied in event_list else [])
         self.assertEqual(observe({'skill': None}, None, [denied], [], skills, 1)['skill_loads']['successful'], [])
 
+    def test_selection_rejects_wrong_modes_and_optional_reads_of_the_other_modes_material(self):
+        case = next(case for case in json.loads(CASES_PATH.read_text()) if case['id'] == 'handoff-note')
+        skills = {'handoff': 'fixture-handoff'}
+        note, questions = 'references/note.md', 'references/questions.md'
+        expected = {'skill_id': skills['handoff'], 'profile': 'a', 'status': 'succeeded', 'loaded_resources': ['SKILL.md', note]}
+        wrong = {**expected, 'profile': 'b', 'loaded_resources': ['SKILL.md', questions]}
+        def check(events, resource_calls=(), attempts=()):
+            return observe(case, None, events, [], skills, 0, resource_calls, resource_attempts=attempts)
+        self.assertEqual(check([expected])['skill_loads']['successful_bindings'], [{'skill_id': 'fixture-handoff', 'profile': 'a'}])
+        for events in ([wrong], [expected, wrong], [{**expected, 'profile': None}]):
+            with self.subTest(events=events):
+                self.assertFalse(check(events)['checks']['skill_selection'])
+        self.assertFalse(check([wrong])['checks']['required_resources'])
+        self.assertFalse(check([expected, {**expected, 'loaded_resources': ['SKILL.md']}])['checks']['required_resources'])
+        self.assertFalse(check([{**expected, 'loaded_resources': ['SKILL.md', note, questions]}])['checks']['forbidden_resources'])
+        self.assertFalse(check([expected], [{'path': questions}])['checks']['forbidden_resources'])
+        self.assertFalse(check([expected], attempts=[{'path': questions, 'status': 'rejected'}])['checks']['forbidden_resources'])
+        denied = {**wrong, 'status': 'rejected', 'error_code': 'SKILL_UNAVAILABLE'}
+        observed = check([expected, denied])
+        self.assertTrue(all(observed['checks'][key] for key in ('skill_selection', 'required_resources', 'forbidden_resources')))
+        self.assertEqual(observed['skill_loads']['failed_attempts'][0]['profile'], 'b')
+
     def test_cases_include_same_material_different_goals_and_independent_boundaries(self):
         cases = json.loads(CASES_PATH.read_text())
-        self.assertEqual(len(cases), 23)
+        self.assertEqual(len(cases), 25)
         self.assertEqual(len({case['id'] for case in cases}), len(cases))
         contrasts = [case for case in cases if case['id'].startswith('same-material-')]
         self.assertEqual({case['skill'] for case in contrasts}, {None, 'plan', 'weekly'})
@@ -207,7 +249,11 @@ class SkillHostAcceptanceTests(unittest.TestCase):
         self.assertTrue(all(case['no_read'] and case['prompt'].endswith('：明天补测试。') for case in contrasts))
         self.assertTrue(any(case.get('owner') == BOB and case.get('no_read') for case in cases))
         self.assertTrue(any(case.get('follow_up') for case in cases))
-        self.assertEqual({case.get('skill') for case in cases}, {'weekly', 'plan', 'evidence', None})
+        self.assertEqual({case.get('skill') for case in cases}, {'weekly', 'plan', 'evidence', 'handoff', None})
+        handoffs = [case for case in cases if case['skill'] == 'handoff']
+        self.assertEqual({case['profile'] for case in handoffs}, {'a', 'b'})
+        self.assertEqual(len({case['prompt'].split('：', 1)[1] for case in handoffs}), 1)
+        self.assertTrue(all(case['no_read'] and case['required_resources'] and case['forbidden_resources'] for case in handoffs))
 
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the official-auth helper contract')
     def test_auth_helper_copies_access_only_and_rejects_stale_or_other_profiles(self):
@@ -262,7 +308,7 @@ class SkillHostAcceptanceTests(unittest.TestCase):
                 'sessionKey': fixture.accounts[ALICE]['openclaw_session_key']}))
         self.assertEqual(done.returncode, 0, 'Candidate identity router process failed')
         result = json.loads(done.stdout)
-        self.assertEqual(result, {'bound': True, 'catalogItems': 3, 'foreignBound': False, 'sender': ALICE,
+        self.assertEqual(result, {'bound': True, 'catalogItems': 4, 'foreignBound': False, 'sender': ALICE,
                                  'directBound': True, 'directSender': ALICE})
 
 

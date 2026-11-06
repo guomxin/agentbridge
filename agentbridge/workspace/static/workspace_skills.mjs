@@ -4,7 +4,17 @@ import { skillReportHtml, skillProgressHtml, comparisonText, skillReviewSummary 
 import { createSkillConfigurationEditor, configurationProposal } from "./workspace_skill_editor.mjs";
 
 const profileLabels = {preview: "草稿预览", fill: "准备填单", review: "总结与复核", track: "进展追踪", search: "案例检索", single: "单项办理", batch: "批量办理", use: "使用"};
-const profileLabel = profile => profileLabels[profile] || profile;
+const profileLabel = profile => Object.hasOwn(profileLabels, profile) ? profileLabels[profile] : profile;
+
+export function skillCatalogModes(profiles) {
+  return Object.entries(profiles).map(([id, state]) => {
+    const missing = state.missing || [];
+    const usable = !missing.length && Boolean(state.available || state.needs_source);
+    const note = missing.length ? `当前不可用（${missing.join('；')}）` : state.needs_source ? '使用时需选择数据源' : usable ? '' : '当前不可用';
+    return {usable, text: [profileLabel(id), state.description, note].filter(Boolean).join(' · '),
+      show: Boolean(state.description || note)};
+  });
+}
 
 export function skillPublicationCoverage(draft, report, evidence) {
   if (evidence !== undefined) {
@@ -904,7 +914,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
   function addSkillFeedback(card,item) {
     const scope = getScope();
     const draftAction = draftActions(scope);
-    const eligible = profile => Object.hasOwn(item.profiles, profile) && (item.profiles[profile].available !== false || item.profiles[profile].needs_source);
+    const eligible = profile => Object.hasOwn(item.profiles, profile) && !item.profiles[profile].missing?.length && (item.profiles[profile].available !== false || item.profiles[profile].needs_source);
     const details=document.createElement('details');details.innerHTML=`<summary>反馈此版本的效果</summary><p>版本 ${escapeHtml(item.version)} · 反馈仅用于改进方法</p><label>本次使用的模式<select name="profile" required><option value="">请选择具体模式</option>${Object.keys(item.profiles).map(profile=>`<option value="${escapeHtml(profile)}" ${eligible(profile)?'':'disabled'}>${escapeHtml(profileLabel(profile))}（${escapeHtml(profile)}）${eligible(profile)?'':' · 当前不可用'}</option>`).join('')}</select></label><label>效果评价<select name="rating"><option value="useful">有帮助</option><option value="incorrect">结果有误</option><option value="not_applicable">不适用</option></select></label><textarea aria-label="纠正说明" maxlength="1000" placeholder="哪里需要改进？"></textarea><button type="button" class="secondary">保存反馈</button><p role="status"></p>`;
     let saving = false;
     details.querySelector('button').onclick=async()=>{

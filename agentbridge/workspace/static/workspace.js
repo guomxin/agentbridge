@@ -7,7 +7,7 @@ import { createTaskCards } from "./workspace_cards.mjs";
 import { createChatProgress } from "./workspace_progress.mjs";
 import { createChatStream } from "./workspace_stream.mjs";
 import { createComposer } from "./workspace_forms.mjs";
-import { createSkillForms } from "./workspace_skills.mjs";
+import { createSkillForms, skillCatalogModes } from "./workspace_skills.mjs";
 import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
@@ -502,8 +502,18 @@ async function loadSkills() {
       const title = document.createElement("h3"); title.textContent = item.name;
       const text = document.createElement("p"); text.textContent = item.description;
       const note = document.createElement("p");
-      const eligible = Object.values(item.profiles).some(p => p.available || p.needs_source);
-      note.textContent = item.status === "disabled" ? "已停用" : !eligible ? Object.values(item.profiles).flatMap(p => p.missing).join("；") : item.status === "trial" ? "试用 · 结果请结合来源核对" : "可用";
+      const modes = skillCatalogModes(item.profiles);
+      const eligible = modes.some(mode => mode.usable);
+      note.textContent = item.status === "disabled" ? "已停用" : !eligible ? "当前不可用" : item.status === "trial" ? "试用 · 结果请结合来源核对" : "可用";
+      card.append(title, text, note);
+      if (modes.length > 1 || modes.some(mode => mode.show)) {
+        const list = document.createElement("ul");
+        for (const mode of modes) {
+          const line = document.createElement("li"); line.textContent = mode.text;
+          list.append(line);
+        }
+        card.append(list);
+      }
       const button = document.createElement("button"); button.type = "button"; button.className = "secondary"; button.textContent = "使用此助手";
       button.disabled = item.status === "disabled" || !eligible;
       button.addEventListener("click", async () => {
@@ -513,7 +523,7 @@ async function loadSkills() {
         input.value = `请使用“${item.name}”（${item.id}）助手，`;
         input.focus();
       });
-      card.append(title, text, note, button); addSkillFeedback(card,item); container.append(card);
+      card.append(button); addSkillFeedback(card,item); container.append(card);
     }
   } catch (error) {
     if (isCancellation(error)) return; if (isCancellation(error)) return; container.textContent = "业务助手暂时无法加载，请稍后刷新。"; }

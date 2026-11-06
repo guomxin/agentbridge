@@ -42,6 +42,36 @@ class BusinessSkillsTests(unittest.TestCase):
         with self.assertRaisesRegex(SkillRejected, "预览"):
             validate_binding(self.service, "alice", binding, capability="taihua.work_log.create.prepare")
 
+    def test_catalog_and_discovery_describe_only_assigned_modes_without_the_method_body(self):
+        proposal = {
+            'name': '材料助手', 'description': '按请求处理材料',
+            'selection': {'use_when': '处理材料', 'not_for': '其他工作', 'output': '按所选模式处理'},
+            'instructions': '仅加载后可见的处理方法', 'references': {'references/rules.md': '内部核对方法'},
+            'profiles': {'brief': {'description': '压缩成摘要'}, 'check': {'description': '逐句核对'},
+                         'legacy': {}, 'db_only': {'description': '从数据库查询', 'database': {'all': ['database.directory']}}},
+        }
+        sid = 'mode-guide'
+        bundle = self.service.skill_authoring.normalize(sid, proposal)
+        with patch.dict(self.store.registry.items, {sid: bundle}):
+            self.assign({sid: {'profiles': ['brief', 'check', 'legacy']}})
+            catalog = skill_catalog(self.service, 'alice')['items']
+            discovered = self.service.skill_authoring.workbench.discover('alice', '材料助手')['items']
+            self.assertEqual(catalog, discovered)
+            item, = catalog
+            self.assertEqual(item['profile_choices'], ['brief', 'check', 'legacy'])
+            self.assertFalse(item['requires_source'])
+            self.assertEqual(item['profiles']['brief']['description'], '压缩成摘要')
+            self.assertEqual(item['profiles']['check']['description'], '逐句核对')
+            self.assertNotIn('description', item['profiles']['legacy'])
+            serialized = json.dumps(item, ensure_ascii=False)
+            for hidden in ('db_only', '从数据库查询', '仅加载后可见的处理方法', '内部核对方法', 'references/rules.md', 'execution'):
+                self.assertNotIn(hidden, serialized)
+            self.assertEqual(skill_catalog(self.service, 'bob')['items'], [])
+            self.assertEqual(self.service.skill_authoring.workbench.discover('bob', sid)['items'], [])
+            admin = next(i for i in skill_catalog(self.service, 'alice', include_all=True)['items'] if i['id'] == sid)
+            self.assertIn('db_only', admin['profile_choices'])
+            self.assertTrue(admin['requires_source'])
+
     def test_task_retains_revocation_even_after_reassignment_and_restart(self):
         self.assign()
         binding = self.store.bind("alice", "oa-work-log", "preview")
@@ -106,6 +136,21 @@ class BusinessSkillsTests(unittest.TestCase):
             self.assertTrue(dependency_state(self.service, "alice", manifest, "review", "a")["available"])
             self.assertTrue(dependency_state(self.service, "alice", manifest, "review")["needs_source"])
             self.assertFalse(dependency_state(self.service, "alice", manifest, "review", "b")["available"])
+
+    def test_selecting_a_source_only_helps_when_all_business_permissions_are_present(self):
+        requirements = {'all': ['oa.workflow.read'], 'database': {'all': ['database.directory']}}
+        manifest = {'profiles': {'review': requirements}}
+        catalog = {'sources': [{'source_id': 'logs', 'capabilities': [{'name': 'database.directory'}]}]}
+        with patch('agentbridge.database.independent.IndependentDatabase.catalog', return_value=catalog):
+            blocked = dependency_state(self.service, 'bob', manifest, 'review')
+            self.assertEqual(blocked['sources'], ['logs'])
+            self.assertTrue(blocked['missing'])
+            self.assertFalse(blocked['needs_source'])
+            self.assertFalse(dependency_state(self.service, 'bob', manifest, 'review', 'logs')['available'])
+            self.service.user_grants.save('bob', ['oa.workflow.read'], expected_revision=0, actor='admin', reason='fixture')
+            self.assertEqual(dependency_state(self.service, 'bob', manifest, 'review'),
+                             {'available': False, 'missing': [], 'needs_source': True, 'sources': ['logs']})
+            self.assertTrue(dependency_state(self.service, 'bob', manifest, 'review', 'logs')['available'])
 
     def test_task_binding_cannot_be_replaced(self):
         self.assign()

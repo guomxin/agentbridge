@@ -40,6 +40,15 @@ class SkillCatalogVersionTests(unittest.TestCase):
         self.assertNotEqual(before["permissionVersion"], after["permissionVersion"])
         self.assertNotEqual(before["catalogVersion"], after["catalogVersion"])
 
+    def test_mode_description_changes_the_catalog_stamp_independently_of_permission_stamp(self):
+        catalog = skill_catalog(self.service, 'user-a')
+        original = skill_catalog_stamps(self.service, 'user-a', catalog=catalog)
+        updated = deepcopy(catalog)
+        updated['items'][0]['profiles']['preview']['description'] += ' 请核对材料。'
+        stamps = skill_catalog_stamps(self.service, 'user-a', catalog=updated)
+        self.assertNotEqual(original['catalogVersion'], stamps['catalogVersion'])
+        self.assertEqual(original['permissionVersion'], stamps['permissionVersion'])
+
 
 if __name__ == "__main__":
     unittest.main()

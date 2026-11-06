@@ -389,7 +389,7 @@ def dependency_state(service, subject, manifest, profile, source_id=None):
         elif not eligible:
             missing.append("没有具备所需能力的数据源")
         return {"available": not missing and bool(source_id), "missing": missing,
-                "needs_source": not source_id and bool(eligible), "sources": eligible}
+                "needs_source": not missing and not source_id and bool(eligible), "sources": eligible}
     return {"available": not missing, "missing": missing, "needs_source": False, "sources": []}
 
 
@@ -403,15 +403,22 @@ def skill_catalog(service, subject, *, include_all=False):
         if not include_all and not settings:
             continue
         manifest = item["manifest"]
-        profiles = settings["profiles"] if settings else list(manifest["profiles"])
+        visible = settings["profiles"] if settings else list(manifest["profiles"])
+        choices = list(manifest["profiles"]) if include_all else list(visible)
+        profiles = {}
+        for name in visible:
+            state = dependency_state(service, subject, manifest, name, (settings or {}).get("source_id"))
+            description = manifest["profiles"][name].get("description")
+            if settings and isinstance(description, str) and description.strip():
+                state["description"] = description.strip()
+            profiles[name] = state
         items.append({"id": sid, "name": manifest["name"], "description": manifest["description"],
                       "selection": manifest["selection"],
                       "version": manifest["version"], "content_hash": item["content_hash"],
                       "status": global_config["value"].get(sid, manifest.get("status", "trial")),
                       "assigned": bool(settings), "settings": settings,
-                      "requires_source": any("database" in p for p in manifest["profiles"].values()),
-                      "profiles": {p: dependency_state(service, subject, manifest, p, (settings or {}).get("source_id")) for p in profiles},
-                      "profile_choices": list(manifest["profiles"])})
+                      "requires_source": any("database" in manifest["profiles"][p] for p in choices),
+                      "profiles": profiles, "profile_choices": choices})
     return {"schemaVersion": PROTOCOL, "items": items, "revision": user["revision"],
             "global_revision": global_config["revision"], "has_more": False}
 

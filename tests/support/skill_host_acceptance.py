@@ -191,6 +191,15 @@ def proposals():
             'profiles': {'use': {'all': ['oa.workflow.read']}},
             'references': {'references/evidence.md': '核查规则：采购待办应有报价，验收待办应有验收单。以返回 materials 为证据；缺项明确列出。不要把合成夹具说成真实业务核验。'},
             'required_resources': {'use': ['references/evidence.md']}},
+        'handoff': {'name': '交接整理助手', 'description': '根据给出的交接材料撰写交接留言或待确认的问题。',
+            'selection': {'use_when': '用户准备工作交接，想留一段说明或核对缺失信息',
+                          'not_for': '周报、安排计划、直接查询业务记录', 'output': '交接留言或交接确认问题'},
+            'instructions': '只依据用户给出的材料交接工作。按当前模式的必读资料组织回答，保留已知与未知的区别。',
+            'profiles': {'a': {'description': '给接班同事留一段陈述性的交接留言，交代已知进展和尚未确定的事。'},
+                         'b': {'description': '向交班同事提问，把交接材料中尚未确定的信息列成待确认的问题。'}},
+            'references': {'references/note.md': '以“交接留言”开头，用一两句陈述已知进展和尚未确定的事项。不要代为安排负责人。',
+                           'references/questions.md': '以“待确认”开头，把材料里缺失且影响接班的信息写成可直接询问交班同事的问题。'},
+            'required_resources': {'a': ['references/note.md'], 'b': ['references/questions.md']}},
     }
 
 
@@ -356,9 +365,10 @@ class SkillHostAcceptance:
         result = {}
         for kind, proposal in proposals().items():
             draft = authoring.save(ALICE, proposal=proposal, request_key='fixture-' + kind)
-            trial = authoring.test_start(ALICE, draft_id=draft['draft_id'], expected_revision=1, profile='use',
-                prompt='合成夹具种子，不是模型评测。', request_key='fixture-test-' + kind)
-            authoring.test_result(ALICE, test_id=trial['test_id'], output='合成夹具种子，不是模型评测或业务核验。')
+            for profile in proposal['profiles']:
+                trial = authoring.test_start(ALICE, draft_id=draft['draft_id'], expected_revision=1, profile=profile,
+                    prompt='合成夹具种子，不是模型评测。', request_key=f'fixture-test-{kind}-{profile}')
+                authoring.test_result(ALICE, test_id=trial['test_id'], output='合成夹具种子，不是模型评测或业务核验。')
             review = authoring.submit(ALICE, draft_id=draft['draft_id'], expected_revision=1,
                 request_key='fixture-publish-' + kind, reason='隔离宿主验收的合成种子', audience=[ALICE, BOB])
             authoring.decide(actor={'role': 'admin', 'username': 'synthetic-reviewer'},
@@ -530,8 +540,11 @@ class SkillHostAcceptance:
                 'run_id': finals[-1].get('runId')}} if finals else None
             events = [event for event in self.service.skills.load_history(owner, 100) if event['event_id'] not in before]
             expected = case.get('skill') if step == 0 else case.get('follow_up_skill')
+            resource_attempts = [{'path': entry['data'].get('path'), 'status': entry['status']}
+                                 for entry in self.authoring_calls[authoring_before:] if entry['action'] == 'resource']
             observations = observe(case if step == 0 else {'skill': expected}, payload, events,
-                                   self.calls[calls_before:], self.skills, code, self.resource_calls[resources_before:])
+                                   self.calls[calls_before:], self.skills, code, self.resource_calls[resources_before:],
+                                   resource_attempts=resource_attempts)
             if case.get('authoring_check'):
                 control = self.authoring_observation(case['authoring_check'], self.authoring_calls[authoring_before:])
                 observations['authoring'] = control
@@ -540,6 +553,7 @@ class SkillHostAcceptance:
             row = {'id': case['id'], 'step': step, 'prompt': prompt, 'elapsed_seconds': round(time.monotonic() - started, 3),
                    'exit_code': code, 'session_key': session_key, 'skill_events': events,
                    'synthetic_calls': self.calls[calls_before:], 'resource_calls': self.resource_calls[resources_before:],
+                   'resource_attempts': resource_attempts,
                    **observations, 'manual_review': 'pending'}
             outputs.append(row)
             self.report['cases'].append(row)
@@ -615,23 +629,30 @@ class SkillHostAcceptance:
             logging.getLogger(name).setLevel(level)
 
 
-def observe(case, payload, events, calls, skills, exit_code, resource_calls=()):
+def observe(case, payload, events, calls, skills, exit_code, resource_calls=(), *, resource_attempts=()):
     result = payload.get('result', payload) if isinstance(payload, dict) else {}
     text = '\n'.join(str(item.get('text', '')) for item in result.get('payloads', []) if isinstance(item, dict))
     successful = [event for event in events if event.get('status') == 'succeeded']
-    expected = {skills[case['skill']]} if case.get('skill') is not None else set()
-    actual = {event['skill_id'] for event in successful}
-    failed = [{key: event.get(key) for key in ('skill_id', 'status', 'error_code')}
+    expected = {(skills[case['skill']], case.get('profile', 'use'))} if case.get('skill') is not None else set()
+    actual = {(event['skill_id'], event.get('profile')) for event in successful}
+    failed = [{key: event[key] for key in ('skill_id', 'profile', 'status', 'error_code') if key in event}
               for event in events if event.get('status') != 'succeeded']
+    def bindings(pairs):
+        return [{'skill_id': sid, 'profile': profile} for sid, profile in sorted(pairs, key=lambda p: (p[0], p[1] or ''))]
+    required = set(case.get('required_resources', ['references/evidence.md'] if case.get('skill') == 'evidence' else []))
+    matches = [event for event in successful if (event['skill_id'], event.get('profile')) in expected]
+    loaded_paths = {path for event in successful for path in event.get('loaded_resources', [])}
+    read_paths = {call['path'] for call in (*resource_calls, *resource_attempts)}
     metadata = result.get('meta', {})
     agent_meta = metadata.get('agentMeta') or {}
     return {'output': text, 'runtime_metadata': metadata,
-        'skill_loads': {'expected': sorted(expected), 'successful': sorted(actual), 'failed_attempts': failed},
+        'skill_loads': {'expected': sorted({sid for sid, _ in expected}), 'successful': sorted({sid for sid, _ in actual}),
+                        'expected_bindings': bindings(expected), 'successful_bindings': bindings(actual), 'failed_attempts': failed},
         'model_observed': {'provider': agent_meta.get('provider'), 'model': agent_meta.get('model')}, 'checks': {
         'agent_finished': exit_code == 0 and payload is not None,
         'skill_selection': actual == expected,
-        'required_resources': case.get('skill') != 'evidence' or any(event['skill_id'] in expected and
-            'references/evidence.md' in event.get('loaded_resources', []) for event in successful),
+        'required_resources': not required or bool(matches) and all(required.issubset(event.get('loaded_resources', [])) for event in matches),
+        'forbidden_resources': not set(case.get('forbidden_resources', [])).intersection(loaded_paths | read_paths),
         'synthetic_read': not case.get('read') or bool(calls),
         'no_read': not case.get('no_read') or not calls,
         'optional_resource': (any(call['path'] == case['optional_resource'] for call in resource_calls)

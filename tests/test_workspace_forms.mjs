@@ -4,8 +4,17 @@ import { readFileSync } from "node:fs";
 import { createLifecycle } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
 import { createWorkspaceRequests } from "../agentbridge/workspace/static/workspace_request.mjs";
 import { createComposer } from "../agentbridge/workspace/static/workspace_forms.mjs";
-import { createSkillForms, skillPublicationCoverage, skillCandidateDiff, skillCandidateRemovals } from "../agentbridge/workspace/static/workspace_skills.mjs";
+import { createSkillForms, skillPublicationCoverage, skillCandidateDiff, skillCandidateRemovals, skillCatalogModes } from "../agentbridge/workspace/static/workspace_skills.mjs";
 import { createSkillLeaveGuard } from "../agentbridge/workspace/static/workspace_skill_leave.mjs";
+
+test('catalog distinguishes an actionable source choice from a missing business permission', () => {
+  const [blocked, select] = skillCatalogModes({a: {description: '逐条核对', available: false, missing: ['流程查询'], needs_source: true},
+    b: {description: '只列三点', available: false, missing: [], needs_source: true}});
+  assert.equal(blocked.usable, false); assert.match(blocked.text, /逐条核对.*流程查询/);
+  assert.doesNotMatch(blocked.text, /选择数据源/);
+  assert.equal(select.usable, true); assert.match(select.text, /只列三点.*选择数据源/);
+  assert.equal(skillCatalogModes({constructor: {available: true}})[0].text, 'constructor');
+});
 
 class Element {
   dataset = {};
