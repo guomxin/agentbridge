@@ -165,14 +165,20 @@ class SkillJobQueue:
         return bool(row and row[0])
 
     @staticmethod
-    def latest_report(db, owner, draft_id, revision):
+    def latest_report(db, owner, draft_id, revision, *, include_job_id=False):
         row = db.execute(
-            "SELECT result_json FROM skill_jobs WHERE owner_subject=? AND kind='evaluation' "
+            "SELECT job_id,result_json FROM skill_jobs WHERE owner_subject=? AND kind='evaluation' "
             "AND state='succeeded' AND json_extract(payload_json,'$.draft_id')=? "
-            "AND json_extract(payload_json,'$.revision')=? ORDER BY created_at DESC LIMIT 1",
+            "AND json_extract(payload_json,'$.revision')=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
             (owner, draft_id, revision),
         ).fetchone()
-        return json.loads(row[0]) if row else None
+        if not row:
+            return None
+        report = json.loads(row[1])
+        if include_job_id:
+            # Legacy report bodies may predate the embedded job identifier.
+            report['job_id'] = row[0]
+        return report
 
     def claim(self):
         with closing(self._connect()) as db, db:

@@ -198,6 +198,18 @@ test('approval distinguishes old unrecorded human reviews from new unreviewed ou
   html=skillReviewQualityHtml(q);assert.match(html,/1 项未记录/);assert.match(html,/人工复核：未记录/);
 });
 
+test('frozen approval shows its report identifier and excludes skipped rows from review',()=>{
+  const q={diagnostics:{message:'',checks:[]},diff:[],audience_diff:{added:[],removed:[]},
+    evaluation:{job_id:'report-B',passed:true,limitations:'',scores:{},reviews:{'candidate':{status:'acceptable'}},
+      cases:[{prompt:'整理成周报',profile:'preview'}],
+      rows:[{key:'candidate',case:0,variant:'candidate',output:'明天补测试',passed:true},
+        {case:0,variant:'published',passed:false,skipped:'线上版本无此模式'}]}};
+  const html=skillReviewQualityHtml(q);
+  assert.match(html,/提交时的评测报告：report-B/);
+  assert.match(html,/1 项可接受，0 项有问题，0 项未复核，1 项已跳过/);
+  assert.match(html,/整理成周报 · 已跳过<\/summary><p>线上版本无此模式/);
+});
+
 test('approval renders only server-scoped frozen candidate problems for explicit acceptance',()=>{
   const q={diagnostics:{message:'检查',checks:[]},diff:[],audience_diff:{added:[],removed:[]},
     candidate_problems:[

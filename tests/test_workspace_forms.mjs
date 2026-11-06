@@ -900,7 +900,10 @@ test('another jobs refresh neither cancels nor duplicates a slow completed-draft
 
 test('evaluation completion updates its local report and exact task entry while preserving later inputs',async()=>{
   const jobs=[];let sequence=0;
-  const f=skillFixture({jobs,onAction:action=>action==='evaluate'?{job_id:`evaluation-${++sequence}`}:undefined});
+  const f=skillFixture({jobs,onAction:action=>{
+    if (action === 'evaluate') return {job_id:`evaluation-${++sequence}`};
+    if (action === 'inspect') return {...quality('方法检查'),evaluation:jobs.at(-1)?.result || null};
+  }});
   await f.forms.showSkillDraft('draft');
   const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='整理计划';row.querySelector('[name=contains]').value='计划';
   const submit=()=>f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
@@ -914,14 +917,57 @@ test('evaluation completion updates its local report and exact task entry while 
   jobs[1]={...jobs[1],state:'succeeded',result:reviewReport('evaluation-2')};
   await f.forms.refreshSkillJobs();
   assert.match(f.$('#skill-eval-state').textContent,/已完成.*不代表通过/);
-  assert.equal(f.$('#skill-eval-open-job').textContent,'查看本次报告');
-  assert.match(f.$('#skill-evaluation-report').innerHTML,/evaluation-2/);assert.doesNotMatch(f.$('#skill-evaluation-report').innerHTML,/data-review-row|尚无独立评测/);
+  assert.equal(f.$('#skill-eval-open-job').textContent,'复核这次结果');
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/evaluation-2/);assert.match(f.$('#skill-evaluation-report').innerHTML,/data-review-row/);
+  assert.equal(f.$('#skill-pin-regression').hidden,false);
   assert.equal(row.querySelector('[name=prompt]').value,'之后编辑的待测题');assert.equal(f.editor.controls.get('instructions').value,'之后编辑的方法');
   assert.equal(f.forms.canAutoReloadSkillEditor(),false);
-  const older=new SkillElement(),current=new SkillElement();older.dataset.backgroundJob='evaluation-1';current.dataset.backgroundJob='evaluation-2';
-  f.$('#skill-jobs').queries.set('[data-background-job]',[older,current]);f.$('#skill-background-jobs').open=false;
-  f.$('#skill-eval-open-job').onclick();assert.equal(f.$('#skill-background-jobs').open,true);
-  assert.equal(current.querySelector('[data-report-job]').open,true);assert.notEqual(older.querySelector('[data-report-job]').open,true);
+  f.view.dispose();
+});
+
+test('same-revision review, pin and submission follow the report actually displayed',async()=>{
+  const jobs=[],requests=[];
+  let report=reviewReport('A');
+  const f=skillFixture({jobs,onAction:async(action,data)=>{
+    if(action==='evaluate')return {job_id:'B'};
+    if(action==='inspect')return {...quality('检查'),evaluation:report};
+    if(action==='submit' && data.expected_report_job_id!==report.job_id)throw Error('评测报告已更新，请刷新复核报告。');
+  },onRequest:(path,options)=>{
+    if(path==='/api/skill-report-reviews'){requests.push([path,options.body.job_id]);return {version:1,status:'acceptable'};}
+    if(path==='/api/skill-regressions'){requests.push([path,options.body.job_id]);return {job_id:options.body.job_id,cases:[],repeats:1};}
+  }});
+  await f.forms.showSkillDraft('draft');
+  const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='整理周报';row.querySelector('[name=contains]').value='下周';
+  await f.$('#skill-eval-form').onsubmit(submitEvent(f.$('#skill-eval-form')));
+  report=reviewReport('B');report.cases[0].profile='fill';
+  jobs.push({job_id:'B',kind:'evaluation',state:'succeeded',result:report});
+  await f.forms.refreshSkillJobs();
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/A/);
+  const submit=f.$('#draft-submit');await submit.onsubmit(submitEvent(submit));
+  assert.equal(f.calls.filter(call=>call.action==='submit').at(-1).data.expected_report_job_id,'A');
+  assert.match(f.$('#draft-detail-error').textContent,/报告已更新/);
+  const review=attachReviewForm(f);
+  await f.$('#skill-eval-open-job').onclick();
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/B/);
+  assert.doesNotMatch(f.$('#skill-publication-profiles').innerHTML,/value="fill" disabled/);
+  review.querySelector('[name=review_status]').value='acceptable';await review.onsubmit(submitEvent(review));
+  await f.$('#skill-pin-regression').onclick();
+  assert.deepEqual(requests,[['/api/skill-report-reviews','B'],['/api/skill-regressions','B']]);
+  await submit.onsubmit(submitEvent(submit));
+  assert.equal(f.calls.filter(call=>call.action==='submit').at(-1).data.expected_report_job_id,'B');
+  f.view.dispose();
+});
+
+test('late report refresh keeps a review typed after switching began',async()=>{
+  const report=reviewReport('A'),later=deferred();let refreshing=false;
+  const f=skillFixture({onAction:action=>action==='inspect'?(refreshing?later.promise:{...quality('检查'),evaluation:report}):undefined});
+  const form=attachReviewForm(f);await f.forms.showSkillDraft('draft');refreshing=true;
+  const refresh=f.$('#skill-refresh-report').onclick();await flush();
+  form.querySelector('[name=review_note]').value='刚输入的旧报告说明';form.oninput();
+  later.resolve({...quality('检查'),evaluation:reviewReport('B')});await refresh;
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/A/);
+  assert.equal(form.querySelector('[name=review_note]').value,'刚输入的旧报告说明');
+  assert.match(f.$('#skill-report-state').textContent,/先保存复核/);
   f.view.dispose();
 });
 
@@ -935,6 +981,8 @@ test('evaluation terminal notices preserve existing human review and stop follow
   f.$('#skill-evaluation-report').innerHTML='保留原报告和人工复核表单';
   jobs.push({job_id:'new-evaluation',kind:'evaluation',state:'succeeded',result:reviewReport('new-evaluation')});
   await f.forms.refreshSkillJobs();assert.equal(f.$('#skill-evaluation-report').innerHTML,'保留原报告和人工复核表单');
+  await f.$('#skill-eval-open-job').onclick();
+  assert.match(f.$('#skill-report-state').textContent,/先保存复核/);
   assert.equal(review.querySelector('[name=review_note]').value,'尚未保存的人工复核');assert.equal(f.forms.canAutoReloadSkillEditor(),false);
   for(const [state,text] of [['failed',/评测失败.*模型超时/],['canceled',/本次评测已取消/]]){
     jobs[0]={...jobs[0],state,error:'模型超时'};await f.forms.refreshSkillJobs();assert.match(f.$('#skill-eval-state').textContent,text);
@@ -1013,6 +1061,7 @@ test("publication sends the selected eligible subset and rejects untested modes 
   f.$("#draft-submit").formValues.profiles = ["preview"];
   await f.$("#draft-submit").onsubmit(submitEvent(f.$("#draft-submit")));
   const submitted = f.calls.find(c => c.action === "submit").data;
+  assert.equal(submitted.expected_report_job_id,null);
   assert.deepEqual(submitted.profiles, ["preview"]);
   assert.equal(submitted.expected_revision, 3);
   f.view.dispose();
@@ -1451,8 +1500,32 @@ test('fixed regression pinning retains pending inputs and imports original condi
   const imported=f.$('#skill-eval-cases').children[1];
   assert.equal(imported.querySelector('[name=prompt]').value,'整理计划');
   assert.equal(imported.querySelector('[name=excludes]').value,'已完成');
+  assert.equal(f.$('#skill-eval-form').querySelector('[name=repeats]').value,'1','append keeps the current group repeat count');
+  f.$('#skill-use-regression').onclick();
+  assert.equal(f.$('#skill-eval-cases').children.length,2);assert.match(f.$('#skill-eval-state').textContent,/已在列表/);
+  f.$('#skill-replace-regression').onclick();
+  assert.equal(f.$('#skill-eval-cases').children.length,1);
   assert.equal(f.$('#skill-eval-form').querySelector('[name=repeats]').value,'2');
   assert.equal(f.calls.some(c => c.action === 'evaluate'),false);
+  f.view.dispose();
+});
+
+test('importing questions retains a linked blank feedback case, edited mode and custom repetition',async()=>{
+  const ids=['12345678-1234-1234-1234-123456789abc','12345678-1234-1234-1234-123456789abd'];
+  const fixed={revision:3,repeats:1,cases:[{prompt:'整理周报',profile:'preview',kind:'output',contains:['周报'],excludes:[]}]};
+  const f=skillFixture({onAction:action=>action==='inspect'?{...quality('检查'),regression:fixed,
+    feedback:{items:ids.map(feedback_id=>({feedback_id,rating:'incorrect',profile:'preview',source:{kind:'binding'}}))}}:undefined});
+  await f.forms.showSkillDraft('draft');
+  const initial=f.$('#skill-eval-cases').children[0];
+  initial.querySelector('[name=profile]').value='fill';
+  const repeats=f.$('#skill-eval-form').querySelector('[name=repeats]');repeats.value='3';
+  const feedback=f.$('#skill-feedback-list').children;
+  for(const item of feedback)item.children[2].onclick();
+  assert.equal(f.$('#skill-eval-cases').children[0],initial);
+  assert.deepEqual(f.$('#skill-eval-cases').children.slice(1).map(n=>n.dataset.feedbackId),ids);
+  f.$('#skill-use-regression').onclick();f.$('#skill-use-regression').onclick();
+  assert.equal(f.$('#skill-eval-cases').children.length,4);assert.equal(repeats.value,'3');
+  assert.equal(initial.querySelector('[name=profile]').value,'fill');
   f.view.dispose();
 });
 
@@ -1591,11 +1664,11 @@ test('fresh report starts unreviewed and does not borrow prior report judgement'
   let active=saved;
   const f=skillFixture({onAction:action=>action==='inspect'?{...quality('检查'),evaluation:active}:undefined});
   let form=attachReviewForm(f,{status:'problem',note:'旧输出补写了效果。'});await f.forms.showSkillDraft('draft');
-  assert.match(f.$('#skill-quality-panel').innerHTML,/1 项有问题/);
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/1 项有问题/);
   active=reviewReport('new-job');form=attachReviewForm(f);await f.forms.showSkillDraft('draft');
   assert.equal(form.querySelector('[name=review_status]').value,'unreviewed');
   assert.equal(form.querySelector('[name=review_note]').value,'');
-  assert.match(f.$('#skill-quality-panel').innerHTML,/0 项有问题，1 项未复核/);
+  assert.match(f.$('#skill-evaluation-report').innerHTML,/0 项有问题，1 项未复核/);
   f.view.dispose();
 });
 

@@ -25,6 +25,16 @@ test('new job does not inherit review and historical job reports stay read only'
  assert.match(skillReportHtml(null),/尚无独立评测/);
 });
 
+test('an unavailable published mode has no automatic failure or review left to do',()=>{
+ const r=report();
+ r.rows=[r.rows[0],{key:'0:0:published',case:0,variant:'published',repeat:0,passed:false,skipped:'线上版本无此模式'}];
+ r.reviews={'0:0:candidate':{status:'acceptable'}};
+ const html=skillReportHtml(r,null,true);
+ assert.match(html,/1 项可接受，0 项有问题，0 项未复核，1 项已跳过/);
+ assert.match(html,/已跳过<\/p><p>线上版本无此模式/);
+ assert.doesNotMatch(html,/自动断言未通过|data-review-row="0:0:published"/);
+});
+
 test('progress distinguishes processed rows, recorded calls and complete estimated usage',()=>{
  const stats={completed:3,total:6,model_calls:2,usage:{input:1000,output:500,totalTokens:1500,cost_estimate_usd:0.01234},usage_calls:2,priced_calls:2,usage_complete:true,cost_complete:true};
  const html=skillProgressHtml(stats);

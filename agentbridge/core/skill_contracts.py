@@ -68,6 +68,7 @@ class SkillAuthoringData(StrictModel):
     proposal: SkillProposal | None = None
     draft_id: str | None = None
     expected_revision: int | None = None
+    expected_report_job_id: str | None = None
     expected_version: int | None = None
     request_key: str | None = None
     provenance: dict | None = None

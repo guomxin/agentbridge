@@ -2,6 +2,7 @@
 from contextlib import closing
 from copy import deepcopy
 from tempfile import TemporaryDirectory
+import json
 import unittest
 
 from agentbridge.core.central_service import CentralCapabilityService
@@ -82,6 +83,51 @@ class SkillReportReviewTests(unittest.TestCase):
         self.assertEqual(before['evaluation']['reviews']['0:0:candidate']['status'],'acceptable')
         self.review(report,expected_version=1)
         self.assertEqual(self.authoring.review_detail(request['request_id'])['quality'],before)
+
+    def test_submission_freezes_only_the_seen_report_and_replays_the_original_receipt(self):
+        values = dict(draft_id=self.draft['draft_id'], expected_revision=1, request_key='submit', reason='已核对')
+        first = self.evaluate()
+        second = self.evaluate('second')
+        for stale in (first['job_id'], None, 'foreign-job'):
+            with self.subTest(stale=stale), self.assertRaisesRegex(UserGrantConflict, '评测报告已更新'):
+                self.authoring.submit('alice', **values, expected_report_job_id=stale)
+        with self.assertRaises(KeyError):
+            self.authoring.submit('bob', **values, expected_report_job_id=second['job_id'])
+        self.assertEqual(self.authoring.reviews('alice')['items'], [])
+        seen = {**values, 'expected_report_job_id':second['job_id']}
+        self.review(second, status='acceptable')
+        submitted = self.authoring.submit('alice', **seen)
+        self.evaluate('third')
+        self.assertEqual(self.authoring.submit('alice', **seen), submitted)
+        snapshot = self.authoring.review_detail(submitted['request_id'])['quality']['evaluation']
+        self.assertEqual(snapshot['job_id'], second['job_id'])
+        self.assertEqual(snapshot['reviews']['0:0:candidate']['status'], 'acceptable')
+        with self.assertRaisesRegex(UserGrantConflict, '请求标识'):
+            self.authoring.submit('alice', **values, expected_report_job_id=first['job_id'])
+
+    def test_explicit_no_report_allows_sample_submission_only_while_there_is_no_report(self):
+        sample = self.authoring.test_start('alice', draft_id=self.draft['draft_id'], expected_revision=1,
+            profile='use', prompt='明天补测试。', request_key='sample')
+        self.authoring.test_result('alice', test_id=sample['test_id'], output='明天补测试。')
+        values = dict(draft_id=self.draft['draft_id'], expected_revision=1, request_key='submit', reason='检查样例')
+        submitted = self.authoring.submit('alice', **values, expected_report_job_id=None)
+        self.assertIsNone(self.authoring.review_detail(submitted['request_id'])['quality']['evaluation'])
+        # Missing and explicit null have distinct meanings, even on retries.
+        with self.assertRaisesRegex(UserGrantConflict, '请求标识'):
+            self.authoring.submit('alice', **values)
+        self.authoring.withdraw('alice', submitted['request_id'])
+        report = self.evaluate()
+        with closing(self.workbench.store.connect()) as db, db:
+            legacy = dict(report)
+            legacy.pop('job_id')
+            db.execute('UPDATE skill_jobs SET result_json=? WHERE job_id=?', (json.dumps(legacy), report['job_id']))
+        self.assertEqual(self.workbench.inspect('alice', self.draft['draft_id'])['evaluation']['job_id'], report['job_id'])
+        values['request_key'] = 'legacy-submit'
+        with self.assertRaisesRegex(UserGrantConflict, '评测报告已更新'):
+            self.authoring.submit('alice', **values, expected_report_job_id=None)
+        # An older caller without this field still freezes the latest report.
+        received = self.authoring.submit('alice', **values)
+        self.assertEqual(self.authoring.review_detail(received['request_id'])['quality']['evaluation']['job_id'], report['job_id'])
 
     def test_fixed_report_comparison_marks_only_new_candidate_regressions(self):
         first = self.evaluate(repeats=2)

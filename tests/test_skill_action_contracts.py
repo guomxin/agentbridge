@@ -57,6 +57,9 @@ class SkillActionContractTests(unittest.TestCase):
                 # for all prior fields and definitions rather than replacing it.
                 current.get('properties', {}).pop('standard_metadata', None)
                 current.get('properties', {}).pop('expected_version', None)
+                if name == 'SkillAuthoringData':
+                    field = current['properties'].pop('expected_report_job_id')
+                    self.assertEqual(field['anyOf'], [{'type':'string'}, {'type':'null'}])
                 current.get('$defs', {}).pop('SkillStandardMetadata', None)
                 current.get('$defs', {}).pop('SkillExecution', None)
                 current.get('$defs', {}).get('SkillProposal', {}).get('properties', {}).pop('standard_metadata', None)
@@ -92,6 +95,9 @@ class SkillActionContractTests(unittest.TestCase):
                         self.assertIsNone(signature.parameters[name].default)
                     baseline_signature = signature.replace(parameters=[p for p in signature.parameters.values()
                         if p.name not in {'test_id', 'binding_id'}])
+                if definition.name == 'submit':
+                    baseline_signature = signature.replace(parameters=[p for p in signature.parameters.values()
+                        if p.name != 'expected_report_job_id'])
                 self.assertEqual(str(baseline_signature), expected['signature'])
                 params = [p for p in signature.parameters.values() if p.name != 'owner' and not p.name.startswith('_')]
                 required = tuple(p.name for p in params if p.default is inspect.Parameter.empty)

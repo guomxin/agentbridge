@@ -96,10 +96,11 @@ export function skillReviewQualityHtml(q, selectedProfiles = [], {canReview = fa
     const status = saved ? (Object.hasOwn(reviewLabels, saved.status) ? saved.status : 'unknown') : hasReviewSnapshot ? 'unreviewed' : 'unknown';
     return {status, note:saved?.note || ''};
   };
-  const reviewCounts = {unreviewed:0,acceptable:0,problem:0,unknown:0};
-  for (const row of report?.rows || []) reviewCounts[rowReview(row).status]++;
+  const reviewCounts = {unreviewed:0,acceptable:0,problem:0,unknown:0,skipped:0};
+  for (const row of report?.rows || []) reviewCounts[row.skipped ? 'skipped' : rowReview(row).status]++;
+  const skipped = reviewCounts.skipped ? `，${reviewCounts.skipped} 项已跳过` : '';
   const reviewSummary = hasReviewSnapshot
-    ? `提交时人工复核：${reviewCounts.acceptable} 项可接受，${reviewCounts.problem} 项有问题，${reviewCounts.unreviewed} 项未复核${reviewCounts.unknown ? `，${reviewCounts.unknown} 项未记录` : ''}。仅对应本次申请冻结的输出，不改变自动断言成绩。`
+    ? `提交时人工复核：${reviewCounts.acceptable} 项可接受，${reviewCounts.problem} 项有问题，${reviewCounts.unreviewed} 项未复核${skipped}${reviewCounts.unknown ? `，${reviewCounts.unknown} 项未记录` : ''}。仅对应本次申请冻结的输出，不改变自动断言成绩。`
     : '提交时人工复核未记录；不能据此判断是否已人工检查。';
   const problems = q.candidate_problems || [];
   const problemHtml = problems.length ? `<section><h3>本次申请的候选问题（${problems.length} 项）</h3>
@@ -117,10 +118,15 @@ export function skillReviewQualityHtml(q, selectedProfiles = [], {canReview = fa
     <details><summary>版本差异（${q.diff.length} 项）</summary>${q.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre class="skill-review-text">${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
     <p>新增使用用户：${escapeHtml(q.audience_diff.added.join('、')||'无')}；移除：${escapeHtml(q.audience_diff.removed.join('、')||'无')}</p>
     ${scoped?`<p><strong>${eligible?'本次申请的模式具备发布依据，仍需人工复核':'本次申请的模式存在阻断，不能批准'}</strong></p><p>${escapeHtml(q.publication_evidence.shared.reason)}</p>${rows.map((row,index)=>`<p>${escapeHtml(selectedProfiles[index])}：${escapeHtml(row?.evidence||'缺少发布依据')}</p>`).join('')}`:''}
-    ${report?`${scoped?'':`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p>`}<p>${escapeHtml(report.limitations)}</p>
+    ${report?`${report.job_id ? `<p>提交时的评测报告：${escapeHtml(report.job_id)}</p>` : ''}${scoped?'':`<p><strong>${report.passed?'独立断言通过，语义仍需人工复核':'独立评测未通过，不能批准'}</strong></p>`}<p>${escapeHtml(report.limitations)}</p>
     ${Object.entries(report.scores).map(([k,v])=>`<p>${labels[k]}：${v.passed}/${v.total}</p>`).join('')}
     <p>${escapeHtml(reviewSummary)}</p>
-    ${report.rows.map(r=>`<details><summary>${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||'模式不可用')} · ${r.passed?'通过':'未通过'} · 人工复核：${reviewLabels[rowReview(r).status]}</summary><pre class="skill-review-text">${escapeHtml(r.output||r.skipped)}</pre><p>${escapeHtml(r.model||'')}</p>${rowReview(r).note ? `<p>复核说明：</p><pre class="skill-review-text">${escapeHtml(rowReview(r).note)}</pre>` : ''}${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`).join('')}`:''}
+    ${report.rows.map(r=>{
+      const label = `${labels[r.variant]} · ${escapeHtml(report.cases?.[r.case]?.profile||'未记录模式')} · ${escapeHtml(r.prompt||report.cases?.[r.case]?.prompt||'模式不可用')}`;
+      if (r.skipped) return `<details><summary>${label} · 已跳过</summary><p>${escapeHtml(r.skipped)}</p></details>`;
+      const review = rowReview(r);
+      return `<details><summary>${label} · ${r.passed?'通过':'未通过'} · 人工复核：${reviewLabels[review.status]}</summary><pre class="skill-review-text">${escapeHtml(r.output)}</pre><p>${escapeHtml(r.model||'')}</p>${review.note ? `<p>复核说明：</p><pre class="skill-review-text">${escapeHtml(review.note)}</pre>` : ''}${(r.checks||[]).map(c=>`<p>${c.passed?'✓':'×'} ${c.rule==='contains'?'应包含':c.rule==='excludes'?'不应包含':'触发判断'}：${escapeHtml(c.value||'')}</p>`).join('')}</details>`;
+    }).join('')}`:''}
     ${problemHtml}
     ${manual?`<p>申请中有模式仅有人工样例。批准时须说明人工验证方法；此说明不会被标为独立评测通过。</p><label>人工验证说明<textarea name="manual_quality_reason" maxlength="1000">${escapeHtml(q.manual_quality_reason||'')}</textarea></label>`:''}`;
 }

@@ -1,6 +1,6 @@
 import { isCancellation } from "./workspace_lifecycle.mjs";
 import { createSkillLeaveGuard } from "./workspace_skill_leave.mjs";
-import { skillReportHtml, skillProgressHtml, comparisonText } from "./workspace_skill_report.mjs";
+import { skillReportHtml, skillProgressHtml, comparisonText, skillReviewSummary } from "./workspace_skill_report.mjs";
 import { createSkillConfigurationEditor, configurationProposal } from "./workspace_skill_editor.mjs";
 
 const profileLabels = {preview: "草稿预览", fill: "准备填单", review: "总结与复核", track: "进展追踪", search: "案例检索", single: "单项办理", batch: "批量办理", use: "使用"};
@@ -222,7 +222,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       const evaluationDirty = () => JSON.stringify(readEvaluation()) !== savedEvaluation;
       const editorSnapshot = () => JSON.stringify({method: readFields(), evaluation: readEvaluation(), reviews: reviewForms.map(reviewValue)});
       let busy = false;
-      let coverage = null;
+      let coverage = null, displayedReportId = null;
       const isDirty = () => JSON.stringify(readFields()) !== JSON.stringify(savedFields);
       const refreshState = () => {
         if (!scope.current()) return;
@@ -335,12 +335,13 @@ export function createSkillForms({ document, state, $, api: request, switchView,
           const audience = f.getAll("audience");
           const permit = leaveGuard.capture();
           await perform(async () => {
-            await draftAction("submit", {draft_id:id, expected_revision:d.revision, request_key:crypto.randomUUID(), reason:f.get("reason"), profiles, ...(audience.length ? {audience} : {})});
+            await draftAction("submit", {draft_id:id, expected_revision:d.revision, expected_report_job_id:displayedReportId, request_key:crypto.randomUUID(), reason:f.get("reason"), profiles, ...(audience.length ? {audience} : {})});
             await showSkillDraft(id, permit);
           });
         } catch (e) { error(e); }
       };
-      const controls = {requireSaved, refreshState, perform, setCoverage: value => {coverage = value;},
+      const controls = {requireSaved, refreshState, perform, setCoverage: (value, reportId) => {coverage = value; displayedReportId = reportId;},
+        canSwitchReport: () => !busy && !leaveGuard.busy() && !reviewDirty(),
         setReviewForms: forms => {reviewForms = forms; leaveGuard.update();},
         reviewChanged: () => leaveGuard.update(),
         evaluation: () => retainedEvaluation,
@@ -419,7 +420,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     const data = await draftActions(scope)("jobs");
     scope.assertCurrent();
     renderSkillJobs(data.items);
-    updateEvaluation?.(data.items);
+    await updateEvaluation?.(data.items);
     await updateGeneration?.(data.items);
   }
   function openBackgroundJob(jobId) {
@@ -536,45 +537,59 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       <details><summary>与线上版本的差异（${quality.diff.length} 项）</summary>${quality.diff.map(c=>`<p>${escapeHtml(c.field)}</p><pre>${escapeHtml(c.diff??JSON.stringify({原来:c.before,现在:c.after},null,2))}</pre>`).join('')}</details>
       <button id="skill-standard-export" class="secondary" type="button">导出标准 Skill 文件包</button><p id="skill-standard-export-state" role="status"></p>
       <h4>独立评测</h4><p>仅使用合成文字，无业务工具。输入简短问题及可检查的期望；断言不会提供给被测模型。适用场景判断仅检查方法说明，不证明宿主实际选择或加载。</p>
-      <div id="skill-evaluation-report">${skillReportHtml(quality.evaluation, quality.comparison, true)}</div>
+      <button id="skill-refresh-report" type="button" class="secondary">刷新复核报告</button><p id="skill-report-state" role="status"></p>
+      <div id="skill-evaluation-report"></div>
       <p id="skill-regression-status"></p><div class="draft-actions">
-      ${quality.evaluation ? '<button id="skill-pin-regression" type="button" class="secondary">将本次评测题目设为常用回归题</button>' : ''}
+      <button id="skill-pin-regression" type="button" class="secondary" hidden>将本次评测题目设为常用回归题</button>
       <button id="skill-use-regression" type="button" class="secondary" hidden>使用常用回归题</button>
+      <button id="skill-replace-regression" type="button" class="secondary" hidden>用固定题替换当前题目</button>
       <button id="skill-clear-regression" type="button" class="secondary" hidden>取消固定</button></div>
-      ${quality.previous_report ? `<button id="skill-reuse-cases" class="secondary" type="button">用上次样例重测</button><p>来源：修订 ${quality.previous_report.revision} 的上次评测。仅复用问题和验收条件，不继承通过结论。</p>` : ''}
+      <button id="skill-reuse-cases" class="secondary" type="button" hidden>用上次样例重测</button><p id="skill-reuse-source" hidden></p>
       <form id="skill-eval-form" class="draft-editor"><div id="skill-eval-cases"></div><div class="draft-actions"><button id="skill-add-case" type="button" class="secondary">添加样本</button><label>每项重复<select name="repeats"><option>1</option><option>2</option><option>3</option></select></label><button type="button" id="skill-save-pending" class="secondary">保存待测题目</button><button id="skill-eval-submit">启动独立评测</button></div><p id="skill-eval-state" role="status">可先保存待测题目，稍后再启动评测；保存不代表评测通过。</p><button id="skill-eval-open-job" type="button" class="secondary" hidden>查看本次后台任务</button></form>
       <h4>我的近期反馈</h4><p>反馈用于发现需要检查的问题，不代表独立评测通过。</p><button type="button" id="skill-refresh-feedback" class="secondary">刷新反馈进度</button><p id="skill-feedback-state" role="status"></p><div id="skill-feedback-list"></div>`;
-    const reviewForms = [...root.querySelectorAll('[data-review-row]')];
-    const reviewValue = form => JSON.stringify({status:form.querySelector('[name=review_status]').value,note:form.querySelector('[name=review_note]').value});
-    for (const form of reviewForms) {
-      let version = quality.evaluation.reviews?.[form.dataset.reviewRow]?.version || 0;
-      form.dataset.savedReview = reviewValue(form);
-      form.oninput = form.onchange = controls.reviewChanged;
-      form.onsubmit = async event => {
-        event.preventDefault();
-        const value = reviewValue(form), fields = JSON.parse(value), status = form.querySelector('[role=status]');
-        await controls.perform(async () => {
-          try {
-            const saved = await request('/api/skill-report-reviews', {method:'POST', csrf:true, scope,
-              body:{job_id:quality.evaluation.job_id,row_key:form.dataset.reviewRow,...fields,expected_version:version}});
-            scope.assertCurrent(); version = saved.version; form.dataset.savedReview = value;
-            quality.evaluation.reviews ||= {}; quality.evaluation.reviews[form.dataset.reviewRow] = saved;
-            const counts = {acceptable:0,problem:0,unreviewed:0};
-            for(const row of quality.evaluation.rows) counts[quality.evaluation.reviews[row.key]?.status || 'unreviewed']++;
-            root.querySelector('[data-review-summary]').textContent = `人工复核：${counts.acceptable} 项可接受，${counts.problem} 项有问题，${counts.unreviewed} 项未复核。复核只对本次结果有效。`;
-            status.textContent = value === reviewValue(form) ? '复核已保存。' : '已保存刚才的复核，当前仍有未保存修改。';
-            controls.reviewChanged();
-            await refreshFeedback();
-          } catch(error) {if(scope.current()&&!isCancellation(error))status.textContent=error.message;}
-        });
-      };
+    let reportRequest = 0;
+    function bindReport(preserveSelection = false) {
+      const report = quality.evaluation;
+      $('#skill-evaluation-report').innerHTML = skillReportHtml(report, quality.comparison, true);
+      const reviewForms = [...root.querySelectorAll('[data-review-row]')];
+      const reviewValue = form => JSON.stringify({status:form.querySelector('[name=review_status]').value,note:form.querySelector('[name=review_note]').value});
+      for (const form of reviewForms) {
+        let version = report.reviews?.[form.dataset.reviewRow]?.version || 0;
+        form.dataset.savedReview = reviewValue(form);
+        form.oninput = form.onchange = controls.reviewChanged;
+        form.onsubmit = async event => {
+          event.preventDefault();
+          const value = reviewValue(form), fields = JSON.parse(value), status = form.querySelector('[role=status]');
+          await controls.perform(async () => {
+            try {
+              ++reportRequest;
+              const saved = await request('/api/skill-report-reviews', {method:'POST', csrf:true, scope,
+                body:{job_id:report.job_id,row_key:form.dataset.reviewRow,...fields,expected_version:version}});
+              scope.assertCurrent(); version = saved.version; form.dataset.savedReview = value;
+              report.reviews ||= {}; report.reviews[form.dataset.reviewRow] = saved;
+              root.querySelector('[data-review-summary]').textContent = skillReviewSummary(report);
+              status.textContent = value === reviewValue(form) ? '复核已保存。' : '已保存刚才的复核，当前仍有未保存修改。';
+              controls.reviewChanged();
+              await refreshFeedback();
+            } catch(error) {if(scope.current()&&!isCancellation(error))status.textContent=error.message;}
+          });
+        };
+      }
+      controls.setReviewForms(reviewForms);
+      const modes = $('#skill-publication-profiles');
+      const priorSelection = preserveSelection ? new Set([...modes.querySelectorAll('input[name="profiles"]:checked')].map(input => input.value)) : null;
+      const coverage = skillPublicationCoverage(d, report, quality.publication_evidence);
+      modes.innerHTML = '<legend>本次发布模式</legend>' +
+        (quality.publication_evidence?.shared?.reason ? `<p>${escapeHtml(quality.publication_evidence.shared.reason)}</p>` : '') + coverage.map(c =>
+        `<label><input type="checkbox" name="profiles" value="${escapeHtml(c.profile)}" ${!c.eligible ? 'disabled' : !priorSelection || priorSelection.has(c.profile) ? 'checked' : ''}> ${escapeHtml(profileLabel(c.profile))}（${escapeHtml(c.profile)}） — ${escapeHtml(c.evidence)}</label>`).join('');
+      controls.setCoverage(coverage, report?.job_id || null);
+      $('#skill-pin-regression').hidden = !report;
+      const previous = quality.previous_report;
+      $('#skill-reuse-cases').hidden = !previous;
+      $('#skill-reuse-source').hidden = !previous;
+      $('#skill-reuse-source').textContent = previous ? `来源：修订 ${previous.revision} 的上次评测。仅复用问题和验收条件，不继承通过结论。` : '';
     }
-    controls.setReviewForms(reviewForms);
-    const coverage = skillPublicationCoverage(d, quality.evaluation, quality.publication_evidence);
-    $('#skill-publication-profiles').innerHTML = '<legend>本次发布模式</legend>' +
-      (quality.publication_evidence?.shared?.reason ? `<p>${escapeHtml(quality.publication_evidence.shared.reason)}</p>` : '') + coverage.map(c =>
-      `<label><input type="checkbox" name="profiles" value="${escapeHtml(c.profile)}" ${c.eligible ? 'checked' : 'disabled'}> ${escapeHtml(profileLabel(c.profile))}（${escapeHtml(c.profile)}） — ${escapeHtml(c.evidence)}</label>`).join('');
-    controls.setCoverage(coverage);
+    bindReport();
     $('#skill-recipients').innerHTML='<legend>使用范围（默认仅自己）</legend>'+recipients.items.map((x,i)=>`<label><input type="checkbox" name="audience" value="${escapeHtml(x.subject)}" ${i===0?'checked':''}>${escapeHtml(x.name)}</label>`).join('');
     const profiles = Object.keys(d.bundle.manifest.profiles);
     const evalNotice = (message, selector = '#skill-eval-state', role = 'status', scroll = true) => {
@@ -583,32 +598,86 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       if(scroll)notice.scrollIntoView?.({block:'nearest',behavior:'smooth'});
     };
     const evalError = (error, selector) => {if (scope.current() && !isCancellation(error)) evalNotice(error.message, selector, 'alert');};
-    const add=(seed, source = '')=>{
+    async function refreshReport(expectedJob = null, automatic = false) {
+      const ticket = ++reportRequest;
+      const notice = message => evalNotice(message, '#skill-report-state', 'status', !automatic);
+      const canSwitch = () => {
+        if (controls.canSwitchReport()) return true;
+        notice('当前报告保留在页面上。请先保存复核或等当前操作完成，再刷新复核报告。');
+        return false;
+      };
+      try {
+        if (!canSwitch()) return;
+        const latest = await draftAction('inspect', {draft_id:d.draft_id});
+        scope.assertCurrent();
+        if (ticket !== reportRequest || d.revision !== revision || !canSwitch()) return;
+        const latestRevision = latest.publication_evidence?.revision ?? latest.evaluation?.revision;
+        if (latestRevision != null && latestRevision !== revision) {
+          notice('草稿修订已变化，请重新打开草稿核对当前修订。');
+          return;
+        }
+        if (expectedJob && latest.evaluation?.job_id !== expectedJob) {
+          notice('最新报告已变化。可在后台任务查看本次结果，或刷新复核报告查看最新结果。');
+          return;
+        }
+        Object.assign(quality, {evaluation:latest.evaluation, publication_evidence:latest.publication_evidence,
+          comparison:latest.comparison, regression:latest.regression, previous_report:latest.previous_report});
+        bindReport(true);
+        refreshRegression();
+        controls.refreshState();
+        notice(quality.evaluation ? '复核报告已更新，本次发布模式已按这份报告核对。' : '本修订尚无独立评测报告。');
+        if (!automatic) $('#skill-evaluation-report').scrollIntoView?.({block:'start',behavior:'smooth'});
+      } catch (error) {
+        if (scope.current() && ticket === reportRequest && !isCancellation(error)) notice(`复核报告暂未更新：${error.message}。可点击刷新复核报告重试。`);
+      }
+    }
+    $('#skill-refresh-report').onclick = () => refreshReport();
+
+    const caseFields = ['prompt', 'profile', 'kind', 'contains', 'excludes'];
+    const readCase = node => ({...Object.fromEntries(caseFields.map(key => [key, node.querySelector(`[name=${key}]`).value])),
+      ...(node.dataset.feedbackId ? {feedback_id:node.dataset.feedbackId} : {})});
+    const caseValues = seed => ({prompt:seed.prompt || '', profile:profiles.includes(seed.profile) ? seed.profile : '',
+      kind:seed.kind === 'trigger' ? (seed.expected_trigger ? 'trigger_true' : 'trigger_false') : 'output',
+      contains:(seed.contains || []).join('\n'), excludes:(seed.excludes || []).join('\n'), ...(seed.feedback_id ? {feedback_id:seed.feedback_id} : {})});
+    const add=(seed, source = '', placeholder = false)=>{
       if (!scope.current()) return;
       const cases=$('#skill-eval-cases');if(cases.children.length>=12)return;
       const missingProfile = seed && !profiles.includes(seed.profile);
-      const node=document.createElement('fieldset');node.dataset.feedbackId=seed?.feedback_id || '';node.innerHTML=`<legend>验收样例</legend><p data-case-source></p><label>问题<textarea name="prompt" required maxlength="3000" placeholder="整理成周报：计划修复登录问题。"></textarea></label>
+      const node=document.createElement('fieldset');node.dataset.initialPlaceholder=String(placeholder);node.dataset.feedbackId=seed?.feedback_id || '';node.innerHTML=`<legend>验收样例</legend><p data-case-source></p><label>问题<textarea name="prompt" required maxlength="3000" placeholder="整理成周报：计划修复登录问题。"></textarea></label>
         <label>模式<select name="profile" required>${missingProfile ? '<option value="">请选择当前修订的模式</option>' : ''}${profiles.map(p=>`<option value="${escapeHtml(p)}">${escapeHtml(profileLabel(p))}（${escapeHtml(p)}）</option>`).join('')}</select></label>
         <label>测试内容<select name="kind"><option value="output">回答质量</option><option value="trigger_true">适用场景：应该使用</option><option value="trigger_false">适用场景：不应使用</option></select></label>
         <label>应包含（每行一项）<textarea name="contains" placeholder="计划"></textarea></label><label>不应包含（每行一项）<textarea name="excludes" placeholder="已修复"></textarea></label><button type="button" class="secondary">移除此样本</button>`;
       node.querySelector('[data-case-source]').textContent = source + (missingProfile ? ` 原模式${seed.profile && seed.profile !== 'unknown' ? `“${seed.profile}”已不在当前修订` : '未记录'}，请明确选择当前模式。` : '');
-      node.querySelector('[name=prompt]').value = seed?.prompt || '';
-      node.querySelector('[name=profile]').value = missingProfile ? '' : seed?.profile || profiles[0];
-      node.querySelector('[name=kind]').value = seed?.kind === 'trigger' ? seed.expected_trigger ? 'trigger_true' : 'trigger_false' : 'output';
-      for (const key of ['contains', 'excludes']) node.querySelector(`[name=${key}]`).value = (seed?.[key] || []).join('\n');
+      const values = caseValues(seed || {profile:profiles[0]});
+      for (const key of caseFields) node.querySelector(`[name=${key}]`).value = values[key];
       node.querySelector('button').onclick=()=>{node.remove();controls.evaluationChanged();};cases.append(node);controls.evaluationChanged();
     };
-    const reuse = (seeds, source, repeats) => {
+    const reuse = (seeds, source, repeats, replace = false) => {
       try {
         controls.requireSaved();
         const container = $('#skill-eval-cases'), existing = [...container.children];
-        const blank = existing.length === 1 && ['prompt', 'contains', 'excludes'].every(key => !existing[0].querySelector(`[name=${key}]`).value.trim());
-        if (seeds.length + (blank ? 0 : existing.length) > 12) throw new Error('最多 12 个验收样例，请先移除不需要的样例。');
-        if (blank) container.replaceChildren();
-        for (const seed of seeds) add(seed, source);
-        if (repeats) $('#skill-eval-form').querySelector('[name=repeats]').value = String(repeats);
+        const repeatControl = $('#skill-eval-form').querySelector('[name=repeats]');
+        const blank = existing.length === 1 && existing[0].dataset.initialPlaceholder === 'true' &&
+          JSON.stringify(readCase(existing[0])) === JSON.stringify(caseValues({profile:profiles[0]}));
+        const clear = replace || blank || !existing.length;
+        // Consume matches individually so intentional duplicates in the source keep their multiplicity.
+        const remaining = clear ? [] : existing.map(node => JSON.stringify(readCase(node)));
+        const additions = seeds.filter(seed => {
+          const index = remaining.indexOf(JSON.stringify(caseValues(seed)));
+          if (index < 0) return true;
+          remaining.splice(index, 1);
+          return false;
+        });
+        if (!clear && !additions.length) {
+          evalNotice(`这 ${seeds.length} 道题已在列表，保留现有题目和重复次数。`);
+          return;
+        }
+        if (additions.length + (clear ? 0 : existing.length) > 12) throw new Error('最多 12 个验收样例，请先移除不需要的样例。');
+        if (clear) container.replaceChildren();
+        for (const seed of additions) add(seed, source);
+        if (repeats && (replace || (clear && repeatControl.value === '1'))) repeatControl.value = String(repeats);
         controls.evaluationChanged();
-        $('#skill-eval-state').textContent = '已填入可编辑样例，尚未运行或保存。请核对模式，再补充“应包含/不应包含”的内容，之后启动评测。';
+        evalNotice(`已${clear ? '填入' : '追加'} ${additions.length} 道题，尚未运行或保存。请核对模式和验收条件。`);
       } catch (error) { evalError(error); }
     };
     const carried = controls.evaluation();
@@ -621,10 +690,9 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         add({prompt: row.prompt, profile: row.profile, kind: row.kind === 'output' ? 'output' : 'trigger',
           expected_trigger: row.kind === 'trigger_true', feedback_id: row.feedback_id, contains: row.contains.split('\n'), excludes: row.excludes.split('\n')}, carried ? '保留的待运行样例，请核对当前修订。' : `已保存待测题目，来源修订 ${stored.source_revision}${stored.source_revision !== d.revision ? '；修订已变化，请核对当前模式' : ''}。`);
       }
-    } else add();
+    } else add(undefined, '', true);
     $('#skill-eval-form').querySelector('[name=repeats]').value = restored?.repeats || '1';
-    const readEvaluation = () => ({cases: [...$('#skill-eval-cases').children].map(node =>
-      ({...Object.fromEntries(['prompt', 'profile', 'kind', 'contains', 'excludes'].map(key => [key, node.querySelector(`[name=${key}]`).value])), ...(node.dataset.feedbackId ? {feedback_id: node.dataset.feedbackId} : {})})),
+    const readEvaluation = () => ({cases: [...$('#skill-eval-cases').children].map(readCase),
       repeats: $('#skill-eval-form').querySelector('[name=repeats]').value || '1'});
     controls.setEvaluationReader(readEvaluation);
     if (stored && !carried) $('#skill-eval-state').textContent = `已恢复修订 ${stored.source_revision} 保存的待测题目；保存不代表已经运行或通过。`;
@@ -654,6 +722,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       const fixed = quality.regression;
       $('#skill-use-regression').hidden = !fixed;
       $('#skill-clear-regression').hidden = !fixed;
+      $('#skill-replace-regression').hidden = !fixed;
       const comparable = quality.evaluation?.case_fingerprint;
       $('#skill-regression-status').textContent = fixed
         ? `常用回归题：修订 ${fixed.revision} 的 ${fixed.cases.length} 题，每项重复 ${fixed.repeats} 次。仅复用题目，不继承通过结论。` +
@@ -664,6 +733,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       try {
         controls.requireSaved();
         await controls.perform(async () => {
+          ++reportRequest;
           quality.regression = await request('/api/skill-regressions', {method:'POST', csrf:true, scope,
             body:{draft_id:d.draft_id, expected_revision:d.revision, job_id:jobId}});
           scope.assertCurrent(); refreshRegression();
@@ -676,13 +746,17 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         });
       } catch(error) {evalError(error);}
     };
-    if (quality.evaluation) $('#skill-pin-regression').onclick = () => pinRegression(quality.evaluation.job_id);
+    $('#skill-pin-regression').onclick = () => {if (quality.evaluation) return pinRegression(quality.evaluation.job_id);};
     $('#skill-clear-regression').onclick = () => pinRegression(null);
-    $('#skill-use-regression').onclick = () => {if(quality.regression)reuse(quality.regression.cases,
-      `常用回归题，来源修订 ${quality.regression.revision}；请核对当前模式。`,quality.regression.repeats);};
+    const loadFixed = replace => {
+      const fixed = quality.regression;
+      if (fixed) reuse(fixed.cases, `常用回归题，来源修订 ${fixed.revision}；请核对当前模式。`, fixed.repeats, replace);
+    };
+    $('#skill-use-regression').onclick = () => loadFixed(false);
+    $('#skill-replace-regression').onclick = () => loadFixed(true);
     refreshRegression();
-    if (quality.previous_report) $('#skill-reuse-cases').onclick=()=>reuse(quality.previous_report.cases,
-      `来源：修订 ${quality.previous_report.revision} 的上次评测；不继承通过结论。`, quality.previous_report.repeats);
+    $('#skill-reuse-cases').onclick=()=>{if(quality.previous_report)reuse(quality.previous_report.cases,
+      `来源：修订 ${quality.previous_report.revision} 的上次评测；不继承通过结论。`, quality.previous_report.repeats);};
     $('#skill-sample-list').querySelectorAll('[data-sample-case]').forEach(button => {
       button.onclick=()=>{const sample=d.tests.find(t=>t.test_id===button.dataset.sampleCase);if(sample)reuse([{prompt:sample.prompt,profile:sample.profile}], `来源：修订 ${sample.revision} 的${profileLabel(sample.profile)}试用样例。请补上“应包含/不应包含”的内容。`);};
     });
@@ -786,7 +860,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
             open.onclick=()=>{if(scope.current())openBackgroundJob(receipt.job_id);};
             const panel=$('#skill-background-jobs');if(panel)panel.open=true;
             let previousState='queued';
-            updateEvaluation=items=>{
+            updateEvaluation=async items=>{
               if(!scope.current())return;
               const job=items.find(item=>item.job_id===receipt.job_id);
               if(!job||job.state===previousState)return;
@@ -795,9 +869,14 @@ export function createSkillForms({ document, state, $, api: request, switchView,
                 succeeded:`修订 ${d.revision} 的评测已完成，可查看本次报告；完成不代表通过。`,
                 failed:`修订 ${d.revision} 的评测失败：${job.error||'请查看本次后台任务。'}`,canceled:`修订 ${d.revision} 的本次评测已取消。`}[job.state];
               if(message)evalNotice(message,'#skill-eval-state',job.state==='failed'?'alert':'status',false);
-              open.textContent=job.state==='succeeded'?'查看本次报告':'查看本次后台任务';
-              if(job.state==='succeeded'&&!quality.evaluation)$('#skill-evaluation-report').innerHTML=job.result?.rows
-                ?skillReportHtml(job.result):'<p>本次评测已完成，请在后台任务中查看报告。</p>';
+              if (job.state === 'succeeded') {
+                open.textContent = '复核这次结果';
+                open.onclick = () => refreshReport(receipt.job_id);
+                if (!quality.evaluation) await refreshReport(receipt.job_id, true);
+              } else {
+                open.textContent='查看本次后台任务';
+                open.onclick=()=>{if(scope.current())openBackgroundJob(receipt.job_id);};
+              }
             };
           } catch(error) { evalError(error); return; }
           try { await refreshSkillJobs(); await refreshFeedback(); }

@@ -142,6 +142,10 @@ class SkillMcpTransportTests(unittest.TestCase):
         self.assertIn('standard_metadata', definitions['SkillProposal']['properties'])
         definitions['SkillProposal']['properties'].pop('standard_metadata')
         definitions['SkillAuthoringData']['properties'].pop('expected_version')
+        field = definitions['SkillAuthoringData']['properties'].pop('expected_report_job_id')
+        self.assertEqual(field['anyOf'], [{'type':'string'}, {'type':'null'}])
+        legacy['description'] = legacy['description'].replace(
+            '提交前用inspect核对最新报告，将编号传入expected_report_job_id；确实没有报告时传null。报告变化后须重新查看。', '')
         start = legacy['description'].index('pending_cases(draft_id)')
         end = legacy['description'].index('evaluate(draft_id', start)
         legacy['description'] = legacy['description'][:start] + legacy['description'][end:]
@@ -213,6 +217,12 @@ class SkillMcpTransportTests(unittest.TestCase):
             fixed = call('set_regression', {**identity, 'job_id': job['job_id']})
             self.assertEqual(fixed['regression']['job_id'], job['job_id'])
             self.assertEqual(call('set_regression', {**identity, 'job_id': None}), {'regression': None})
+            submit = {**identity, 'request_key':'submit-viewed', 'reason':'已核对'}
+            stale = mcp_call(client, token, 'submit', {**submit, 'expected_report_job_id':None}).json()['result']
+            self.assertTrue(stale['isError'])
+            self.assertIn('评测报告已更新', str(stale['content']))
+            accepted = call('submit', {**submit, 'expected_report_job_id':job['job_id']})
+            self.assertEqual(service.skill_authoring.review_detail(accepted['request_id'])['quality']['evaluation']['job_id'], job['job_id'])
 
 
 class SkillWorkspaceTransportTests(unittest.TestCase):

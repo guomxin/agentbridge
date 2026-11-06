@@ -215,7 +215,7 @@ class SkillWorkbench:
             'bundle': draft['bundle'], 'baseline': baseline, 'cases': cases, 'repeats': repeats}, request_key)
 
     def latest_report(self, db, owner, draft_id, revision):
-        return self._report_reviews(db, owner, SkillJobQueue.latest_report(db, owner, draft_id, revision))
+        return self._report_reviews(db, owner, SkillJobQueue.latest_report(db, owner, draft_id, revision, include_job_id=True))
 
     @staticmethod
     def _pending_cases(db, owner, draft_id):

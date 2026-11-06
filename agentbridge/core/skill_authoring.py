@@ -19,6 +19,8 @@ from agentbridge.core.skill_quality import (candidate_review_problems, normalize
     proposal_from_bundle, publication_evidence, standard_document)
 from agentbridge.core.user_grants import UserGrantConflict
 
+_REPORT_NOT_SPECIFIED = object()
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -330,15 +332,21 @@ class SkillAuthoring:
         result['profiles'] = json.loads(result.pop('profiles_json'))
         return result
 
-    def submit(self, owner, *, draft_id, expected_revision, request_key, reason, audience=None, profiles=None):
+    def submit(self, owner, *, draft_id, expected_revision, request_key, reason, audience=None, profiles=None,
+               expected_report_job_id=_REPORT_NOT_SPECIFIED):
         reason = text(reason, '发布说明', 1000)
         audience = audience or [owner]
         if not isinstance(audience,list) or not audience or len(audience)>100 or any(not isinstance(x,str) or not x or len(x)>256 for x in audience):
             raise ValueError('发布范围无效')
         audience = sorted(set(audience))
+        command = {'op':'submit','draft_id':draft_id,'revision':expected_revision,'reason':reason,'audience':audience,'profiles':profiles}
+        if expected_report_job_id is not _REPORT_NOT_SPECIFIED:
+            if expected_report_job_id is not None:
+                expected_report_job_id = text(expected_report_job_id, '评测报告编号', 128)
+            command['expected_report_job_id'] = expected_report_job_id
         with closing(self.store.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
-            digest, previous = self._command(db,owner,request_key,{'op':'submit','draft_id':draft_id,'revision':expected_revision,'reason':reason,'audience':audience,'profiles':profiles})
+            digest, previous = self._command(db,owner,request_key,command)
             if previous: return previous
             revision(expected_revision)
             draft = self._owned(db,owner,draft_id,expected_revision)
@@ -349,6 +357,8 @@ class SkillAuthoring:
                 raise ValueError('申请模式无效')
             tested = {r[0] for r in db.execute("SELECT profile FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported'", (draft_id,draft['revision']))}
             report = self.workbench.latest_report(db, owner, draft_id, draft['revision'])
+            if expected_report_job_id is not _REPORT_NOT_SPECIFIED and expected_report_job_id != (report['job_id'] if report else None):
+                raise UserGrantConflict('本修订的评测报告已更新，请查看最新报告后再提交。')
             evidence = publication_evidence(bundle, draft['revision'], tested, report)
             selected = [p for p in evidence['profiles'] if p['profile'] in profiles]
             if any(p['blocked'] for p in selected): raise ValueError('申请模式的独立评测或共享门槛未通过，请重新核对评测')

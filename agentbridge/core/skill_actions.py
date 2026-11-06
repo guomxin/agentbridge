@@ -30,7 +30,7 @@ SKILL_ACTION_DEFINITIONS = (
                           ('draft_id', 'expected_revision', 'profile', 'prompt', 'request_key')),
     SkillActionDefinition('test_result', 'authoring', 'test_result', ('test_id', 'output')),
     SkillActionDefinition('submit', 'authoring', 'submit',
-                          ('draft_id', 'expected_revision', 'request_key', 'reason'), ('audience', 'profiles')),
+                          ('draft_id', 'expected_revision', 'request_key', 'reason'), ('audience', 'profiles', 'expected_report_job_id')),
     SkillActionDefinition('withdraw', 'authoring', 'withdraw', ('request_id',)),
     SkillActionDefinition('preferences', 'authoring', 'preferences', (), ('value', 'expected_revision')),
     SkillActionDefinition('restore', 'authoring', 'restore',
