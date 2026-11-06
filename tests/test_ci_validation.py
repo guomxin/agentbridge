@@ -185,7 +185,11 @@ out = Path(sys.argv[sys.argv.index('--output') + 1])
 out.mkdir(parents=True, exist_ok=False)
 (out / 'artifact.json').write_text('{}')
 """)
-    stage["command"] = [arg.replace(str(ROOT), str(dispatch_root)) for arg in stage["command"]]
+    # Relocate the build inputs and outputs, keeping the actual interpreter even
+    # when it lives inside the checkout's .venv.
+    for option in ("--root", "--output"):
+        index = stage["command"].index(option) + 1
+        stage["command"][index] = str(dispatch_root / Path(stage["command"][index]).relative_to(ROOT))
     monkeypatch.setattr(ci_validation, "ci_stages", lambda *args: [stage])
     for _ in range(2):
         ci_validation.run_profile("full", dispatch_root)
