@@ -32,22 +32,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci_validation_plan.py
       - uses: actions/setup-node@v4
+        if: steps.plan.outputs.profile != 'docs' && steps.plan.outputs.profile != 'python-tests'
         with:
           node-version: '22.22.3'
       - name: Prepare Python validation environment
+        if: steps.plan.outputs.profile != 'node-tests'
+        env:
+          VALIDATION_PROFILE: ${{ steps.plan.outputs.profile }}
         run: |
           set -euo pipefail
           validation_venv="$RUNNER_TEMP/agentbridge-tests"
           python -m venv "$validation_venv"
-          "$validation_venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77' pytest pytest-xdist
-          "$validation_venv/bin/python" -m pip install --disable-pip-version-check --no-build-isolation -e '.[database-analysis]'
+          test_packages=('setuptools>=77' pytest)
+          project_spec=.
+          if [[ "$VALIDATION_PROFILE" == full ]]; then
+            test_packages+=(pytest-xdist)
+            project_spec='.[database-analysis]'
+          fi
+          "$validation_venv/bin/python" -m pip install --disable-pip-version-check "${test_packages[@]}"
+          "$validation_venv/bin/python" -m pip install --disable-pip-version-check --no-build-isolation -e "$project_spec"
           echo "AGENTBRIDGE_TEST_PYTHON=$validation_venv/bin/python" >> "$GITHUB_ENV"
       - name: Run independent repository checks without a browser
         env:
           VALIDATION_PROFILE: ${{ steps.plan.outputs.profile }}
         run: |
           set -euo pipefail
-          "$AGENTBRIDGE_TEST_PYTHON" scripts/ci_validation.py --profile "$VALIDATION_PROFILE"
+          "${AGENTBRIDGE_TEST_PYTHON:-python}" scripts/ci_validation.py --profile "$VALIDATION_PROFILE"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

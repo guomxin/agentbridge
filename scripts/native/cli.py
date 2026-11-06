@@ -7,13 +7,19 @@ import uuid
 from pathlib import Path
 from common import external, save, timestamp
 
+# scripts/native is the entrypoint directory; use this checkout's shared CI modules.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', help='Private JSON result outside the repository')
     commands = parser.add_subparsers(dest='command', required=True)
     validation = commands.add_parser('validate')
-    validation.add_argument('--full', action='store_true')
+    modes = validation.add_mutually_exclusive_group()
+    modes.add_argument('--full', action='store_true')
+    modes.add_argument('--changed', action='store_true', help='Run development checks for changed files')
+    validation.add_argument('--base', metavar='REF', help='Ancestor to compare for --changed (default: HEAD)')
     validation.add_argument('--plugin', action='store_true')
     validation.add_argument('--test', action='append', default=[])
     publish = commands.add_parser('publish')
@@ -47,7 +53,7 @@ def main():
     try:
         if args.command == 'validate':
             from validation import validate
-            result = validate(full=args.full, tests=args.test, plugin=args.plugin)
+            result = validate(full=args.full, tests=args.test, plugin=args.plugin, changed=args.changed, base=args.base)
         elif args.command == 'publish':
             if args.apply and (not args.host_profile or not args.authorization):
                 raise ValueError('--apply requires --host-profile and --authorization')
@@ -71,8 +77,8 @@ def main():
                 if args.action in ('start', 'restart') and not args.authorization:
                     raise ValueError('Activation requires --authorization')
                 result = lifecycle.manage(config, args.action, args.kind, args.authorization)
-        result.update(checkedAt=timestamp(), exitCode=0)
-        code = 0
+        code = 2 if result.get('status') in {'full_required', 'needs_alignment'} else 0
+        result.update(checkedAt=timestamp(), exitCode=code)
     except (ValueError, RuntimeError, OSError, KeyError) as error:
         # No child stdout/stderr or private configuration in this report.
         result = {'status': 'failed', 'errorType': type(error).__name__,

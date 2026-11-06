@@ -19,8 +19,10 @@ def test_workflow_uses_linux_native_profiles_and_keeps_permissions_and_evidence(
         "name: repository-validation", "runs-on: ubuntu-24.04", "shell: bash",
         "contents: read", "actions: read", "persist-credentials: false", "fetch-depth: 0",
         "python scripts/ci_validation_plan.py", 'scripts/ci_validation.py --profile "$VALIDATION_PROFILE"',
-        'python -m venv "$validation_venv"', "pytest pytest-xdist", "'setuptools>=77'",
-        "--no-build-isolation -e '.[database-analysis]'", "Run independent repository checks without a browser",
+        "- uses: actions/setup-node@v4\n        if: steps.plan.outputs.profile != 'docs' && steps.plan.outputs.profile != 'python-tests'",
+        "- name: Prepare Python validation environment\n        if: steps.plan.outputs.profile != 'node-tests'",
+        'python -m venv "$validation_venv"', '"${AGENTBRIDGE_TEST_PYTHON:-python}" scripts/ci_validation.py',
+        "Run independent repository checks without a browser",
         "uses: actions/upload-artifact@v4", "if: always()", "output/ci-validation/ci-plan.json",
         "output/ci-validation/*.xml", "output/ci-validation/runs/*/artifact/artifact.json", "retention-days: 14",
     ):
@@ -34,7 +36,7 @@ def test_workflow_uses_linux_native_profiles_and_keeps_permissions_and_evidence(
     assert "branches: [main]" in source and "pull_request:" in source and "workflow_dispatch:" in source
 
 
-def test_workflow_bash_blocks_parse_without_running_installs():
+def test_workflow_bash_blocks_parse_without_running_installs(tmp_path, monkeypatch):
     if not shutil.which("bash"):
         pytest.skip("Bash syntax checker is unavailable")
     lines = (ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8").splitlines()
@@ -53,6 +55,32 @@ def test_workflow_bash_blocks_parse_without_running_installs():
     for script in scripts:
         assert "set -euo pipefail" in script
         subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+    # Record the pip arguments selected by the real workflow block without installing anything.
+    fake_python = tmp_path / 'python'
+    fake_python.write_text("""#!/bin/bash
+set -eu
+if [[ "$1 $2" == "-m venv" ]]; then
+  mkdir -p "$3/bin"
+  cp "$0" "$3/bin/python"
+else
+  printf '%s\\n' "$*" >> "$INSTALL_LOG"
+fi
+""")
+    fake_python.chmod(0o755)
+    monkeypatch.setenv('PATH', str(tmp_path), prepend=':')
+    monkeypatch.setenv('RUNNER_TEMP', str(tmp_path))
+    monkeypatch.setenv('GITHUB_ENV', str(tmp_path / 'github-env'))
+    log = tmp_path / 'pip.log'
+    monkeypatch.setenv('INSTALL_LOG', str(log))
+    for profile in ('docs', 'release', 'python-tests', 'node-tests-docs', 'workspace-ui', 'full'):
+        log.write_text('')
+        monkeypatch.setenv('VALIDATION_PROFILE', profile)
+        subprocess.run(['bash', '-c', scripts[0]], check=True)
+        tools, project = (line.split() for line in log.read_text().splitlines())
+        assert 'setuptools>=77' in tools and 'pytest' in tools
+        assert ('pytest-xdist' in tools) == (profile == 'full')
+        assert project[-2:] == ['-e', '.[database-analysis]' if profile == 'full' else '.']
 
 
 @pytest.fixture
@@ -75,11 +103,10 @@ def record():
         out.write(json.dumps(row) + '\n')
     return os.environ.get('TEST_FAIL_STAGE') == row['script']
 '''
-    for name in ("check_public_content.py", "current_facts.py"):
-        path = root / "scripts" / name
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(record + "\nif record(): raise SystemExit(13)\n")
-    for name in ["tests/test_documentation.py", *ci_validation.RELEASE_TESTS]:
+    path = root / "scripts/check_public_content.py"
+    path.parent.mkdir()
+    path.write_text(record + "\nif record(): raise SystemExit(13)\n")
+    for name in ["tests/test_documentation.py", *ci_validation.RELEASE_TESTS, *ci_validation.INDEPENDENT_PYTHON_TESTS]:
         (root / name).write_text(record + """
 import pytest
 
@@ -97,15 +124,16 @@ def records(root):
     return [json.loads(line) for line in (root / "dispatch.jsonl").read_text().splitlines()]
 
 
-@pytest.mark.parametrize("profile", ["docs", "release"])
+@pytest.mark.parametrize("profile", ["docs", "release", "python-tests"])
 def test_scoped_profile_runs_selected_nonbrowser_tests_with_isolated_key(dispatch_root, profile):
     ci_validation.run_profile(profile, dispatch_root)
     calls = records(dispatch_root)
     expected = ["test_documentation.py"]
     if profile == "release":
         expected.extend(Path(path).name for path in ci_validation.RELEASE_TESTS)
-    assert [c["script"] for c in calls] == [*expected, "check_public_content.py", "current_facts.py"]
-    assert calls[-1]["args"] == ["--check"]
+    if profile == "python-tests":
+        expected.extend(Path(path).name for path in ci_validation.INDEPENDENT_PYTHON_TESTS)
+    assert [c["script"] for c in calls] == [*expected, "check_public_content.py"]
     assert {c["keyBytes"] for c in calls} == {32}
     assert {c["keyMode"] for c in calls} == {stat.S_IRUSR | stat.S_IWUSR}
     assert len({c["key"] for c in calls}) == 1
@@ -131,6 +159,23 @@ def test_full_ci_has_all_nonbrowser_checks_and_no_formal_release_receipt():
     assert all("playwright" not in s["command"] and "chromium" not in s["command"] for s in stages.values())
 
 
+def test_small_profiles_run_whole_node_families_and_workspace_ui_packages_the_change():
+    local_root = "output/development-validation/example"
+    node = ci_validation.ci_stages("node-tests", ROOT, output=local_root)
+    node_docs = ci_validation.ci_stages("node-tests-docs", ROOT, output=local_root)
+    ui = ci_validation.ci_stages("workspace-ui", ROOT, output=local_root)
+    ids = lambda stages: [s["id"] for s in stages]
+    assert set(ids(node)) == {"public-content", "workspace-node", "openclaw", "mcp-app-test"}
+    assert ids(node_docs) == ["python-docs", *ids(node)]
+    assert ids(ui) == ["python-workspace-ui", "public-content", "workspace-node", "installed-wheel"]
+    for stage in node + node_docs + ui:
+        if stage.get("report"):
+            assert stage["report"].startswith(local_root + "/")
+            assert not any(validation_plan.CI_OUTPUT in arg for arg in stage["command"])
+    assert all(path in ui[0]["command"] for path in ("tests/test_documentation.py", *ci_validation.HISTORY_PYTHON_TESTS))
+    assert node[1]["testFiles"] == list(validation_plan.WORKSPACE_NODE)
+
+
 def test_repeated_ci_runs_do_not_collide_with_an_existing_wheel_probe(dispatch_root, monkeypatch):
     stage = next(s for s in ci_validation.ci_stages("full", ROOT) if s["id"] == "installed-wheel")
     builder = dispatch_root / "scripts/agentbridge_artifact.py"
@@ -148,7 +193,7 @@ out.mkdir(parents=True, exist_ok=False)
     assert not (dispatch_root / "output/release-validation/full.json").exists()
 
 
-@pytest.mark.parametrize("failure", ["test_documentation.py", "check_public_content.py", "current_facts.py"])
+@pytest.mark.parametrize("failure", ["test_documentation.py", "check_public_content.py"])
 def test_scoped_failure_stops_remaining_checks_and_cleans_key(dispatch_root, monkeypatch, failure):
     monkeypatch.setenv("TEST_FAIL_STAGE", failure)
     with pytest.raises(subprocess.CalledProcessError) as error:
