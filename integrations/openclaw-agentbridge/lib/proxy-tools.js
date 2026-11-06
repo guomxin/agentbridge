@@ -407,7 +407,15 @@ function createProxyTool({
         // loading a Skill. Check again before sending any business arguments.
         const blocked = skillLoad ? skillLoad.check()
           : boundSkillToolGuard(identityRouter, skillContext, identity, descriptor.name, callParams, {proxy:true});
-        if (blocked) return jsonToolResult(blocked);
+        if (blocked) {
+          // Only this call's newly created read task has no other continuation
+          // to finish it. A shared turn or resumed task may still have work.
+          if (resolution?.createdForCall) await finishHostTask({
+            client: identity.client, taskId, logger, causationRef: boundedText(toolCallId, 256),
+            outcome: {status:"failed",errorCode:blocked.error.code,message:blocked.error.message},
+          });
+          return jsonToolResult(blocked);
+        }
         result = await identity.client.callToolResult(
           descriptor.name,
           callParams,
@@ -798,7 +806,8 @@ async function resolveTaskId({
     } else {
       if (!independentReadCall) taskIdBinder?.(sessionKey, descriptor.name, taskId);
     }
-    return { taskId, originEndpointId: boundedText(response?.task?.originEndpointId, 128), endpoint: response?.endpoint,
+    return { taskId, createdForCall: independentReadCall && response?.reused?.task === false,
+      originEndpointId: boundedText(response?.task?.originEndpointId, 128), endpoint: response?.endpoint,
       ...(reusableEnsureLease(response?.coordinatorLease, taskId)
       ? { coordinatorLease: response.coordinatorLease } : {}) };
   } catch (error) {

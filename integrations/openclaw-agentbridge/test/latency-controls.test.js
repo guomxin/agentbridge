@@ -163,6 +163,37 @@ test('a missing first-load transport receipt reports an unknown outcome without 
   assert.deepEqual(skillBindingMeta(f.router,context,f.identity),{});assert.equal(f.calls.length,1);
 });
 
+for (const [toolName,reused,shouldFinish] of [
+  ['oa_workflow_pending_list',false,true], ['oa_workflow_pending_list',true,false],
+  ['oa_workflow_done_list',false,false],
+]) test(`a load that starts during task setup protects ${toolName} (task reused: ${reused})`,async()=>{
+  const ensure=Promise.withResolvers(),skillReply=Promise.withResolvers(),businessCalls=[],finishes=[];
+  const client={
+    async callTool(name,params) {
+      if (name==='agentbridge_host_task_ensure') return ensure.promise;
+      assert.equal(name,'agentbridge_host_task_finish');finishes.push(params);return {status:'succeeded'};
+    },
+    async callToolResult(name) {
+      if (name==='agentbridge_skill_get') return skillReply.promise;
+      businessCalls.push(name);throw Error('business call reached the center while load was pending');
+    },
+  };
+  const router={config:{boundSkillToolGuard:false},resolveToolContext:()=>({bound:true,binding,client}),
+    endpointKeyForSession:()=> 'workspace:test-user'};
+  const tools=createAgentBridgeProxyTools({context,identityRouter:router,serverName:'agentbridge'});
+  const read=tools.find(tool=>tool.name===toolName).execute('read-call',{});
+  const load=tools.find(tool=>tool.name==='agentbridge_skill_get').execute('load-call',weekly);
+  ensure.resolve({task:{taskId},reused:{task:reused},coordinatorLease:lease()});
+  assert.equal(skillError(await read),'SKILL_LOAD_IN_PROGRESS');assert.deepEqual(businessCalls,[]);
+  assert.equal(finishes.length,shouldFinish?1:0);
+  if (shouldFinish) {
+    assert.equal(finishes[0].task_id,taskId);assert.equal(finishes[0].causation_ref,'read-call');
+    assert.equal(finishes[0].outcome,'failed');assert.equal(finishes[0].error_code,'SKILL_LOAD_IN_PROGRESS');
+  }
+  skillReply.resolve({structuredContent:{status:'succeeded',binding_id:'skill-binding',...weekly}});
+  assert.equal((await load).structuredContent.binding_id,'skill-binding');
+});
+
 test('failed and rejected loads release their slot for a later explicit request',async()=>{
   const f=delayedSkillProxy();
   const failed=f.invoke(context,'agentbridge_skill_get',weekly);await nextDispatch();
