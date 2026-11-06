@@ -159,7 +159,16 @@ class SkillWorkbench:
         return self._job_queue().cancel(owner, job_id)
 
     def retry(self, owner, job_id):
-        return self._job_queue().retry(owner, job_id)
+        return self._job_queue().retry(owner, job_id, validate_target=self._require_job_draft)
+
+    def _require_job_draft(self, db, owner, payload):
+        if payload['draft_id'] is None:
+            return None  # Generation can create a new draft.
+        from agentbridge.core.skill_authoring import revision
+        draft = self.authoring._owned(db, owner, payload['draft_id'], revision(payload['revision']))
+        if draft['state'] == 'archived':
+            raise ValueError('草稿已归档，不能启动或重试后台任务。')
+        return draft
 
     def scopes(self, owner, scope=None, enabled=None):
         from agentbridge.core.skill_authoring import text
@@ -181,38 +190,48 @@ class SkillWorkbench:
         text(material, '提炼材料', 16000)
         text(scope, '会话范围', 256)
         if type(automatic) is not bool: raise ValueError('自动标识无效')
-        source = self.authoring._provenance(owner, {'kind': 'automatic' if automatic else 'interaction', 'task_ids': task_ids or [], 'complete': False})
-        prior = None
-        if draft_id:
-            draft = self.authoring.get(owner, draft_id)
-            if draft['revision'] != expected_revision: raise UserGrantConflict('草稿修订已变化')
-            prior = proposal_from_bundle(draft['bundle'])
-        with closing(self.store.connect()) as db:
-            if automatic:
-                if not self._auto_allowed(db, owner, scope): raise PermissionError('请先开启自动沉淀及当前会话范围')
-                n = db.execute("SELECT count(*) FROM skill_jobs WHERE owner_subject=? AND kind='generation' AND created_at>=? AND json_extract(payload_json,'$.automatic')=1", (owner, timestamp()[:10])).fetchone()[0]
-                existing = db.execute('SELECT 1 FROM skill_jobs WHERE owner_subject=? AND request_key=?', (owner, request_key)).fetchone()
-                if n >= 3 and not existing: raise ValueError('今日自动沉淀已达 3 次')
-        payload = {'material': material, 'draft_id': draft_id, 'revision': expected_revision, 'prior': prior,
-                   'scope': scope, 'automatic': automatic, 'provenance': source}
-        return self._enqueue(owner, 'generation', payload, request_key)
+        task_ids = task_ids or []
+        if not isinstance(task_ids, list) or len(task_ids) > 5 or any(not isinstance(t, str) for t in task_ids):
+            raise ValueError('一次最多关联五个任务')
+        def prepare(db, previous):
+            target = {'draft_id': draft_id, 'revision': expected_revision}
+            if previous is None:
+                draft = self._require_job_draft(db, owner, target)
+                prior = proposal_from_bundle(self.authoring._bundle(db, draft_id, expected_revision)[1]) if draft else None
+                source = self.authoring._provenance(owner, {'kind': 'automatic' if automatic else 'interaction',
+                    'task_ids': task_ids, 'complete': False})
+            else:
+                prior, source = previous['prior'], previous['provenance']
+                if list(dict.fromkeys(task_ids)) != [t['task_id'] for t in source['tasks']]:
+                    raise UserGrantConflict('请求标识已用于其他后台任务')
+            return {**target, 'material': material, 'prior': prior, 'scope': scope,
+                    'automatic': automatic, 'provenance': source}
+        return self._enqueue(owner, 'generation', prepare, request_key)
 
     def evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1):
         if type(repeats) is not int or not 1 <= repeats <= 3: raise ValueError('重复次数为 1 至 3')
-        draft = self.authoring.get(owner, draft_id)
-        if draft['revision'] != expected_revision: raise UserGrantConflict('草稿修订已变化')
         cases = validate_cases(cases)
-        if any(c['profile'] not in draft['bundle']['manifest']['profiles'] for c in cases): raise ValueError('评测模式不存在')
-        with closing(self.store.connect()) as db:
-            for case in cases:
-                if case.get('feedback_id') and not db.execute(
-                        'SELECT 1 FROM skill_feedback WHERE feedback_id=? AND owner_subject=? AND skill_id=?',
-                        (case['feedback_id'], owner, draft['skill_id'])).fetchone():
-                    raise KeyError('反馈来源不存在或不属于此助手')
-            row = db.execute('SELECT payload_json FROM skill_versions WHERE skill_id=? ORDER BY rowid DESC LIMIT 1', (draft['skill_id'],)).fetchone()
-        baseline = json.loads(row[0]) if row else None
-        return self._enqueue(owner, 'evaluation', {'draft_id': draft_id, 'revision': expected_revision,
-            'bundle': draft['bundle'], 'baseline': baseline, 'cases': cases, 'repeats': repeats}, request_key)
+        if not isinstance(draft_id, str) or not draft_id:
+            raise ValueError('缺少评测草稿标识')
+        def prepare(db, previous):
+            target = {'draft_id': draft_id, 'revision': expected_revision}
+            if previous is None:
+                draft = self._require_job_draft(db, owner, target)
+                _, bundle = self.authoring._bundle(db, draft_id, expected_revision)
+                if any(c['profile'] not in bundle['manifest']['profiles'] for c in cases):
+                    raise ValueError('评测模式不存在')
+                for case in cases:
+                    if case.get('feedback_id') and not db.execute(
+                            'SELECT 1 FROM skill_feedback WHERE feedback_id=? AND owner_subject=? AND skill_id=?',
+                            (case['feedback_id'], owner, draft['skill_id'])).fetchone():
+                        raise KeyError('反馈来源不存在或不属于此助手')
+                row = db.execute('SELECT payload_json FROM skill_versions WHERE skill_id=? ORDER BY rowid DESC LIMIT 1',
+                                 (draft['skill_id'],)).fetchone()
+                baseline = json.loads(row[0]) if row else None
+            else:
+                bundle, baseline = previous['bundle'], previous['baseline']
+            return {**target, 'bundle': bundle, 'baseline': baseline, 'cases': cases, 'repeats': repeats}
+        return self._enqueue(owner, 'evaluation', prepare, request_key)
 
     def latest_report(self, db, owner, draft_id, revision):
         return self._report_reviews(db, owner, SkillJobQueue.latest_report(db, owner, draft_id, revision, include_job_id=True))

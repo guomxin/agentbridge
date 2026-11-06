@@ -569,7 +569,7 @@ class HostContractStore:
                 "shared-contract-h01-h29-log-week-comparison-source-selection-v1",
             ),
             (
-                "openclaw", "0.4.127", "L3",
+                "openclaw", "0.4.128", "L3",
                 "shared-contract-h01-h29-skill-submission-report-v1",
             ),
         )

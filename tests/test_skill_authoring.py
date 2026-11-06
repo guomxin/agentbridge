@@ -56,6 +56,20 @@ class SkillAuthoringTests(unittest.TestCase):
         with self.assertRaises(UserGrantConflict):self.a.save('alice',draft_id=d['draft_id'],expected_revision=7,proposal=self.proposal,request_key='two')
         with self.assertRaises(ValueError):self.a.test_start('alice',draft_id=d['draft_id'],expected_revision=None,profile='use',prompt='x',request_key='t')
 
+    def test_explicit_empty_profiles_cannot_submit_every_eligible_profile(self):
+        draft = self.a.save('alice', proposal={**self.proposal, 'profiles': {'preview': {}, 'fill': {}}}, request_key='save-two')
+        target = {'draft_id': draft['draft_id'], 'expected_revision': 1}
+        for profile in ('preview', 'fill'):
+            sample = self.a.test_start('alice', **target, profile=profile, prompt='合成输入', request_key=profile)
+            self.a.test_result('alice', test_id=sample['test_id'], output='合成回答')
+        data = {**target, 'reason': '个人使用', 'request_key': 'publish'}
+        with self.assertRaisesRegex(ValueError, '申请模式无效'):
+            self.a.dispatch('alice', 'submit', {**data, 'profiles': []})
+        self.assertEqual(self.a.reviews('alice')['items'], [])
+        request = self.a.dispatch('alice', 'submit', data)
+        self.assertCountEqual(self.a.review_detail(request['request_id'])['profiles'], ['preview', 'fill'])
+        self.assertFalse(request['published'])
+
     def test_publication_coverage_survives_bounded_history_and_resets_per_revision(self):
         proposal = {**self.proposal, 'profiles': {'preview': {}, 'fill': {}}}
         draft = self.a.save('alice', proposal=proposal, request_key='coverage')

@@ -36,15 +36,21 @@ class SkillJobQueue:
         self._validate_text = validate_text
         self._now = now if now is not None else lambda: datetime.now(timezone.utc)
 
-    def enqueue(self, owner, kind, payload, request_key):
+    def enqueue(self, owner, kind, payload: dict | Callable[[sqlite3.Connection, dict | None], dict], request_key):
         self._validate_text(request_key, '请求标识', 128)
-        digest = sha256(_json({'kind': kind, 'payload': payload}).encode()).hexdigest()
         with closing(self._connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             old = db.execute(
                 'SELECT * FROM skill_jobs WHERE owner_subject=? AND request_key=?',
                 (owner, request_key),
             ).fetchone()
+            if old and old['kind'] != kind:
+                raise UserGrantConflict('请求标识已用于其他后台任务')
+            if callable(payload):
+                # New requests capture their draft under this write lock. A
+                # replay rebuilds the same payload using the original snapshots.
+                payload = payload(db, json.loads(old['payload_json']) if old else None)
+            digest = sha256(_json({'kind': kind, 'payload': payload}).encode()).hexdigest()
             if old:
                 if old['input_hash'] != digest:
                     raise UserGrantConflict('请求标识已用于其他后台任务')
@@ -130,7 +136,7 @@ class SkillJobQueue:
                 self._event(db, owner, 'job.canceled', job_id, {})
         return self.jobs(owner, job_id)
 
-    def retry(self, owner, job_id):
+    def retry(self, owner, job_id, *, validate_target=None):
         with closing(self._connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute(
@@ -142,6 +148,8 @@ class SkillJobQueue:
             if row['state'] != 'failed' or row['attempts'] >= 3:
                 raise ValueError('仅可重试失败任务，最多尝试三次')
             payload = json.loads(row['payload_json'])
+            if validate_target is not None:
+                validate_target(db, owner, payload)
             if payload.get('automatic') and not self.auto_allowed(db, owner, payload['scope']):
                 raise PermissionError('自动沉淀已关闭')
             db.execute(

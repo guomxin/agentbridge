@@ -27,7 +27,7 @@ import { createHostPerformance } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.127";
+export const PLUGIN_VERSION = "0.4.128";
 
 // Only fixed host guidance enters system context. Catalogs, trial material and
 // task history keep their existing data context and do not gain authority.
@@ -250,7 +250,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         runId: (scopeRun && scopeRun !== event.toolCallId ? scopeRun : null) || event.runId || context.runId };
       const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, toolName, event.params, { startSample: false });
       if (sampleBlocked) return { block: true, blockReason: sampleBlocked.error.message };
-      const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, toolName, event.params);
+      const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, toolName, event.params,
+        {proxy:AGENTBRIDGE_AGENT_FACING_TOOL_NAMES.includes(toolName)});
       if (scopeBlocked) return { block: true, blockReason: scopeBlocked.error.message };
     }
     if (

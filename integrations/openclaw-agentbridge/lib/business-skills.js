@@ -47,13 +47,13 @@ function closedRunRejection() {
   return { status: "rejected", error: { code: "SKILL_RUN_CONTEXT_CLOSED",
     message: "该独立回合已结束，不能复用其工具上下文。请在新回合中执行。" } };
 }
-function unresolvedRestriction(router, context, identity, entries) {
+function unresolvedRestriction(router, context, identity, entries, pendingOnly = false) {
   if (context.runId || !context.sessionKey) return false;
   const probe = skillRunKey({ ...context, runId: "unresolved-context" }, identity, router);
   const namespace = probe && JSON.parse(probe)[0];
-  return [...entries.keys()].some(key => {
+  return [...entries].some(([key, entry]) => {
     const [owner, session] = JSON.parse(key);
-    return session === context.sessionKey && (!namespace || owner === namespace);
+    return session === context.sessionKey && (!namespace || owner === namespace) && (!pendingOnly || entry.pending);
   });
 }
 export function skillRunKey(context, identity, router = null) {
@@ -71,7 +71,60 @@ export function skillRunKey(context, identity, router = null) {
 export function skillBindingMeta(router, context, identity) {
   const key = skillRunKey(context, identity, router);
   const id = key && runState(router).bindings.get(key);
-  return id ? { "agentbridge/skill": { bindingId: typeof id === "string" ? id : id.bindingId } } : {};
+  return id && !id.pending ? { "agentbridge/skill": { bindingId: typeof id === "string" ? id : id.bindingId } } : {};
+}
+
+function pendingLoadRejection() {
+  return { status: "rejected", error: { code: "SKILL_LOAD_IN_PROGRESS",
+    message: "本回合的助手正在加载。请等待加载结果，再使用该助手的方法或工具。" } };
+}
+
+// Reserve only when the proxy actually executes. A pre-call hook can still be
+// vetoed by the host and never reach the proxy.
+export function reserveSkillLoad(router, context, identity, params, signal) {
+  const key = skillRunKey(context, identity, router);
+  if (!key) return { rejection: { status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
+    message: "当前宿主缺少独立回合上下文，无法安全加载业务助手。" } } };
+  const entries = runState(router).bindings;
+  let entry = entries.get(key);
+  if (entry?.pending) return { rejection: pendingLoadRejection() };
+  if (!entry) {
+    if (entries.size >= MAX_RUN_STATES) return { rejection: { status: "rejected", error: {
+      code: "SKILL_BINDING_CAPACITY", message: "助手加载容量已满，请稍后重试。" } } };
+    entry = { pending: true };
+    entries.set(key, entry);
+  }
+  const release = () => {
+    if (entry.pending && entries.get(key) === entry) entries.delete(key);
+    signal?.removeEventListener("abort", release);
+  };
+  signal?.addEventListener("abort", release, {once:true});
+  if (signal?.aborted) {
+    release();
+    return {rejection:closedRunRejection()};
+  }
+  const check = () => signal?.aborted || entries.get(key) !== entry || skillRunKey(context, identity, router) !== key
+    ? closedRunRejection() : null;
+  return {
+    createsBinding: Boolean(entry.pending),
+    check,
+    finish(payload) {
+      const stale = check();
+      if (stale) return stale;
+      if (payload?.status !== "succeeded") return null;
+      if (typeof payload.binding_id !== "string" || !payload.binding_id ||
+          (payload.skill_id !== undefined && payload.skill_id !== params?.skill_id) ||
+          (payload.profile !== undefined && payload.profile !== params?.profile) ||
+          (!entry.pending && payload.binding_id !== (entry.bindingId || entry))) {
+        return {status:"rejected",error:{code:"SKILL_BINDING_INVALID",message:"加载响应与本次助手绑定不一致，请重新核对。"}};
+      }
+      if (entry.pending) rememberSkillBinding(router, context, identity, {
+        ...payload, skill_id: params.skill_id, profile: params.profile,
+      });
+      return null;
+    },
+    release,
+  };
 }
 export function rememberSkillBinding(router, context, identity, payload) {
   const key = skillRunKey(context, identity, router);
@@ -84,14 +137,22 @@ export function rememberSkillBinding(router, context, identity, payload) {
     at: router.skillRunNow?.() ?? Date.now() });
 }
 
-export function boundSkillToolGuard(router, context, identity, toolName, params) {
+export function boundSkillToolGuard(router, context, identity, toolName, params, { proxy = false } = {}) {
   if (closedRun(router, context)) return closedRunRejection();
-  if (router.config?.boundSkillToolGuard !== true) return null;
+  const enforceScope = router.config?.boundSkillToolGuard === true;
+  if (!enforceScope && !proxy) return null;
   const entries = runState(router).bindings;
-  if (unresolvedRestriction(router, context, identity, entries)) return {
+  if (unresolvedRestriction(router, context, identity, entries, !enforceScope)) return {
     status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
       message: "当前会话存在受限业务回合，缺少精确回合关联，不能绕过原限制。" } };
   const binding = entries.get(skillRunKey(context, identity, router));
+  if (binding?.pending) {
+    // Independent discovery does not use the selected binding.
+    if (["agentbridge_skill_catalog", "agentbridge_identity_status"].includes(toolName) ||
+        (toolName === "agentbridge_skill_authoring" && ["discover", "composition"].includes(params?.action))) return null;
+    return pendingLoadRejection();
+  }
+  if (!enforceScope) return null;
   const scope = boundToolScope(binding);
   if (!scope) return null;
   const reject = () => ({ status: "rejected", error: { code: "SKILL_TOOL_SCOPE_REQUIRED",

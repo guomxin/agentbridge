@@ -3,7 +3,7 @@ import {
   AGENTBRIDGE_USER_TURN_SOURCE_TOOLS,
 } from "./tool-catalog.js";
 import { extractToolPayload } from "./mcp-client.js";
-import { skillBindingMeta, rememberSkillBinding, skillRunKey, draftSampleGuard, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
+import { skillBindingMeta, reserveSkillLoad, draftSampleGuard, workspaceSkillTrialGuard, boundSkillToolGuard } from "./business-skills.js";
 import { staticToolScope } from "./tool-scopes.js";
 import {
   HOST_CONTEXT_META_KEY,
@@ -135,7 +135,7 @@ export function createAgentBridgeProxyTools({
 }) {
   const identity = identityRouter.resolveToolContext(context);
   const workspaceSession = isWorkspaceSession(context.sessionKey);
-  const resolveIdentity = async (signal) => {
+  const resolveIdentity = (signal) => {
     if (identity.bound) {
       return identity;
     }
@@ -252,8 +252,10 @@ function createProxyTool({
     parameters: descriptor.inputSchema || emptyObjectSchema(),
     ...(descriptor.annotations ? { annotations: descriptor.annotations } : {}),
     execute: (toolCallId, rawParams, signal) => {
-      const execute = async () => {
-      const identity = await resolveIdentity(signal);
+      let skillLoad;
+      const invoke = async () => {
+      const resolved = resolveIdentity(signal);
+      const identity = resolved?.then ? await resolved : resolved;
       if (!identity.bound) {
         return jsonToolResult({
           status: "unbound",
@@ -285,12 +287,13 @@ function createProxyTool({
         return jsonToolResult({ status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED",
           message: "当前工具缺少精确的身份、会话和独立回合关联，不能复用其他调用的上下文。" } });
       }
+      const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams, {proxy:true});
+      if (scopeBlocked) return jsonToolResult(scopeBlocked);
       const sampleBlocked = draftSampleGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
       if (sampleBlocked) return jsonToolResult(sampleBlocked);
-      const scopeBlocked = boundSkillToolGuard(identityRouter, skillContext, identity, descriptor.name, normalizedParams);
-      if (scopeBlocked) return jsonToolResult(scopeBlocked);
-      if (descriptor.name === "agentbridge_skill_get" && !skillRunKey(skillContext, identity, identityRouter)) {
-        return jsonToolResult({ status: "rejected", error: { code: "SKILL_RUN_CONTEXT_REQUIRED", message: "当前宿主缺少独立回合上下文，无法安全加载业务助手。" } });
+      if (descriptor.name === "agentbridge_skill_get") {
+        skillLoad = reserveSkillLoad(identityRouter, skillContext, identity, normalizedParams, signal);
+        if (skillLoad.rejection) return jsonToolResult(skillLoad.rejection);
       }
       if (isTaskEligibleTool(descriptor.name)) {
         const stopped = terminalPlanGuard?.({ sessionKey: context.sessionKey, runId: context.runId, toolCallId, toolName: descriptor.name });
@@ -392,12 +395,19 @@ function createProxyTool({
         : null;
       let result;
       const transportRecovery = {};
-      const retry = safeTransportRetryPolicy({
+      // Without a binding, a first GET creates one at the center. A dropped
+      // receipt cannot be retried as though it were an idempotent lookup.
+      const retry = skillLoad?.createsBinding ? null : safeTransportRetryPolicy({
         descriptor,
         logger,
         transportRecovery,
       });
       try {
+        // Task resolution and lease renewal can yield while another tool starts
+        // loading a Skill. Check again before sending any business arguments.
+        const blocked = skillLoad ? skillLoad.check()
+          : boundSkillToolGuard(identityRouter, skillContext, identity, descriptor.name, callParams, {proxy:true});
+        if (blocked) return jsonToolResult(blocked);
         result = await identity.client.callToolResult(
           descriptor.name,
           callParams,
@@ -428,6 +438,15 @@ function createProxyTool({
           },
         );
       } catch (error) {
+        if (skillLoad) {
+          const stale = skillLoad.check();
+          if (stale) return jsonToolResult(stale);
+          if (skillLoad.createsBinding && (error?.retryable ||
+              ["MCP_TIMEOUT", "MCP_EMPTY_RESPONSE", "MCP_INVALID_RESPONSE"].includes(error?.code))) {
+            return jsonToolResult({status:"unconfirmed", error:{code:"SKILL_LOAD_UNCONFIRMED",
+              message:"未收到完整加载回执，无法确认中心是否已加载助手。请停止本次处理，先核对助手使用记录。"}});
+          }
+        }
         if (taskId) {
           await finishHostTask({
             client: identity.client,
@@ -443,8 +462,9 @@ function createProxyTool({
         }
         throw error;
       }
-      if (descriptor.name === "agentbridge_skill_get") {
-        rememberSkillBinding(identityRouter, skillContext, identity, extractToolPayload(result));
+      if (skillLoad) {
+        const rejected = skillLoad.finish(extractToolPayload(result));
+        if (rejected) return jsonToolResult(rejected);
       }
       if (trial) skillTrialResultHandler?.(context.sessionKey, trial, normalizedParams, extractToolPayload(result));
       if (["agentbridge_task_cancel", "agentbridge_task_plan_cancel"].includes(descriptor.name)) {
@@ -534,6 +554,7 @@ function createProxyTool({
           )
         : nativeResult;
       };
+      const execute = () => invoke().finally(() => skillLoad?.release?.());
       if (!performanceRecorder) return execute();
       // Lazy OpenClaw factories may omit runId. Use the exact observed call
       // binding for telemetry as well as execution; a rejected binding must

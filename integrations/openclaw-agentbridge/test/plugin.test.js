@@ -8083,3 +8083,24 @@ test('ordinary authoring sample blocks native tools in its exact run and release
   assert.equal(harness.hooks.before_tool_call({toolCallId:'new-native',toolName:'exec',runId:'next',params:{}},{sessionKey,runId:'next'}),undefined);
   assert.deepEqual(calls,['agentbridge_skill_authoring']);
 });
+
+test('an unused pre-call hook holds no Skill reservation, and a dispatched load blocks native tools immediately',async()=>{
+  const sessionKey='agent:main:telegram:direct:1001',runId='run-pending',context={sessionKey,runId};
+  const reply=Promise.withResolvers(),calls=[];
+  const client={callToolResult(name,params){calls.push({name,params});return reply.promise;}};
+  const identityRouter=taskIdentityRouter({sessionKey,client});identityRouter.config={boundSkillToolGuard:true};
+  const harness=fakeApi({autoPoll:false,boundSkillToolGuard:true});
+  registerAgentBridgeInteractions(harness.api,{identityRouter});
+  const hook=(toolName,toolCallId,params={})=>harness.hooks.before_tool_call({toolName,toolCallId,params,runId},context);
+  assert.equal(hook('openclawagentbridge_skill_get','never-dispatched',{skill_id:'old',profile:'use'}),undefined);
+  assert.equal(hook('exec','after-host-cancel'),undefined);
+  const params={skill_id:'weekly',profile:'use'};
+  assert.equal(hook('openclawagentbridge_skill_get','active-load',params),undefined);
+  const running=harness.toolFactory(context).find(t=>t.name==='agentbridge_skill_get').execute('active-load',params);
+  assert.match(hook('exec','native-while-loading').blockReason,/正在加载/);
+  assert.match(hook('openclawdatabase_execute','db-while-loading').blockReason,/正在加载/);
+  assert.equal(hook('openclawagentbridge_skill_catalog','discovery'),undefined);
+  reply.resolve({structuredContent:{status:'succeeded',binding_id:'synthetic',...params,
+    execution:{legacy:false,effects:['read'],allow_batch:false,capabilities:[]}}});
+  assert.equal((await running).structuredContent.binding_id,'synthetic');assert.equal(calls.length,1);
+});

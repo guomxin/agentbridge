@@ -1,8 +1,11 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from copy import deepcopy
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from agentbridge.core.central_service import CentralCapabilityService
 from agentbridge.core.skill_quality import (EVALUATION_SCHEMA, grade_output, import_standard,
@@ -146,6 +149,94 @@ class SkillWorkbenchTests(unittest.TestCase):
         self.w.retry('alice', j['job_id'])
         self.run_jobs(lambda *_: {'text':'计划：修复'})
         self.assertEqual(self.w.jobs('alice', j['job_id'])['state'], 'succeeded')
+
+    def test_archive_blocks_new_jobs_and_retry_but_existing_receipts_remain_readable(self):
+        target = {'draft_id': self.d['draft_id'], 'expected_revision': 1}
+        generation = {**target, 'material': '改进这个方法', 'request_key': 'gen'}
+        g = self.w.generate('alice', **generation)
+        e = self.evaluate()
+        def timeout(*_):
+            raise TimeoutError('合成超时')
+        self.run_jobs(timeout)
+        self.a.archive('alice', **target)
+        for job in (e, g):
+            with self.assertRaisesRegex(ValueError, '归档'):
+                self.w.retry('alice', job['job_id'])
+            self.assertEqual(self.w.jobs('alice', job['job_id'])['state'], 'failed')
+        with self.assertRaisesRegex(ValueError, '归档'):
+            self.evaluate('new')
+        with self.assertRaisesRegex(ValueError, '归档'):
+            self.w.generate('alice', **{**generation, 'request_key': 'new-generation'})
+        with self.assertRaises(KeyError):
+            self.w.generate('bob', **generation)
+        with self.assertRaises(UserGrantConflict):
+            self.w.generate('alice', **{**generation, 'material': '另一项任务'})
+        self.assertEqual(self.evaluate()['job_id'], e['job_id'])
+        self.assertEqual(self.w.generate('alice', **generation)['job_id'], g['job_id'])
+        self.a.restore('alice', **target, target_revision=1, request_key='restore')
+        self.assertEqual(self.evaluate()['job_id'], e['job_id'])
+        self.assertEqual(self.w.generate('alice', **generation)['job_id'], g['job_id'])
+        for job in (e, g):
+            with self.assertRaises(UserGrantConflict):
+                self.w.retry('alice', job['job_id'])
+        self.assertEqual(len(self.w.jobs('alice')['items']), 2)
+        self.assertEqual(self.w.jobs('bob')['items'], [])
+
+    def test_archive_after_acceptance_keeps_frozen_evaluation_and_prevents_generation_save(self):
+        target = {'draft_id': self.d['draft_id'], 'expected_revision': 1}
+        e = self.evaluate()
+        g = self.w.generate('alice', **target, material='梳理这个方法', request_key='gen')
+        def finish(system, prompt):
+            if self.a.get('alice', target['draft_id'])['state'] != 'archived':
+                self.a.archive('alice', **target)
+            if '业务方法编辑器' in system:
+                return {'text': json.dumps({'kind':'method','proposal':self.p})}
+            return {'text': '计划：修复登录问题'}
+        self.run_jobs(finish)
+        self.assertEqual(self.w.jobs('alice', e['job_id'])['state'], 'succeeded')
+        self.assertEqual(self.w.jobs('alice', g['job_id'])['state'], 'failed')
+        draft = self.a.get('alice', target['draft_id'])
+        self.assertEqual((draft['state'], draft['revision']), ('archived', 1))
+
+    def test_generation_receipt_uses_original_task_snapshot_and_rejects_changed_source(self):
+        data = {'material': '整理任务过程', 'request_key': 'from-task', 'task_ids': ['synthetic-task']}
+        with patch.object(self.s.tasks, 'get_task', return_value={'status': 'running'}) as get_task:
+            job = self.w.generate('alice', **data)
+            get_task.assert_called_once_with('synthetic-task', user_subject='alice')
+        with patch.object(self.s.tasks, 'get_task', side_effect=AssertionError('旧回执不重新读取任务')):
+            self.assertEqual(self.w.generate('alice', **data)['job_id'], job['job_id'])
+            with self.assertRaises(UserGrantConflict):
+                self.w.generate('alice', **{**data, 'task_ids': ['other-task']})
+
+    def test_enqueue_waits_for_concurrent_archive_before_checking_draft(self):
+        target = {'draft_id': self.d['draft_id'], 'expected_revision': 1}
+        archived, enqueue_attempt, release = threading.Event(), threading.Event(), threading.Event()
+        event, connect = self.a._event, self.w.store.connect
+        def hold_archive(db, owner, kind, object_id, payload):
+            event(db, owner, kind, object_id, payload)
+            if kind == 'draft.archived':
+                archived.set()
+                self.assertTrue(release.wait(5))
+        def traced_connect():
+            db = connect()
+            def trace(sql):
+                if archived.is_set() and sql == 'BEGIN IMMEDIATE':
+                    enqueue_attempt.set()
+            db.set_trace_callback(trace)
+            return db
+        with patch.object(self.a, '_event', hold_archive), patch.object(self.w.store, 'connect', traced_connect):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                archive = pool.submit(self.a.archive, 'alice', **target)
+                try:
+                    self.assertTrue(archived.wait(5))
+                    enqueue = pool.submit(self.evaluate)
+                    self.assertTrue(enqueue_attempt.wait(5))
+                finally:
+                    release.set()
+                self.assertEqual(archive.result(timeout=5)['status'], 'archived')
+                with self.assertRaisesRegex(ValueError, '归档'):
+                    enqueue.result(timeout=5)
+        self.assertEqual(self.w.jobs('alice')['items'], [])
 
     def test_standard_import_roundtrip_and_path_rejection(self):
         pack = self.w.export('alice', self.d['draft_id'])

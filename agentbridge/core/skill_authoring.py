@@ -352,7 +352,8 @@ class SkillAuthoring:
             draft = self._owned(db,owner,draft_id,expected_revision)
             if draft['state']=='archived': raise ValueError('草稿已归档')
             _, bundle = self._bundle(db,draft_id,draft['revision'])
-            profiles = profiles or list(bundle['manifest']['profiles'])
+            if profiles is None:
+                profiles = list(bundle['manifest']['profiles'])
             if not isinstance(profiles,list) or not profiles or any(not isinstance(p,str) for p in profiles) or len(set(profiles))!=len(profiles) or any(p not in bundle['manifest']['profiles'] for p in profiles):
                 raise ValueError('申请模式无效')
             tested = {r[0] for r in db.execute("SELECT profile FROM skill_draft_tests WHERE draft_id=? AND revision=? AND status='reported'", (draft_id,draft['revision']))}

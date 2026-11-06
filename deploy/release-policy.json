@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "884fa18d3d94"
+    "1930d9aa0a0d"
   ],
   "dataCompatibility": "reviewed-forward-only",
-  "reason": "Reviewed production predecessor 884fa18d3d94. No database schema or historic report migration. Automatic fallback after candidate start would re-enable downloading task-disallowed reports and writing grants to an implicit source."
+  "reason": "No database migration. Automatic fallback after candidate start could reintroduce stale run binding attribution, expand an explicitly empty skill publication scope, and admit new jobs for archived drafts."
 }

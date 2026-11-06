@@ -98,6 +98,113 @@ test("the general-purpose agent retains independent tasks and plan recovery afte
   }
 });
 
+function delayedSkillProxy({ guard = true, cold = false } = {}) {
+  const calls = [], identities = [];
+  let credential = 'current-fixture';
+  const identity = { bound: true, binding, client: { callToolResult(name, params, options) {
+    const reply = Promise.withResolvers();
+    calls.push({ name, params, binding: options.meta['agentbridge/skill']?.bindingId, retry:options.retry, reply });
+    return reply.promise;
+  } } };
+  const router = { config:{boundSkillToolGuard:guard}, resolveToolContext:()=>cold?{bound:false}:identity,
+    catalogCacheKeyForBinding:()=>credential, endpointKeyForSession:()=> 'fixture-workspace',
+    resolveWorkspaceSession() {
+      const reply=Promise.withResolvers();identities.push(reply);return reply.promise;
+    } };
+  function invoke(ctx, name, params, signal) {
+    const tools=createAgentBridgeProxyTools({context:ctx,identityRouter:router,serverName:'agentbridge',
+      taskRunRefResolver:()=>ctx.runId,taskRunContextResolver:()=>({status:'bound',runId:ctx.runId})});
+    return tools.find(tool=>tool.name===name).execute('call-'+name,params,signal);
+  }
+  function succeed(call, bindingId) {
+    call.reply.resolve({structuredContent:{status:'succeeded',binding_id:bindingId,
+      skill_id:call.params.skill_id,profile:call.params.profile,execution:{legacy:false,capabilities:[],effects:['read'],allow_batch:false}}});
+  }
+  return {calls,identities,identity,router,invoke,succeed,rotate:()=>{credential='rotated-fixture';}};
+}
+
+const nextDispatch = () => new Promise(resolve=>setImmediate(resolve));
+const skillError = result => result.details?.structuredContent?.error?.code;
+const weekly = {skill_id:'weekly',profile:'use'};
+const plan = {skill_id:'plan',profile:'use'};
+
+for (const guard of [false,true]) test(`an in-flight load owns its run before any center I/O (scope guard ${guard})`,async()=>{
+  const f=delayedSkillProxy({guard});
+  const first=f.invoke(context,'agentbridge_skill_get',weekly);
+  assert.equal(boundSkillToolGuard(f.router,context,f.identity,'exec',{})?.error.code,guard?'SKILL_LOAD_IN_PROGRESS':undefined);
+  for (const args of [weekly, plan, {...weekly,profile:'another'}, {...weekly,source_id:'other'}]) {
+    assert.equal(skillError(await f.invoke(context,'agentbridge_skill_get',args)),'SKILL_LOAD_IN_PROGRESS');
+  }
+  assert.equal(skillError(await f.invoke(context,'database_execute',{capability:'database.logs.query'})),'SKILL_LOAD_IN_PROGRESS');
+  assert.equal(skillError(await f.invoke(context,'agentbridge_skill_authoring',{action:'test',data:{}})),'SKILL_LOAD_IN_PROGRESS');
+  assert.equal(draftSampleGuard(f.router,context,f.identity,'oa_workflow_pending_list',{}),null);
+  assert.equal(f.calls.length,1);
+  assert.equal(f.calls[0].binding,undefined);
+  assert.equal(f.calls[0].retry,undefined,'the first unbound GET must not be replayed automatically');
+  const other={...context,runId:'other'};
+  const independent=f.invoke(other,'agentbridge_skill_get',plan);await nextDispatch();
+  assert.equal(f.calls.length,2);f.succeed(f.calls[1],'plan-binding');await independent;
+  f.succeed(f.calls[0],'weekly-binding');await first;
+  assert.equal(skillBindingMeta(f.router,context,f.identity)['agentbridge/skill'].bindingId,'weekly-binding');
+  assert.equal(skillBindingMeta(f.router,other,f.identity)['agentbridge/skill'].bindingId,'plan-binding');
+  const repeated=f.invoke(context,'agentbridge_skill_get',weekly);await nextDispatch();
+  assert.equal(f.calls[2].binding,'weekly-binding');assert.ok(f.calls[2].retry);
+  f.succeed(f.calls[2],'weekly-binding');await repeated;
+});
+
+test('a missing first-load transport receipt reports an unknown outcome without replay or binding',async()=>{
+  const f=delayedSkillProxy();
+  const request=f.invoke(context,'agentbridge_skill_get',weekly);await nextDispatch();
+  f.calls[0].reply.reject(Object.assign(new Error('lost response'),{code:'MCP_TIMEOUT'}));
+  const result=await request;
+  assert.equal(skillError(result),'SKILL_LOAD_UNCONFIRMED');
+  assert.equal(result.details.structuredContent.status,'unconfirmed');
+  assert.match(result.details.structuredContent.error.message,/无法确认中心是否已加载/);
+  assert.deepEqual(skillBindingMeta(f.router,context,f.identity),{});assert.equal(f.calls.length,1);
+});
+
+test('failed and rejected loads release their slot for a later explicit request',async()=>{
+  const f=delayedSkillProxy();
+  const failed=f.invoke(context,'agentbridge_skill_get',weekly);await nextDispatch();
+  f.calls[0].reply.reject(new Error('synthetic transport failure'));
+  await assert.rejects(failed,/synthetic transport failure/);
+  const denied=f.invoke(context,'agentbridge_skill_get',plan);await nextDispatch();
+  f.calls[1].reply.resolve({structuredContent:{status:'rejected',error:{code:'SKILL_DEPENDENCY_UNAVAILABLE'}}});
+  assert.equal((await denied).structuredContent.error.code,'SKILL_DEPENDENCY_UNAVAILABLE');
+  const retry=f.invoke(context,'agentbridge_skill_get',weekly);await nextDispatch();
+  assert.deepEqual(f.calls.map(call=>call.binding),[undefined,undefined,undefined]);
+  f.succeed(f.calls[2],'retry-binding');await retry;
+  assert.equal(skillBindingMeta(f.router,context,f.identity)['agentbridge/skill'].bindingId,'retry-binding');
+});
+
+for (const close of ['cancel', 'session', 'run', 'identity']) test(`a late response cannot restore a Skill after ${close} changes its owner`,async()=>{
+  const f=delayedSkillProxy(),controller=new AbortController();
+  let now=1000;f.router.skillRunNow=()=>now;
+  const stale=f.invoke(context,'agentbridge_skill_get',weekly,controller.signal);await nextDispatch();
+  if (close==='cancel') controller.abort();
+  if (close==='session') releaseSkillSession(f.router,context.sessionKey);
+  if (close==='run') releaseSkillRun(f.router,context);
+  if (close==='identity') f.rotate();
+  now+=600_000; // Late responses must also be harmless after ended-run tombstones expire.
+  const current=f.invoke(context,'agentbridge_skill_get',plan);await nextDispatch();
+  f.succeed(f.calls[1],'current-binding');await current;
+  f.succeed(f.calls[0],'late-binding');
+  assert.equal(skillError(await stale),'SKILL_RUN_CONTEXT_CLOSED');
+  assert.equal(skillBindingMeta(f.router,context,f.identity)['agentbridge/skill'].bindingId,'current-binding');
+});
+
+test('two lazy Workspace identities resolving in reverse order still produce one bound load',async()=>{
+  const f=delayedSkillProxy({cold:true});
+  const slow=f.invoke(context,'agentbridge_skill_get',weekly);
+  const fast=f.invoke(context,'agentbridge_skill_get',plan);
+  f.identities[1].resolve(f.identity);await nextDispatch();
+  f.identities[0].resolve(f.identity);
+  assert.equal(skillError(await slow),'SKILL_LOAD_IN_PROGRESS');
+  assert.deepEqual(f.calls.map(call=>call.params.skill_id),['plan']);
+  f.succeed(f.calls[0],'fast-binding');await fast;
+  assert.equal(skillBindingMeta(f.router,context,f.identity)['agentbridge/skill'].bindingId,'fast-binding');
+});
+
 function catalogRouter({ token = "first-test-token", cache = new Map(), versions = new Map() } = {}) {
   return new AgentBridgeIdentityRouter({ config: resolvePluginConfig({ mcpUrl: "https://bridge.test/mcp",
     identityBindings: [{ channel: "telegram", senderId: "1001", tokenEnv: "TEST_TOKEN" }] }),
