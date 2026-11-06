@@ -18,6 +18,9 @@ from agentbridge.adapters.seeyon_business_settlement import (
 from tests.test_seeyon_business_settlement import SettlementFrame, field, snapshot
 
 
+pytestmark = pytest.mark.browser
+
+
 @pytest.fixture(scope="module")
 def browser():
     with sync_playwright() as playwright:

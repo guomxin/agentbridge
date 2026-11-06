@@ -43,3 +43,4 @@ include = ["agentbridge*", "bscli", "bscli.cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["browser: uses a real browser (local validation only)"]

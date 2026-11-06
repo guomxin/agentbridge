@@ -180,6 +180,7 @@ def test_title_routes_to_dedicated_profile():
     assert pending_action_profile_for_title("转发：【综合】乘坐飞机申请单") is None
 
 
+@pytest.mark.browser
 def test_actual_cap4_extractor_groups_rows_and_rejects_visible_editor():
     from playwright.sync_api import sync_playwright
 

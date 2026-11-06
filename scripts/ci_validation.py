@@ -1,8 +1,4 @@
-"""Run the selected CI profile using the POSIX validation entrypoints.
-
-Scope selection remains in ci_validation_plan.py. This entry neither publishes
-nor has production credentials, and scoped checks never create a Full receipt.
-"""
+"""Run independent Linux CI checks. The formal release receipt is produced only by local Full."""
 from __future__ import annotations
 
 import argparse
@@ -10,11 +6,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 
 try:
-    from validation_plan import test_environment
+    from validation_plan import CI_OUTPUT, CI_PYTEST_SCOPE, plan, resolve, test_environment, test_report
 except ModuleNotFoundError:
-    from scripts.validation_plan import test_environment
+    from scripts.validation_plan import CI_OUTPUT, CI_PYTEST_SCOPE, plan, resolve, test_environment, test_report
 
 RELEASE_TESTS = (
     "tests/test_release_policy.py",
@@ -24,30 +21,45 @@ RELEASE_TESTS = (
     "tests/test_native_maintenance.py",
 )
 
-
-def commands(profile, root, python):
-    if profile not in {"docs", "release", "full"}:
-        raise ValueError("Unknown validation profile")
+def ci_stages(profile, root):
     if profile == "full":
-        return [[python, str(root / "scripts/validation_plan.py"), "full", "--root", str(root)]]
+        return plan(root, for_ci=True)["stages"]
+    if profile not in {"docs", "release"}:
+        raise ValueError("Unknown validation profile")
     tests = ["tests/test_documentation.py"]
     if profile == "release":
         tests.extend(RELEASE_TESTS)
-    targeted = [python, str(root / "scripts/native/cli.py"), "validate"]
-    for path in tests:
-        targeted.extend(["--test", path])
-    return [targeted, [python, str(root / "scripts/check_public_content.py")],
-            [python, str(root / "scripts/current_facts.py"), "--check"]]
+    report = f"{CI_OUTPUT}/pytest.xml"
+    return [
+        {"id": f"python-{profile}", "report": report, "reportKind": "junit",
+         "command": [sys.executable, "-m", "pytest", "-q", *CI_PYTEST_SCOPE,
+                     f"--junitxml={report}", *tests]},
+        {"id": "public-content", "command": [sys.executable, "scripts/check_public_content.py"]},
+        {"id": "current-facts", "command": [sys.executable, "scripts/current_facts.py", "--check"]},
+    ]
 
 
 def run_profile(profile, root):
     root = Path(root).resolve()
-    calls = commands(profile, root, sys.executable)
-    # current_facts constructs temporary services even in docs-only checks. On
-    # POSIX it needs an ephemeral key, just as the native test runner does.
-    with test_environment() as environment:
-        for command in calls:
-            subprocess.run(command, cwd=root, env=environment, check=True)
+    stages = ci_stages(profile, root)
+    (root / CI_OUTPUT).mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
+    with test_environment() as env:
+        env.update(AGENTBRIDGE_BROWSER_TESTS="0", PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="1")
+        for stage in stages:
+            print(f"CI: {stage['id']}", flush=True)
+            report = root / resolve(stage["report"], run_id) if stage.get("report") else None
+            if report:
+                report.unlink(missing_ok=True)
+            command = [resolve(value, run_id) for value in stage["command"]]
+            subprocess.run(command, cwd=root / stage.get("cwd", "."), env=env, check=True,
+                           timeout=stage.get("timeoutSeconds", 900))
+            if report and stage["reportKind"] == "junit":
+                summary = test_report(report)
+                if summary["failed"] or not summary["passed"]:
+                    raise ValueError(f"CI stage {stage['id']} has failures or no passing tests")
+            elif report and not report.is_file():
+                raise FileNotFoundError(f"CI stage {stage['id']} did not produce {report}")
 
 
 def main():

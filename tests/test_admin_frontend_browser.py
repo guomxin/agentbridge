@@ -16,10 +16,11 @@ from agentbridge.core.mcp_identities import McpIdentityTokenStore
 from tests.database_fixtures import configured_source
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("AGENTBRIDGE_BROWSER_TESTS") != "1",
-    reason="opt-in isolated Chromium acceptance",
-)
+pytestmark = [
+    pytest.mark.browser,
+    pytest.mark.skipif(os.environ.get("AGENTBRIDGE_BROWSER_TESTS") != "1",
+                       reason="opt-in isolated Chromium acceptance"),
+]
 PASSWORD = "BrowserFixture!Only2026"
 
 

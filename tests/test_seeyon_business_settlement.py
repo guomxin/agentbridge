@@ -381,6 +381,7 @@ def test_new_permission_does_not_expand_existing_approval_grants(tmp_path):
     assert profile.commit == COMMIT
 
 
+@pytest.mark.browser
 def test_offline_cap4_extractor_keeps_rows_selected_choices_and_attachment_identity():
     from playwright.sync_api import sync_playwright
 

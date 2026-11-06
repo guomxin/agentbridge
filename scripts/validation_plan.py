@@ -57,6 +57,8 @@ BROWSER_FIXTURES = ("tests/test_workspace_markdown.browser.js",)
 CHECKS = ["browser-runtime", "public-content", "current-facts", "python-full", "compileall",
           "pip-check", "workspace-node", "openclaw", "openclaw-pack", "installed-wheel"]
 EVIDENCE_VERSION = 2
+CI_OUTPUT = "output/ci-validation"
+CI_PYTEST_SCOPE = ("--strict-markers", "-m", "not browser")
 
 
 def stamp():
@@ -82,7 +84,7 @@ def read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def plan(root, *, mcp_app=False):
+def plan(root, *, mcp_app=False, for_ci=False):
     root = Path(root).resolve()
     patterns = ("test_*.mjs", "test_*.js", "*.test.mjs", "*.test.js")
     discovered = {p.relative_to(root).as_posix() for pattern in patterns
@@ -111,44 +113,51 @@ def plan(root, *, mcp_app=False):
         stages.append({"id": name, "command": command, "cwd": cwd, "testFiles": list(files),
                        "report": report, "reportKind": report_kind, "timeoutSeconds": timeout})
 
-    add("browser-runtime", [python, "-m", "playwright", "install", "chromium"])
+    output = CI_OUTPUT if for_ci else "output/release-validation"
+    if not for_ci:
+        add("browser-runtime", [python, "-m", "playwright", "install", "chromium"])
     add("public-content", [python, "scripts/check_public_content.py"])
     add("current-facts", [python, "scripts/current_facts.py", "--check"])
-    add("python-full", [python, "-m", "pytest", "-q", "-n", "4", "--dist", "loadscope",
-                        "--junitxml=output/release-validation/pytest.xml"],
-        files=python_tests, report="output/release-validation/pytest.xml", timeout=3600)
+    pytest_scope = CI_PYTEST_SCOPE if for_ci else ()
+    add("python-non-browser" if for_ci else "python-full",
+        [python, "-m", "pytest", "-q", "-n", "4", "--dist", "loadscope",
+         *pytest_scope, f"--junitxml={output}/pytest.xml"],
+        files=python_tests, report=f"{output}/pytest.xml", timeout=3600)
     add("compileall", [python, "-m", "compileall", "-q", "agentbridge", "bscli"])
     add("pip-check", [python, "-m", "pip", "check"])
     add("workspace-node", [node, "--test", "--test-reporter=junit",
-                           "--test-reporter-destination=output/release-validation/workspace-node.xml", *WORKSPACE_NODE],
-        files=WORKSPACE_NODE, report="output/release-validation/workspace-node.xml")
+                           f"--test-reporter-destination={output}/workspace-node.xml", *WORKSPACE_NODE],
+        files=WORKSPACE_NODE, report=f"{output}/workspace-node.xml")
     # Run the same files as npm test with a machine-readable test report.
     add("openclaw", [node, "--test", "--test-reporter=junit",
-                     "--test-reporter-destination=../../output/release-validation/openclaw.xml",
+                     f"--test-reporter-destination=../../{output}/openclaw.xml",
                      *[str(Path(p).relative_to("integrations/openclaw-agentbridge")) for p in plugin_tests]],
         cwd="integrations/openclaw-agentbridge", files=plugin_tests,
-        report="output/release-validation/openclaw.xml", timeout=1800)
+        report=f"{output}/openclaw.xml", timeout=1800)
     # The runner's explicit Node invocation must retain npm test's exact meaning.
     package = read(root / "integrations/openclaw-agentbridge/package.json")
     if package.get("scripts", {}).get("test") != "node --test test/*.test.js":
         raise ValueError("OpenClaw npm test changed; update the shared validation plan")
     add("openclaw-pack", [npm, "run", "pack:check"], cwd="integrations/openclaw-agentbridge")
-    if mcp_app:
+    if mcp_app or for_ci:
         add("mcp-app-test", [npm, "test"], cwd="integrations/mcp-app",
             files=sorted(p.relative_to(root).as_posix() for p in
                          (root / "integrations/mcp-app/tests").glob("*.test.*")))
+    if mcp_app:
         add("mcp-app-check", [npm, "run", "check"], cwd="integrations/mcp-app")
         add("mcp-app-build", [npm, "run", "build"], cwd="integrations/mcp-app")
     add("installed-wheel", [python, "scripts/agentbridge_artifact.py", "build", "--root", str(root),
-                            "--output", str(root / "output/release-validation/runs/{runId}/artifact")],
-        report="output/release-validation/runs/{runId}/artifact/artifact.json", report_kind="artifact")
-    return {"schema": "agentbridge.validation-plan.v1", "options": {"mcpApp": bool(mcp_app)}, "stages": stages,
+                            "--output", str(root / output / "runs/{runId}/artifact")],
+        report=f"{output}/runs/{{runId}}/artifact/artifact.json", report_kind="artifact")
+    browser_group = ({"mode": "excluded", "pytestExpression": "not browser", "manualFixtures": list(BROWSER_FIXTURES)}
+                     if for_ci else
+                     {"mode": "opt-in", "files": [*BROWSER_FIXTURES, "tests/test_admin_frontend_browser.py"],
+                      "pythonEnabled": os.environ.get("AGENTBRIDGE_BROWSER_TESTS") == "1",
+                      "manualFixtures": list(BROWSER_FIXTURES)})
+    return {"schema": "agentbridge.ci-plan.v1" if for_ci else "agentbridge.validation-plan.v1",
+            "options": {"mcpApp": bool(mcp_app)}, "stages": stages,
             "groups": {"workspaceNode": list(WORKSPACE_NODE), "python": python_tests,
-                       "openclaw": plugin_tests,
-                       "browserAcceptance": {"mode": "opt-in", "files": [*BROWSER_FIXTURES,
-                            "tests/test_admin_frontend_browser.py"],
-                            "pythonEnabled": os.environ.get("AGENTBRIDGE_BROWSER_TESTS") == "1",
-                            "manualFixtures": list(BROWSER_FIXTURES)}}}
+                       "openclaw": plugin_tests, "browserAcceptance": browser_group}}
 
 
 def test_report(path):

@@ -1,6 +1,5 @@
 """Independent real-adapter checks over the closed IO acceptance transport."""
 from pathlib import Path
-import time
 
 import pytest
 
@@ -107,22 +106,36 @@ def test_equal_count_ordering_drift_fails_the_original_page_anchor(fixture, monk
     assert evidence["confirmed"] is False and evidence["reason"] == "done_scan_unproven"
 
 
-def test_slow_done_page_receives_remaining_budget_and_stops_without_false_completion(fixture):
+def test_slow_done_page_receives_remaining_budget_and_stops_without_false_completion(fixture, monkeypatch):
     adapter, worker, target = historical_target(fixture, done_delay=.15)
     offset = len(fixture.oa.data["verification_io"])
-    start = time.monotonic()
+    # Only closed transport waits advance this budget: runner scheduling and SQLite setup
+    # must not exhaust it before the verifier can reach the delayed history page.
+    class IOClock:
+        elapsed = 0.0
+
+        def monotonic(self):
+            return self.elapsed
+
+        def sleep(self, seconds):
+            self.elapsed += seconds
+
+    clock = IOClock()
+    for module in ("agentbridge.browser.read_budget", "agentbridge.adapters.seeyon_history_query",
+                   "agentbridge.adapters.seeyon_pending_query", "tests.support.oa_verification_acceptance"):
+        monkeypatch.setattr(module + ".time", clock)
+    fixture.oa.contract.io_delay = .005
     with adapter.capability_scope(worker):
         try:
-            with read_deadline_scope(start + .06):
+            with read_deadline_scope(clock.monotonic() + .06):
                 result = verify_pending_action(adapter, worker, target)
         except (RuntimeError, TimeoutError):
             pass
         else:
             assert result["confirmed"] is False
-    elapsed = time.monotonic() - start
     calls = fixture.oa.data["verification_io"][offset:]
     timed_out = [event for event in calls if event["timedOut"]]
     assert timed_out and timed_out[-1]["kind"] == "history_page"
-    assert 0 < timed_out[-1]["requestedTimeoutMs"] <= 60
-    assert elapsed < .3
+    assert 0 < timed_out[-1]["requestedTimeoutMs"] < 60
+    assert clock.elapsed == pytest.approx(.06, abs=.001)
     assert fixture.audit()["syntheticWrites"] == 0

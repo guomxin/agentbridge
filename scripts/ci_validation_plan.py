@@ -95,13 +95,13 @@ def main():
     root = Path(__file__).resolve().parents[1]
     event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
     result = plan(root, os.environ, event)
-    destination = root / 'output/release-validation/ci-plan.json'
+    destination = root / 'output/ci-validation/ci-plan.json'
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
         stream.write(f"profile={result['profile']}\n")
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
-        stream.write('### Validation plan\n```json\n' + json.dumps(result, ensure_ascii=False, indent=2) + '\n```\n')
+        stream.write('### Independent CI checks (no browser)\n```json\n' + json.dumps(result, ensure_ascii=False, indent=2) + '\n```\n')
     # Caller stdout may use a legacy encoding; artifacts and summaries stay UTF-8.
     print(json.dumps(result, ensure_ascii=True))
 

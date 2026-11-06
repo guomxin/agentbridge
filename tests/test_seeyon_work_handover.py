@@ -147,6 +147,7 @@ def test_title_routing_is_dedicated_and_bounded():
     assert pending_action_profile_for_title("【HR】离职申请单-测试")["profile"] == "resignation"
 
 
+@pytest.mark.browser
 def test_cap4_dom_preserves_multiple_rows_and_rejects_visible_editors():
     # Execute the actual extractor against an offline DOM, including CAP4's hidden textarea.
     from playwright.sync_api import sync_playwright

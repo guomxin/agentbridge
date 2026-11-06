@@ -150,5 +150,5 @@ def test_entrypoint_handles_chinese_paths_with_legacy_encoding(tmp_path, monkeyp
             ci_validation_plan.main()
         stdout.flush()
         assert json.loads(console.getvalue().decode('cp1252')) == result
-    assert json.loads((tmp_path / 'output/release-validation/ci-plan.json').read_text(encoding='utf-8')) == result
+    assert json.loads((tmp_path / 'output/ci-validation/ci-plan.json').read_text(encoding='utf-8')) == result
     assert '验收记录' in (tmp_path / 'summary.md').read_text(encoding='utf-8')

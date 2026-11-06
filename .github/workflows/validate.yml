@@ -42,12 +42,7 @@ jobs:
           "$validation_venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77' pytest pytest-xdist
           "$validation_venv/bin/python" -m pip install --disable-pip-version-check --no-build-isolation -e '.[database-analysis]'
           echo "AGENTBRIDGE_TEST_PYTHON=$validation_venv/bin/python" >> "$GITHUB_ENV"
-      - name: Prepare Linux browser dependencies for full validation
-        if: steps.plan.outputs.profile == 'full'
-        run: |
-          set -euo pipefail
-          "$AGENTBRIDGE_TEST_PYTHON" -m playwright install --with-deps chromium
-      - name: Validate repository revision without production credentials
+      - name: Run independent repository checks without a browser
         env:
           VALIDATION_PROFILE: ${{ steps.plan.outputs.profile }}
         run: |
@@ -56,6 +51,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: validation-${{ github.sha }}
-          path: output/release-validation/
+          name: ci-validation-${{ github.sha }}
+          path: |
+            output/ci-validation/ci-plan.json
+            output/ci-validation/*.xml
+            output/ci-validation/runs/*/artifact/artifact.json
           retention-days: 14
