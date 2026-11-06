@@ -43,6 +43,8 @@ class McpPresentationTests(unittest.TestCase):
         self.assertIn("source_id", profile["planning"]["modelContext"])
         self.assertIn("database.report.export", profile["planning"]["modelContext"])
         self.assertIn("不建立专用计划", profile["planning"]["modelContext"])
+        self.assertIn("database.logs.analyze", profile["planning"]["modelContext"])
+        self.assertIn("baseline_start_date", profile["planning"]["modelContext"])
         self.assertNotIn("OA 转泰华", profile["planning"]["modelContext"])
 
     def test_interaction_tool_metadata_supports_modern_and_legacy_hosts(self):
