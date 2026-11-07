@@ -16,7 +16,7 @@ export function configurationProposal(value) {
   const profiles={}, references={}, required_resources={};
   for (const row of value.references) {
     const path=row.path.trim();
-    if (!/^references\/[a-zA-Z0-9_\-\u4e00-\u9fff/ .]+\.md$/u.test(path) || path.includes('..') || path.includes('//')) throw Error('参考资料路径须为 references/名称.md，不能包含上级目录。');
+    if (!path.startsWith('references/') || !path.endsWith('.md') || path.split('/').at(-1)==='.md' || path.split('/').includes('..') || path.includes('//') || /[\\:\u0000]/u.test(path)) throw Error('参考资料路径须为 references/名称.md，不能包含上级目录。');
     if (Object.hasOwn(references,path)) throw Error('参考资料路径不能重复。');
     references[path]=row.content;
   }

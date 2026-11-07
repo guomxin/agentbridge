@@ -16,7 +16,7 @@ from uuid import uuid4
 from agentbridge.core.business_skills import PROTOCOL, _json, validate_skill_bundle
 from agentbridge.core.skill_actions import dispatch_skill_action
 from agentbridge.core.skill_quality import (candidate_review_problems, normalize_standard_metadata,
-    proposal_from_bundle, publication_evidence, report_score_counts, standard_document)
+    proposal_from_bundle, publication_evidence, report_score_counts, standard_document, _standard_name)
 from agentbridge.core.user_grants import UserGrantConflict
 
 _REPORT_NOT_SPECIFIED = object()
@@ -543,15 +543,26 @@ class SkillAuthoring:
             self._event(db,owner,'draft.restored',draft_id,{'revision':rev,'restored_from':target_revision})
             return self._receipt(db,owner,request_key,digest,{'draft_id':draft_id,'revision':rev,'status':'draft_saved','published':False})
 
+    def _export_snapshot(self, owner, draft_id):
+        with closing(self.store.connect()) as db:
+            draft = self._owned(db, owner, draft_id)
+            row, bundle = self._bundle(db, draft_id, draft['revision'])
+            name = bundle['manifest'].get('standard_metadata', {}).get('name')
+            if name is None:
+                first, original = (row, bundle) if draft['revision'] == 1 else self._bundle(db, draft_id, 1)
+                if json.loads(first['provenance_json'])['kind'] == 'import':
+                    name = original['manifest']['name']
+            return draft, bundle, name if _standard_name(name) else None
+
     def export(self, owner, draft_id):
-        draft = self.get(owner, draft_id)
-        bundle = draft['bundle']
+        draft, bundle, standard_name = self._export_snapshot(owner, draft_id)
         # Importers still save only the proposal as a new draft. The immutable
         # manifest preserves the original ID and declared resource order for
         # consumers that verify an independently identified source revision.
         return {'format': 'agentbridge.skill-draft.v1', 'proposal': proposal_from_bundle(bundle),
                 'source': {'skill_id': draft['skill_id'], 'revision': draft['revision'],
-                           'content_hash': bundle['content_hash'], 'manifest': bundle['manifest']}}
+                           'content_hash': bundle['content_hash'], 'manifest': bundle['manifest'],
+                           **({'standard_name': standard_name} if standard_name else {})}}
 
     def dispatch(self, owner, action, data):
         return dispatch_skill_action(self, owner, action, data)

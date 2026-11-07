@@ -2791,6 +2791,52 @@ class WorkspaceHttpServerTests(unittest.TestCase):
                 self.assertEqual(detail["bundle"]["resources"], {
                     "SKILL.md": document, "references/example.md": reference})
                 self.assertEqual(detail["bundle"]["manifest"]["name"], "original-name")
+
+                # Imported full-budget drafts must remain editable. Unicode and
+                # control characters use different wire sizes, while all share
+                # the same decoded resource and mode limits.
+                proposal = {"name": "改名后的草稿", "description": "只整理文字",
+                    "selection": {"use_when": "整理文字", "not_for": "业务操作", "output": "文字"},
+                    "profiles": {profile: {"description": "文" * 500,
+                        "execution": {"effects": ["read"], "allow_batch": False, "capabilities": []}}
+                        for profile in "abcdefgh"}}
+                for index, char in enumerate(("文", "📌", "\x01")):
+                    with self.subTest(char=repr(char)):
+                        value = {**proposal, "instructions": char * 40_000,
+                                 "references": {"references/example.md": char * 8_000}}
+                        request = {"action": "save", "data": {"draft_id": saved["draft_id"],
+                            "expected_revision": index + 1, "request_key": "large-save-" + str(index),
+                            "proposal": value, "provenance": {"kind": "revision"}}}
+                        wire = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
+                        self.assertGreater(len(wire), 128 * 1024)
+                        self.assertLess(len(wire), 514 * 1024)
+                        self.assertEqual(_request(port, "POST", path, body=wire, origin=origin)[0], 401)
+                        self.assertEqual(_request(port, "POST", path, body=wire, origin=origin, cookies=cookies)[0], 401)
+                        status, _, updated = _request(port, "POST", path, body=wire.ljust(514 * 1024), origin=origin, **auth)
+                        self.assertEqual(status, 200, updated)
+                        self.assertEqual(updated["revision"], index + 2)
+                        fresh = service.skill_authoring.get("user-a", saved["draft_id"])
+                        self.assertEqual(fresh["bundle"]["resources"], {
+                            "SKILL.md": value["instructions"], **value["references"]})
+                        self.assertEqual(set(fresh["bundle"]["manifest"]["profiles"]), set("abcdefgh"))
+
+                for raw in (wire.ljust(514 * 1024 + 1),
+                            json.dumps({**request, "owner": "user-b"}).encode()):
+                    self.assertEqual(_request(port, "POST", path, body=raw, origin=origin, **auth)[0], 400)
+
+                # Transport headroom never expands the saved content contract.
+                request["data"].update(expected_revision=4, request_key="over-content")
+                request["data"]["proposal"]["references"]["references/example.md"] += "x"
+                status, _, _ = _request(port, "POST", path, body=request, origin=origin, **auth)
+                self.assertEqual(status, 400)
+                self.assertEqual(service.skill_authoring.get("user-a", saved["draft_id"])["revision"], 4)
+
+                request["data"]["proposal"]["references"]["references/example.md"] = char * 8_000
+                other = service.skill_authoring.save("user-b", proposal=request["data"]["proposal"], request_key="foreign-draft")
+                request["data"].update(draft_id=other["draft_id"], expected_revision=1, request_key="foreign-large-save")
+                status, _, _ = _request(port, "POST", path, body=request, origin=origin, **auth)
+                self.assertEqual(status, 404)
+                self.assertEqual(service.skill_authoring.get("user-b", other["draft_id"])["revision"], 1)
             finally:
                 server.shutdown()
                 server.server_close()

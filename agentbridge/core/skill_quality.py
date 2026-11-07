@@ -336,7 +336,7 @@ def normalize_standard_metadata(value):
     try:
         normalized = SkillStandardMetadata.model_validate(value).model_dump(exclude_none=True)
     except ValidationError as exc:
-        raise ValueError('标准元数据仅支持 license（最多1000字符）和 compatibility（最多500字符）字符串') from exc
+        raise ValueError('标准元数据仅支持合法标准 name、license（最多1000字符）和 compatibility（最多500字符）字符串') from exc
     if any(not v.strip() for v in normalized.values()):
         raise ValueError('标准元数据不能为空白')
     return normalized
@@ -369,7 +369,7 @@ def export_standard(bundle, *, imported_name=None):
         raise ValueError('正文与标准元数据冲突，请先修正草稿')
     metadata.update(declared)
     metadata = normalize_standard_metadata(metadata)
-    name = imported_name if _standard_name(imported_name) else m['id']
+    name = metadata.pop('name', None) or (imported_name if _standard_name(imported_name) else m['id'])
     header = '\n'.join(f'{key}: {json.dumps(value, ensure_ascii=False)}' for key, value in [
         ('name', name), ('description', m['description']), *metadata.items()])
     # These literal separators would break a quoted YAML scalar into lines.

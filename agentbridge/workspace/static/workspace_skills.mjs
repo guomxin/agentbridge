@@ -7,31 +7,22 @@ const profileLabels = {preview: "草稿预览", fill: "准备填单", review: "�
 const profileLabel = profile => Object.hasOwn(profileLabels, profile) ? profileLabels[profile] : profile;
 
 async function readDraftImport(file) {
-  const draftLimit = 100_000;
-  if (file.size > 384 * 1024) throw new Error('文件不能超过 384 KiB。');
+  if (file.size > 1024 * 1024) throw new Error('文件不能超过 1 MiB。');
   const value = JSON.parse(await file.text());
-  // Standard packages count decoded text and references on the server.
-  // UTF-8 and JSON escaping can make a valid 48,000-character export larger.
-  if (value?.format === 'agentskills.files.v1') return value;
-  if (file.size > 256 * 1024) throw new Error('原生草稿文件不能超过 256 KiB。');
-  if (file.size <= draftLimit) return value;
-
-  // Only the proposal will be saved. Allow extra bytes for native revision
-  // metadata without expanding the original budget for draft content.
-  const source = value?.source, manifest = source?.manifest;
-  if (value?.format !== 'agentbridge.skill-draft.v1' || !value.proposal || typeof value.proposal !== 'object' ||
-      Array.isArray(value.proposal) || Object.keys(value).length !== 3 ||
-      !Number.isSafeInteger(source?.revision) || source.revision < 1 || Object.keys(source).length !== 4 ||
-      typeof source.skill_id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(source.skill_id) ||
-      typeof source.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(source.content_hash) ||
-      manifest?.schemaVersion !== 'agentbridge.skills.v1' || manifest.id !== source.skill_id ||
-      manifest.version !== '0.0.0' || manifest.entrypoint !== 'SKILL.md') {
-    throw new Error('未带原生修订信息的草稿不能超过 100 KB。');
+  if (value?.format === 'agentskills.files.v1') {
+    if (file.size > 384 * 1024) throw new Error('标准文件包不能超过 384 KiB。');
+    return value;
   }
-  const bytes = data => new Blob([JSON.stringify(data, null, 2)]).size;
-  const previousSize = bytes({format:value.format, proposal:value.proposal});
-  const sourceSize = bytes(value) - previousSize;
-  if (previousSize > draftLimit || file.size - sourceSize > draftLimit) throw new Error('草稿内容不能超过 100 KB。');
+  if (value?.format !== 'agentbridge.skill-draft.v1' || !value.proposal ||
+      typeof value.proposal !== 'object' || Array.isArray(value.proposal)) throw new Error('不支持的草稿格式');
+  // Only the proposal is saved, under a fresh identity. Source claims grant
+  // no authority. The central validator still enforces decoded content limits.
+  if (new Blob([JSON.stringify(value.proposal)]).size > 512 * 1024) throw new Error('草稿内容不能超过 512 KiB。');
+  if (value.source?.standard_name !== undefined) {
+    const name = value.source.standard_name;
+    if (typeof name !== 'string' || name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error('标准名称格式无效。');
+    value.proposal = {...value.proposal, standard_metadata: {...value.proposal.standard_metadata, name}};
+  }
   return value;
 }
 

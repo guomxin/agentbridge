@@ -138,7 +138,7 @@ class SkillMcpTransportTests(unittest.TestCase):
             self.assertIn(field, definitions['SkillDependencies']['properties'])
             definitions['SkillDependencies']['properties'].pop(field)
         metadata = definitions.pop('SkillStandardMetadata')
-        self.assertEqual(set(metadata['properties']), {'license', 'compatibility'})
+        self.assertEqual(set(metadata['properties']), {'name', 'license', 'compatibility'})
         self.assertIn('standard_metadata', definitions['SkillProposal']['properties'])
         definitions['SkillProposal']['properties'].pop('standard_metadata')
         definitions['SkillAuthoringData']['properties'].pop('expected_version')

@@ -72,7 +72,7 @@ test('explicit capability restriction preserves an intentionally empty set and d
 
 test('invalid names, paths and effect mismatches remain editable but cannot be saved',()=>{
   const value=skillConfiguration(legacy());
-  for(const path of ['../private.md','references/../private.md','references/a.js','references//a.md']){
+  for(const path of ['../private.md','references/../private.md','references/a.js','references//a.md','references/.md','references/a\\b.md','references/a:b.md','references/a\u0000.md']){
     const copy=structuredClone(value);copy.references[0].path=path;assert.throws(()=>configurationProposal(copy),/参考资料路径/);
   }
   const duplicate=structuredClone(value);duplicate.profiles[1].id='preview';assert.throws(()=>configurationProposal(duplicate),/模式标识不能重复/);
@@ -80,6 +80,17 @@ test('invalid names, paths and effect mismatches remain editable but cannot be s
   assert.throws(()=>configurationProposal(effects),/只能选择读取效果/);
   effects.profiles[0].execution.effects=[];assert.throws(()=>configurationProposal(effects),/至少一种/);
   const missing=structuredClone(value);missing.references=[];assert.throws(()=>configurationProposal(missing),/必读资料不存在/);
+});
+
+test('accepted Markdown resource names survive a no-op edit without losing exact required associations',()=>{
+  for(const path of ['references/faq(v2).md','references/équipe.md','references/a..b.md','references/复核📎.md']){
+    const bundle=legacy();
+    bundle.resources[path]=bundle.resources['references/source.md'];delete bundle.resources['references/source.md'];
+    bundle.manifest.required_resources.preview=[path];
+    const f=fixture(bundle,catalog),value=configurationProposal(f.editor.read());
+    assert.deepEqual(Object.keys(value.references),[path]);
+    assert.deepEqual(value.required_resources.preview,[path]);
+  }
 });
 
 test('unknown existing dependencies and unsafe display text are preserved as data',()=>{

@@ -39,6 +39,47 @@ class SkillStandardMetadataTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.a.workbench.export('bob', draft['draft_id'])
 
+    def test_native_transfer_retains_external_name_without_changing_source_snapshot(self):
+        first = self.a.workbench.import_package('alice', package=self.package, request_key='first')
+        original = self.a.get('alice', first['draft_id'])
+        proposal = proposal_from_bundle(original['bundle'])
+        proposal['name'] = '中文显示标题'
+        self.a.save('alice', draft_id=first['draft_id'], expected_revision=1, proposal=proposal, request_key='rename')
+        snapshot = self.a.get('alice', first['draft_id'])
+        native = self.a.export('alice', first['draft_id'])
+        self.assertEqual(native['source']['standard_name'], 'text-helper')
+        self.assertEqual(native['source']['manifest'], snapshot['bundle']['manifest'])
+        self.assertEqual(native['source']['content_hash'], snapshot['bundle']['content_hash'])
+        self.assertEqual(native['proposal'], proposal_from_bundle(snapshot['bundle']))
+        copied = deepcopy(native['proposal'])
+        copied['standard_metadata'] = {**copied.get('standard_metadata', {}), 'name': native['source']['standard_name']}
+        second = self.a.save('bob', proposal=copied, request_key='copy', provenance={'kind': 'import'})
+        self.assertNotEqual(second['skill_id'], first['skill_id'])
+        self.assertEqual(import_standard(self.a.workbench.export('bob', second['draft_id']))['name'], 'text-helper')
+        self.assertEqual(self.a.export('bob', second['draft_id'])['source']['standard_name'], 'text-helper')
+        self.a.save('bob', draft_id=second['draft_id'], expected_revision=1,
+                    proposal={**copied, 'instructions': copied['instructions']+'\nModified.'}, request_key='second-change')
+        self.a.restore('bob', draft_id=second['draft_id'], expected_revision=2, target_revision=1, request_key='restore')
+        self.assertEqual(import_standard(self.a.workbench.export('bob', second['draft_id']))['name'], 'text-helper')
+        self.assertEqual(self.a.get('alice', first['draft_id'])['bundle'], snapshot['bundle'])
+        with self.assertRaises(KeyError):
+            self.a.export('bob', first['draft_id'])
+
+    def test_standard_name_is_declarative_and_strictly_validated(self):
+        proposal = import_standard(self.package)
+        for name in ('', ' ', 'Upper', '-bad', 'bad-', 'bad--name', 'x'*65, 'ok\n', 42):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.a.normalize('safe-id', {**proposal, 'standard_metadata': {'name': name}})
+        bundle = self.a.normalize('safe-id', {**proposal, 'standard_metadata': {'name': '2-text-helper'}})
+        self.assertEqual(bundle['manifest']['id'], 'safe-id')
+        self.assertEqual(bundle['manifest']['profiles']['use']['execution']['capabilities'], [])
+        self.assertEqual(import_standard(export_standard(bundle))['name'], '2-text-helper')
+
+    def test_import_replay_retains_existing_revision_without_adding_metadata(self):
+        first = self.a.workbench.import_package('alice', package=self.package, request_key='same')
+        self.assertEqual(self.a.workbench.import_package('alice', package=self.package, request_key='same'), first)
+        self.assertNotIn('name', self.a.get('alice', first['draft_id'])['bundle']['manifest']['standard_metadata'])
+
     def test_export_uses_original_import_name_only_for_a_valid_external_name(self):
         proposal = import_standard(self.package)
         for provenance, title, use_original in [

@@ -37,6 +37,9 @@ MAX_BODY_BYTES = 128 * 1024
 MAX_CHAT_BODY_BYTES = 18 * 1024 * 1024
 # Leave room for the action envelope and request key around a full file.
 MAX_STANDARD_IMPORT_BODY_BYTES = STANDARD_FILE_BYTES + 2 * 1024
+# Draft text has its own domain limits. Allow UTF-8 / JSON escaping and
+# bounded mode configuration without changing ordinary request budgets.
+MAX_SKILL_SAVE_BODY_BYTES = 512 * 1024 + 2 * 1024
 SESSION_COOKIE = "agentbridge_workspace_session"
 CSRF_COOKIE = "agentbridge_workspace_csrf"
 ENROLLMENT_COOKIE = "agentbridge_workspace_enrollment"
@@ -563,10 +566,12 @@ def create_workspace_http_server(
                 return
             try:
                 if route.path == "/api/skill-drafts":
-                    body = self._read_json(max_bytes=MAX_STANDARD_IMPORT_BODY_BYTES)
-                    if int(self.headers["Content-Length"]) > MAX_BODY_BYTES and (
-                        body.get("action") != "import_standard" or set(body) != {"action", "data"}
-                    ):
+                    body = self._read_json(max_bytes=MAX_SKILL_SAVE_BODY_BYTES)
+                    action = body.get("action")
+                    limit = (MAX_STANDARD_IMPORT_BODY_BYTES if action == "import_standard" else
+                             MAX_SKILL_SAVE_BODY_BYTES if action == "save" else MAX_BODY_BYTES)
+                    length = int(self.headers["Content-Length"])
+                    if length > limit or (length > MAX_BODY_BYTES and set(body) != {"action", "data"}):
                         raise ValueError("invalid request body length")
                     result = application.service.skill_authoring.dispatch(
                         account["user_subject"], body.get("action"), body.get("data", {})

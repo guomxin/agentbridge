@@ -46,6 +46,7 @@ class SkillMethod(StrictModel):
 
 class SkillStandardMetadata(StrictModel):
     """Declarative package information; never runtime permission or instructions."""
+    name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
     license: str | None = Field(default=None, min_length=1, max_length=1000)
     compatibility: str | None = Field(default=None, min_length=1, max_length=500)
 

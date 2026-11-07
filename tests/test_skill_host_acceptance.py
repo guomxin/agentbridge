@@ -229,6 +229,20 @@ class SkillHostAcceptanceTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 load_candidate(export,cases,expected)
 
+    def test_candidate_external_name_does_not_change_the_source_or_grant_identity(self):
+        export, cases, expected = self.candidate_input()
+        package = json.loads(export.read_text())
+        package['source']['standard_name'] = '2-external-title'
+        export.write_text(json.dumps(package, ensure_ascii=False))
+        candidate = load_candidate(export, cases, expected)
+        self.assertEqual(candidate.identity, expected)
+        self.assertNotIn('standard_metadata', candidate.proposal)
+        for name in ('bad--name', '中文名称', 42):
+            package['source']['standard_name'] = name
+            export.write_text(json.dumps(package, ensure_ascii=False))
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, '来源'):
+                load_candidate(export, cases, expected)
+
     def test_candidate_rejects_a_valid_business_contract_instead_of_silently_removing_its_tools(self):
         export, cases, expected = self.candidate_input(permissions={'all':['oa.workflow.read']})
         with self.assertRaisesRegex(ValueError, '纯文字只读'):

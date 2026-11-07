@@ -12,7 +12,7 @@ import stat
 
 from agentbridge.core.business_skills import validate_skill_bundle
 from agentbridge.core.skill_contracts import SkillProposal
-from agentbridge.core.skill_quality import proposal_from_bundle
+from agentbridge.core.skill_quality import proposal_from_bundle, _standard_name
 
 
 @dataclass
@@ -75,7 +75,9 @@ def _check_source(package, expected):
     if not isinstance(package, dict) or package.get('format') != 'agentbridge.skill-draft.v1':
         raise ValueError('候选需要 AgentBridge 原生 v1 草稿导出')
     source = package.get('source')
-    if not isinstance(source, dict) or set(source) != {'skill_id', 'revision', 'content_hash', 'manifest'}:
+    if (not isinstance(source, dict) or set(source) - {'skill_id', 'revision', 'content_hash', 'manifest', 'standard_name'}
+            or not {'skill_id', 'revision', 'content_hash', 'manifest'} <= set(source)
+            or ('standard_name' in source and not _standard_name(source['standard_name']))):
         raise ValueError('此导出缺少可核验的来源，请重新导出草稿')
     if set(package) != {'format', 'source', 'proposal'}:
         raise ValueError('候选导出包含未知字段')

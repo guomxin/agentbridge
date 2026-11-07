@@ -550,47 +550,50 @@ async function importDraftFile(file) {
 }
 const jsonFile = value => new Blob([JSON.stringify(value,null,2)]);
 
-test('a native export that crossed 100 KB only because of its source imports the original proposal',async()=>{
-  const profiles=Object.fromEntries([...'abcdefgh'].map(p=>[p,{description:'资'.repeat(400),all:[],any:[],
-    execution:{effects:['read'],allow_batch:false,capabilities:[]}}]));
-  const proposal={name:'长资料草稿',instructions:'文'.repeat(27_000),profiles};
-  const original={format:'agentbridge.skill-draft.v1',proposal};
-  const source={skill_id:'usr-private',revision:2,content_hash:'a'.repeat(64),
-    manifest:{id:'usr-private',version:'0.0.0',schemaVersion:'agentbridge.skills.v1',entrypoint:'SKILL.md',profiles}};
-  assert.ok(jsonFile(original).size<=100_000);assert.ok(jsonFile({...original,source}).size>100_000);
-  for(const pack of [original,{...original,source}]){
-    const {mutations,message}=await importDraftFile(jsonFile(pack));
-    assert.equal(message,'');assert.equal(mutations.length,1);assert.equal(mutations[0].action,'save');
-    assert.deepEqual(mutations[0].data.proposal,proposal);
-    assert.deepEqual(Object.keys(mutations[0].data).sort(),['proposal','provenance','request_key']);
-    assert.deepEqual(mutations[0].data.provenance,{kind:'import'});
+test('native backups preserve full-size decoded proposals under bounded file and proposal budgets',async()=>{
+  for(const c of ['文','📎','\u0001']){
+    const proposal={name:'满额草稿',instructions:c.repeat(40_000),references:{'references/a.md':c.repeat(8000)}};
+    const source={skill_id:'untrusted',manifest:{owner:'must-not-be-imported'}};
+    for(const pack of [{format:'agentbridge.skill-draft.v1',proposal},{format:'agentbridge.skill-draft.v1',proposal,source}]){
+      const {mutations,message}=await importDraftFile(jsonFile(pack));
+      assert.equal(message,'');assert.equal(mutations.length,1);assert.equal(mutations[0].action,'save');
+      assert.deepEqual(mutations[0].data.proposal,proposal);
+      assert.deepEqual(Object.keys(mutations[0].data).sort(),['proposal','provenance','request_key']);
+      assert.deepEqual(mutations[0].data.provenance,{kind:'import'});
+    }
   }
-  const tooLarge={...original,proposal:{...proposal,instructions:'文'.repeat(34_000)},source};
-  const denied=await importDraftFile(jsonFile(tooLarge));
-  assert.deepEqual(denied.mutations,[]);assert.match(denied.message,/草稿内容不能超过 100 KB/);
+  const denied=await importDraftFile(jsonFile({format:'agentbridge.skill-draft.v1',proposal:{instructions:'x'.repeat(512*1024)}}));
+  assert.deepEqual(denied.mutations,[]);assert.match(denied.message,/512 KiB/);
 });
 
-test('standard packages can use the bounded file budget while native limits remain unchanged',async()=>{
-  const sized=(value,size)=>{
-    const raw=JSON.stringify(value);return new Blob([raw,' '.repeat(size-new Blob([raw]).size)]);
-  };
-  const value={format:'agentbridge.skill-draft.v1',proposal:{name:'旧包'}};
-  const edge=await importDraftFile(sized(value,100_000));assert.equal(edge.mutations.length,1);
-  const over=await importDraftFile(sized(value,100_001));assert.deepEqual(over.mutations,[]);assert.match(over.message,/100 KB/);
-  const aboveNative=await importDraftFile(sized(value,256*1024+1));assert.deepEqual(aboveNative.mutations,[]);assert.match(aboveNative.message,/256 KiB/);
+test('standard and native file caps are independent and the hard maximum is checked before reading',async()=>{
   const pack={format:'agentskills.files.v1',files:{'SKILL.md':'---\nname: text-helper\ndescription: Read supplied text\n---\n\n'+'\u0001'.repeat(40_000),
     'references/example.md':'\u0001'.repeat(8000)}};
-  assert.ok(jsonFile(pack).size>256*1024);
   const standard=await importDraftFile(jsonFile(pack));assert.equal(standard.message,'');assert.equal(standard.mutations.length,1);
   assert.equal(standard.mutations[0].action,'import_standard');assert.deepEqual(standard.mutations[0].data.package,pack);
-  for(const source of [{}, {revision:2,content_hash:'a'.repeat(64),extra:true,
-                            manifest:{schemaVersion:'agentbridge.skills.v1',entrypoint:'SKILL.md',version:'0.0.0'}}]){
-    const bogus=await importDraftFile(sized({format:'agentbridge.skill-draft.v1',proposal:{name:'假来源'},source},100_001));
-    assert.deepEqual(bogus.mutations,[]);assert.match(bogus.message,/100 KB/);
+  const raw=JSON.stringify(pack);
+  const over=await importDraftFile(new Blob([raw,' '.repeat(384*1024+1-new Blob([raw]).size)]));
+  assert.deepEqual(over.mutations,[]);assert.match(over.message,/384 KiB/);
+  for(const proposal of [null,[],1]){
+    const invalid=await importDraftFile(jsonFile({format:'agentbridge.skill-draft.v1',proposal}));
+    assert.deepEqual(invalid.mutations,[]);assert.match(invalid.message,/格式/);
   }
   let reads=0;
-  const absoluteMax=await importDraftFile({size:384*1024+1,async text(){reads++;return '{}';}});
-  assert.equal(reads,0);assert.deepEqual(absoluteMax.mutations,[]);assert.match(absoluteMax.message,/384 KiB/);
+  const absoluteMax=await importDraftFile({size:1024*1024+1,async text(){reads++;return '{}';}});
+  assert.equal(reads,0);assert.deepEqual(absoluteMax.mutations,[]);assert.match(absoluteMax.message,/1 MiB/);
+});
+
+test('native source keeps only the descriptive external name while identity claims are ignored',async()=>{
+  const proposal={name:'中文显示名',instructions:'只整理给定文字。',standard_metadata:{license:'MIT'}};
+  const pack={format:'agentbridge.skill-draft.v1',proposal,source:{standard_name:'external-helper',skill_id:'foreign',revision:99}};
+  const imported=await importDraftFile(jsonFile(pack));
+  assert.equal(imported.mutations.length,1);
+  assert.deepEqual(imported.mutations[0].data.proposal,{...proposal,standard_metadata:{license:'MIT',name:'external-helper'}});
+  assert.equal(imported.mutations[0].data.draft_id,undefined);
+  for(const name of ['../escape','bad--name','中文','a'.repeat(65),7]){
+    const denied=await importDraftFile(jsonFile({...pack,source:{standard_name:name}}));
+    assert.deepEqual(denied.mutations,[]);assert.match(denied.message,/名称/);
+  }
 });
 
 test("leave dialog has explicit actions, Escape stays, and account disposal closes a pending decision", async () => {
