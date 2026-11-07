@@ -292,3 +292,40 @@ test('skill reviews keep pending visible and history can load further pages and 
   assert.equal(nodes.get('#review-more').hidden,true);assert.match(nodes.get('#review-list-status').textContent,/2 项/);
   assert.equal(errors.length,1);
 });
+
+function replaceableSkillReviewContent() {
+  const nodes=new Map();let html='';
+  return {nodes,get innerHTML(){return html;},set innerHTML(value){
+    html=value;nodes.clear();
+    if(value.includes('review-pending'))for(const key of ['pending','history','more','rows','list-status','metrics'])
+      nodes.set('#review-'+key,{innerHTML:'',textContent:'',hidden:false,disabled:false,setAttribute(){},querySelectorAll(){return [];}});
+  },querySelector:key=>nodes.get(key)||null};
+}
+
+test('leaving skill reviews while the first read is pending preserves cancellation instead of throwing during cleanup',async()=>{
+  const {renderSkillReviewList}=await import('../agentbridge/admin/static/admin_skill_reviews.mjs');
+  const pending=deferred(),content=replaceableSkillReviewContent();
+  const {api,readScope}=client(()=>pending.promise);
+  const run=renderSkillReviewList({content,api,openReview:async()=>{},onError(){}});
+  readScope.begin();content.innerHTML='<p>新页面</p>';
+  pending.resolve(response({items:[]}));
+  await assert.rejects(run,{name:'AbortError'});
+  assert.equal(content.innerHTML,'<p>新页面</p>');
+});
+
+test('a canceled history page read cannot change controls in a newly rendered review list',async()=>{
+  const {renderSkillReviewList}=await import('../agentbridge/admin/static/admin_skill_reviews.mjs');
+  const pending=deferred(),content=replaceableSkillReviewContent(),errors=[];
+  let reads=0;
+  const {api,readScope}=client(()=>++reads===1?Promise.resolve(response({items:[]})):pending.promise);
+  await renderSkillReviewList({content,api,openReview:async()=>{},onError:error=>errors.push(error)});
+  const loading=content.nodes.get('#review-history').onclick();
+  readScope.begin();content.innerHTML='<button id="review-pending">另一个审批视图</button>';
+  const replacement=content.nodes.get('#review-pending');replacement.disabled=true;
+  const replacementStatus=content.nodes.get('#review-list-status');replacementStatus.textContent='新视图正在加载';
+  pending.reject(Error('旧请求网络失败'));
+  await loading;
+  assert.equal(errors.length,1);assert.equal(errors[0].name,'AbortError');
+  assert.equal(replacement.disabled,true);
+  assert.equal(replacementStatus.textContent,'新视图正在加载');
+});

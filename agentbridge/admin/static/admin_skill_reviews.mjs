@@ -4,7 +4,11 @@ export async function renderSkillReviewList({content, api, openReview, onError})
   const labels={submitted:'待审批',published:'已发布',changes_requested:'需修改',rejected:'已拒绝',withdrawn:'已撤回'};
   let state='pending', cursor=null, items=[], loading=false;
   content.innerHTML='<p>个人发布与共享发布均须审批。请核对固定修订、使用范围及评测依据。</p><div class="actions"><button id="review-pending">待审批</button><button id="review-history" class="button secondary">历史申请</button></div><div id="review-rows"></div><button id="review-more" class="button secondary" hidden>加载更多申请</button><p id="review-list-status" role="status"></p><div id="review-metrics"></div>';
-  const $=selector=>content.querySelector(selector);
+  // A canceled read can finish after navigation replaced content. Keep this
+  // list's nodes so cleanup cannot touch a new view or mask AbortError.
+  const nodes=new Map(['pending','history','more','rows','list-status','metrics']
+    .map(key=>['#review-'+key,content.querySelector('#review-'+key)]));
+  const $=selector=>nodes.get(selector);
   const controls=()=>{
     for(const key of ['pending','history']) {
       $('#review-'+key).disabled=loading;
