@@ -5,6 +5,7 @@ unreviewed evidence; only the authenticated control plane can accept and publish
 """
 from __future__ import annotations
 
+import base64
 from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -36,6 +37,33 @@ def revision(value):
     if type(value) is not int or value < 1:
         raise ValueError("需要有效修订号")
     return value
+
+
+def _page_boundary(cursor, limit, scope):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('分页数量需为 1 至 100')
+    if cursor is None:
+        return None
+    try:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= 1024:
+            raise ValueError()
+        value = json.loads(base64.b64decode(cursor, altchars=b'-_', validate=True))
+        if (not isinstance(value, list) or len(value) != 3 or value[0] != scope
+                or not isinstance(value[1], str) or not isinstance(value[2], str)
+                or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', value[2])):
+            raise ValueError()
+        if datetime.fromisoformat(value[1]).tzinfo is None:
+            raise ValueError()
+        return value[1:]
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise ValueError('分页游标无效或与当前列表不匹配') from exc
+
+
+def _next_page(rows, limit, scope, time_key, id_key):
+    more = len(rows) > limit
+    rows = rows[:limit]
+    cursor = base64.urlsafe_b64encode(_json([scope, rows[-1][time_key], rows[-1][id_key]]).encode()).decode() if more else None
+    return rows, {'has_more': more, 'next_cursor': cursor}
 
 
 class SkillAuthoring:
@@ -234,9 +262,29 @@ class SkillAuthoring:
             rows = db.execute('''SELECT d.*,r.payload_json,
                 (SELECT version FROM skill_publications p WHERE p.skill_id=d.skill_id) AS published_version,
                 (SELECT state FROM skill_review_requests q WHERE q.draft_id=d.draft_id AND q.draft_revision=d.revision ORDER BY created_at DESC LIMIT 1) AS review_state
-                FROM skill_drafts d JOIN skill_draft_revisions r ON r.draft_id=d.draft_id AND r.revision=d.revision WHERE owner_subject=? ORDER BY updated_at DESC LIMIT 100''', (owner,)).fetchall()
+                FROM skill_drafts d JOIN skill_draft_revisions r ON r.draft_id=d.draft_id AND r.revision=d.revision WHERE owner_subject=? ORDER BY (d.state='archived'),updated_at DESC,d.draft_id DESC LIMIT 100''', (owner,)).fetchall()
             return {'items': [{**{k:r[k] for k in r.keys() if k != 'payload_json'},
                               'name': json.loads(r['payload_json'])['manifest']['name']} for r in rows]}
+
+    def list_page(self, owner, *, state='active', cursor=None, limit=50):
+        if state not in ('active', 'archived'):
+            raise ValueError('草稿列表需选择 active 或 archived')
+        scope = ['drafts', owner, state]
+        boundary = _page_boundary(cursor, limit, scope)
+        where = "d.owner_subject=? AND d.state" + ("='archived'" if state == 'archived' else "!='archived'")
+        params = [owner]
+        if boundary:
+            where += ' AND (d.updated_at,d.draft_id)<(?,?)'
+            params.extend(boundary)
+        with closing(self.store.connect()) as db:
+            rows = db.execute('''SELECT d.*,r.payload_json,
+                (SELECT version FROM skill_publications p WHERE p.skill_id=d.skill_id) AS published_version,
+                (SELECT state FROM skill_review_requests q WHERE q.draft_id=d.draft_id AND q.draft_revision=d.revision ORDER BY created_at DESC LIMIT 1) AS review_state
+                FROM skill_drafts d JOIN skill_draft_revisions r ON r.draft_id=d.draft_id AND r.revision=d.revision WHERE '''
+                + where + ' ORDER BY d.updated_at DESC,d.draft_id DESC LIMIT ?', [*params, limit + 1]).fetchall()
+        rows, page = _next_page(rows, limit, scope, 'updated_at', 'draft_id')
+        return {'items': [{**{k: r[k] for k in r.keys() if k != 'payload_json'},
+                           'name': json.loads(r['payload_json'])['manifest']['name']} for r in rows], **page}
 
     def get(self, owner, draft_id):
         with closing(self.store.connect()) as db:
@@ -397,7 +445,27 @@ class SkillAuthoring:
             return {'items':[self._review_public(r) for r in db.execute(
                 '''SELECT q.*,json_extract(r.payload_json,'$.manifest.name') AS name
                    FROM skill_review_requests q JOIN skill_draft_revisions r ON q.draft_id=r.draft_id AND q.draft_revision=r.revision'''
-                +(' WHERE q.owner_subject=?' if owner else '')+' ORDER BY q.created_at DESC LIMIT 100', (owner,) if owner else ())]}
+                +(' WHERE q.owner_subject=?' if owner else '')+" ORDER BY (q.state!='submitted'),q.created_at DESC,q.request_id DESC LIMIT 100", (owner,) if owner else ())]}
+
+    def review_page(self, owner=None, *, state='pending', cursor=None, limit=50):
+        if state not in ('pending', 'history'):
+            raise ValueError('申请列表需选择 pending 或 history')
+        scope = ['reviews', owner, state]
+        boundary = _page_boundary(cursor, limit, scope)
+        where = "q.state" + ("='submitted'" if state == 'pending' else "!='submitted'")
+        params = []
+        if owner is not None:
+            where += ' AND q.owner_subject=?'
+            params.append(owner)
+        if boundary:
+            where += ' AND (q.created_at,q.request_id)<(?,?)'
+            params.extend(boundary)
+        with closing(self.store.connect()) as db:
+            rows = db.execute('''SELECT q.*,json_extract(r.payload_json,'$.manifest.name') AS name
+                FROM skill_review_requests q JOIN skill_draft_revisions r ON q.draft_id=r.draft_id AND q.draft_revision=r.revision WHERE '''
+                + where + ' ORDER BY q.created_at DESC,q.request_id DESC LIMIT ?', [*params, limit + 1]).fetchall()
+        rows, page = _next_page(rows, limit, scope, 'created_at', 'request_id')
+        return {'items': [self._review_public(r) for r in rows], **page}
 
     def review_detail(self, request_id):
         with closing(self.store.connect()) as db:

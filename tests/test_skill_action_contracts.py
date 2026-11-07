@@ -119,7 +119,8 @@ class SkillActionContractTests(unittest.TestCase):
         self.assertEqual(transport_outcome({'expected_version': 0})['result'], {'expected_version': 0})
         self.assertEqual(transport_outcome({'expected_version': True})['error'], 'ValidationError')
         metadata = skill_contracts.SkillStandardMetadata.model_validate({'license': 'MIT', 'compatibility': 'Text only'})
-        self.assertEqual(metadata.model_dump(), {'license': 'MIT', 'compatibility': 'Text only'})
+        self.assertIsNone(metadata.name)
+        self.assertEqual(metadata.model_dump(exclude_none=True), {'license': 'MIT', 'compatibility': 'Text only'})
         for invalid in ({'license': 1}, {'compatibility': 'x' * 501}, {'allowed_tools': ['write']}, {'license': ''}):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 skill_contracts.SkillStandardMetadata.model_validate(invalid)

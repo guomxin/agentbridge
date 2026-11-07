@@ -221,7 +221,9 @@ def create_admin_http_server(
                 elif route.path == "/api/skill-reviews":
                     request_id = _query_value(query, "id")
                     self._json(200, control_plane.service.skill_authoring.review_detail(request_id) if request_id else {
-                        **control_plane.service.skill_authoring.reviews(),
+                        **(control_plane.service.skill_authoring.review_page(state=_query_value(query, 'state') or 'pending',
+                                                                            cursor=_query_value(query, 'cursor'), limit=_query_int(query, 'limit', 50))
+                           if any(k in query for k in ('state', 'cursor', 'limit')) else control_plane.service.skill_authoring.reviews()),
                         'metrics': control_plane.service.skill_authoring.workbench.metrics()})
                 elif route.path == "/api/skills":
                     self._json(200, control_plane.skill_config(_query_value(query, "user")))

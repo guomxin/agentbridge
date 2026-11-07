@@ -3035,6 +3035,22 @@ class WorkspaceHttpServerTests(unittest.TestCase):
                 self.assertEqual([d["draft_id"] for d in drafts["items"]],[saved["draft_id"]])
                 self.assertEqual(_request(port,"POST","/api/skill-drafts",origin=origin,cookies=cookies,csrf=cookies["agentbridge_workspace_csrf"],body={"action":"decide","data":{}})[0],400)
 
+                # Pagination uses the authenticated owner for every page.
+                for i in range(3):
+                    archived = service.skill_authoring.save('user-a', proposal=proposal, request_key=f'archived-{i}')
+                    service.skill_authoring.archive('user-a', draft_id=archived['draft_id'], expected_revision=1)
+                self.assertEqual(_request(port, 'GET', '/api/skill-drafts?state=archived&limit=1')[0], 401)
+                status, _, page = _request(port, 'GET', '/api/skill-drafts?state=active&limit=1', cookies=cookies)
+                self.assertEqual(status, 200); self.assertEqual([v['draft_id'] for v in page['items']], [saved['draft_id']])
+                status, _, page = _request(port, 'GET', '/api/skill-drafts?state=archived&limit=1', cookies=cookies)
+                self.assertEqual(status, 200); self.assertTrue(page['has_more'])
+                from urllib.parse import urlencode
+                route = '/api/skill-drafts?' + urlencode({'state':'archived','limit':1,'cursor':page['next_cursor']})
+                status, _, next_page = _request(port, 'GET', route, cookies=cookies)
+                self.assertEqual(status, 200); self.assertNotEqual(page['items'][0]['draft_id'], next_page['items'][0]['draft_id'])
+                for query in ('state=bad', 'state=active&limit=0', 'state=active&limit=101', 'state=active&limit=bad', 'state=archived&cursor=bad'):
+                    self.assertEqual(_request(port, 'GET', '/api/skill-drafts?' + query, cookies=cookies)[0], 400)
+
                 original_path = '/api/database/logs/taihua_primary/123'
                 with patch.object(application, 'database_original', return_value={
                     'author': '测试作者', 'paragraphs': [{'number': 1, 'text': '<img src=x onerror=evil()>'}],

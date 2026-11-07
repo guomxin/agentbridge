@@ -271,3 +271,24 @@ test('approval requires every frozen problem reason while return and rejection r
   values.set('decision','approve');
   assert.equal(skillReviewDecision(values,'legacy').problem_resolutions,undefined,'old requests with no known problems remain compatible');
 });
+
+test('skill reviews keep pending visible and history can load further pages and retry failures',async()=>{
+  const {renderSkillReviewList}=await import('../agentbridge/admin/static/admin_skill_reviews.mjs');
+  const nodes=new Map();
+  const content={innerHTML:'',querySelector(key){if(!nodes.has(key))nodes.set(key,{innerHTML:'',textContent:'',hidden:false,disabled:false,setAttribute(){},querySelectorAll(){return [];}});return nodes.get(key);}};
+  const calls=[],errors=[];
+  const row=(id,state)=>({request_id:id,state,owner_subject:'alice',name:'文字助手',draft_revision:1,audience:['alice'],created_at:'2026-11-07T00:00:00Z'});
+  let fail=false;
+  const api=async path=>{calls.push(path);const q=new URL(path,'http://fixture').searchParams;
+    if(fail)throw Error('暂时无法读取');
+    return q.get('state')==='pending'?{items:[row('pending','submitted')]}:q.has('cursor')?{items:[row('old','withdrawn'),row('older','rejected')]}:{items:[row('old','withdrawn')],next_cursor:'next+/='};
+  };
+  await renderSkillReviewList({content,api,openReview:async()=>{},onError:e=>errors.push(e)});
+  assert.match(nodes.get('#review-rows').innerHTML,/待审批/);assert.equal(nodes.get('#review-more').hidden,true);
+  await nodes.get('#review-history').onclick();assert.equal(nodes.get('#review-more').hidden,false);
+  fail=true;await nodes.get('#review-more').onclick();assert.match(nodes.get('#review-list-status').textContent,/暂时无法/);assert.equal(nodes.get('#review-more').disabled,false);
+  fail=false;await nodes.get('#review-more').onclick();
+  assert.match(calls.at(-1),/cursor=next%2B%2F%3D/);
+  assert.equal(nodes.get('#review-more').hidden,true);assert.match(nodes.get('#review-list-status').textContent,/2 项/);
+  assert.equal(errors.length,1);
+});

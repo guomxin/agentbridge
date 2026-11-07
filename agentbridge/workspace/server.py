@@ -292,7 +292,10 @@ def create_workspace_http_server(
                     draft_id = query.get("id", [None])[0]
                     self._json(200, {**authoring.get(account["user_subject"], draft_id),
                                      "authoring_catalog":application.skill_authoring_catalog()} if draft_id else {
-                        **authoring.list(account["user_subject"]), "preferences": authoring.preferences(account["user_subject"]),
+                        **(authoring.list_page(account["user_subject"], state=_query_value(query, 'state') or 'active',
+                                              cursor=_query_value(query, 'cursor'), limit=_query_int(query, 'limit', 50))
+                           if any(k in query for k in ('state', 'cursor', 'limit')) else authoring.list(account["user_subject"])),
+                        "preferences": authoring.preferences(account["user_subject"]),
                         "scope": 'workspace:' + account['account_id'],
                         "scopes": authoring.workbench.scopes(account['user_subject']),
                         "jobs": authoring.workbench.jobs(account['user_subject']),

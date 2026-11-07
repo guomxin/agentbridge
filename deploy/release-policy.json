@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1c6c5669516a"
+    "92cafadc6b68"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Standard file import and export use the existing immutable draft revisions, provenance and unchanged resource contract. No stored fields, authority or database schema change; the predecessor can read all saved drafts."
+  "dataCompatibility": "reviewed-forward-only",
+  "reason": "No schema migration. New imported copies can retain a validated external name in standard_metadata.name; the predecessor rejects that field when editing drafts. Retain this descriptive metadata after candidate start."
 }

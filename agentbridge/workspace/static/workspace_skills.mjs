@@ -127,7 +127,7 @@ export function skillCandidateRemovals(changes) {
 
 export function createSkillForms({ document, state, $, api: request, switchView, startTrial, clearTrial = () => {}, getScope, FormData: FormDataType = globalThis.FormData, eventTarget = globalThis, confirm }) {
   const leaveGuard = createSkillLeaveGuard({document, eventTarget, confirm});
-  let updateGeneration = null, updateEvaluation = null;
+  let updateGeneration = null, updateEvaluation = null, draftListPage = null;
   const adoptionsByView = new WeakMap();
   const pendingAdoptions = view => {
     if (!adoptionsByView.has(view)) adoptionsByView.set(view, new Set());
@@ -176,9 +176,9 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     scope.timeout(() => { URL.revokeObjectURL(url); release(); }, 1000);
   }
   const draftStatus={submitted:"待审批",published:"已发布",changes_requested:"需修改",rejected:"已拒绝",withdrawn:"已撤回",editing:"草稿",archived:"已归档"};
-  function renderDraftList(items) {
+  function renderDraftList(items, archived = false) {
     const list=$("#draft-list");list.replaceChildren();
-    if(!items.length)list.textContent="还没有草稿。可以直接在对话中说：做个周报助手。";
+    if(!items.length)list.textContent=archived?"暂无已归档草稿。":"还没有草稿。可以直接在对话中说：做个周报助手。";
     for(const d of items){const b=document.createElement("button");b.className="secondary";b.textContent=`${d.name} · 修订 ${d.revision} · ${draftStatus[d.review_state||d.state]||d.state}${d.published_version?" · 线上 "+d.published_version:" · 尚未发布"}`;b.onclick=()=>showSkillDraft(d.draft_id);list.append(b);}
   }
   async function loadSkillDrafts(permit) {
@@ -194,11 +194,14 @@ export function createSkillForms({ document, state, $, api: request, switchView,
     const root=$("#skill-authoring"); if (!root) return;
     root.innerHTML = '<p role="status">正在加载草稿。</p>';
     try {
-      const data=await api("/api/skill-drafts");scope.assertCurrent();
+      const data=await api("/api/skill-drafts?state=active");scope.assertCurrent();
       root.innerHTML=`<h3>我的草稿</h3><p>从需求或当前对话提炼方法，先试用，再提交管理控制台审批。草稿仅自己可见。</p>
         <div class="draft-actions"><button id="draft-generate" class="secondary">描述需求生成</button><button id="draft-extract" class="secondary">总结当前对话</button><button id="draft-import" class="secondary">导入草稿</button></div>
         <label class="draft-auto"><input type="checkbox" id="draft-auto" ${data.preferences.value.auto_draft?"checked":""}> 自动沉淀有价值的交互（仅私有草稿，不自动发布）</label>
-        <div id="skill-workbench-home"></div><p id="draft-error" role="status"></p><div id="skill-candidate-preview"></div><div id="draft-list"></div><div id="draft-detail"></div><h3>可用助手</h3>`;
+        <div id="skill-workbench-home"></div><p id="draft-error" role="status"></p><div id="skill-candidate-preview"></div>
+        <div class="draft-actions"><button id="draft-active" type="button" aria-pressed="true">活动草稿</button><button id="draft-archived" type="button" class="secondary" aria-pressed="false">已归档</button></div>
+        <div id="draft-list"></div><button id="draft-more" class="secondary" type="button" hidden>加载更多草稿</button><p id="draft-page-status" role="status"></p>
+        <div id="draft-detail"></div><h3>可用助手</h3>`;
       $("#draft-generate").onclick=()=>{$("#skill-generate-form").hidden=false;$("#skill-generate-material").focus();};
       renderSkillWorkbenchHome(data);
       $("#draft-extract").onclick=()=>draftChat("把刚才的过程做成助手草稿");
@@ -219,6 +222,46 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         };input.click();
       };
       renderDraftList(data.items);
+      let listState = 'active', items = data.items, cursor = data.next_cursor, loading = false;
+      const pageControls = () => {
+        $('#draft-active').setAttribute('aria-pressed', String(listState === 'active'));
+        $('#draft-archived').setAttribute('aria-pressed', String(listState === 'archived'));
+        for (const id of ['draft-active','draft-archived','draft-more']) $('#'+id).disabled = loading;
+        $('#draft-more').hidden = !cursor;
+      };
+      const page = async (nextState, append = false) => {
+        if (loading || !scope.current()) return;
+        if (!append && !await leaveGuard.request()) return;
+        const permit = append ? null : leaveGuard.capture();
+        const requestScope = scope.replace('draft-page');
+        loading = true; pageControls(); $('#draft-page-status').textContent = '正在加载草稿。';
+        try {
+          const params = new URLSearchParams({state:nextState});
+          if (append && cursor) params.set('cursor',cursor);
+          const result = await scopedApi(requestScope)('/api/skill-drafts?'+params);
+          requestScope.assertCurrent();
+          if (!append) {
+            if (!await leaveGuard.request(permit)) { $('#draft-page-status').textContent='草稿有新修改，列表未切换。'; return; }
+            parent.replace('skill-draft-detail').dispose(); $('#draft-detail').replaceChildren();
+          }
+          listState = nextState;
+          items = [...new Map([...(append ? items : []), ...result.items].map(d=>[d.draft_id,d])).values()];
+          cursor = result.next_cursor;
+          renderDraftList(items, listState === 'archived');
+          $('#draft-page-status').textContent = `已显示 ${items.length} 份草稿。`;
+        } catch(e) { if(requestScope.current()&&!isCancellation(e)) $('#draft-page-status').textContent = e.message; }
+        finally { if(scope.current()) {loading=false;pageControls();} }
+      };
+      $('#draft-active').onclick = () => page('active');
+      $('#draft-archived').onclick = () => page('archived');
+      $('#draft-more').onclick = () => page(listState,true);
+      const listPage = {state:()=>listState, update:(result, expectedState)=>{
+        if(loading||listState!==expectedState)return;
+        items=result.items;cursor=result.next_cursor;renderDraftList(items,listState==='archived');pageControls();
+      }};
+      draftListPage=listPage;
+      scope.defer(()=>{if(draftListPage===listPage)draftListPage=null;});
+      pageControls();
     } catch(e){if(!scope.current()||isCancellation(e))return false;root.textContent=e.message;return false;}
   }
   async function showSkillDraft(id, permit, carriedEvaluation = null) {
@@ -263,36 +306,41 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       const evaluationDirty = () => JSON.stringify(readEvaluation()) !== savedEvaluation;
       const editorSnapshot = () => JSON.stringify({method: readFields(), evaluation: readEvaluation(), reviews: reviewForms.map(reviewValue)});
       let busy = false;
+      let initialReady = false, initialLoading = false;
+      const initialNotice = "正在加载草稿检查，请稍候。";
       let coverage = null, displayedReportId = null;
       const isDirty = () => JSON.stringify(readFields()) !== JSON.stringify(savedFields);
       const refreshState = () => {
         if (!scope.current()) return;
         const dirty = isDirty();
         const processing = busy || leaveGuard.busy();
+        const blocked = processing || !initialReady;
         leaveGuard.update();
         $("#draft-revision-label").textContent = `已保存：修订 ${d.revision} · 来源：${d.provenance.kind} · 仅保存方法，勿包含业务原文或凭据。`;
         $("#draft-publication-title").textContent = `申请发布已保存修订 ${d.revision}`;
-        $("#draft-save-state").textContent = `已保存修订 ${d.revision} · ${processing ? "正在处理，请稍候" : dirty ? "有未保存修改。请先保存，再评测或申请发布。" : "当前内容已保存"}`;
-        $("#draft-editor-fields").disabled = processing;
+        $("#draft-save-state").textContent = `已保存修订 ${d.revision} · ${!initialReady ? initialLoading ? "正在加载草稿检查" : "草稿检查尚未加载，请重试" : processing ? "正在处理，请稍候" : dirty ? "有未保存修改。请先保存，再评测或申请发布。" : "当前内容已保存"}`;
+        $("#draft-editor-fields").disabled = blocked;
         for (const form of reviewForms) for (const input of form.querySelectorAll("input,textarea,select,button")) input.disabled = processing;
-        for (const control of editor.querySelectorAll("input,textarea,select,button")) control.disabled = processing || (d.state === "archived" && control.id !== "draft-export");
-        configuration.setDisabled(processing || d.state === "archived");
+        for (const control of editor.querySelectorAll("input,textarea,select,button")) control.disabled = blocked || (d.state === "archived" && control.id !== "draft-export");
+        configuration.setDisabled(blocked || d.state === "archived");
         $("#draft-test").textContent = dirty ? "保存后试用" : `试用已保存修订 ${d.revision}`;
-        $("#draft-restore").disabled = processing;
+        $("#draft-archive").disabled = blocked || d.state === "archived";
+        $("#draft-restore").disabled = blocked;
         const selected = [...$("#skill-publication-profiles").querySelectorAll('input[name="profiles"]:checked')].map(input => input.value);
-        $("#draft-submit-button").disabled = dirty || processing || !coverage || !selected.length || d.state === "archived";
+        $("#draft-submit-button").disabled = dirty || blocked || !coverage || !selected.length || d.state === "archived";
         $("#skill-publication-state").textContent = dirty ? "有未保存修改，不能申请发布旧内容。" :
           !coverage ? "正在核对本修订样例。" : !selected.length ? "请选择已有本修订输出样例的模式；样例仍需人工复核。" :
           `将申请：修订 ${d.revision} · ${selected.map(profileLabel).join("、")}。不会增加业务权限。`;
         const evaluate = $("#skill-eval-submit");
-        if (evaluate) evaluate.disabled = dirty || processing || d.state === "archived";
+        if (evaluate) evaluate.disabled = dirty || blocked || d.state === "archived";
         const saveCases = $("#skill-save-pending");
-        if(saveCases) saveCases.disabled = dirty || processing || d.state === "archived";
+        if(saveCases) saveCases.disabled = dirty || blocked || d.state === "archived";
       };
       leaveGuard.register(scope, {isDirty: () => isDirty() || evaluationDirty() || reviewDirty(), isBusy: () => busy, snapshot: editorSnapshot, refresh: refreshState,
         notify: message => error(new Error(message))});
       const requireSaved = () => {
         scope.assertCurrent();
+        if (!initialReady) throw new Error(initialNotice);
         if (reviewDirty()) throw new Error("有未保存的复核说明，请先保存复核。");
         if (busy || leaveGuard.busy()) throw new Error("正在处理，请稍候。");
         if (isDirty()) throw new Error("有未保存修改，请先保存，再评测或申请发布。");
@@ -328,6 +376,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
       };
       const perform = async action => {
         if (busy || leaveGuard.busy() || !scope.current()) return;
+        if (!initialReady) { error(new Error(initialNotice)); return; }
         busy = true; refreshState();
         try { await action(); } catch (e) { error(e); }
         finally { busy = false; refreshState(); }
@@ -395,8 +444,27 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         evaluationChanged: () => leaveGuard.update(),
         evaluationSaved: value => {savedEvaluation = JSON.stringify(value); leaveGuard.update();},
       };
-      refreshState();
-      await renderSkillQuality(d, scope, controls);
+      const loadInitialQuality = async () => {
+        if (initialLoading || !scope.current()) return;
+        initialLoading = true; refreshState();
+        $("#skill-quality-panel").innerHTML = '<p role="status">正在加载草稿检查。</p>';
+        try {
+          await renderSkillQuality(d, scope, controls);
+          scope.assertCurrent();
+          initialReady = true;
+          if ($("#draft-detail-error").textContent === initialNotice) $("#draft-detail-error").textContent = "";
+        } catch (e) {
+          if (!scope.current() || isCancellation(e)) return;
+          // Keep the method editor and any later inputs intact. Retry only the
+          // reads; no acknowledged state-changing operation is repeated.
+          $("#skill-quality-panel").innerHTML = `<p role="status">草稿检查暂未加载：${escapeHtml(e.message)}</p><button type="button" id="skill-initial-retry" class="secondary">重试加载草稿检查</button>`;
+          $("#skill-initial-retry").onclick = loadInitialQuality;
+        } finally {
+          initialLoading = false;
+          if (scope.current()) refreshState();
+        }
+      };
+      await loadInitialQuality();
       scope.assertCurrent();
       for(const r of d.requests){const p=document.createElement("p");p.textContent=`修订 ${r.draft_revision} · ${draftStatus[r.state]||r.state} ${r.published_version||""} ${r.decision_reason||""}`;if(r.state==="submitted"){const b=document.createElement("button");b.textContent="撤回申请";b.onclick=async()=>{if(!await leaveGuard.request())return;const permit=leaveGuard.capture();return perform(async()=>{await draftAction("withdraw",{request_id:r.request_id});await showSkillDraft(id,permit);});};p.append(b);}$("#draft-requests").append(p);}
     } catch(e){if(!scope.current()||isCancellation(e))return;root.textContent=e.message;}
@@ -439,9 +507,11 @@ export function createSkillForms({ document, state, $, api: request, switchView,
           listing=true;
           const listScope=scope.replace('generated-draft-list');
           try {
-            const latest=await scopedApi(listScope)('/api/skill-drafts');listScope.assertCurrent();
+            const page=draftListPage, listState=page?.state()||'active';
+            const latest=await scopedApi(listScope)('/api/skill-drafts?state='+listState);listScope.assertCurrent();
             if(updateGeneration!==update)return;
-            renderDraftList(latest.items);listed=true;$('#draft-error').textContent=completed;
+            if(draftListPage===page)page?.update(latest,listState);
+            listed=true;$('#draft-error').textContent=completed;
           } catch(error) {
             if(scope.current()&&updateGeneration===update&&!isCancellation(error))$('#draft-error').textContent='草稿已生成；列表暂未刷新，可在后台任务中查看草稿或点击“刷新任务”。';
           } finally {listing=false;}

@@ -873,7 +873,7 @@ test('generation opens its progress and polling adds the completed draft without
   const timers={setTimeout(cb){pending.set(++next,cb);return next;},clearTimeout(id){pending.delete(id);}};
   const f=skillFixture({jobs,timers,onAction:action=>{
     if(action==='generate'){jobs.push({job_id:'generated-job',kind:'generation',state:'queued'});return jobs[0];}
-  },onRequest:(path,options)=>path==='/api/skill-drafts'&&!options.body?draftListing(items,jobs):undefined});
+  },onRequest:(path,options)=>path==='/api/skill-drafts?state=active'&&!options.body?draftListing(items,jobs):undefined});
   await f.forms.loadSkillDrafts();await f.forms.showSkillDraft('draft');
   const row=f.$('#skill-eval-cases').children[0];row.querySelector('[name=prompt]').value='尚未保存的待测题';f.$('#skill-eval-form').oninput();
   f.editor.controls.get('instructions').value='尚未保存的方法';f.editor.oninput();
@@ -908,7 +908,7 @@ test('generation terminal notices follow only the latest submitted job including
   await f.forms.refreshSkillJobs();assert.equal(f.$('#draft-error').textContent,'本次生成已取消。');
   await submit();jobs.push({job_id:'generation-4',kind:'generation',state:'succeeded',result:{classification:'preference'}});
   await f.forms.refreshSkillJobs();assert.match(f.$('#draft-error').textContent,/提炼已完成/);
-  assert.equal(f.calls.filter(c=>c.path==='/api/skill-drafts'&&!c.action).length,1,'no draft result must not claim a new draft or reload its list');
+  assert.equal(f.calls.filter(c=>c.path==='/api/skill-drafts?state=active'&&!c.action).length,1,'no draft result must not claim a new draft or reload its list');
   f.view.dispose();
 });
 
@@ -916,7 +916,7 @@ test('a failed completed-draft list refresh preserves the success receipt and re
   const jobs=[{job_id:'generation',kind:'generation',state:'succeeded',result:{draft_id:'new'}}];let reads=0;
   const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:'generation'}:undefined,
     onRequest:(path,options)=>{
-      if(path!=='/api/skill-drafts'||options.body)return;
+      if(path!=='/api/skill-drafts?state=active'||options.body)return;
       if(++reads===2)throw Error('列表读取超时');
       return draftListing(reads>2?[{draft_id:'new',name:'已生成的草稿',revision:1,state:'editing'}]:[],jobs);
     }});
@@ -932,7 +932,7 @@ test('leaving during a completed generation list read cannot paint the departed 
   const gate=deferred();let reads=0;
   const jobs=[{job_id:'generation',kind:'generation',state:'succeeded',result:{draft_id:'private-draft'}}];
   const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:'generation'}:undefined,
-    onRequest:(path,options)=>path==='/api/skill-drafts'&&!options.body?(++reads===1?draftListing([],jobs):gate.promise):undefined});
+    onRequest:(path,options)=>path==='/api/skill-drafts?state=active'&&!options.body?(++reads===1?draftListing([],jobs):gate.promise):undefined});
   await f.forms.loadSkillDrafts();
   const submit=f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));await flush();
   f.view.dispose();f.$('#draft-error').textContent='另一个账号';
@@ -957,7 +957,7 @@ test('refreshing the same skill view ignores a late generation receipt from the 
 test('another jobs refresh neither cancels nor duplicates a slow completed-draft list read',async()=>{
   const gate=deferred(),jobs=[{job_id:'generation',kind:'generation',state:'succeeded',result:{draft_id:'new'}}];let reads=0;
   const f=skillFixture({jobs,onAction:action=>action==='generate'?{job_id:'generation'}:undefined,
-    onRequest:(path,options)=>path==='/api/skill-drafts'&&!options.body?(++reads===1?draftListing([],jobs):gate.promise):undefined});
+    onRequest:(path,options)=>path==='/api/skill-drafts?state=active'&&!options.body?(++reads===1?draftListing([],jobs):gate.promise):undefined});
   await f.forms.loadSkillDrafts();
   const submit=f.$('#skill-generate-form').onsubmit(submitEvent(f.$('#skill-generate-form')));await flush();
   await f.forms.refreshSkillJobs();assert.equal(reads,2);
@@ -1997,5 +1997,127 @@ test('an older failed feedback refresh cannot overwrite the status of a newer su
   rejectOld(Error('older request failed'));await older;
   assert.equal(f.$('#skill-feedback-state').textContent,fresh);
   assert.match(f.$('#skill-feedback-list').children[0].children[2].textContent,/修订 4 · 执行中/);
+  f.view.dispose();
+});
+
+test('initial diagnostics block state changes until their default inputs are ready, then archive reloads once',async()=>{
+  const inspecting=deferred();
+  const f=skillFixture({onAction:action=>action==='inspect'?inspecting.promise:action==='archive'?{status:'archived'}:undefined});
+  const opening=f.forms.showSkillDraft('draft');await flush();
+  assert.equal(f.$('#draft-editor-fields').disabled,true);
+  assert.equal(f.$('#draft-archive').disabled,true);
+  assert.equal(f.$('#draft-restore').disabled,true);
+  await f.$('#draft-archive').onclick();
+  await f.$('#draft-restore').onclick();
+  await f.editor.onsubmit(submitEvent(f.editor));
+  assert.equal(f.calls.some(c=>['archive','restore','save'].includes(c.action)),false);
+  assert.equal(await f.forms.canLeaveSkillEditor(),true,'a read in progress must not trap navigation');
+  inspecting.resolve(quality('方法检查'));await opening;
+  assert.equal(f.$('#draft-editor-fields').disabled,false);
+  assert.equal(f.$('#draft-archive').disabled,false);
+  assert.equal(f.$('#draft-restore').disabled,false);
+  await f.$('#draft-archive').onclick();
+  assert.equal(f.calls.filter(c=>c.action==='archive').length,1);
+  assert.equal(f.calls.filter(c=>c.path.startsWith('/api/skill-drafts')&&!c.path.includes('?id=')&&!c.action).length,1);
+  assert.doesNotMatch(f.$('#draft-detail-error').textContent,/内容又有变化/);
+  f.view.dispose();
+});
+
+test('initial recipients also block restore until ready and a successful restore reloads the detail',async()=>{
+  const recipients=deferred();let reads=0;
+  const f=skillFixture({onAction:action=>action==='recipients'&&++reads===1?recipients.promise:action==='restore'?{status:'restored',revision:4}:undefined});
+  const opening=f.forms.showSkillDraft('draft');await flush();
+  f.$('#draft-revision').value='1';
+  await f.$('#draft-restore').onclick();
+  assert.equal(f.calls.filter(c=>c.action==='restore').length,0);
+  recipients.resolve({items:[]});await opening;
+  await f.$('#draft-restore').onclick();
+  assert.equal(f.calls.filter(c=>c.action==='restore').length,1);
+  assert.equal(f.calls.filter(c=>c.path==='/api/skill-drafts?id=draft').length,2);
+  assert.doesNotMatch(f.$('#draft-detail-error').textContent,/内容又有变化/);
+  f.view.dispose();
+});
+
+test('failed initial diagnostics preserve the editor and retry only reads without losing later input',async()=>{
+  const retry=deferred();let inspections=0;
+  const f=skillFixture({onAction:action=>{
+    if(action!=='inspect')return;
+    if(++inspections===1)throw Error('检查暂时超时');
+    return retry.promise;
+  }});
+  await f.forms.showSkillDraft('draft');
+  assert.match(f.$('#skill-quality-panel').innerHTML,/检查暂时超时.*重试加载草稿检查/);
+  assert.equal(f.editor.controls.get('instructions').value,'保留计划与完成的区别。');
+  assert.equal(f.$('#draft-archive').disabled,true);
+  assert.equal(await f.forms.canLeaveSkillEditor(),true);
+  f.editor.controls.get('instructions').value='晚到的修改仍需保存';f.editor.oninput();
+  const loading=f.$('#skill-initial-retry').onclick();
+  await f.$('#skill-initial-retry').onclick();
+  assert.equal(inspections,2,'retry clicks cannot start competing initializations');
+  retry.resolve(quality('已恢复'));await loading;
+  assert.equal(f.$('#draft-archive').disabled,false);
+  assert.equal(f.editor.controls.get('instructions').value,'晚到的修改仍需保存');
+  assert.equal(await f.forms.canLeaveSkillEditor(),false);
+  assert.equal(f.windowEvents.size,1);
+  assert.equal(f.calls.some(c=>['save','archive','restore'].includes(c.action)),false);
+  f.view.dispose();
+});
+
+test('a genuine late edit during archive is still protected after initialization completes',async()=>{
+  const archive=deferred();
+  const f=skillFixture({onAction:action=>action==='archive'?archive.promise:undefined});
+  await f.forms.showSkillDraft('draft');
+  const archiving=f.$('#draft-archive').onclick();await flush();
+  f.editor.controls.get('instructions').value='归档等待时到达的新修改';f.editor.oninput();
+  archive.resolve({status:'archived'});await archiving;
+  assert.equal(f.calls.filter(c=>c.action==='archive').length,1);
+  assert.equal(f.calls.filter(c=>c.path.startsWith('/api/skill-drafts')&&!c.path.includes('?id=')&&!c.action).length,0);
+  assert.equal(f.editor.controls.get('instructions').value,'归档等待时到达的新修改');
+  assert.match(f.$('#draft-detail-error').textContent,/内容又有变化/);
+  assert.equal(await f.forms.canLeaveSkillEditor(),false);
+  f.view.dispose();
+});
+
+test('leaving a draft during initial reads ignores their late response without trapping navigation',async()=>{
+  const inspecting=deferred();
+  const f=skillFixture({onAction:action=>action==='inspect'?inspecting.promise:undefined});
+  const opening=f.forms.showSkillDraft('draft');await flush();
+  assert.equal(await f.forms.canLeaveSkillEditor(),true);
+  const before=f.$('#skill-quality-panel').innerHTML;
+  f.view.dispose();
+  inspecting.resolve(quality('过时的检查'));await opening;
+  assert.equal(f.$('#skill-quality-panel').innerHTML,before);
+  assert.equal(f.calls.some(c=>['archive','restore','save'].includes(c.action)),false);
+});
+
+test('draft list defaults to active and archived pages remain reachable without truncation',async()=>{
+  const calls=[];
+  const f=skillFixture({onRequest:async(path)=>{
+    if(!path.startsWith('/api/skill-drafts?state='))return;
+    calls.push(path);
+    const q=new URL(path,'http://fixture').searchParams;
+    const row=id=>({draft_id:id,name:id,revision:1,state:q.get('state')==='active'?'editing':'archived'});
+    return {items:q.has('cursor')?[row('history-1'),row('history-2')]:[row(q.get('state')==='active'?'active':'history-1')],
+      next_cursor:q.get('state')==='archived'&&!q.has('cursor')?'next+/=':null,
+      preferences:{revision:1,value:{auto_draft:false}},scopes:{items:[]},jobs:{items:[]}};
+  }});
+  await f.forms.loadSkillDrafts();assert.equal(calls[0],'/api/skill-drafts?state=active');
+  assert.equal(f.$('#draft-more').hidden,true);
+  await f.$('#draft-archived').onclick();assert.equal(f.$('#draft-more').hidden,false);
+  await f.$('#draft-more').onclick();assert.match(calls.at(-1),/cursor=next%2B%2F%3D/);
+  assert.equal(f.$('#draft-more').hidden,true);
+  assert.equal(f.$('#draft-page-status').textContent,'已显示 2 份草稿。');
+  f.view.dispose();
+});
+
+test('switching draft history never discards edits entered while its page is loading',async()=>{
+  const gate=deferred();
+  const f=skillFixture({onRequest:path=>path==='/api/skill-drafts?state=archived'?gate.promise:undefined});
+  await f.forms.loadSkillDrafts();await f.forms.showSkillDraft('draft');
+  const switching=f.$('#draft-archived').onclick();await flush();
+  f.editor.controls.get('instructions').value='请求期间的新输入';f.editor.oninput();
+  gate.resolve({items:[],next_cursor:null});await switching;
+  assert.equal(f.editor.controls.get('instructions').value,'请求期间的新输入');
+  assert.equal(f.$('#draft-page-status').textContent,'草稿有新修改，列表未切换。');
   f.view.dispose();
 });
