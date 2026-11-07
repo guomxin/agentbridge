@@ -20,6 +20,7 @@ export function configurationProposal(value) {
     if (Object.hasOwn(references,path)) throw Error('参考资料路径不能重复。');
     references[path]=row.content;
   }
+  if (Object.values(references).reduce((sum,content)=>sum+[...content].length,0)>48000) throw Error('参考资料合计不能超过 48,000 字符。');
   for (const row of value.profiles) {
     const id=row.id.trim();
     if (!/^[a-z][a-z0-9_]{0,31}$/.test(id)) throw Error('模式标识须以小写字母开头，最多 32 位，仅含小写字母、数字和下划线。');
@@ -109,7 +110,7 @@ export function createSkillConfigurationEditor({document,root,bundle,catalog={},
     const box=node('details'),summary=node('summary',seed?.path || '新参考资料');box.className='skill-config-card';box.open=!seed;
     const content=node('div');box.append(summary,content);referenceList.append(box);
     const row={box,path:field(content,'资料路径','text',seed?.path || 'references/',{maxLength:256}),
-      content:field(content,'资料内容','textarea',seed?.content || '',{maxLength:40000,rows:8})};
+      content:field(content,'资料内容','textarea',seed?.content || '',{maxLength:96000,rows:8})};
     row.content.className='skill-config-text';
     row.path.oninput=()=>{summary.textContent=row.path.value || '新参考资料';for(const profile of profiles){const required=profile.required.get(row);if(required)required.title.textContent=row.path.value||'未命名资料';}changed();};
     button(content,'删除资料',()=>{references.splice(references.indexOf(row),1);box.remove();for(const profile of profiles){profile.required.get(row)?.label.remove();profile.required.delete(row);}changed();});

@@ -278,7 +278,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         <label>名称<input name="name" required maxlength="120" value="${escapeHtml(m.name)}"></label>
         <label>简介<textarea name="description" required maxlength="500">${escapeHtml(m.description)}</textarea></label>
         ${[["use_when","适用场景"],["not_for","不适用场景"],["output","输出结果"]].map(([k,t])=>`<label>${t}<textarea name="${k}" required maxlength="500">${escapeHtml(m.selection[k])}</textarea></label>`).join("")}
-        <label>处理方法<textarea name="instructions" required maxlength="40000" rows="12">${escapeHtml(d.bundle.resources["SKILL.md"])}</textarea></label>
+        <label>处理方法<textarea name="instructions" required maxlength="80000" rows="12">${escapeHtml(d.bundle.resources["SKILL.md"])}</textarea></label>
         <details class="skill-config"><summary>模式、执行范围与参考资料</summary><div id="skill-configuration"></div></details>
         <label>试用模式<select id="draft-test-profile">${Object.keys(m.profiles).map(p => `<option value="${escapeHtml(p)}">${escapeHtml(profileLabel(p))}（${escapeHtml(p)}）</option>`).join("")}</select></label>
         <div class="draft-actions"><button type="submit">保存新修订</button><button type="button" id="draft-test" class="secondary">试用已保存修订 ${d.revision}</button><button type="button" id="draft-export" class="secondary">导出</button><button type="button" id="draft-archive" class="secondary">归档</button></div></fieldset><p id="draft-detail-error" role="alert" aria-live="assertive"></p></form>
@@ -350,6 +350,7 @@ export function createSkillForms({ document, state, $, api: request, switchView,
         if (reviewDirty()) throw new Error("有未保存的复核说明，请先保存复核，再保存方法。");
         if (d.state === "archived") throw new Error("草稿已归档，不能保存或试用。");
         const values = readFields();
+        if ([...values.instructions].length > 40000) throw new Error("处理方法不能超过 40,000 字符。");
         const proposal = {...proposalFromBundle(d.bundle), ...Object.fromEntries(["name", "description", "instructions"].map(k => [k, values[k]])),
           selection: Object.fromEntries(["use_when", "not_for", "output"].map(k => [k, values[k]])),
           ...configurationProposal(values.configuration)};

@@ -93,6 +93,19 @@ test('accepted Markdown resource names survive a no-op edit without losing exact
   }
 });
 
+test('reference text uses the full Unicode resource budget instead of a UTF-16 half-limit',()=>{
+  const bundle=legacy();bundle.resources['references/source.md']='📎'.repeat(48000);
+  const f=fixture(bundle,catalog),input=f.field('资料内容');
+  assert.equal(input.maxLength,96000);
+  const value=configurationProposal(f.editor.read());
+  assert.equal([...value.references['references/source.md']].length,48000);
+  input.value+='字';assert.throws(()=>configurationProposal(f.editor.read()),/48,000 字符/);
+  const two=skillConfiguration(bundle);two.references[0].content='文'.repeat(24000);
+  two.references.push({path:'references/second.md',content:'📎'.repeat(24000)});
+  assert.equal(Object.keys(configurationProposal(two).references).length,2);
+  two.references[1].content+='字';assert.throws(()=>configurationProposal(two),/48,000 字符/);
+});
+
 test('unknown existing dependencies and unsafe display text are preserved as data',()=>{
   const bundle=legacy();bundle.manifest.profiles.preview.all=['unknown.permission'];bundle.manifest.profiles.preview.description='<img onerror=alert(1)>';
   const f=fixture(bundle,catalog),value=configurationProposal(f.editor.read());

@@ -2121,3 +2121,17 @@ test('switching draft history never discards edits entered while its page is loa
   assert.equal(f.$('#draft-page-status').textContent,'草稿有新修改，列表未切换。');
   f.view.dispose();
 });
+
+test('method editing counts Unicode characters rather than UTF-16 units',async()=>{
+  const f=skillFixture();await f.forms.showSkillDraft('draft');
+  f.editor.controls.get('instructions').value='📎'.repeat(39999);
+  await f.editor.onsubmit(submitEvent(f.editor));
+  assert.equal(f.calls.filter(c=>c.action==='save').length,1);
+  assert.equal(f.calls.find(c=>c.action==='save').data.proposal.instructions.length,79998);
+  f.view.dispose();
+  const over=skillFixture();await over.forms.showSkillDraft('draft');
+  over.editor.controls.get('instructions').value='📎'.repeat(40001);
+  await over.editor.onsubmit(submitEvent(over.editor));
+  assert.equal(over.calls.filter(c=>c.action==='save').length,0);
+  assert.match(over.$('#draft-detail-error').textContent,/40,000/);over.view.dispose();
+});

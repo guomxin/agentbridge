@@ -800,6 +800,21 @@
                 ],
                 "default": null,
                 "title": "License"
+              },
+              "name": {
+                "anyOf": [
+                  {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Name"
               }
             },
             "title": "SkillStandardMetadata",
