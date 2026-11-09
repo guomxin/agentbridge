@@ -85,6 +85,7 @@ export function createInteractionSharedState() {
     loginContinuations: new Map(),
     recentUserMessages: new Map(),
     planningRepairs: new Map(),
+    planningCalls: new Map(),
     documentDeliveries: new Map(),
     documentDeliveryReceipts: new Map(),
     taskContinuations: new Map(),
@@ -150,6 +151,7 @@ export class InteractionCoordinator {
       sharedState.recentUserMessages || (sharedState.recentUserMessages = new Map());
     this.planningRepairs =
       sharedState.planningRepairs || (sharedState.planningRepairs = new Map());
+    this.planningCalls = sharedState.planningCalls || (sharedState.planningCalls = new Map());
     this.terminalPlanFailures =
       sharedState.terminalPlanFailures || (sharedState.terminalPlanFailures = new Map());
     this.documentDeliveries =
@@ -348,6 +350,7 @@ export class InteractionCoordinator {
       sessionKey,
       runId: runId || previous?.runId || null,
       identityScope: scope,
+      turnRef: previous?.turnRef ?? this.recentUserMessages.get(sessionKey)?.taskRunRef ?? null,
       capturedAt: this.now(),
       readContinuation: normalizeReadContinuation(
         event.toolName,
@@ -358,7 +361,80 @@ export class InteractionCoordinator {
     this.pruneToolBindings();
   }
 
-  taskRunRefForToolCall(toolCallId, sessionKey, toolName = null) {
+  capturePlanningCall({ toolCallId, sessionKey, runId, resolvedIdentityScope }) {
+    this.prunePlanningRepairs();
+    const callId = normalizeToolCallId(toolCallId);
+    if (!callId || !isPrivateSessionKey(sessionKey)) return null;
+    const binding = this.toolBindings.get(callId);
+    const existing = this.planningCalls.get(callId);
+    if (existing) {
+      const conflict = existing.conflict || existing.sessionKey !== sessionKey ||
+        (existing.runId && runId && existing.runId !== runId) || binding?.conflict ||
+        (resolvedIdentityScope !== undefined && this.toolIdentityResolver &&
+          (!resolvedIdentityScope || (existing.identityScope && existing.identityScope !== resolvedIdentityScope) ||
+            resolvedIdentityScope !== this.toolIdentityResolver(sessionKey)));
+      if (conflict) {
+        const rejected = Object.freeze({ ...existing, conflict: true, isCurrent: () => false });
+        this.planningCalls.set(callId, rejected);
+        return rejected;
+      }
+      // Workspace identity may be resolved asynchronously on its first tool.
+      // Bind it once without replacing the turn/time captured at call entry.
+      if (!existing.identityScope && resolvedIdentityScope) {
+        const bound = { ...existing, identityScope: resolvedIdentityScope,
+          isCurrent: () => this.planningCalls.get(callId) === bound && this.planningCallCurrent(bound) };
+        this.planningCalls.set(callId, Object.freeze(bound));
+        return bound;
+      }
+      return existing;
+    }
+    const call = {
+      toolCallId: callId, sessionKey,
+      runId: binding?.runId || safeRoutePart(runId),
+      turnRef: binding?.turnRef ?? this.recentUserMessages.get(sessionKey)?.taskRunRef ?? null,
+      identityScope: binding ? binding.identityScope : this.toolIdentityResolver?.(sessionKey) || null,
+      capturedAt: this.now(),
+      conflict: Boolean(binding?.conflict || (binding?.sessionKey && binding.sessionKey !== sessionKey)),
+      isCurrent: () => this.planningCalls.get(callId) === call && this.planningCallCurrent(call),
+    };
+    this.planningCalls.set(callId, Object.freeze(call));
+    return call;
+  }
+
+  planningCallCurrent(call) {
+    if (!call || call.conflict || !isPrivateSessionKey(call.sessionKey) ||
+        call.capturedAt + PLANNING_REPAIR_TTL_MS <= this.now() ||
+        call.turnRef !== (this.recentUserMessages.get(call.sessionKey)?.taskRunRef || null) ||
+        (call.toolCallId && this.toolBindings.get(call.toolCallId)?.conflict) ||
+        (this.toolIdentityResolver && (!call.identityScope || call.identityScope !== this.toolIdentityResolver(call.sessionKey))) ||
+        (call.runId && this.endedToolRuns.has(JSON.stringify([call.sessionKey, call.runId])))) return false;
+    return true;
+  }
+
+  planningRepairForCall(sessionKey, planningContext = null) {
+    this.prunePlanningRepairs();
+    if (planningContext && (planningContext.sessionKey !== sessionKey ||
+        this.planningCalls.get(planningContext.toolCallId) !== planningContext ||
+        !this.planningCallCurrent(planningContext))) return null;
+    const repair = this.planningRepairs.get(sessionKey);
+    if (!repair || !this.planningCallCurrent(repair)) return null;
+    return repair;
+  }
+
+  planningIdempotencyForCall(sessionKey, toolName, planningContext = null) {
+    return toolName === "agentbridge_task_plan_prepare"
+      ? this.planningRepairForCall(sessionKey, planningContext)?.idempotencyKey || null : null;
+  }
+
+  planningRepairContextForCall(sessionKey, toolName, planningContext = null) {
+    const repair = toolName === "agentbridge_task_plan_prepare"
+      ? this.planningRepairForCall(sessionKey, planningContext) : null;
+    return repair ? { sourceTaskId: repair.sourceTaskId,
+      sourceRunRef: repair.turnRef || repair.runId,
+      idempotencyKey: repair.idempotencyKey } : null;
+  }
+
+  taskRunRefForToolCall(toolCallId, sessionKey, toolName = null, planningContext = null) {
     this.pruneToolBindings();
     this.prunePlanningRepairs();
     const normalized = normalizeToolCallId(toolCallId);
@@ -371,17 +447,16 @@ export class InteractionCoordinator {
       return exact.status === "bound" ? exact.runId : null;
     }
     if (binding?.conflict) return null;
+    const planningRepair = this.planningRepairForCall(sessionKey, planningContext);
+    if (toolName === "agentbridge_task_plan_prepare" && planningRepair &&
+        (planningContext || binding?.sessionKey === sessionKey)) return planningRepair.taskRunRef;
     if (!binding || (binding.sessionKey && binding.sessionKey !== sessionKey)) {
+      if (planningContext?.turnRef && planningContext.sessionKey === sessionKey &&
+          this.planningCalls.get(normalized) === planningContext && this.planningCallCurrent(planningContext) &&
+          !isIndependentTaskEntryTool(toolName)) return planningContext.turnRef;
       return normalized;
     }
     const recent = this.recentUserMessages.get(sessionKey);
-    const planningRepair = this.planningRepairs.get(sessionKey);
-    if (
-      toolName === "agentbridge_task_plan_prepare" &&
-      planningRepair?.taskRunRef
-    ) {
-      return planningRepair.taskRunRef;
-    }
     if (
       !isIndependentTaskEntryTool(toolName) &&
       recent?.taskRunRef
@@ -413,10 +488,9 @@ export class InteractionCoordinator {
     this.pruneToolBindings();
   }
 
-  taskScopeForBusinessCall(sessionKey, toolName) {
-    this.prunePlanningRepairs();
+  taskScopeForBusinessCall(sessionKey, toolName, planningContext = null) {
     return toolName === "agentbridge_task_plan_prepare" &&
-      this.planningRepairs.has(sessionKey) ? "independent" : null;
+      this.planningRepairForCall(sessionKey, planningContext) ? "independent" : null;
   }
 
   deliverPreparedDocumentResult(event, context) {
@@ -485,6 +559,9 @@ export class InteractionCoordinator {
 
   async captureNativeToolResult(event, context) {
     await this.captureTrustedResultView(event, context);
+    const planning = this.capturePlanningOutcome(event,
+      this.toolBindings.get(normalizeToolCallId(event.toolCallId)), context);
+    if (planning) return planning;
     const processed = processToolResult(event.result, this.config.allowedCardOrigins);
     if (!processed.sanitized) {
       const payload = trustedAgentBridgeStructuredContent(event.result, this.config.mcpServerName);
@@ -622,6 +699,40 @@ export class InteractionCoordinator {
     return presentation;
   }
 
+  capturePlanningOutcome(event, binding, context) {
+    const payload = trustedAgentBridgeStructuredContent(event.result, this.config.mcpServerName);
+    const failedPlan = payload?.plan || payload?.result?.plan;
+    const sourceIncomplete = failedPlan?.state === "failed" && failedPlan.terminalReason === "PLAN_SOURCE_INCOMPLETE";
+    if (payload?.error?.code !== "PLAN_REQUIRED" && !sourceIncomplete) return null;
+    const callId = normalizeToolCallId(event.toolCallId);
+    const saved = callId ? this.planningCalls.get(callId) : null;
+    if (event.planningContext && event.planningContext !== saved) return null;
+    // Native calls retain their original snapshot for legacy middleware too.
+    // A result with a call ID but no trusted call context cannot attach itself
+    // to whichever user turn happens to be current when it arrives.
+    if (callId && !saved && !binding) return null;
+    const sessionKey = saved?.sessionKey || binding?.sessionKey || context.sessionKey;
+    const call = saved || {
+      sessionKey, runId: binding?.runId || context.runId || null,
+      turnRef: binding?.turnRef ?? this.recentUserMessages.get(sessionKey)?.taskRunRef ?? null,
+      identityScope: binding ? binding.identityScope : this.toolIdentityResolver?.(sessionKey) || null,
+      capturedAt: binding?.capturedAt ?? this.now(), conflict: binding?.conflict,
+    };
+    if (!this.planningCallCurrent(call)) return null;
+    if (sourceIncomplete) {
+      const existing = this.terminalPlanFailures.get(sessionKey);
+      if (!existing || existing.planId !== failedPlan.planId || existing.turnRef !== call.turnRef) {
+        this.terminalPlanFailures.set(sessionKey, { ...call, planId: failedPlan.planId,
+          expiresAt: call.capturedAt + PLANNING_REPAIR_TTL_MS });
+      }
+      return null;
+    }
+    if (this.rememberPlanningRepair(payload, call, taskIdFromToolResult(event.result))) {
+      return planningRepairRequiredResult(event.result, payload);
+    }
+    return null;
+  }
+
   captureToolResult(event, context) {
     const binding = this.takeToolBinding(event.toolCallId);
     const taskId = taskIdFromToolResult(event.result);
@@ -652,28 +763,9 @@ export class InteractionCoordinator {
     if (!publicPayload) {
       return undefined;
     }
-    const failedPlan = publicPayload.plan || publicPayload.result?.plan;
-    if (failedPlan?.state === "failed" && failedPlan.terminalReason === "PLAN_SOURCE_INCOMPLETE") {
-      const sessionKey = binding?.sessionKey || context.sessionKey;
-      if (isPrivateSessionKey(sessionKey)) {
-        this.terminalPlanFailures.set(sessionKey, {
-          planId: failedPlan.planId,
-          turnRef: this.recentUserMessages.get(sessionKey)?.taskRunRef || null,
-          runId: binding?.runId || context.runId || null,
-          expiresAt: this.now() + PLANNING_REPAIR_TTL_MS,
-        });
-      }
-    }
-    const planningRepair = this.rememberPlanningRepair(
-      publicPayload,
-      binding,
-      context,
-      taskId,
-    );
+    const planningRepair = this.capturePlanningOutcome(event, binding, context);
     if (planningRepair) {
-      return {
-        result: planningRepairRequiredResult(event.result, publicPayload),
-      };
+      return { result: planningRepair };
     }
     this.rememberLoginContinuation(publicPayload, binding, context);
     const loginStart = this.autoStartLoginForRead(
@@ -704,14 +796,14 @@ export class InteractionCoordinator {
   terminalPlanFailureForCall({ sessionKey, runId, toolCallId, toolName }) {
     const failure = this.terminalPlanFailures.get(sessionKey);
     if (!failure) {
-      this.prunePlanningRepairs();
-      if (this.planningRepairs.has(sessionKey) && toolName !== "agentbridge_task_plan_prepare") {
+      if (this.planningRepairForCall(sessionKey) &&
+          !["agentbridge_task_plan_prepare", "oa_workflow_history_next"].includes(toolName)) {
         return { status: "planning_control", error: { code: "PLAN_REQUIRED",
           message: "本轮已要求使用持久计划，不能改用独立查询或填写卡绕过；请使用计划目录和计划入口继续。" } };
       }
       return null;
     }
-    if (failure.expiresAt <= this.now()) {
+    if (failure.expiresAt <= this.now() || !this.planningCallCurrent(failure)) {
       this.terminalPlanFailures.delete(sessionKey);
       return null;
     }
@@ -741,28 +833,28 @@ export class InteractionCoordinator {
     this.loginContinuations.set(sessionKey, binding.readContinuation);
   }
 
-  rememberPlanningRepair(payload, binding, context, sourceTaskId = null) {
+  rememberPlanningRepair(payload, call, sourceTaskId = null) {
     if (payload?.error?.code !== "PLAN_REQUIRED") {
       return false;
     }
-    const sessionKey = binding?.sessionKey || context.sessionKey;
-    if (!isPrivateSessionKey(sessionKey)) {
+    const sessionKey = call.sessionKey;
+    if (!this.planningCallCurrent(call)) {
       return false;
     }
     const existing = this.planningRepairs.get(sessionKey);
-    if (existing && existing.expiresAt > this.now()) {
-      return true;
+    if (existing && existing.expiresAt > this.now() && this.planningCallCurrent(existing)) {
+      return existing.sourceTaskId === safeRoutePart(sourceTaskId);
     }
-    const recent = this.recentUserMessages.get(sessionKey);
     const baseRef =
-      recent?.taskRunRef ||
-      safeRoutePart(binding?.runId) ||
+      call.turnRef ||
+      safeRoutePart(call.runId) ||
       `repair:${randomUUID()}`;
     this.planningRepairs.set(sessionKey, {
+      ...call,
       taskRunRef: `${baseRef}:plan-repair`.slice(0, 256),
       sourceTaskId: safeRoutePart(sourceTaskId),
-      capturedAt: this.now(),
-      expiresAt: this.now() + PLANNING_REPAIR_TTL_MS,
+      idempotencyKey: `openclaw:plan-repair:${randomUUID()}`,
+      expiresAt: call.capturedAt + PLANNING_REPAIR_TTL_MS,
     });
     this.api.logger.info(
       "AgentBridge prepared a fresh host task reference for one composed-plan repair",
@@ -1211,6 +1303,9 @@ export class InteractionCoordinator {
   }
 
   removeSession(sessionKey) {
+    for (const [callId, call] of this.planningCalls) {
+      if (call.sessionKey === sessionKey) this.planningCalls.delete(callId);
+    }
     this.resultViewSessionTokens.delete(sessionKey);
     this.resultViewHooklessTokens.delete(sessionKey);
     for (const [key, record] of this.resultViews) {
@@ -1267,6 +1362,7 @@ export class InteractionCoordinator {
     this.loginContinuations.clear();
     this.recentUserMessages.clear();
     this.planningRepairs.clear();
+    this.planningCalls.clear();
     this.terminalPlanFailures.clear();
     this.taskContinuations.clear();
     this.taskContinuationChoices.clear();
@@ -2832,6 +2928,12 @@ export class InteractionCoordinator {
 
   prunePlanningRepairs() {
     const current = this.now();
+    for (const [callId, call] of this.planningCalls) {
+      if (call.capturedAt + PLANNING_REPAIR_TTL_MS <= current) this.planningCalls.delete(callId);
+    }
+    while (this.planningCalls.size > MAX_TOOL_BINDINGS) {
+      this.planningCalls.delete(this.planningCalls.keys().next().value);
+    }
     for (const [sessionKey, repair] of this.planningRepairs) {
       if (repair.expiresAt <= current) {
         this.planningRepairs.delete(sessionKey);

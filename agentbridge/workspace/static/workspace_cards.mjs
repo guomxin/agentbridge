@@ -10,15 +10,18 @@ import { markWorkspaceTiming } from "./workspace_performance.mjs";
 import { createActionableResults } from "./workspace_actionable.mjs";
 import { createOaPendingRecovery } from "./workspace_recovery.mjs";
 import {createBatchRemaining} from './workspace_batch_remaining.mjs';
+import { createOaHistoryResults, oaHistoryPresentation } from './workspace_oa_history.mjs';
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, loadHistoryPage, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
+  const taskListRows = new Map();
   const clocks = new Map();
   let clockTimer = null, clockScope = null;
   state.taskFeedback ||= new Map();
   const remaining = createBatchRemaining({document,state,queryRemaining,getScope,makeKey:makeFeedbackRequestKey});
+  const oaHistory = createOaHistoryResults({document,state,getScope,loadHistoryPage});
   const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery, getScope,
     makeRequestKey:makeFeedbackRequestKey, openTask: async taskId => {
       if (await switchView("tasks") === false) return;
@@ -38,6 +41,12 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   const text = (node, value) => {
     const next = String(value ?? "");
     if (node.textContent !== next) node.textContent = next;
+  };
+  const updateHistoryTaskRow = (taskId, presentation) => {
+    const row = taskListRows.get(taskId);
+    if (!row || !presentation) return;
+    text(row.status, presentation.label);
+    row.bar.className = `task-status-bar ${presentation.statusClass}`;
   };
   const remainingQueryCopy = result => {
     const scopes=(result.actionableResults || []).map(group=>group.remaining).filter(Boolean);
@@ -236,6 +245,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     const feedback = createFeedbackView(taskId);
     const artifacts = element("div");
     const query = element("div");
+    const oaHistoryPanel = element("section");
     const recoveryPanel = element("section");
     const remainingPanel = element('section');
     const actions = element("div", "application-card-actions");
@@ -248,8 +258,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     });
     actions.append(progress);
     card.append(header, description, wait, facts.root, active.root, batch.root,
-      history.root, executionHistory.root, artifacts, query, recoveryPanel,remainingPanel, feedback.root, actions);
-    return { title, status, description, wait, facts, active, batch, history, executionHistory, artifacts, query, recoveryPanel,remainingPanel, feedback, progress };
+      history.root, executionHistory.root, artifacts, query, oaHistoryPanel, recoveryPanel,remainingPanel, feedback.root, actions);
+    return { title, status, description, wait, facts, active, batch, history, executionHistory, artifacts, query, oaHistoryPanel, recoveryPanel,remainingPanel, feedback, progress };
   }
 
   function renderBatch(view, batch) {
@@ -455,6 +465,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       oldSources.every(group => Date.parse(group.expiresAt) <= Date.now() && !(group.targets || []).some(target =>
         target.preparation && !["succeeded","completed","verified_complete","failed","outcome_unknown","canceled","expired","superseded","skipped"].includes(target.preparation.state))));
     const recovered = oaRecoveryPresentation(result);
+    const historyQuery = oaHistoryPresentation(result.oaHistoryQuery);
     const queryWait = pendingQueryWait(result);
     if (recovered?.completed) {
       card.className = "message assistant application-card succeeded";
@@ -469,6 +480,9 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       queryResultCopy(result) || "查询已完成，请查看本次查询结果。" : taskCardStatusMessage(cardStatus, task.summary);
     text(view.description, result.preparationHealth?.message || recovered?.message || failure?.message || queryWait?.message || scopedQueryCopy || (execution?.message ?
       task.summary?.batch ? `${statusCopy} ${execution.message}` : execution.message : statusCopy));
+    if (historyQuery) {
+      text(view.title, historyQuery.title); text(view.status, historyQuery.label); text(view.description, historyQuery.message);
+    }
     const current = active[0] || result.interaction;
     updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
       ["办理阶段", recovered?.label || execution?.phase], ["最近核验", recovered?.observedAt ? formatTime(recovered.observedAt) : execution?.observedAt ? formatTime(execution.observedAt) : null],
@@ -480,7 +494,16 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     updateArtifacts(view, result, true);
     text(view.progress, recovered?.completed || cardStatus === "succeeded" ? "查看办理结果" : cardStatus === "outcome_unknown" ? "查看核验详情" : result.artifactsHasMore ? "查看全部文件与进度" : "查看进度");
     updateFeedback(view.feedback, result);
-    actionable.render(view.query, result.actionableResults);
+    actionable.render(view.query, historyQuery ? [] : result.actionableResults);
+    if (historyQuery) view.query.hidden = true;
+    oaHistory.render(view.oaHistoryPanel, result, presentation => {
+      if (!presentation) return;
+      text(view.title, presentation.title); text(view.status, presentation.label); text(view.description, presentation.message);
+      view.status.className = `application-card-status ${presentation.statusClass}`;
+      updateHistoryTaskRow(task.task_id, presentation);
+      text(view.progress, "查看查询结果"); view.query.hidden = true;
+    });
+    if (historyQuery) text(view.progress, "查看查询结果");
     recovery.render(view.recoveryPanel, result);
     remaining.render(view.remainingPanel,result);
     if (focusWasInside && !card.contains(focused)) view.progress.focus({preventScroll:true});
@@ -490,6 +513,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   function renderTasks() {
     const list = $("#task-list");
     list.replaceChildren();
+    taskListRows.clear();
     if (state.tasks.length === 0) {
       list.append(emptyState("没有符合条件的任务"));
       return;
@@ -498,17 +522,14 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const button = document.createElement("button");
       button.type = "button";
       button.className = `task-row ${task.task_id === state.selectedTaskId ? "active" : ""}`;
-      button.innerHTML = `
-        <span class="task-status-bar ${escapeClass(task.status)}"></span>
-        <span>
-          <span class="task-title"></span>
-          <span class="task-meta">
-            <span>${statusLabel(task.status)}</span>
-            <span>${formatTime(task.updated_at)}</span>
-          </span>
-        </span>`;
-      button.querySelector(".task-title").textContent =
-        displayTaskTitle(task.title);
+      const bar = element("span", `task-status-bar ${escapeClass(task.status)}`), copy = element("span");
+      const title = element("span", "task-title"), meta = element("span", "task-meta");
+      const status = element("span"), time = element("span");
+      text(title, displayTaskTitle(task.title)); text(status, statusLabel(task.status)); text(time, formatTime(task.updated_at));
+      meta.append(status, time); copy.append(title, meta); button.append(bar, copy);
+      taskListRows.set(task.task_id, {bar, status});
+      const history = state.oaHistoryQueries?.get(task.task_id);
+      updateHistoryTaskRow(task.task_id, oaHistoryPresentation(history?.projection || history?.failureProjection));
       button.addEventListener("click", () => loadTaskDetail(task.task_id));
       list.append(button);
     });
@@ -522,6 +543,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       if (view?.feedback) state.taskFeedback.get(view.taskId)?.views.delete(view.feedback);
       if (view?.recoveryPanel) recovery.detach(view.recoveryPanel);
       if (view?.remainingPanel) remaining.detach(view.remainingPanel);
+      if (view?.oaHistoryPanel) oaHistory.detach(view.oaHistoryPanel);
       detail.replaceChildren();
       const heading = element("div", "detail-heading");
       const back = element("button", "icon-command mobile-detail-back");
@@ -552,7 +574,8 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
           return loadTaskDetail(action.taskId);
         }
         if (!["progress", "result"].includes(action?.kind)) return;
-        const target = action.kind === "progress" && !view.active.root.hidden ? view.active.root : view.outcomeNotice;
+        const target = action.kind === "progress" && !view.active.root.hidden ? view.active.root
+          : view.historyQuery ? view.oaHistoryPanel : view.outcomeNotice;
         target.setAttribute("tabindex", "-1");
         target.scrollIntoView?.({block:"nearest"}); target.focus({preventScroll:true});
       });
@@ -593,12 +616,13 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const executionHistory = disclosure("查看历史执行观察", "business-disclosure execution-history");
       const artifacts = element("div");
       const query = element("div");
+      const oaHistoryPanel = element("section");
       const recoveryPanel = element("section");
       const remainingPanel = element('section');
       const feedback = createFeedbackView(task.task_id);
       const timeline = {root:element("div", "timeline"), rows:new Map()};
-      detail.append(heading, facts.root, outcomeNotice, wait, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, recoveryPanel,remainingPanel, feedback.root, timeline.root);
-      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, wait, plan, active, batch, history, executionHistory, artifacts, query, recoveryPanel,remainingPanel, feedback, timeline};
+      detail.append(heading, facts.root, outcomeNotice, wait, plan, active.root, batch.root, history.root, executionHistory.root, artifacts, query, oaHistoryPanel, recoveryPanel,remainingPanel, feedback.root, timeline.root);
+      view = {taskId:task.task_id, heading, title, status, resume, resumeLink, queryAction, facts, outcomeNotice, wait, plan, active, batch, history, executionHistory, artifacts, query, oaHistoryPanel, recoveryPanel,remainingPanel, feedback, timeline};
       detailViews.set(detail, view);
       detail.dataset.taskId = task.task_id;
     }
@@ -611,8 +635,11 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     updateClock(view.wait, result);
     const execution = businessExecutionPresentation(result);
     const recovered = oaRecoveryPresentation(result);
+    const historyQuery = oaHistoryPresentation(result.oaHistoryQuery);
     const queryWait = pendingQueryWait(result);
     const primaryAction = taskPrimaryAction(result);
+    view.historyQuery = Boolean(historyQuery);
+    if (historyQuery && ["result", "progress"].includes(primaryAction.kind)) primaryAction.label = "查看查询结果";
     view.primaryAction = primaryAction;
     text(view.title, displayTaskTitle(taskResultTitle(result)));
     text(view.status, result.preparationHealth?.label || recovered?.label || queryWait?.label ||
@@ -628,6 +655,10 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     view.queryAction.hidden = !view.readOnlyQuery || Boolean(recovered?.completed);
     view.queryAction.disabled = Boolean(view.queryPending) || !view.readOnlyQuery || typeof refreshQuery !== "function";
     if (!view.queryRequestKey) text(view.outcomeNotice, result.preparationHealth?.message || recovered?.message || queryWait?.message || remainingQueryCopy(result) || queryResultCopy(result) || execution?.message || taskCardStatusMessage(task.status, task.summary));
+    if (historyQuery) {
+      text(view.title, historyQuery.title); text(view.status, historyQuery.label); text(view.outcomeNotice, historyQuery.message);
+      view.queryAction.hidden = true;
+    }
     updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
       ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
         ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],
@@ -647,7 +678,17 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
     renderExecutionHistory(view.executionHistory, result);
     updateArtifacts(view, result, false);
     updateFeedback(view.feedback, result);
-    actionable.render(view.query, result.actionableResults);
+    actionable.render(view.query, historyQuery ? [] : result.actionableResults);
+    if (historyQuery) view.query.hidden = true;
+    oaHistory.render(view.oaHistoryPanel, result, presentation => {
+      if (!presentation) return;
+      text(view.title, presentation.title); text(view.status, presentation.label); text(view.outcomeNotice, presentation.message);
+      updateHistoryTaskRow(task.task_id, presentation);
+      view.historyQuery = true; view.query.hidden = true; view.queryAction.hidden = true;
+      if (["progress", "result"].includes(view.primaryAction?.kind)) {
+        view.primaryAction.label = "查看查询结果"; text(view.resume, view.primaryAction.label);
+      }
+    });
     recovery.render(view.recoveryPanel, result);
     remaining.render(view.remainingPanel,result);
     const nodes = [];
@@ -665,7 +706,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
         row = {root, title, time};
         view.timeline.rows.set(key, row);
       }
-      text(row.title, eventLabel(event.event_type));
+      text(row.title, historyQuery && event.event_type === "task.completed" ? "只读调用已结束" : eventLabel(event.event_type));
       text(row.time, formatTime(event.created_at));
       nodes.push(row.root);
     }
@@ -714,7 +755,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
 
   return { upsertTaskCard, upsertTaskCardVariant, renderTasks, renderTaskDetail, renderSkillCard, addDetail,
     resetTaskCardControllers: () => {
-      recovery.reset();remaining.reset();actionable.reset();clocks.clear();
+      recovery.reset();remaining.reset();actionable.reset();oaHistory.reset();clocks.clear();taskListRows.clear();
       if (clockTimer !== null) clockScope?.clearTimer(clockTimer);
       clockTimer = null;
     } };

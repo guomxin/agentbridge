@@ -189,6 +189,10 @@ class CentralCapabilityService:
     ) -> None:
         self.home = Path(home)
         self.db_path = self.home / "agentbridge.db"
+        from agentbridge.core.oa_history_queries import OaHistoryQueryStore
+        from agentbridge.core.oa_history_query_service import OaHistoryQueryService
+        self.oa_history_queries = OaHistoryQueryStore(self.db_path)
+        self.oa_history_query_service = OaHistoryQueryService(self.oa_history_queries)
         access_stores = CentralAccessStores.create(self.db_path)
         self.user_grants = access_stores.user_grants
         self.skills = access_stores.skills
@@ -355,7 +359,12 @@ class CentralCapabilityService:
 
     def planning_catalog(
         self, *, granted_scopes: list[str] | set[str], user_subject: str | None = None,
+        view: str = "full", kind: str | None = None, name: str | None = None,
+        section: str = "all", system: str | None = None, cursor: str | None = None,
+        expected_revision: str | None = None,
     ) -> dict:
+        from agentbridge.core.planning_catalog import discover_planning_catalog, filter_planning_examples
+
         catalog = build_planning_catalog(
             registry=self.registry,
             transforms=self.transforms,
@@ -372,8 +381,14 @@ class CentralCapabilityService:
                 item for item in catalog.get("capabilities", [])
                 if CAPABILITY_PERMISSIONS.get(item["name"]) in allowed
             ]
-            catalog["examples"] = []
-        return catalog
+            filter_planning_examples(catalog)
+        if view == "full":
+            # Internal skill authoring still consumes complete contracts.
+            if any(value is not None for value in (kind, name, system, cursor, expected_revision)) or section != "all":
+                raise ValueError("The internal full planning catalog does not accept discovery filters")
+            return catalog
+        return discover_planning_catalog(catalog, view=view, kind=kind, name=name, section=section,
+                                         system=system, cursor=cursor, expected_revision=expected_revision)
 
     def task_plan_required_scopes(self, proposal: dict) -> frozenset[str]:
         compiled = validate_and_compile_task_plan(
@@ -385,6 +400,18 @@ class CentralCapabilityService:
             scope_resolver=self.planning_required_scopes,
         )
         return frozenset(compiled["requiredScopes"])
+
+    def task_request_accepted_at(self, task: dict) -> str:
+        repair = (task.get("summary") or {}).get("planRepair")
+        if not isinstance(repair, dict):
+            return task["created_at"]
+        original = self.tasks.get_task(repair.get("sourceTaskId"), user_subject=task["user_subject"])
+        if (original["agent_host"] != task["agent_host"]
+                or original["origin_endpoint_id"] != task["origin_endpoint_id"]
+                or original["active_conversation_ref"] != task["active_conversation_ref"]
+                or original["created_at"] != repair.get("originalAcceptedAt")):
+            raise TaskIntegrityError("planning repair request time binding is invalid")
+        return original["created_at"]
 
     def prepare_task_plan(
         self,
@@ -402,7 +429,7 @@ class CentralCapabilityService:
         try:
             compiled_proposal, temporal_context = compile_temporal_constraints(
                 proposal,
-                accepted_at=task.get("created_at"),
+                accepted_at=self.task_request_accepted_at(task),
             )
         except ValueError as exc:
             raise PlanValidationError(
@@ -2026,12 +2053,15 @@ class CentralCapabilityService:
         task_scope: str = "host_run",
         tool_name: str | None = None,
         planning_task_key: str | None = None,
+        planning_repair_source_task_id: str | None = None,
         host_instance_id: str | None = None,
         host_version: str | None = None,
     ) -> dict:
         task_scope = str(task_scope or "host_run").strip()
         if task_scope not in {"host_run", "user_turn", "independent"}:
             raise ValueError("task_scope is invalid")
+        if planning_repair_source_task_id and (tool_name != "agentbridge_task_plan_prepare" or task_scope != "independent"):
+            raise TaskIntegrityError("planning repair source requires an independent plan preparation")
         try:
             endpoint = self.tasks.endpoint_for_key(
                 user_subject=user_subject,
@@ -2117,6 +2147,18 @@ class CentralCapabilityService:
                 control = self._planning_control("本轮已完成业务读取，请使用独立修复计划继续，不能复用已终结的原子任务。")
             if control:
                 return {"protocolVersion": "0.1", "taskId": source_task["task_id"], **control}
+        plan_repair = None
+        if planning_repair_source_task_id:
+            original = self.tasks.get_task(planning_repair_source_task_id, user_subject=user_subject)
+            original_for_turn = self.tasks.find_host_task(user_subject=user_subject, agent_host=agent_host,
+                host_task_key=planning_task_key or "")
+            if (original["agent_host"] != agent_host or original["origin_endpoint_id"] != endpoint["endpoint_id"]
+                    or original["active_conversation_ref"] != conversation_ref
+                    or original_for_turn is None or original_for_turn["task_id"] != original["task_id"]
+                    or original["host_task_key"] == host_task_key
+                    or not self._task_has_business_source(user_subject=user_subject, task_id=original["task_id"])):
+                raise TaskIntegrityError("planning repair source does not match this endpoint and accepted turn")
+            plan_repair = {"sourceTaskId": original["task_id"], "originalAcceptedAt": original["created_at"]}
         coordinator_lease = None
         if host_instance_id and host_version:
             self.host_contract.require_registration(
@@ -2134,10 +2176,12 @@ class CentralCapabilityService:
                 origin_endpoint_id=endpoint["endpoint_id"],
                 active_conversation_ref=conversation_ref,
                 title=title,
-                summary={"workspaceQueryGroup": workspace_query_group}
-                if workspace_query_group else None,
+                summary={**({"workspaceQueryGroup": workspace_query_group} if workspace_query_group else {}),
+                    **({"planRepair": plan_repair} if plan_repair else {})} or None,
                 connection=connection,
             )
+            if plan_repair and task.get("summary", {}).get("planRepair") != plan_repair:
+                raise TaskIntegrityError("planning repair task is bound to a different source")
             if host_instance_id and host_version:
                 coordinator_lease = self.host_contract.acquire_coordinator_lease(
                     task_id=task["task_id"],
@@ -4221,6 +4265,23 @@ class CentralCapabilityService:
                             prepare_capability=prepare_capability,
                             definition=definition,
                         )
+                    elif capability_name in {"oa.workflow.history.query", "oa.workflow.history.next"}:
+                        from agentbridge.core.oa_history_queries import OaHistoryQueryError
+                        from agentbridge.core.business_content_identity import principal_binding
+                        principal = principal_binding(session)
+                        if principal is None:
+                            raise CapabilityRejected("OA_HISTORY_SESSION_CHANGED", "OA 会话身份尚未核实，不能读取历史查询。")
+                        query_context = dict(user_subject=user_subject, session_id=session["session_id"],
+                            principal_ref=principal, adapter=adapter, worker=worker)
+                        try:
+                            if capability_name == "oa.workflow.history.query":
+                                accepted = self.task_request_accepted_at(self.tasks.get_task(task_id, user_subject=user_subject)) if task_id else self.operations.get(context.operation_id)["created_at"]
+                                result = self.oa_history_query_service.query(**query_context,
+                                    accepted_at=accepted, **arguments)
+                            else:
+                                result = self.oa_history_query_service.next(**query_context, **arguments)
+                        except (OaHistoryQueryError, ValueError) as exc:
+                            raise CapabilityRejected(getattr(exc, "code", "OA_HISTORY_QUERY_INVALID"), str(exc)) from exc
                     else:
                         result = adapter.invoke_capability(
                             capability_name,

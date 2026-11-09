@@ -167,13 +167,23 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
             coordinator.taskIdForBusinessCall(sessionKey, toolName),
           taskIdBinder: (sessionKey, toolName, taskId) =>
             coordinator.bindIndependentTask(sessionKey, toolName, taskId),
-          taskScopeResolver: (sessionKey, toolName) =>
-            coordinator.taskScopeForBusinessCall(sessionKey, toolName),
-          taskRunRefResolver: (toolCallId, sessionKey, toolName) =>
+          taskScopeResolver: (sessionKey, toolName, planningContext) =>
+            coordinator.taskScopeForBusinessCall(sessionKey, toolName, planningContext),
+          planningContextFactory: request => {
+            const namespace = request.identity && identityRouter.catalogCacheKeyForBinding?.(request.identity.binding);
+            const endpoint = request.identity && identityRouter.endpointKeyForSession?.(request.sessionKey);
+            return coordinator.capturePlanningCall({ ...request,
+              ...(request.identity ? { resolvedIdentityScope: namespace && endpoint
+                ? JSON.stringify([namespace, endpoint]) : null } : {}) });
+          },
+          planningRepairResolver: (sessionKey, toolName, planningContext) =>
+            coordinator.planningRepairContextForCall(sessionKey, toolName, planningContext),
+          taskRunRefResolver: (toolCallId, sessionKey, toolName, planningContext) =>
             coordinator.taskRunRefForToolCall(
               toolCallId,
               sessionKey,
               toolName,
+              planningContext,
             ),
           taskRunContextResolver: (toolCallId, sessionKey, expectedRunId) =>
             coordinator.toolRunContextForCall(toolCallId, sessionKey, expectedRunId),

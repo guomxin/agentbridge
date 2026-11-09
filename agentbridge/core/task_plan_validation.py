@@ -9,6 +9,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from agentbridge.core.capability import CapabilityRegistry
+from agentbridge.core.oa_query_temporal import (
+    MAX_ROLLING_DAYS, OAQueryDateBasis, OAQueryTemporalKind, validate_oa_query_temporal,
+)
 from agentbridge.core.input_validation import (
     SchemaIssue, ValidationProfile, matches_json_type, object_input_issue, schema_value_issue,
 )
@@ -100,9 +103,11 @@ TaskPlanBindingDefinitionInput = Annotated[
 class TaskPlanTemporalConstraintInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["previous_day", "day_before_yesterday", "previous_calendar_week", "absolute_range"]
+    kind: OAQueryTemporalKind
     start: Annotated[str | None, Field(max_length=10)] = None
     end: Annotated[str | None, Field(max_length=10)] = None
+    days: Annotated[int | None, Field(strict=True, ge=1, le=MAX_ROLLING_DAYS)] = None
+    date_basis: OAQueryDateBasis | None = None
 
 
 class TaskPlanConstraintsInput(BaseModel):
@@ -420,6 +425,8 @@ def validate_and_compile_task_plan(
         )
 
     ordered_keys = _topological_order(normalized, source_order)
+    _validate_read_only_references(normalized, ordered_keys=ordered_keys, write_steps=write_steps,
+                                   transforms=transforms)
     ancestors = _dependency_ancestors(normalized, ordered_keys)
     for step_key in ordered_keys:
         step = normalized[step_key]
@@ -689,30 +696,10 @@ def _normalize_constraints(value: Any, *, proposal_version: str) -> dict[str, An
     temporal = value.get("temporal")
     if temporal is None:
         return {}
-    if not isinstance(temporal, dict) or set(temporal) - {"kind", "start", "end"}:
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID", "temporal 约束不合法。"
-        )
-    kind = temporal.get("kind")
-    if kind not in {"previous_day", "day_before_yesterday", "previous_calendar_week", "absolute_range"}:
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID", "temporal.kind 不受支持。"
-        )
-    if kind != "absolute_range" and (
-        temporal.get("start") is not None or temporal.get("end") is not None
-    ):
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID", "相对 temporal 约束不能声明 start 或 end。"
-        )
-    if kind == "absolute_range" and not temporal.get("start"):
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID", "absolute_range 缺少 start。"
-        )
-    if kind == "absolute_range" and not temporal.get("end"):
-        raise PlanValidationError(
-            "PLAN_SCHEMA_INVALID", "absolute_range 缺少 end。"
-        )
-    return {"temporal": dict(temporal)}
+    try:
+        return {"temporal": validate_oa_query_temporal(temporal)}
+    except ValueError as exc:
+        raise PlanValidationError("PLAN_SCHEMA_INVALID", str(exc)) from exc
 
 
 def _validate_partial_input(
@@ -808,6 +795,42 @@ def _dependency_ancestors(
     return result
 
 
+def _validate_read_only_references(
+    steps: dict[str, dict[str, Any]], *, ordered_keys: list[str],
+    write_steps: list[str], transforms: TransformRegistry,
+) -> None:
+    """Reference pages cannot be recast as complete data or passed to a writer."""
+    terminals = {spec.name: spec for spec in transforms.list() if spec.read_only_terminal}
+    restricted_sources = {name for spec in terminals.values() for name in spec.allowed_source_capabilities}
+    sources = {key for key, step in steps.items()
+               if step["kind"] == "capability" and step["capabilityName"] in restricted_sources}
+    projections = {key for key, step in steps.items()
+                   if step["kind"] == "transform" and step["transformName"] in terminals}
+    if not sources and not projections:
+        return
+    if write_steps or len(sources) != 1 or len(projections) != 1 or ordered_keys[-1] not in projections:
+        raise PlanValidationError("PLAN_READ_ONLY_REFERENCE_REQUIRED",
+            "历史查询引用仅支持一个来源的只读终点；不能派生写入或用其他转换合并为完整事项。")
+    terminal_key = ordered_keys[-1]
+    terminal = steps[terminal_key]
+    spec = terminals[terminal["transformName"]]
+    source_key = next(iter(sources))
+    for field in spec.required_bound_inputs:
+        binding = terminal.get("bindings", {}).get(field) or {}
+        references = _binding_references(binding)
+        if (binding.get("mode") == "many" or len(references) != 1
+                or references[0].get("step") != source_key or references[0].get("pointer") != ""
+                or steps[source_key]["capabilityName"] not in spec.allowed_source_capabilities):
+            raise PlanValidationError("PLAN_PROVENANCE_REQUIRED",
+                "只读查询投影必须直接绑定已登记查询来源的完整结果，不能绑定单页 items 或模型自填对象。",
+                step_key=terminal_key)
+    other_sources = {key for key, step in steps.items() if key != source_key and step["kind"] == "capability"
+                     and "business_source" in ((planning_descriptor(step["capabilityName"]) or {}).get("roles") or [])}
+    if other_sources:
+        raise PlanValidationError("PLAN_READ_ONLY_REFERENCE_REQUIRED",
+            "当前历史查询引用不支持混入其他业务来源；不能忽略来源或在模型文本中合并。", step_key=terminal_key)
+
+
 def _validate_v2_provenance(
     steps: dict[str, dict[str, Any]],
     *,
@@ -832,7 +855,7 @@ def _validate_v2_provenance(
     for key in sorted(business_sources):
         descriptor = planning_descriptor(steps[key]["capabilityName"]) or {}
         source_contract = descriptor.get("sourceContract") or {}
-        if source_contract.get("dateArguments") and not isinstance(temporal, dict):
+        if (source_contract.get("dateArguments") or source_contract.get("temporalArgument")) and not isinstance(temporal, dict):
             raise PlanValidationError(
                 "PLAN_TEMPORAL_CONSTRAINT_REQUIRED",
                 "带日期口径的业务来源必须声明统一 temporal 约束。",

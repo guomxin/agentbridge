@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import base64
+import binascii
+from copy import deepcopy
+import hashlib
+import json
 from typing import Any
 
 from agentbridge.core.capability import CapabilityRegistry
@@ -13,6 +18,165 @@ from agentbridge.core.transforms import TransformRegistry
 
 
 ScopeResolver = Callable[[str], frozenset[str]]
+PLANNING_DISCOVERY_SCHEMA = "agentbridge.planning-catalog.v3"
+# The native host caps a model-visible tool result at 16000 UTF-16 units.
+# Measure the complete, pretty-printed response and leave room for its envelope.
+PLANNING_DISCOVERY_MAX_CHARS = 12000
+PLANNING_DISCOVERY_PAGE_SIZE = 25
+_DETAIL_SECTIONS = ("input", "output", "planning")
+
+
+def planning_catalog_response_chars(value: Any) -> int:
+    text = json.dumps(value, ensure_ascii=False, indent=2)
+    return len(text.encode("utf-16-le")) // 2
+
+
+def filter_planning_examples(catalog: dict[str, Any]) -> None:
+    """Apply the final user grant to examples as well as capability entries."""
+    capabilities = {item["name"] for item in catalog["capabilities"]}
+    transforms = {item["name"] for item in catalog["transforms"]}
+    guide = catalog["prepareInputGuide"]
+    guide["examples"] = [
+        example for example in guide["examples"]
+        if all(
+            (step.get("kind") == "capability" and step.get("capabilityName") in capabilities)
+            or (step.get("kind") == "transform" and step.get("transformName") in transforms)
+            for step in example["steps"]
+        )
+    ]
+
+
+def _catalog_revision(value: Any) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _discovery_error(code: str, message: str, **extra: Any) -> dict[str, Any]:
+    return {"schemaVersion": PLANNING_DISCOVERY_SCHEMA, "status": "rejected",
+            "error": {"code": code, "message": message}, **extra}
+
+
+def _summary_entry(kind: str, entry: dict[str, Any]) -> dict[str, Any]:
+    fields = ("name", "version", "system", "effect", "planningRoles",
+              "mayRequireTrustedInteraction", "resultProjection", "requiredBoundInputs",
+              "maximumInputItems", "maximumOutputChars", "haltsOnEmpty", "haltsOnIncomplete",
+              "readOnlyTerminal", "allowedSourceCapabilities")
+    summary = {"kind": kind, **{key: entry[key] for key in fields if key in entry}}
+    description = str(entry.get("description") or "")
+    summary["description"] = description[:160]
+    summary["descriptionComplete"] = len(description) <= 160
+    return summary
+
+
+def _summary_cursor(*, revision: str, system: str | None, kind: str | None, after: str) -> str:
+    value = {"revision": revision, "system": system, "kind": kind, "after": after}
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def discover_planning_catalog(
+    catalog: dict[str, Any], *, view: str = "summary", kind: str | None = None,
+    name: str | None = None, section: str = "all", system: str | None = None,
+    cursor: str | None = None, expected_revision: str | None = None,
+) -> dict[str, Any]:
+    """Bounded public projection; callers must supply the currently authorized catalog.
+
+    Cursors locate public metadata only and never grant access. Every request
+    rebuilds the authorized catalog before validating its revision and filters.
+    Full internal contracts remain available to skill authoring and validation.
+    """
+    invalid = _discovery_error("PLANNING_CATALOG_INVALID_QUERY", "目录查询参数不合法。")
+    if view not in {"summary", "detail"} or kind not in {None, "capability", "transform"}:
+        return invalid
+    if section not in {"all", *_DETAIL_SECTIONS}:
+        return invalid
+    for value, maximum in ((name, 160), (system, 64), (cursor, 2048), (expected_revision, 71)):
+        if value is not None and (not isinstance(value, str) or not value or len(value) > maximum):
+            return invalid
+    if view == "summary" and (name is not None or section != "all"):
+        return invalid
+    if view == "detail" and (kind is None or name is None or cursor is not None or system is not None):
+        return invalid
+    revision = _catalog_revision(catalog)
+    if expected_revision is not None and expected_revision != revision:
+        return _discovery_error("PLANNING_CATALOG_CHANGED", "目录或当前授权已变化，请重新发现后读取合同。",
+                                nextAction={"tool": "agentbridge_task_plan_catalog", "arguments": {}})
+    common = {"schemaVersion": PLANNING_DISCOVERY_SCHEMA, "view": view,
+              "catalogRevision": revision, "policyVersion": catalog["policyVersion"],
+              "supportedProposalVersions": catalog["supportedProposalVersions"],
+              "limits": catalog["limits"], "availableSections": list(_DETAIL_SECTIONS)}
+    if view == "detail":
+        entries = catalog["capabilities" if kind == "capability" else "transforms"]
+        entry = next((item for item in entries if item["name"] == name), None)
+        if entry is None:
+            return _discovery_error("PLANNING_CATALOG_ENTRY_UNAVAILABLE", "当前目录没有可用的该项合同。")
+        if section == "all":
+            contract = deepcopy(entry)
+        elif section in {"input", "output"}:
+            field = section + "Schema"
+            contract = {"name": name, "version": entry["version"], field: deepcopy(entry[field])}
+        else:
+            contract = deepcopy({key: value for key, value in entry.items()
+                                 if key not in {"inputSchema", "outputSchema"}})
+        result = {**common, "kind": kind, "name": name, "section": section,
+                  "contractRevision": _catalog_revision(entry),
+                  "completeSections": list(_DETAIL_SECTIONS) if section == "all" else [section],
+                  "contract": contract}
+        if planning_catalog_response_chars(result) > PLANNING_DISCOVERY_MAX_CHARS:
+            if section == "all":
+                return _discovery_error(
+                    "PLANNING_CATALOG_SECTION_REQUIRED", "完整合同超出单次预算，请分别读取 input、output、planning。",
+                    catalogRevision=revision, availableSections=list(_DETAIL_SECTIONS),
+                    nextAction={"tool": "agentbridge_task_plan_catalog", "arguments": {
+                        "view": "detail", "kind": kind, "name": name, "section": "input",
+                        "expected_revision": revision}})
+            return _discovery_error("PLANNING_CATALOG_SECTION_TOO_LARGE", "该完整合同分节超出读取预算，不能使用截断合同生成计划。")
+        return result
+
+    entries = [(entry_kind, item) for entry_kind, key in (("capability", "capabilities"), ("transform", "transforms"))
+               for item in catalog[key] if (kind is None or kind == entry_kind)
+               and (system is None or entry_kind == "transform" or item["system"] == system)]
+    entries.sort(key=lambda pair: (pair[0], pair[1]["name"]))
+    keys = [entry_kind + ":" + item["name"] for entry_kind, item in entries]
+    start = 0
+    if cursor is not None:
+        try:
+            raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+            position = json.loads(raw)
+            if not isinstance(position, dict) or set(position) != {"revision", "system", "kind", "after"}:
+                return invalid
+            if position["system"] != system or position["kind"] != kind:
+                return invalid
+            if position["revision"] != revision:
+                return _discovery_error("PLANNING_CATALOG_CHANGED", "目录或当前授权已变化，请从首批重新发现。",
+                                        nextAction={"tool": "agentbridge_task_plan_catalog", "arguments": {}})
+            start = keys.index(position["after"]) + 1
+        except (ValueError, TypeError, UnicodeError, binascii.Error):
+            return invalid
+    result = {**common, "filters": {"system": system, "kind": kind},
+              "total": len(entries), "startOffset": start, "returnedCount": 0,
+              "entries": [], "hasMore": False, "nextCursor": None,
+              "prepareInputGuide": {"requiredFields": catalog["prepareInputGuide"]["requiredFields"],
+                                    "rules": catalog["prepareInputGuide"]["rules"]},
+              "instructions": "摘要不含完整参数。选定名称后用 view=detail、kind、name 读取合同；大合同按 input/output/planning 分节，expected_revision 使用 catalogRevision。按 nextCursor 保持相同 system/kind 续取目录。system 仅筛选能力，通用转换仍保留。"}
+    for index in range(start, len(entries)):
+        entry_kind, entry = entries[index]
+        result["entries"].append(_summary_entry(entry_kind, entry))
+        result.update(returnedCount=len(result["entries"]), hasMore=index + 1 < len(entries),
+                      nextCursor=_summary_cursor(revision=revision, system=system, kind=kind, after=keys[index])
+                      if index + 1 < len(entries) else None)
+        if (len(result["entries"]) > PLANNING_DISCOVERY_PAGE_SIZE
+                or planning_catalog_response_chars(result) > PLANNING_DISCOVERY_MAX_CHARS):
+            result["entries"].pop()
+            if not result["entries"]:
+                return _discovery_error("PLANNING_CATALOG_ENTRY_TOO_LARGE", "目录摘要超出单次读取预算。")
+            result.update(returnedCount=len(result["entries"]), hasMore=True,
+                          nextCursor=_summary_cursor(revision=revision, system=system, kind=kind,
+                                                     after=keys[index - 1]))
+            break
+    if planning_catalog_response_chars(result) > PLANNING_DISCOVERY_MAX_CHARS:
+        return _discovery_error("PLANNING_CATALOG_ENTRY_TOO_LARGE", "目录说明超出单次读取预算。")
+    return result
 
 
 def build_planning_catalog(

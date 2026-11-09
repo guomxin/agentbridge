@@ -40,6 +40,8 @@
       "oa_workflow_pending_list",
       "oa_workflow_sent_list",
       "oa_workflow_done_list",
+      "oa_workflow_history_query",
+      "oa_workflow_history_next",
       "oa_workflow_tracked_list",
       "oa_workflow_detail_get",
       "oa_workflow_opinions_list",

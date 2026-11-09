@@ -122,6 +122,8 @@ export function createAgentBridgeProxyTools({
   taskRunRefResolver = null,
   taskRunContextResolver = null,
   taskScopeResolver = null,
+  planningContextFactory = null,
+  planningRepairResolver = null,
   taskContinuationResolver = null,
   interactionGetGuard = null,
   terminalPlanGuard = null,
@@ -175,6 +177,8 @@ export function createAgentBridgeProxyTools({
         taskRunRefResolver,
         taskRunContextResolver,
         taskScopeResolver,
+        planningContextFactory,
+        planningRepairResolver,
         taskContinuationResolver,
         interactionGetGuard,
         terminalPlanGuard,
@@ -234,6 +238,8 @@ function createProxyTool({
   taskRunRefResolver,
   taskRunContextResolver,
   taskScopeResolver,
+  planningContextFactory,
+  planningRepairResolver,
   taskContinuationResolver,
   interactionGetGuard,
   terminalPlanGuard,
@@ -253,6 +259,10 @@ function createProxyTool({
     ...(descriptor.annotations ? { annotations: descriptor.annotations } : {}),
     execute: (toolCallId, rawParams, signal) => {
       let skillLoad;
+      // Capture the accepted turn before any asynchronous work. This context
+      // is only for planning recovery; it cannot create a skill/run binding.
+      let planningContext = planningContextFactory?.({ ...context, toolCallId,
+        toolName: descriptor.name }) || null;
       const invoke = async () => {
       const resolved = resolveIdentity(signal);
       const identity = resolved?.then ? await resolved : resolved;
@@ -267,6 +277,15 @@ function createProxyTool({
           },
         });
       }
+      if (planningContextFactory) planningContext = planningContextFactory({ ...context,
+        toolCallId, toolName: descriptor.name, identity }) || planningContext;
+      const stalePlanningCall = () => descriptor.name === "agentbridge_task_plan_prepare" &&
+        planningContext && !planningContext.isCurrent();
+      const stalePlanningResult = () => jsonToolResult({ status: "rejected", error: {
+        code: "PLAN_TURN_CONTEXT_CHANGED",
+        message: "计划准备所属的请求或身份已改变，请停止旧请求，不要复用新的会话上下文。",
+      } });
+      if (stalePlanningCall()) return stalePlanningResult();
       let resultViewIssuance = null;
       if (descriptor.name === "oa_workflow_pending_list" && trustedResultHandler && trustedResultContextFactory) {
         try {
@@ -305,11 +324,13 @@ function createProxyTool({
           toolName: descriptor.name,
           params: normalizedParams,
         }) || normalizedParams;
+      const planningRepair = planningRepairResolver?.(context.sessionKey, descriptor.name, planningContext);
       const callParams = paramsWithStableIdempotencyKey({
         descriptor,
         params,
         toolCallId,
         runId: context.runId,
+        planningIdempotencyKey: planningRepair?.idempotencyKey,
       });
       if (descriptor.name === "agentbridge_interaction_get") {
         const guarded = interactionGetGuard?.({
@@ -373,17 +394,24 @@ function createProxyTool({
         taskIdBinder,
         taskRunRefResolver,
         taskScopeResolver,
+        planningContext,
+        planningRepair,
         logger,
         resultViewIssuance,
       });
       if (resolution?.planningControl) {
-        return {
+        const result = {
           ...jsonToolResult(resolution.planningControl),
           details: { mcpServer: serverName, mcpTool: descriptor.name,
             agentbridgeTaskId: resolution.taskId,
             structuredContent: resolution.planningControl },
         };
+        return trustedResultHandler ? await trustedResultHandler(
+          { toolCallId, toolName: descriptor.name, params: callParams, result, planningContext },
+          context,
+        ) : result;
       }
+      if (stalePlanningCall()) return stalePlanningResult();
       const taskId = resolution?.taskId || null;
       const coordinatorLease = taskId
         ? resolution?.coordinatorLease || await renewCoordinatorLease({
@@ -403,6 +431,7 @@ function createProxyTool({
         transportRecovery,
       });
       try {
+        if (stalePlanningCall()) return stalePlanningResult();
         // Task resolution and lease renewal can yield while another tool starts
         // loading a Skill. Check again before sending any business arguments.
         const blocked = skillLoad ? skillLoad.check()
@@ -556,7 +585,7 @@ function createProxyTool({
       // The embedded host forwards only content/details to result middleware.
       return trustedResultHandler
         ? await trustedResultHandler(
-            { toolCallId, toolName: descriptor.name, params: callParams, result: nativeResult,
+            { toolCallId, toolName: descriptor.name, params: callParams, result: nativeResult, planningContext,
               ...(trustedResultView ? { trustedResultView } : {}) },
             context,
           )
@@ -620,7 +649,11 @@ function paramsWithStableIdempotencyKey({
   params,
   toolCallId,
   runId,
+  planningIdempotencyKey,
 }) {
+  if (descriptor.name === "agentbridge_task_plan_prepare" && planningIdempotencyKey) {
+    return { ...params, idempotency_key: boundedText(planningIdempotencyKey, 256) };
+  }
   if (
     !AGENTBRIDGE_GOVERNED_ENTRY_TOOLS.has(descriptor.name) ||
     !Object.hasOwn(descriptor.inputSchema?.properties || {}, "idempotency_key") ||
@@ -702,6 +735,8 @@ async function resolveTaskId({
   taskIdBinder,
   taskRunRefResolver,
   taskScopeResolver,
+  planningContext,
+  planningRepair,
   logger,
   resultViewIssuance = null,
 }) {
@@ -724,7 +759,7 @@ async function resolveTaskId({
   }
   const independentTaskEntry = isIndependentTaskEntryTool(descriptor.name);
   const sharedTurnRef = boundedText(
-        taskRunRefResolver?.(toolCallId, sessionKey, independentTaskEntry ? null : descriptor.name),
+        taskRunRefResolver?.(toolCallId, sessionKey, independentTaskEntry ? null : descriptor.name, planningContext),
         256,
       );
   const runRef = independentReadCall ? boundedText(toolCallId, 256) :
@@ -756,7 +791,8 @@ async function resolveTaskId({
         agent_host: "openclaw",
         host_task_key: boundedText(`${sessionKey}|${runRef}`, 1024),
         tool_name: descriptor.name,
-        planning_task_key: boundedText(`${sessionKey}|${sharedTurnRef || runRef}`, 1024),
+        planning_task_key: boundedText(`${sessionKey}|${planningRepair?.sourceRunRef || sharedTurnRef || runRef}`, 1024),
+        ...(planningRepair?.sourceTaskId ? { planning_repair_source_task_id: planningRepair.sourceTaskId } : {}),
         endpoint_key: endpointKey,
         client_type: workspaceSession ? "web" : binding.channel,
         external_subject: workspaceSession
@@ -785,9 +821,9 @@ async function resolveTaskId({
             ]
           : ["direct_status", "trusted_interaction",
               ...(binding.channel === "telegram" ? ["continuous_flow_v1"] : [])],
-        task_scope: workspaceSession
-          ? independentReadCall || independentTaskEntry ||
-            taskScopeResolver?.(sessionKey, descriptor.name) === "independent"
+        task_scope: taskScopeResolver?.(sessionKey, descriptor.name, planningContext) === "independent"
+          ? "independent" : workspaceSession
+          ? independentReadCall || independentTaskEntry
             ? "independent"
             : "user_turn"
           : "host_run",

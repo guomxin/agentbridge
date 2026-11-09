@@ -1853,3 +1853,19 @@ td {
 .message-image-record { margin:0; min-width:0; }
 .message-image-record .message-image-button { width:100%; min-height:42px; }
 .message-image-retention { margin-top:4px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+
+/* History queries use their own scrolling table, within the existing card. */
+.oa-history-panel { min-width:0; max-width:calc(100% - 32px); margin:14px 16px; }
+.oa-history-heading { display:block; line-height:1.5; }
+.oa-history-range, .oa-history-progress, .oa-history-explanation, .oa-history-notice, .oa-history-empty {
+  margin:8px 0; font-size:12px; line-height:1.6; overflow-wrap:anywhere;
+}
+.oa-history-range, .oa-history-progress, .oa-history-explanation { color:var(--muted); }
+.oa-history-notice { color:var(--ink); }
+.oa-history-scroll { width:100%; max-width:100%; overflow-x:auto; border:1px solid var(--line); box-sizing:border-box; }
+.oa-history-scroll:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
+.oa-history-table { min-width:1320px; width:100%; table-layout:fixed; }
+.oa-history-table th, .oa-history-table td { width:160px; padding:10px 12px; white-space:normal; overflow-wrap:anywhere; }
+.oa-history-table th:first-child, .oa-history-table td:first-child { width:280px; }
+.oa-history-navigation { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:10px; margin-top:10px; }
+.oa-history-page { color:var(--muted); font-size:12px; }

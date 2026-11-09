@@ -326,8 +326,10 @@ class WorkspaceApplication:
         delivery = preparation_health(self.service, task)
         business = self._business_task_presentation(account, task, interactions)
         from agentbridge.core.oa_batch_remaining import remaining_presentation
+        from agentbridge.workspace.oa_history import presentation as history_presentation
         return {
             "task": _public_task(task),
+            "oaHistoryQuery": history_presentation(self.service, account["user_subject"], task_id),
             "actionableResults": self.actionable_results(account, task_id),
             "actionableSourceTaskIds": actionable_sources,
             "preparationHealth": delivery,
@@ -636,6 +638,10 @@ class WorkspaceApplication:
     def actionable_results(self, account: dict, task_id: str) -> list[dict]:
         from agentbridge.core.actionable_results import list_actionable_results
         return list_actionable_results(self.service, account["user_subject"], task_id, include_partial=True)
+
+    def next_oa_history_page(self, account: dict, task_id: str, body: dict) -> dict:
+        from agentbridge.workspace.oa_history import next_page
+        return next_page(self.service, account, task_id, body)
 
     def prepare_selected_results(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.actionable_results import queue_preparation

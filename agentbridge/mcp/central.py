@@ -25,7 +25,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.resources import FunctionResource
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl, Field
 import uvicorn
 from agentbridge.mcp.resource_budget import BoundedMcpProtocol, bounded_mcp_app
@@ -164,6 +164,7 @@ from agentbridge.admin.server import (
 from agentbridge.auth.action_card import TrustedActionApplication
 from agentbridge.core.task_plan_validation import (
     TaskPlanConstraintsInput,
+    TaskPlanTemporalConstraintInput,
     TaskPlanStepInput,
     serialize_task_plan_steps,
 )
@@ -238,6 +239,8 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "oa_workflow_pending_list": frozenset({"oa:read"}),
     "oa_workflow_sent_list": frozenset({"oa:read"}),
     "oa_workflow_done_list": frozenset({"oa:read"}),
+    "oa_workflow_history_query": frozenset({"oa:read"}),
+    "oa_workflow_history_next": frozenset({"oa:read"}),
     "oa_workflow_tracked_list": frozenset({"oa:read"}),
     "oa_workflow_detail_get": frozenset({"oa:read"}),
     "oa_workflow_opinions_list": frozenset({"oa:read"}),
@@ -394,6 +397,18 @@ HOST_CONTROL_TOOL_NAMES = (
     *HOST_PRESENTATION_TOOL_NAMES,
     *HOST_COORDINATION_TOOL_NAMES,
 )
+
+
+def _history_query_tool_result(response: dict[str, Any] | CallToolResult) -> CallToolResult:
+    # Preserve trusted interaction text/private metadata. For ordinary query
+    # receipts, extra pretty-print indentation can exceed the host's 12k mirror
+    # even though complete result rows fit the service's 10k delivery budget.
+    # FastMCP validates this structuredContent against the unchanged dict schema.
+    if isinstance(response, CallToolResult):
+        return response
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(
+        response, ensure_ascii=False, separators=(",", ":"), allow_nan=False))],
+        structuredContent=response)
 
 
 def agent_facing_tools_for_scopes(scopes: list[str] | set[str]) -> list[str]:
@@ -1590,18 +1605,33 @@ def create_central_mcp_server(
         name="agentbridge_task_plan_catalog",
         title="Get AgentBridge Planning Catalog",
         description=(
-            "Return the model-safe capability and deterministic-transform catalog filtered "
-            "to this MCP identity's scopes. Use it before proposing a multi-system task plan."
+            "Discover the current identity's authorized planning capabilities and transforms. "
+            "Default view=summary returns bounded entries without schemas; follow nextCursor with "
+            "the same system/kind filters. Before proposing a plan, use view=detail with kind and "
+            "an exact name for each selected contract. Large contracts require separate input, "
+            "output and planning sections; pass catalogRevision as expected_revision to keep "
+            "sections consistent. Never infer arguments from summaries or use truncated schemas."
         ),
         annotations=read_annotations,
         structured_output=True,
     )
-    async def agentbridge_task_plan_catalog() -> dict[str, Any]:
+    async def agentbridge_task_plan_catalog(
+        view: Literal["summary", "detail"] = "summary",
+        kind: Literal["capability", "transform"] | None = None,
+        name: Annotated[str | None, Field(min_length=1, max_length=160)] = None,
+        section: Literal["all", "input", "output", "planning"] = "all",
+        system: Annotated[str | None, Field(min_length=1, max_length=64,
+            description="Summary capability filter; common transforms remain visible.")] = None,
+        cursor: Annotated[str | None, Field(min_length=1, max_length=2048)] = None,
+        expected_revision: Annotated[str | None, Field(pattern=r"^sha256:[0-9a-f]{64}$")] = None,
+    ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         return await asyncio.to_thread(
             service.planning_catalog,
             granted_scopes=identity["scopes"],
             user_subject=identity["user_subject"],
+            view=view, kind=kind, name=name, section=section, system=system,
+            cursor=cursor, expected_revision=expected_revision,
         )
 
     @mcp.tool(
@@ -2007,6 +2037,48 @@ def create_central_mcp_server(
         if end_date:
             arguments["end_date"] = end_date
         return await invoke(ctx, "oa.workflow.done.list", arguments, idempotency_key)
+
+    @mcp.tool(
+        name="oa_workflow_history_query",
+        title="查询 OA 全部历史事项及流程状态",
+        description=(
+            "Query the authenticated user's Done or Sent OA history with explicit temporal intent. "
+            "Use temporal.kind=all for all history; relative dates are frozen to the original request time. "
+            "date_basis distinguishes processed_at from initiated_at; Sent supports only initiated_at. "
+            "The query scans bounded batches and verifies current workflow nodes. During scanning/details "
+            "it returns progress; when complete or terminal partial it returns whole result rows in pages. "
+            "While has_more is true, call oa_workflow_history_next with next_cursor until work and delivery "
+            "are exhausted. Never call a fresh query to continue, invent a start year, treat a single page "
+            "as all results, or infer workflow nodes from handler names. Coverage reports missing source "
+            "or detail evidence; partial results must be labelled as partial. No OA business data is written."
+        ), annotations=read_annotations, structured_output=True,
+    )
+    async def oa_workflow_history_query(
+        ctx: Context, collection: Literal["done", "sent"], temporal: TaskPlanTemporalConstraintInput,
+        keyword: Annotated[str | None, Field(max_length=200)] = None,
+        limit: Annotated[int, Field(ge=1, le=50)] = 50,
+        idempotency_key: Annotated[str | None, Field(max_length=256)] = None,
+    ) -> dict[str, Any]:
+        arguments = {"collection": collection, "temporal": temporal.model_dump(exclude_none=True), "limit": limit}
+        if keyword:
+            arguments["keyword"] = keyword
+        return _history_query_tool_result(await invoke(ctx, "oa.workflow.history.query", arguments, idempotency_key))
+
+    @mcp.tool(
+        name="oa_workflow_history_next",
+        title="继续 OA 历史查询或读取结果下一页",
+        description=(
+            "Continue an existing OA history query using only its next_cursor. The cursor binds the "
+            "original user, OA session, collection and frozen filters; do not alter the query. "
+            "Repeat while has_more=true, including result delivery pages after state=complete/partial. "
+            "Repeated use of the same cursor returns the same cached receipt without replaying OA reads. "
+            "An expired cursor or changed session requires a fresh query; partial coverage remains partial."
+        ), annotations=read_annotations, structured_output=True,
+    )
+    async def oa_workflow_history_next(
+        ctx: Context, cursor: Annotated[str, Field(min_length=1, max_length=128)],
+    ) -> dict[str, Any]:
+        return _history_query_tool_result(await invoke(ctx, "oa.workflow.history.next", {"cursor": cursor}, None))
 
     @mcp.tool(
         name="oa_workflow_tracked_list",
@@ -5677,6 +5749,7 @@ def create_central_mcp_server(
         ] = "host_run",
         tool_name: Annotated[str | None, Field(max_length=128)] = None,
         planning_task_key: Annotated[str | None, Field(max_length=1024)] = None,
+        planning_repair_source_task_id: Annotated[str | None, Field(max_length=128)] = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host_context, _registration = await _registered_host_context(
@@ -5705,6 +5778,8 @@ def create_central_mcp_server(
             task_scope=task_scope,
             tool_name=tool_name,
             planning_task_key=planning_task_key,
+            **({"planning_repair_source_task_id": planning_repair_source_task_id}
+               if planning_repair_source_task_id else {}),
             host_instance_id=host_context["hostInstanceId"],
             host_version=host_context["hostVersion"],
         )

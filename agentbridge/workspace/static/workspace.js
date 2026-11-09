@@ -114,6 +114,8 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTas
   prepareRecovery:prepareOaPendingRecovery, getScope:() => sessionScope,
   openPreparation:(taskId,options) => preparationHandoff.start(taskId,options), viewState,
   queryRemaining:queryOaBatchRemaining,
+  loadHistoryPage:(taskId,cursor) => scopedApi(sessionScope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-history/next`,
+    {method:"POST",body:{cursor},csrf:true,timeoutMs:45000}),
 });
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({

@@ -614,6 +614,10 @@ def create_workspace_http_server(
                 if route.path == "/api/actions/oa-pending-query":
                     self._json(202, application.query_oa_pending(account, body))
                     return
+                history_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/oa-history/next", route.path)
+                if history_match:
+                    self._json(200, application.next_oa_history_page(account, history_match.group(1), body))
+                    return
                 remaining_match = re.fullmatch(r"/api/tasks/([0-9a-f-]{36})/oa-batch-remaining/query", route.path)
                 if remaining_match:
                     self._json(202, application.query_oa_batch_remaining(account, remaining_match.group(1), body))
@@ -1165,6 +1169,10 @@ def create_workspace_http_server(
                 )
 
         def _handle_error(self, exc: Exception) -> None:
+            from agentbridge.core.oa_history_queries import OaHistoryQueryError
+            if isinstance(exc, OaHistoryQueryError):
+                self._json(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
+                return
             from agentbridge.core.user_grants import UserGrantConflict
             from agentbridge.core.skill_workbench import TaskFeedbackError
             from agentbridge.core.actionable_results import ActionableResultError

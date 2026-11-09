@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import hashlib
+import json
 from typing import Any, Callable
 
 from agentbridge.core.query_contracts import HISTORY_QUERY_EVIDENCE_SCHEMA
@@ -34,6 +36,8 @@ class TransformSpec:
     result_projection: str | None = None
     required_bound_inputs: tuple[str, ...] = ()
     input_item_counter: TransformItemCounter | None = None
+    read_only_terminal: bool = False
+    allowed_source_capabilities: tuple[str, ...] = ()
 
     @property
     def version(self) -> str:
@@ -54,6 +58,8 @@ class TransformSpec:
             "requiredBoundInputs": list(self.required_bound_inputs),
             "deterministic": True,
             "networkAccess": False,
+            **({"readOnlyTerminal": True, "allowedSourceCapabilities": list(self.allowed_source_capabilities)}
+               if self.read_only_terminal else {}),
         }
 
 
@@ -126,6 +132,8 @@ class TransformRegistry:
 WORK_ITEMS_TO_LOG_DRAFT = "work_items_to_log_draft.v1"
 MERGE_WORK_ITEMS = "merge_work_items.v1"
 WORK_ITEMS_TO_LOG_DRAFT_V2 = "work_items_to_log_draft.v2"
+OA_HISTORY_REPORT = "oa_history_report.v1"
+OA_HISTORY_REPORT_SOURCES = ("oa.workflow.history.query", "oa.workflow.history.next")
 
 WORK_ITEMS_TO_LOG_DRAFT_INPUT_SCHEMA = {
     "type": "object",
@@ -245,7 +253,92 @@ def build_transform_registry() -> TransformRegistry:
         ),
         _work_items_to_log_draft_v2,
     )
+    registry.register(
+        TransformSpec(
+            name=OA_HISTORY_REPORT,
+            description="只读投影已保存的 OA 历史查询及续读引用，保留日期、状态和流程节点；单页不代表全部，不能派生业务写入。",
+            input_schema={"type": "object", "properties": {"report": _oa_history_report_schema()},
+                          "required": ["report"], "additionalProperties": False},
+            output_schema=_oa_history_report_schema(output=True),
+            maximum_input_items=50, maximum_output_chars=12000,
+            halts_on_incomplete=True, result_projection="oa_history_report",
+            required_bound_inputs=("report",),
+            input_item_counter=lambda arguments: len((arguments.get("report") or {}).get("items") or []),
+            read_only_terminal=True, allowed_source_capabilities=OA_HISTORY_REPORT_SOURCES,
+        ),
+        lambda arguments: project_oa_history_report(arguments["report"]),
+    )
     return registry
+
+
+def _oa_history_report_schema(*, output: bool = False) -> dict[str, Any]:
+    properties = {
+        "schema_version": {"type": "string"}, "query_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "collection": {"type": "string", "enum": ["done", "sent"]},
+        "state": {"type": "string", "enum": ["scan", "scanning", "details", "complete", "partial"]},
+        "temporal": {"type": "object"}, "progress": {"type": "object"}, "coverage": {"type": "object"},
+        "items": {"type": "array", "maxItems": 50, "items": {"type": "object"}},
+        "next_cursor": {"type": ["string", "null"], "maxLength": 128},
+        "replay_cursor": {"type": "string", "minLength": 1, "maxLength": 128},
+        "total": {"type": "integer", "minimum": 0}, "returned_count": {"type": "integer", "minimum": 0},
+        "has_more": {"type": "boolean"}, "delivery": {"type": "object"},
+    }
+    required = ["query_id", "collection", "state", "temporal", "progress", "coverage", "items", "next_cursor", "replay_cursor"]
+    if output:
+        properties.update({key: {"type": "boolean"} for key in
+            ("source_complete", "delivery_complete", "report_complete", "source_incomplete", "empty", "read_only")})
+        properties["completion_meaning"] = {"type": "string", "enum": ["read_only_query_reference"]}
+        required += ["source_complete", "delivery_complete", "report_complete", "source_incomplete", "empty", "read_only", "completion_meaning"]
+    return {"type": "object", "properties": properties, "required": required, "additionalProperties": not output}
+
+
+def _public_history_fields(value: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    def public(item):
+        if isinstance(item, dict):
+            return {key: public(data) for key, data in item.items() if not key.startswith("_")}
+        if isinstance(item, list):
+            return [public(data) for data in item]
+        return deepcopy(item)
+    return {key: public(value[key]) for key in fields if key in value}
+
+
+def project_oa_history_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Project a public query page without fetching, merging or shortening it."""
+    result = _public_history_fields(report, ("query_id", "collection", "state", "next_cursor", "replay_cursor",
+                                            "total", "returned_count", "has_more"))
+    result["schema_version"] = "agentbridge.oa_history_report.v1"
+    temporal = report["temporal"]
+    result["temporal"] = _public_history_fields(temporal, ("acceptedAt", "timeZone", "precision", "bounds", "dateBasis"))
+    if "constraint" in temporal:
+        result["temporal"]["constraint"] = _public_history_fields(temporal["constraint"], ("kind", "start", "end", "days", "date_basis"))
+    if "absoluteRange" in temporal:
+        result["temporal"]["absoluteRange"] = _public_history_fields(temporal["absoluteRange"], ("start", "end"))
+    result["progress"] = _public_history_fields(report["progress"],
+        ("source_total", "scanned_count", "matched_count", "details_checked", "details_failed"))
+    result["coverage"] = _public_history_fields(report["coverage"],
+        ("status", "completionReason", "scan_complete", "details_complete"))
+    if "delivery" in report:
+        result["delivery"] = _public_history_fields(report["delivery"], ("offset", "complete"))
+    fields = ("affair_id", "title", "category", "initiated_at", "processed_at", "workflow_state",
+              "workflow_state_text", "current_handlers", "current_nodes", "observed_at", "unavailable_fields")
+    result["items"] = [_public_history_fields(row, fields) for row in report["items"]]
+    for row in result["items"]:
+        if isinstance(row.get("current_nodes"), list):
+            row["current_nodes"] = [_public_history_fields(node, ("name", "handlers")) for node in row["current_nodes"]]
+    coverage = result["coverage"]
+    source_complete = (result["state"] == "complete" and coverage.get("status") == "complete"
+                       and coverage.get("scan_complete") is True and coverage.get("details_complete") is True)
+    delivery = result.get("delivery") or {}
+    delivery_complete = (delivery.get("offset") == 0 and delivery.get("complete") is True
+                         and result.get("has_more") is False and result.get("next_cursor") is None
+                         and result.get("total") == len(result["items"]))
+    result.update(source_complete=source_complete, source_incomplete=not source_complete,
+                  delivery_complete=delivery_complete, report_complete=source_complete and delivery_complete,
+                  empty=source_complete and delivery_complete and not result["items"], read_only=True,
+                  completion_meaning="read_only_query_reference")
+    if len(json.dumps(result, ensure_ascii=False, indent=2).encode("utf-16-le")) // 2 > 12000:
+        raise TransformRejected("TRANSFORM_OUTPUT_TOO_LARGE", "完整只读查询页超出投影预算；未裁剪记录或字段。")
+    return result
 
 
 def _work_items_to_log_draft(arguments: dict[str, Any]) -> dict[str, Any]:

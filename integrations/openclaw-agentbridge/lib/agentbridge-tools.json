@@ -3124,9 +3124,102 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return the model-safe capability and deterministic-transform catalog filtered to this MCP identity's scopes. Use it before proposing a multi-system task plan.",
+      "description": "Discover the current identity's authorized planning capabilities and transforms. Default view=summary returns bounded entries without schemas; follow nextCursor with the same system/kind filters. Before proposing a plan, use view=detail with kind and an exact name for each selected contract. Large contracts require separate input, output and planning sections; pass catalogRevision as expected_revision to keep sections consistent. Never infer arguments from summaries or use truncated schemas.",
       "inputSchema": {
-        "properties": {},
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cursor"
+          },
+          "expected_revision": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Revision"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "capability",
+                  "transform"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kind"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name"
+          },
+          "section": {
+            "default": "all",
+            "enum": [
+              "all",
+              "input",
+              "output",
+              "planning"
+            ],
+            "title": "Section",
+            "type": "string"
+          },
+          "system": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Summary capability filter; common transforms remain visible.",
+            "title": "System"
+          },
+          "view": {
+            "default": "summary",
+            "enum": [
+              "summary",
+              "detail"
+            ],
+            "title": "View",
+            "type": "string"
+          }
+        },
         "title": "agentbridge_task_plan_catalogArguments",
         "type": "object"
       },
@@ -3345,6 +3438,36 @@
           "TaskPlanTemporalConstraintInput": {
             "additionalProperties": false,
             "properties": {
+              "date_basis": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "processed_at",
+                      "initiated_at"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Date Basis"
+              },
+              "days": {
+                "anyOf": [
+                  {
+                    "maximum": 3660,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Days"
+              },
               "end": {
                 "anyOf": [
                   {
@@ -3360,10 +3483,17 @@
               },
               "kind": {
                 "enum": [
+                  "absolute_range",
+                  "between",
+                  "since",
+                  "until",
+                  "all",
                   "previous_day",
                   "day_before_yesterday",
                   "previous_calendar_week",
-                  "absolute_range"
+                  "previous_calendar_month",
+                  "current_calendar_month",
+                  "rolling_days"
                 ],
                 "title": "Kind",
                 "type": "string"
@@ -4060,6 +4190,192 @@
         "type": "object"
       },
       "title": "List Completed OA Workflows"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Query the authenticated user's Done or Sent OA history with explicit temporal intent. Use temporal.kind=all for all history; relative dates are frozen to the original request time. date_basis distinguishes processed_at from initiated_at; Sent supports only initiated_at. The query scans bounded batches and verifies current workflow nodes. During scanning/details it returns progress; when complete or terminal partial it returns whole result rows in pages. While has_more is true, call oa_workflow_history_next with next_cursor until work and delivery are exhausted. Never call a fresh query to continue, invent a start year, treat a single page as all results, or infer workflow nodes from handler names. Coverage reports missing source or detail evidence; partial results must be labelled as partial. No OA business data is written.",
+      "inputSchema": {
+        "$defs": {
+          "TaskPlanTemporalConstraintInput": {
+            "additionalProperties": false,
+            "properties": {
+              "date_basis": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "processed_at",
+                      "initiated_at"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Date Basis"
+              },
+              "days": {
+                "anyOf": [
+                  {
+                    "maximum": 3660,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Days"
+              },
+              "end": {
+                "anyOf": [
+                  {
+                    "maxLength": 10,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "End"
+              },
+              "kind": {
+                "enum": [
+                  "absolute_range",
+                  "between",
+                  "since",
+                  "until",
+                  "all",
+                  "previous_day",
+                  "day_before_yesterday",
+                  "previous_calendar_week",
+                  "previous_calendar_month",
+                  "current_calendar_month",
+                  "rolling_days"
+                ],
+                "title": "Kind",
+                "type": "string"
+              },
+              "start": {
+                "anyOf": [
+                  {
+                    "maxLength": 10,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Start"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "title": "TaskPlanTemporalConstraintInput",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "collection": {
+            "enum": [
+              "done",
+              "sent"
+            ],
+            "title": "Collection",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "keyword": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Keyword"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 50,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "temporal": {
+            "$ref": "#/$defs/TaskPlanTemporalConstraintInput"
+          }
+        },
+        "required": [
+          "collection",
+          "temporal"
+        ],
+        "title": "oa_workflow_history_queryArguments",
+        "type": "object"
+      },
+      "name": "oa_workflow_history_query",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "oa_workflow_history_queryDictOutput",
+        "type": "object"
+      },
+      "title": "查询 OA 全部历史事项及流程状态"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Continue an existing OA history query using only its next_cursor. The cursor binds the original user, OA session, collection and frozen filters; do not alter the query. Repeat while has_more=true, including result delivery pages after state=complete/partial. Repeated use of the same cursor returns the same cached receipt without replaying OA reads. An expired cursor or changed session requires a fresh query; partial coverage remains partial.",
+      "inputSchema": {
+        "properties": {
+          "cursor": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Cursor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "title": "oa_workflow_history_nextArguments",
+        "type": "object"
+      },
+      "name": "oa_workflow_history_next",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "oa_workflow_history_nextDictOutput",
+        "type": "object"
+      },
+      "title": "继续 OA 历史查询或读取结果下一页"
     },
     {
       "annotations": {
@@ -11622,6 +11938,7 @@
   ],
   "userTurnSourceTools": [
     "oa_workflow_sent_list",
-    "oa_workflow_done_list"
+    "oa_workflow_done_list",
+    "oa_workflow_history_query"
   ]
 }

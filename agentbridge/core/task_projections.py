@@ -266,7 +266,10 @@ def build_plan_result_projection(
             }
         ),
     }
-    if projection_kind == "private_draft":
+    if projection_kind == "oa_history_report":
+        from agentbridge.core.transforms import project_oa_history_report
+        projection["result"] = project_oa_history_report(result)
+    elif projection_kind == "private_draft":
         projection["result"] = {
             key: result.get(key)
             for key in (
@@ -307,6 +310,9 @@ def plan_result_response(plan: dict[str, Any]) -> dict[str, Any]:
         "canceled": "canceled",
         "waiting_user": "requires_user_action",
     }.get(plan["state"], "running")
+    projection = plan.get("result_projection") or {}
+    if status == "succeeded" and projection.get("kind") == "oa_history_report":
+        return _history_plan_reference_response(plan, projection)
     response = {
         "protocolVersion": "0.1",
         "status": status,
@@ -318,10 +324,58 @@ def plan_result_response(plan: dict[str, Any]) -> dict[str, Any]:
             "source": "plan.resultProjection.result",
             "doNotQueryOperations": True,
         }
+        projection = plan["result_projection"]
     if plan.get("terminal_reason") == "PLAN_SOURCE_INCOMPLETE":
         response["nextAction"] = {
             "type": "report_plan_failure", "doNotRetryAtomicTools": True,
             "businessWriteOccurred": False,
             "source": "plan.resultProjection.result.source_summaries",
         }
+    return response
+
+
+def _history_plan_reference_response(plan: dict[str, Any], projection: dict[str, Any]) -> dict[str, Any]:
+    """Keep the full stored page out of the model's nested plan envelope.
+
+    A replay reads the cached current page, then its next_cursor continues
+    delivery. It never starts another query or skips an undelivered first page.
+    The Workspace still reads the unchanged complete stored projection.
+    """
+    report = projection["result"]
+    terminal = report["state"] in {"complete", "partial"}
+    reference = {key: report[key] for key in
+        ("query_id", "collection", "state", "replay_cursor", "next_cursor", "source_complete", "source_incomplete")}
+    reference.update(read_only=True, delivery_complete=False, report_complete=False,
+                     items_available_via="replay_cursor", completion_meaning="read_only_query_reference")
+    projected = {key: projection[key] for key in ("schemaVersion", "visibility", "kind", "resultHash")}
+    projected["result"] = reference
+    compact_plan = {key: value for key, value in task_plan_response(plan).items()
+                    if key in {"schemaVersion", "planId", "taskId", "revision", "state", "effectOutcome"}}
+    compact_plan["resultProjection"] = projected
+    cursor = report["replay_cursor"] if terminal else report["next_cursor"]
+    response = {
+        "protocolVersion": "0.1", "status": "succeeded", "plan": compact_plan,
+        "completionMeaning": "read_only_query_reference",
+        "queryComplete": report["source_complete"], "deliveryComplete": False,
+        "deliveryMode": "via_replay_cursor",
+        "nextAction": {
+            "type": "read_saved_query_page" if terminal else "continue_read_only_query",
+            "source": "plan.resultProjection.result", "doNotQueryOperations": True,
+            "readOnly": True, "doNotClaimFullResult": True,
+            "tool": "oa_workflow_history_next", "arguments": {"cursor": cursor},
+            "instruction": "终态引用须先用 replay_cursor 读取当前保存页，再按该页 next_cursor 继续；活动查询用 next_cursor 推进。计划完成不代表结果已交付。",
+        },
+    }
+    # Metadata is normally small. If an unusually verbose source fills its
+    # 10k budget with metadata, defer whole metadata fields to the same receipt
+    # instead of cutting strings, rows, or the final JSON transport envelope.
+    metadata_keys = [key for key in ("temporal", "progress", "coverage", "total", "returned_count", "has_more", "delivery")
+                     if key in report]
+    reference["deferred_fields"] = ["items", *metadata_keys]
+    for key in metadata_keys:
+        reference[key] = report[key]
+        if len(json.dumps(response, ensure_ascii=False, indent=2).encode("utf-16-le")) // 2 <= 12000:
+            reference["deferred_fields"].remove(key)
+        else:
+            del reference[key]
     return response
