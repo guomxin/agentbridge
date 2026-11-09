@@ -16,13 +16,16 @@ from agentbridge.adapters.seeyon_write_workflows import (
 )
 from agentbridge.core import write_catalog
 from agentbridge.core.planning_policy import planning_descriptor
-from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS, UserGrants
+from agentbridge.core.user_grants import CAPABILITY_PERMISSIONS, PERMISSIONS, TOOL_PERMISSIONS, UserGrants
 from agentbridge.core.write_workflow import WritePrepareAliasDefinition, WriteWorkflowDefinition
+from agentbridge.mcp.central import AGENT_FACING_TOOL_SCOPE_REQUIREMENTS
 
 
 CONTRACT_BYTES = (Path(__file__).parent / "fixtures/oa_write_workflows_contract.json").read_bytes()
 # Keep the signed-off bytes/hash frozen; adapt only the retired Python exception namespace.
 CONTRACT = json.loads(CONTRACT_BYTES.replace(b'"bscli.adapters.', b'"agentbridge.adapters.'))
+# Explicit read-only extension; no old registry entry or write contract changes.
+HISTORY_READ_CAPABILITIES = ["oa.workflow.history.query", "oa.workflow.history.next"]
 # The original migration fixture remains immutable. This separately reviewed
 # revision changes only versions/descriptions for the 14 unified pending flows.
 PENDING_REVISION = json.loads(
@@ -215,7 +218,7 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
 def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
     registry = seeyon_central.build_central_capability_registry()
     # list() sorts capabilities and would hide movement across read/write blocks.
-    assert list(registry._specs) == CONTRACT["registry_order"]
+    assert list(registry._specs) == [*HISTORY_READ_CAPABILITIES, *CONTRACT["registry_order"]]
     assert list(write_catalog._TRUSTED_WRITE_DEFINITIONS) == CONTRACT["catalog_order"]
     assert list(write_catalog._CAPABILITY_SCOPES) == CONTRACT["scope_order"]
     assert [
@@ -223,6 +226,19 @@ def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
         for commit, (prepare, _definition) in write_catalog._TRUSTED_WRITE_COMMITS.items()
         if commit.startswith("oa.")
     ] == CONTRACT["commits"]
+
+
+@pytest.mark.parametrize("name", HISTORY_READ_CAPABILITIES)
+def test_history_query_extension_has_only_existing_read_permissions(name):
+    spec = seeyon_central.build_central_capability_registry().get(name)
+    tool_name = name.replace(".", "_")
+    assert spec.effect == "read"
+    assert spec.system == "oa"
+    assert AGENT_FACING_TOOL_SCOPE_REQUIREMENTS[tool_name] == frozenset({"oa:read"})
+    assert CAPABILITY_PERMISSIONS[name] == TOOL_PERMISSIONS[tool_name] == "oa.workflow.read"
+    assert name not in write_catalog._TRUSTED_WRITE_DEFINITIONS
+    assert name not in write_catalog._TRUSTED_WRITE_COMMITS
+    assert name not in write_catalog._CAPABILITY_SCOPES
 
 
 def test_all_oa_write_specs_match_versioned_contract_and_registration_order():

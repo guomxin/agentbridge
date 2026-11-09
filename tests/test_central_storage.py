@@ -11,6 +11,8 @@ import unittest
 from unittest.mock import patch
 
 from agentbridge.core.central_service import CentralCapabilityService
+from agentbridge.core.oa_history_queries import OaHistoryQueryStore
+from agentbridge.core.oa_history_query_service import OaHistoryQueryService
 from agentbridge.core.session_secrets import AesGcmSessionStateProtector, SessionStateStore
 from agentbridge.core.sessions import SessionRegistry
 from agentbridge.core.tasks import TaskHubStore
@@ -26,6 +28,21 @@ class CentralStorageTests(unittest.TestCase):
             service.user_grants.save('user-a', [next(iter(PERMISSIONS))], expected_revision=0,
                                      actor='test', reason='restart fixture')
             grant = service.user_grants.get('user-a')
+            history_identity = {'user_subject': 'user-a', 'session_id': 'history-session-a',
+                                'principal_ref': 'history-principal-a'}
+            history_query = {'collection': 'done', 'keyword': '业务结算单', 'limit': 1,
+                'temporal': {'constraint': {'kind': 'all'}, 'acceptedAt': '2026-11-09T09:00:00+08:00',
+                    'timeZone': 'Asia/Shanghai', 'precision': 'day', 'bounds': 'inclusive',
+                    'absoluteRange': {'start': None, 'end': None}, 'dateBasis': 'processed_at'}}
+            history_rows = [{'affair_id': 'first', 'title': '业务结算单一'},
+                            {'affair_id': 'second', 'title': '业务结算单二'}]
+            history_created = service.oa_history_queries.create(**history_identity, query=history_query)
+            history_receipt = service.oa_history_queries.advance(history_created['cursor'], **history_identity,
+                expected_version=1, state='complete', state_data={'rows': history_rows, 'details_index': 2},
+                scanned_delta=2, detail_delta=2, elapsed_seconds=1,
+                response={'state': 'complete', 'items': history_rows[:1], 'total': 2,
+                          'delivery': {'offset': 0, 'complete': False}}, next_stage='results', next_offset=1)
+            history_record = service.oa_history_queries.get(history_created['record']['query_id'], **history_identity)
             for instance in (service, CentralCapabilityService(home=home, base_url='https://oa.example.test')):
                 self.assertEqual(instance.user_grants.get('user-a'), grant)
                 for name, type_name in baseline['stores'].items():
@@ -58,6 +75,14 @@ class CentralStorageTests(unittest.TestCase):
                     ['index', 'private_business_draft_contents_expiry'],
                     ['index', 'agent_tasks_subject_created'],
                     ['index', 'user_timeline_subject_type_created'],
+                    ['table', 'oa_history_queries'],
+                    ['table', 'oa_history_query_receipts'],
+                    ['index', 'oa_history_queries_owner'],
+                    ['index', 'oa_history_query_receipts_query'],
+                    ['trigger', 'immutable_oa_history_query'],
+                    ['trigger', 'immutable_oa_history_terminal_results'],
+                    ['trigger', 'immutable_oa_history_cursor'],
+                    ['trigger', 'immutable_oa_history_receipt'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))
@@ -70,6 +95,22 @@ class CentralStorageTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(json.dumps(original_schema, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest(), baseline['schemaSha256'])
                 self.assertEqual(type(instance.business_drafts).__name__, 'BusinessDraftStore')
                 self.assertEqual(instance.business_drafts.db_path, Path(home) / 'agentbridge.db')
+                self.assertIsInstance(instance.oa_history_queries, OaHistoryQueryStore)
+                self.assertIsInstance(instance.oa_history_query_service, OaHistoryQueryService)
+                self.assertIs(instance.oa_history_query_service.store, instance.oa_history_queries)
+                self.assertEqual(instance.oa_history_queries.db_path, Path(home) / 'agentbridge.db')
+                restored = instance.oa_history_queries.get(history_record['query_id'], **history_identity)
+                self.assertEqual(restored, history_record)
+                self.assertEqual(restored['query'], history_query)
+                self.assertEqual(restored['state_data']['rows'], history_rows)
+                # Restart restores both a cached current page and its unused
+                # continuation. Cached replay requires no downstream adapter.
+                self.assertEqual(instance.oa_history_query_service.next(cursor=history_receipt['replay_cursor'],
+                    adapter=None, worker=None, **history_identity), history_receipt)
+                continuation = instance.oa_history_queries.resolve(history_receipt['next_cursor'], **history_identity)
+                self.assertIsNone(continuation['cached_response'])
+                self.assertEqual((continuation['stage'], continuation['delivery_offset']), ('results', 1))
+                self.assertEqual(continuation['record']['version'], history_record['version'])
 
     def test_injected_secret_store_release_identity_and_home_isolation(self):
         with TemporaryDirectory() as temp:

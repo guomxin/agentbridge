@@ -39,7 +39,10 @@ class McpPresentationTests(unittest.TestCase):
             profile["planning"]["schemaVersion"],
             "agentbridge.composed-task-planning-policy.v1",
         )
-        self.assertIn("later action", profile["planning"]["modelContext"])
+        self.assertIn("后续业务动作依赖先读取的数据", profile["planning"]["modelContext"])
+        self.assertIn("agentbridge_task_plan_prepare提交一个持久计划", profile["planning"]["modelContext"])
+        self.assertIn("oa_workflow_history_query", profile["planning"]["modelContext"])
+        self.assertIn("replay_cursor", profile["planning"]["modelContext"])
         self.assertIn("source_id", profile["planning"]["modelContext"])
         self.assertIn("database.report.export", profile["planning"]["modelContext"])
         self.assertIn("不建立专用计划", profile["planning"]["modelContext"])

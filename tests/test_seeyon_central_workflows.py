@@ -94,6 +94,8 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                 "oa.work_handover.approve",
                 "oa.workflow.detail.get",
                 "oa.workflow.done.list",
+                "oa.workflow.history.next",
+                "oa.workflow.history.query",
                 "oa.workflow.opinions.list",
                 "oa.workflow.pending.batch.prepare",
                 "oa.workflow.pending.list",
@@ -104,6 +106,8 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
             ],
         )
         effects = {spec.name: spec.effect for spec in registry.list(system="oa")}
+        self.assertEqual(effects["oa.workflow.history.query"], "read")
+        self.assertEqual(effects["oa.workflow.history.next"], "read")
         self.assertEqual(effects["oa.document.certificate.search"], "read")
         self.assertEqual(effects["oa.meeting_room.availability.list"], "read")
         self.assertEqual(effects["oa.meeting_room.my_applications.list"], "read")
