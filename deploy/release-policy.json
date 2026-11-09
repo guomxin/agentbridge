@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "8d8465aad7f0"
+    "c732152b3eae"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "The predecessor already supports standard_metadata.name. This forward fix only retains the detached review-list nodes during navigation cancellation, without changing stored data, schema or authority."
+  "dataCompatibility": "reviewed-schema-transition",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "fccf13649bb39013cf41d22bc572f14c1f383c4493a7b18a1ec89d34fc7e7a5f",
+      "afterSha256": "438a377b368a5b61f83b4f2acbe3fa7f3d1cbe26d876042c4b14f7d62fe1ce90"
+    }
+  },
+  "reason": "Reviewed against the deployed c732152b3eae schema on 2026-11-09 using read-only schema capture and an isolated schema-only candidate initialization. Adds two OA history query tables, two indexes and four immutability triggers, plus SQLite primary-key autoindexes. Existing objects and all four user_version values are unchanged; the other three databases are unchanged. No business data migration or authorization change."
 }
