@@ -40,6 +40,36 @@ def presentation(service, subject, task_id):
                 "next_cursor": None, "error": {"code": exc.code, "message": str(exc)}}
 
 
+def grouping(service, subject, task, query, *, plan=None, batch=None):
+    """Permit folding only one successful, owned continuation operation.
+
+    The caller supplies the authorized presentation, never a client grouping
+    request. This marker grants no result/cursor access: expired or changed
+    sessions may group their unavailable audit cards with all data cleared.
+    Initial queries/plans and mixed tasks retain their original cards.
+    Presentation-only safeguards for interactions/artifacts still apply in UI.
+    """
+    if (task.get("user_subject") != subject or task.get("status") != "succeeded"
+            or plan is not None or batch is not None or not isinstance(query, dict)
+            or query.get("schema_version") != "agentbridge.oa_history_query.v1"
+            or query.get("state") not in {"scanning", "details", "complete", "partial", "unavailable"}
+            or not isinstance(query.get("query_id"), str) or not query["query_id"]):
+        return None
+    task_id = task["task_id"]
+    service.require_task_result_access(user_subject=subject, task_id=task_id)
+    operation_ids = service.tasks.operation_ids_for_task(task_id=task_id, user_subject=subject)
+    if len(operation_ids) != 1 or task.get("current_operation_id") != operation_ids[0]:
+        return None
+    operation = service.operations.get(operation_ids[0])
+    value = operation.get("result")
+    if (operation.get("user_subject") != subject or operation.get("status") != "succeeded"
+            or operation.get("capability_name") != "oa.workflow.history.next"
+            or not isinstance(value, dict) or value.get("schema_version") != "agentbridge.oa_history_query.v1"
+            or value.get("query_id") != query["query_id"]):
+        return None
+    return {"queryId": query["query_id"], "eligible": True}
+
+
 def next_page(service, account, task_id, body):
     if not isinstance(body, dict) or set(body) != {"cursor"}:
         raise ValueError("历史查询续取仅接受原查询游标。")

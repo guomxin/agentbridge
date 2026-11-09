@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createWorkspaceViewState,createReadingScroll,createPreparationHandoff} from '../agentbridge/workspace/static/workspace_navigation.mjs';
+import {createWorkspaceViewState,createReadingScroll,createPreparationHandoff,timelineNodeMatchesKey} from '../agentbridge/workspace/static/workspace_navigation.mjs';
 import {createLifecycle} from '../agentbridge/workspace/static/workspace_lifecycle.mjs';
 import {createDocument} from './workspace_dom_fixture.mjs';
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -47,6 +47,24 @@ test('prepending history at the very top preserves the first item below the hist
   assert.equal(saved.anchor,'first');assert.equal(saved.offset,-80);
   item.offsetTop=680;container.scrollHeight=2600;scroll.restore(saved);
   assert.equal(container.scrollTop,600);
+});
+
+test('a saved legacy task position restores through only currently projected query aliases',() => {
+  const document=createDocument(),container=document.createElement('div'),notice=document.createElement('button'),item=document.createElement('article');
+  item.dataset.timelineKey='oa-history:account-a:query-one';
+  item.dataset.timelineAliases=JSON.stringify(['task:first:summary','task:next:summary']);
+  item.offsetTop=600;container.append(item);
+  Object.assign(container,{scrollTop:10,scrollHeight:2000,clientHeight:400});
+  const scroll=createReadingScroll({container,notice});
+  assert.equal(timelineNodeMatchesKey(item,'task:next:summary'),true);
+  assert.equal(timelineNodeMatchesKey(item,'oa-history:account-b:query-one'),false);
+  scroll.restore({top:100,atBottom:false,anchor:'task:next:summary',offset:20});
+  assert.equal(container.scrollTop,620);
+  for(const aliases of ['not-json','null','{}','[null,7]']){
+    item.dataset.timelineAliases=aliases;assert.equal(timelineNodeMatchesKey(item,'task:next:summary'),false);
+  }
+  delete item.dataset.timelineAliases;
+  scroll.restore({top:100,atBottom:false,anchor:'task:next:summary',offset:20});assert.equal(container.scrollTop,100);
 });
 
 function handoffFixture() {

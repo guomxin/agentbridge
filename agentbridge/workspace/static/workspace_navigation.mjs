@@ -30,6 +30,17 @@ export function createWorkspaceViewState({storage, getAccountId, now = Date.now}
   };
 }
 
+// Aliases come only from the currently authorized timeline projection. They
+// restore a reading position; they never authorize fetching a task or result.
+export function timelineNodeMatchesKey(node, key) {
+  if (!key || !node?.dataset) return false;
+  if (node.dataset.timelineKey === key) return true;
+  try {
+    const aliases = JSON.parse(node.dataset.timelineAliases || "null");
+    return Array.isArray(aliases) && aliases.some(alias => typeof alias === "string" && alias === key);
+  } catch { return false; }
+}
+
 export function createReadingScroll({container, notice, save = () => {}}) {
   let following = true;
   const position = node => {
@@ -58,7 +69,7 @@ export function createReadingScroll({container, notice, save = () => {}}) {
   return {update, snapshot, restore(value) {
     if (!value || value.atBottom) update({force:true});
     else {
-      const anchor = [...(container.children || [])].find(node => value.anchor && node.dataset?.timelineKey === value.anchor);
+      const anchor = [...(container.children || [])].find(node => timelineNodeMatchesKey(node, value.anchor));
       const top = anchor && Number.isFinite(position(anchor)) ? position(anchor) + value.offset : value.top;
       following = false; container.scrollTop = Math.min(top, Math.max(0,container.scrollHeight-container.clientHeight)); notice.hidden = true;
     }

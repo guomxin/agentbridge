@@ -85,40 +85,68 @@ function rowValues(row) {
     timeText(field(row, "observed_at"))];
 }
 
-// In-memory, account-scoped paging shared by the chat card and task detail.
+// In-memory, account-scoped paging shared by every task for one trusted query.
 // Work cursors advance the query on the same result page; delivery cursors turn
 // result pages. Neither path prepares, authorizes, or submits an OA business.
 export function createOaHistoryResults({ document, state = {}, getScope, loadHistoryPage }) {
   const models = state.oaHistoryQueries ||= new Map();
+  const queries = new Map(), versions = new Map(), blockedQueries = new Map();
   const roots = new WeakMap();
   const node = (tag, className = "", text = "") => {
     const value = document.createElement(tag); value.className = className; value.textContent = text; return value;
   };
-  const current = model => !model.disposed && models.get(model.taskId) === model && (!model.scope || model.scope.current());
+  const current = model => !model.disposed && model.taskIds.size > 0 &&
+    (model.queryId ? queries.get(model.queryId) === model : models.get(model.taskId) === model) &&
+    (!model.scope || model.scope.current());
   function clear(model, notice = "", {blocked = false} = {}) {
     model.generation++; model.pages = []; model.index = 0; model.projection = null;
     model.failureProjection = blocked && model.queryId ? {schema_version: SCHEMA,
       query_id: model.queryId, state: "unavailable", error: {code: "OA_HISTORY_UNAVAILABLE"}} : null;
     model.pending = false; model.notice = notice;
     model.firstSignature = null;
-    model.blocked = blocked; model.blockedVersion = model.version;
+    model.blocked = blocked;
+    if (blocked && model.queryId) blockedQueries.set(model.queryId, {scope: model.scope, projection: model.failureProjection});
     for (const view of model.views) { view.rows.clear(); view.body.replaceChildren(); }
   }
-  function modelFor(taskId) {
-    let model = models.get(taskId);
+  function dispose(model) {
+    clear(model); model.disposed = true;
+    for (const view of model.views) { view.root.replaceChildren(); view.root.hidden = true; roots.delete(view.root); }
+    model.views.clear();
+    for (const taskId of model.taskIds) if (models.get(taskId) === model) { models.delete(taskId); versions.delete(taskId); }
+    model.taskIds.clear();
+    if (queries.get(model.queryId) === model) queries.delete(model.queryId);
+  }
+  function modelFor(taskId, queryId) {
+    const previous = models.get(taskId);
+    let model = queryId ? queries.get(queryId) : previous?.queryId === null ? previous : null;
     if (!model) {
-      model = {taskId, queryId: null, pages: [], index: 0, projection: null, views: new Set(),
-        generation: 0, pending: false, notice: "", scope: getScope?.(), disposed: false, version: null, blocked: false};
-      models.set(taskId, model);
+      model = {taskId, taskIds: new Set(), queryId, pages: [], index: 0, projection: null, views: new Set(),
+        generation: 0, pending: false, notice: "", scope: getScope?.(), disposed: false, blocked: false};
+      const blocked = blockedQueries.get(queryId);
+      if (blocked && (!blocked.scope || blocked.scope.current())) {
+        model.blocked = true; model.failureProjection = blocked.projection;
+      }
+      if (queryId) queries.set(queryId, model);
       model.scope?.defer(() => {
-        clear(model); model.disposed = true;
-        for (const view of model.views) { view.root.replaceChildren(); view.root.hidden = true; roots.delete(view.root); }
-        model.views.clear(); if (models.get(taskId) === model) models.delete(taskId);
+        dispose(model);
+        if (blockedQueries.get(queryId)?.scope === model.scope) blockedQueries.delete(queryId);
       });
     }
+    if (previous && previous !== model) {
+      previous.taskIds.delete(taskId);
+      if (previous.taskId === taskId) previous.taskId = previous.taskIds.values().next().value || null;
+      if (previous.requestTaskId === taskId) { previous.generation++; previous.pending = false; }
+      for (const view of [...previous.views]) if (view.taskId === taskId) {
+        previous.views.delete(view); view.model = model; model.views.add(view);
+      }
+      // Preserve an access-loss tombstone while this account scope is alive.
+      if (!previous.taskIds.size && !previous.blocked) dispose(previous);
+      else update(previous);
+    }
+    model.taskIds.add(taskId); model.taskId ||= taskId; models.set(taskId, model);
     return model;
   }
-  function create(root, model) {
+  function create(root, model, taskId) {
     root.className = "oa-history-panel";
     const heading = node("strong", "oa-history-heading");
     const range = node("p", "oa-history-range"), progress = node("p", "oa-history-progress");
@@ -137,13 +165,14 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
     previous.type = next.type = "button";
     const position = node("span", "oa-history-page");
     previous.addEventListener("click", () => {
+      const model = view.model;
       if (previous.disabled || !current(model) || model.pending || model.index <= 0) return;
       model.index--; model.notice = ""; update(model);
     });
-    next.addEventListener("click", () => { if (!next.disabled) void advance(model); });
+    next.addEventListener("click", () => { if (!next.disabled) void advance(view.model); });
     navigation.append(previous, position, next);
     root.append(heading, range, progress, explanation, notice, empty, scroll, navigation);
-    const view = {root, heading, range, progress, explanation, notice, empty, scroll, body, navigation, previous, next, position, rows: new Map(), model};
+    const view = {root, heading, range, progress, explanation, notice, empty, scroll, body, navigation, previous, next, position, rows: new Map(), model, taskId};
     model.views.add(view); roots.set(root, view); return view;
   }
   function update(model) {
@@ -194,11 +223,12 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
     if (model.index + 1 < model.pages.length) { model.index++; model.notice = ""; update(model); return; }
     const page = model.pages[model.index], cursor = nextCursor(page);
     if (!cursor) return;
-    const queryId = model.queryId, generation = model.generation, index = model.index;
+    const queryId = model.queryId, generation = model.generation, index = model.index, taskId = model.taskId;
+    model.requestTaskId = taskId;
     model.pending = true; model.notice = ""; update(model);
     const stillCurrent = () => current(model) && model.generation === generation && model.queryId === queryId;
     try {
-      const response = pageFrom(await loadHistoryPage(model.taskId, cursor));
+      const response = pageFrom(await loadHistoryPage(taskId, cursor));
       if (!stillCurrent()) return;
       if (unavailable(response) && response.query_id === queryId) {
         clear(model, "", {blocked: true}); model.failureProjection = response; update(model); return;
@@ -220,28 +250,28 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
       } else model.notice = error?.message === "OA_HISTORY_PAGE_MISMATCH"
         ? "返回结果与当前查询不一致，已保留当前页，请重试。"
         : "本次读取未成功，当前页已保留。请重试同一次读取。";
-    } finally { if (stillCurrent()) { model.pending = false; update(model); } }
+    } finally { if (stillCurrent()) { model.pending = false; model.requestTaskId = null; update(model); } }
   }
   return {
     render(root, result, onPresentation) {
       const taskId = result?.task?.task_id, projection = result?.oaHistoryQuery;
       if (!taskId || !valid(projection) && !unavailable(projection) && !models.has(taskId)) { root.hidden = true; return; }
-      const model = modelFor(taskId), version = Number.isSafeInteger(result.task.version) ? result.task.version : null;
-      if (model.version !== null && version !== null && version < model.version) return;
-      if (version !== null) model.version = version;
+      const version = Number.isSafeInteger(result.task.version) ? result.task.version : null, previousVersion = versions.get(taskId);
+      if (previousVersion !== undefined && version !== null && version < previousVersion) return;
+      const previous = models.get(taskId);
+      if (valid(projection) && previous?.queryId === null && previous.blocked &&
+          (version === null || previousVersion === undefined || version <= previousVersion)) return;
+      if (version !== null) versions.set(taskId, version);
+      const model = modelFor(taskId, valid(projection) || unavailable(projection) ? projection.query_id : null);
       const old = roots.get(root);
-      if (old && old.model !== model) { old.model.views.delete(old); roots.delete(root); root.replaceChildren(); }
-      if (!roots.has(root)) create(root, model);
+      if (old && (old.model !== model || old.taskId !== taskId)) { old.model.views.delete(old); roots.delete(root); root.replaceChildren(); }
+      if (!roots.has(root)) create(root, model, taskId);
       if (typeof onPresentation === "function") roots.get(root).onPresentation = onPresentation;
       if (unavailable(projection)) {
-        clear(model, "", {blocked: true}); model.queryId = projection.query_id; model.failureProjection = projection;
+        clear(model, "", {blocked: true}); model.failureProjection = projection;
       } else if (!valid(projection)) {
         clear(model, "该任务当前未提供可读取的历史查询结果，已清除旧结果。", {blocked: true});
-      } else if (!(model.blocked && projection.query_id === model.queryId
-          && (version === null || model.blockedVersion === null || version <= model.blockedVersion))) {
-        const changedQuery = model.queryId !== projection.query_id;
-        if (changedQuery) { clear(model); model.queryId = projection.query_id; }
-        model.blocked = false;
+      } else if (!model.blocked) {
         // Task refreshes carry the first page. Do not replace a later report
         // page or reapply an earlier work cursor after manual continuation.
         const signature = JSON.stringify(projection);
@@ -255,13 +285,23 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
       update(model);
     },
     detach(root) { const view = roots.get(root); if (view) view.model.views.delete(view); roots.delete(root); },
-    reset() {
-      for (const model of models.values()) {
-        clear(model); model.disposed = true;
-        for (const view of model.views) { view.root.replaceChildren(); view.root.hidden = true; roots.delete(view.root); }
-        model.views.clear();
+    retire(taskId) {
+      const model = models.get(taskId); versions.delete(taskId);
+      if (!model) return;
+      models.delete(taskId); model.taskIds.delete(taskId);
+      for (const view of [...model.views]) if (view.taskId === taskId) {
+        view.root.replaceChildren(); view.root.hidden = true; roots.delete(view.root); model.views.delete(view);
       }
-      models.clear();
+      if (model.taskId === taskId) model.taskId = model.taskIds.values().next().value || null;
+      if (!model.taskIds.size) dispose(model);
+      else {
+        if (model.requestTaskId === taskId) { model.generation++; model.pending = false; model.requestTaskId = null; }
+        update(model);
+      }
+    },
+    reset() {
+      for (const model of new Set([...models.values(), ...queries.values()])) dispose(model);
+      models.clear(); queries.clear(); versions.clear(); blockedQueries.clear();
     },
   };
 }

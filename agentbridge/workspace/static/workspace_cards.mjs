@@ -466,6 +466,16 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
         target.preparation && !["succeeded","completed","verified_complete","failed","outcome_unknown","canceled","expired","superseded","skipped"].includes(target.preparation.state))));
     const recovered = oaRecoveryPresentation(result);
     const historyQuery = oaHistoryPresentation(result.oaHistoryQuery);
+    const historyGroupSafe = historyQuery && task.status === "succeeded" && !failure
+      && !taskInteractions(result).length && !result.artifacts?.length && !result.artifactsHasMore
+      && !result.batch && !task.summary?.batch && !result.actionableResults?.length && !result.businessExecution;
+    card.dataset.oaHistoryQueryId = historyGroupSafe ? result.oaHistoryQuery.query_id : "";
+    // Query identity already includes the OA session/principal binding. Task
+    // host/turn can differ between the first plan and its governed continuations.
+    card.dataset.oaHistoryScope = historyGroupSafe ? state.account?.accountId || state.account?.userSubject
+      || state.account?.account_id || state.account?.user_subject || "current-account" : "";
+    card.dataset.oaHistoryFoldable = String(Boolean(historyGroupSafe && result.oaHistoryGrouping?.eligible === true
+      && result.oaHistoryGrouping.queryId === result.oaHistoryQuery.query_id));
     const queryWait = pendingQueryWait(result);
     if (recovered?.completed) {
       card.className = "message assistant application-card succeeded";
@@ -754,6 +764,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   }
 
   return { upsertTaskCard, upsertTaskCardVariant, renderTasks, renderTaskDetail, renderSkillCard, addDetail,
+    retireTaskCardControllers: taskId => oaHistory.retire(taskId),
     resetTaskCardControllers: () => {
       recovery.reset();remaining.reset();actionable.reset();oaHistory.reset();clocks.clear();taskListRows.clear();
       if (clockTimer !== null) clockScope?.clearTimer(clockTimer);

@@ -4,10 +4,10 @@ import {readFileSync} from 'node:fs';
 import {createDocument} from './workspace_dom_fixture.mjs';
 import {applyHistoryPage, historyPresentation, loadHistoryPage} from '../agentbridge/workspace/static/workspace_history.mjs';
 import {createLifecycle, isCancellation} from '../agentbridge/workspace/static/workspace_lifecycle.mjs';
-import {createReadingScroll} from '../agentbridge/workspace/static/workspace_navigation.mjs';
+import {createReadingScroll, timelineNodeMatchesKey} from '../agentbridge/workspace/static/workspace_navigation.mjs';
 import {createProjectionOrder, applyCurrentSnapshot} from '../agentbridge/workspace/static/workspace_projection.mjs';
 import {restoreHistoryAnchor} from '../agentbridge/workspace/static/workspace_history_autoload.mjs';
-import {historyMessageKey, parseTimestampMilliseconds, textHash} from '../agentbridge/workspace/static/workspace_results.mjs';
+import {createResultView, historyMessageKey, parseTimestampMilliseconds, textHash} from '../agentbridge/workspace/static/workspace_results.mjs';
 
 const source = readFileSync(new URL('../agentbridge/workspace/static/workspace.js', import.meta.url), 'utf8');
 function implementation(name, async = true) {
@@ -34,7 +34,7 @@ const page = ({messages = [], cards = [], hasMore = true, id = 'older'} = {}) =>
 // Exercise the actual page and refresh handlers. Only transport and DOM row
 // rendering are replaced; the shared page validation, ordering and reading
 // anchor calculations use their production implementations.
-function harness({initialReading = null, realSkills = false} = {}) {
+function harness({initialReading = null, realSkills = false, realHistoryGroups = false} = {}) {
   const document = createDocument(), container = document.createElement('main');
   const notice = document.createElement('button'), existing = document.createElement('article');
   existing.dataset.timelineKey = 'existing'; existing.offsetTop = 200; container.append(existing);
@@ -44,24 +44,27 @@ function harness({initialReading = null, realSkills = false} = {}) {
     historyLoading:false, historyRestoring:false, historyError:'', legacyHistoryLoaded:true,
     legacyHistoryLoading:false, currentLoaded:true, timelineCursor:70,
     localMessages:new Map([['draft', draft.value]]), syncedMessages:new Map(), historyMessages:new Map(),
-    account:{accountId:'alice'}, skillCards:new Map(), recentSkillEvents:[], skillHistoryRead:null};
+    account:{accountId:'alice'}, skillCards:new Map(), recentSkillEvents:[], skillHistoryRead:null, queryGroupOpen:new Map()};
   const cards = new Map(), timeline = new Map(), renders = [], restores = [], requests = [], errors = [], timings = [];
   const lifecycle = createLifecycle(), scope = lifecycle.scope();
   const reading = createReadingScroll({container, notice});
+  const {groupQueryCards, restoreHistoryCardState} = createResultView({document,state,openTask(){}});
   container.events.scroll();
   const readingScroll = {snapshot:() => reading.snapshot(), restore(value) { restores.push(value); reading.restore(value); }};
   const renderChatTimeline = () => {
-    const rows = [...cards.values(), ...timeline.values(), ...state.historyMessages.values(), ...state.skillCards.values()];
+    let rows = [...cards.values(), ...timeline.values(), ...state.historyMessages.values(), ...state.skillCards.values()];
+    if (realHistoryGroups) rows = groupQueryCards(rows.sort((a,b) => Number(a.dataset.timelineAt || 0)-Number(b.dataset.timelineAt || 0)));
     rows.forEach((node, index) => { node.offsetTop = 80 + index * 40; });
     existing.offsetTop = 200 + rows.length * 40;
     container.scrollHeight = 3000 + rows.length * 40;
     container.replaceChildren(...rows, existing);
+    if (realHistoryGroups) restoreHistoryCardState(container);
     renders.push({cards:cards.size, messages:timeline.size, loading:state.historyLoading,
       restoring:state.historyRestoring, cursor:state.historyCursor});
   };
   const bindings = {state, sessionScope:scope, readingScroll, initialReading,
     projectionOrder:createProjectionOrder(), applyHistoryPage, historyPresentation, loadHistoryPage,
-    applyCurrentSnapshot, restoreHistoryAnchor, isCancellation,
+    applyCurrentSnapshot, restoreHistoryAnchor, timelineNodeMatchesKey, isCancellation,
     scopedApi:requestScope => path => {
       const response = deferred(); requests.push({path, scope:requestScope, ...response}); return response.promise;
     },
@@ -69,6 +72,11 @@ function harness({initialReading = null, realSkills = false} = {}) {
     upsertTaskCard(detail, options) {
       assert.equal(options.render, false);
       const node = document.createElement('article'); node.dataset.timelineKey = `task:${detail.task.task_id}`;
+      if (realHistoryGroups && detail.oaHistoryQuery) Object.assign(node.dataset, {
+        taskId:detail.task.task_id, timelineAt:parseTimestampMilliseconds(detail.task.created_at),
+        oaHistoryQueryId:detail.oaHistoryQuery.query_id, oaHistoryScope:state.account.accountId,
+        oaHistoryFoldable:String(detail.oaHistoryGrouping?.eligible === true), queryStatus:detail.task.status,
+      });
       cards.set(detail.task.task_id, node);
     },
     ingestTimelineEntry(entry, render, advance) {
@@ -214,6 +222,50 @@ test('refresh loads the saved reading window without manual input and fences ano
   assert.equal(h.cards.has('paired-query'), true); assert.deepEqual(h.state.historyCursor, cursor('restored-window'));
   assert.equal(h.draft.value, '尚未发送的输入草稿'); assert.deepEqual(h.errors, []);
   assert.ok(h.timings.includes('chat_loaded'));
+});
+
+const historyCard = (id, ordinal, continuation = true) => ({
+  task:{task_id:id,status:'succeeded',created_at:`2026-11-09T01:00:${String(ordinal).padStart(2,'0')}Z`},
+  oaHistoryQuery:{query_id:'saved-query'}, oaHistoryGrouping:continuation ? {queryId:'saved-query',eligible:true} : undefined,
+});
+const historyCurrent = cards => ({schemaVersion:'agentbridge.workspace-current.v1',cards,unavailableTaskIds:[],
+  timeline:{items:[],oldestSequence:70},
+  history:{schemaVersion:'agentbridge.workspace-history.v1',hasMore:true,nextCursor:cursor('recent')},
+  cursors:{timeline:70},dispatches:{items:[]}});
+
+test('refresh restores a saved continuation task alias from the current grouped query without redundant history reads', async () => {
+  const saved={top:900,atBottom:false,anchor:'task:saved-next',offset:17};
+  const h=harness({initialReading:saved,realHistoryGroups:true});h.state.currentLoaded=false;
+  const refreshing=h.loadChat();
+  h.requests[0].resolve(historyCurrent([historyCard('initial',1,false),historyCard('saved-next',2)]));
+  await refreshing;
+  assert.equal(h.requests.length,1);assert.equal(h.state.historyRestoring,false);
+  const reports=h.container.children.filter(node=>node.dataset.oaHistoryQueryId);
+  assert.equal(reports.length,1);assert.equal(reports[0],h.cards.get('initial'));
+  assert.equal(timelineNodeMatchesKey(reports[0],saved.anchor),true);
+  assert.equal(h.container.scrollTop,reports[0].offsetTop+saved.offset);
+  assert.deepEqual(h.errors,[]);assert.equal(h.state.historyError,'');
+  assert.equal(h.draft.value,'尚未发送的输入草稿');
+});
+
+test('refresh pages until a legacy task alias is authorized then stops at the single promoted query card', async () => {
+  const saved={top:900,atBottom:false,anchor:'task:saved-next',offset:21};
+  const h=harness({initialReading:saved,realHistoryGroups:true});h.state.currentLoaded=false;
+  const refreshing=h.loadChat();
+  h.requests[0].resolve(historyCurrent([historyCard('newest-next',3)]));await flush();
+  assert.equal(h.state.historyRestoring,true);assert.equal(h.requests.length,2);
+  assert.match(h.requests[1].path,/^\/api\/history\?/);
+  const stableKey=h.cards.get('newest-next').dataset.timelineKey;
+  h.requests[1].resolve({...page({id:'restored-query-window'}),
+    cards:[historyCard('initial',1,false),historyCard('saved-next',2)]});
+  await refreshing;
+  const reports=h.container.children.filter(node=>node.dataset.oaHistoryQueryId);
+  assert.equal(h.requests.length,2);assert.equal(reports.length,1);
+  assert.equal(reports[0],h.cards.get('initial'));assert.equal(reports[0].dataset.timelineKey,stableKey);
+  assert.equal(timelineNodeMatchesKey(reports[0],saved.anchor),true);
+  assert.equal(h.container.scrollTop,reports[0].offsetTop+saved.offset);
+  assert.deepEqual(h.state.historyCursor,cursor('restored-query-window'));
+  assert.equal(h.state.historyRestoring,false);assert.deepEqual(h.errors,[]);assert.equal(h.state.historyError,'');
 });
 
 test('initial chat shows recent skill events without loading older history and preserves each existing feedback card', async () => {

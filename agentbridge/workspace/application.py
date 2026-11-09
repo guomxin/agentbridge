@@ -326,10 +326,13 @@ class WorkspaceApplication:
         delivery = preparation_health(self.service, task)
         business = self._business_task_presentation(account, task, interactions)
         from agentbridge.core.oa_batch_remaining import remaining_presentation
-        from agentbridge.workspace.oa_history import presentation as history_presentation
+        from agentbridge.workspace.oa_history import grouping as history_grouping, presentation as history_presentation
+        history_query = history_presentation(self.service, account["user_subject"], task_id)
+        grouping = history_grouping(self.service, account["user_subject"], task, history_query, plan=plan, batch=batch)
         return {
             "task": _public_task(task),
-            "oaHistoryQuery": history_presentation(self.service, account["user_subject"], task_id),
+            "oaHistoryQuery": history_query,
+            **({"oaHistoryGrouping": grouping} if grouping is not None else {}),
             "actionableResults": self.actionable_results(account, task_id),
             "actionableSourceTaskIds": actionable_sources,
             "preparationHealth": delivery,

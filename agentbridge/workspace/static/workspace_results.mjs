@@ -1,3 +1,5 @@
+import { reconcileChildren } from "./workspace_dom.mjs";
+
 // Pure projections shared by timeline cards and task details.
 export const TERMINAL_TASK_STATES = new Set([
   "succeeded", "failed", "partially_succeeded", "outcome_unknown", "canceled", "expired",
@@ -589,9 +591,133 @@ export function historyMessageKey(message, index) {
   ].join(":");
 }
 
-export function createResultView({ document, state, reissueArtifact, now = () => Date.now(), timers = globalThis }) {
+export function createResultView({ document, state, reissueArtifact, openTask, now = () => Date.now(), timers = globalThis }) {
   const artifactTimers = new WeakMap();
   const archivedQueries = new WeakMap();
+  const historyGroups = new Map();
+  let historyTimelineKeys = new WeakMap();
+  let historyRestores = [];
+  const descendants = root => [root, ...[...(root?.children || [])].flatMap(descendants)];
+  const hasClass = (node, name) => String(node?.className || "").split(" ").includes(name);
+  const findClass = (root, name) => descendants(root).find(node => hasClass(node, name));
+  const buttons = root => descendants(root).filter(node => String(node?.tagName || node?.tag).toLowerCase() === "button");
+
+  function resetHistoryGroups() {
+    historyRestores = [];
+    for (const view of historyGroups.values()) {
+      const original = historyTimelineKeys.get(view.anchor);
+      if (original && view.anchor.dataset.timelineKey === original.groupKey) view.anchor.dataset.timelineKey = original.taskKey;
+      delete view.anchor.dataset.timelineAliases; delete view.anchor.dataset.oaHistoryGroupCount;
+      view.root.remove(); view.rows.clear();
+    }
+    historyGroups.clear(); historyTimelineKeys = new WeakMap();
+  }
+
+  // Runs synchronously after the timeline DOM is reconciled. Reparenting a
+  // report can otherwise drop keyboard focus before its replacement is mounted.
+  function restoreHistoryCardState(container) {
+    const restores = historyRestores; historyRestores = [];
+    for (const {anchor, scroll, focus, originalFocus} of restores) {
+      if (!container.contains(anchor)) continue;
+      const targetScroll = findClass(anchor, "oa-history-scroll");
+      if (scroll && targetScroll) {
+        targetScroll.scrollTop = scroll.top; targetScroll.scrollLeft = scroll.left;
+      }
+      if (!focus) continue;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== originalFocus && container.contains(active)) continue;
+      const available = node => {
+        if (!node || node.disabled || !container.contains(node)) return false;
+        for (let parent = node; parent && parent !== container; parent = parent.parentNode) if (parent.hidden) return false;
+        return true;
+      };
+      const target = [focus.node, focus.fallback, targetScroll, buttons(findClass(anchor, "application-card-actions"))[0]].find(available);
+      target?.focus?.({preventScroll:true});
+    }
+  }
+
+  function groupHistoryCards(nodes) {
+    historyRestores = [];
+    const groups = new Map(), output = [];
+    for (const card of nodes) {
+      const original = historyTimelineKeys.get(card);
+      if (original && card.dataset.timelineKey === original.groupKey) card.dataset.timelineKey = original.taskKey;
+      historyTimelineKeys.delete(card); delete card.dataset.timelineAliases;
+      const query = card.dataset.oaHistoryQueryId, scope = card.dataset.oaHistoryScope;
+      if (!query || !scope) {
+        delete card.dataset.oaHistoryGroupCount;
+        output.push(card); continue;
+      }
+      const key = JSON.stringify(["oa-history", scope, query]);
+      const group = groups.get(key);
+      if (group && card.dataset.oaHistoryFoldable === "true") {
+        group.cards.push(card);
+        delete card.dataset.oaHistoryGroupCount;
+      } else {
+        output.push(card);
+        // Keep a mixed task, failed step, interaction or artifact fully visible.
+        // Only the server's explicitly reviewed read-only continuations fold.
+        if (!group) groups.set(key, {key, anchor:card, cards:[card]});
+        else delete card.dataset.oaHistoryGroupCount;
+      }
+    }
+    for (const {key, anchor, cards} of groups.values()) {
+      let view = historyGroups.get(key);
+      const originalFocus = document.activeElement;
+      const focusedCard = cards.find(card => card !== anchor && !output.includes(card) && card.contains?.(originalFocus));
+      const source = focusedCard || (view?.anchor !== anchor ? view?.anchor : null);
+      const sourceScroll = source && findClass(source, "oa-history-scroll");
+      const scroll = sourceScroll ? {top:Number(sourceScroll.scrollTop) || 0, left:Number(sourceScroll.scrollLeft) || 0} : null;
+      const focusedStep = view?.root.contains(originalFocus) ? originalFocus : null;
+      if (!view) {
+        const root = document.createElement("details"), summary = document.createElement("summary");
+        const list = document.createElement("ol");
+        root.className = "oa-history-steps"; root.open = state.queryGroupOpen.get(key) === true;
+        root.addEventListener("toggle", () => state.queryGroupOpen.set(key, root.open));
+        root.append(summary, list);
+        view = {key, root, summary, list, rows:new Map()}; historyGroups.set(key, view);
+      }
+      const groupKey = `oa-history:${encodeURIComponent(anchor.dataset.oaHistoryScope)}:${encodeURIComponent(anchor.dataset.oaHistoryQueryId)}`;
+      const aliases = cards.map(card => card.dataset.timelineKey).filter(Boolean);
+      historyTimelineKeys.set(anchor, {taskKey:anchor.dataset.timelineKey, groupKey});
+      anchor.dataset.timelineKey = groupKey; anchor.dataset.timelineAliases = JSON.stringify(aliases);
+      anchor.dataset.oaHistoryGroupCount = String(cards.length);
+      view.root.hidden = cards.length < 2;
+      view.summary.textContent = `查询过程（${cards.length} 步）`;
+      const rows = cards.map((card, index) => {
+        const id = card.dataset.taskId;
+        let row = view.rows.get(id);
+        if (!row) {
+          const root = document.createElement("li"), button = document.createElement("button");
+          button.type = "button"; button.className = "text-command";
+          button.addEventListener("click", () => openTask?.(id));
+          root.append(button); row = {root, button}; view.rows.set(id, row);
+        }
+        row.button.textContent = `步骤 ${index + 1} · ${statusLabel(card.dataset.queryStatus)} · 查看详情`;
+        row.button.disabled = typeof openTask !== "function";
+        return row.root;
+      });
+      const retained = new Set(cards.map(card => card.dataset.taskId));
+      for (const id of view.rows.keys()) if (!retained.has(id)) view.rows.delete(id);
+      reconcileChildren(view.list, rows);
+      let focus = focusedStep ? {node:focusedStep, fallback:view.summary} : null;
+      if (focusedCard && !focusedStep) {
+        const navigation = findClass(focusedCard, "oa-history-navigation");
+        const buttonIndex = navigation ? buttons(navigation).indexOf(originalFocus) : -1;
+        const targetNavigation = findClass(anchor, "oa-history-navigation");
+        const target = buttonIndex >= 0 && targetNavigation ? buttons(targetNavigation)[buttonIndex]
+          : sourceScroll?.contains(originalFocus) ? findClass(anchor, "oa-history-scroll") : null;
+        const step = view.rows.get(focusedCard.dataset.taskId)?.button;
+        if (!target) { view.root.open = true; state.queryGroupOpen.set(key, true); }
+        focus = {node:target || step, fallback:view.summary};
+      }
+      if (view.root.parentNode !== anchor) anchor.append(view.root);
+      view.anchor = anchor;
+      if (scroll || focus) historyRestores.push({anchor, scroll, focus, originalFocus});
+    }
+    for (const [key, view] of historyGroups) if (!groups.has(key)) { view.root.remove(); historyGroups.delete(key); }
+    return output;
+  }
   function renderMarkdown(element, value) {
     const source = String(value ?? "");
     // Keep content readable if a static dependency failed to load.
@@ -639,6 +765,7 @@ export function createResultView({ document, state, reissueArtifact, now = () =>
   }
 
   function groupQueryCards(nodes) {
+    nodes = groupHistoryCards(nodes);
     const output = [];
     const groups = new Map();
     const newest = new Map();
@@ -888,5 +1015,5 @@ export function createResultView({ document, state, reissueArtifact, now = () =>
     schedule();
   }
 
-  return { renderMarkdown, groupQueryCards, renderTaskPlan, renderTaskPlanResult, appendArtifactList };
+  return { renderMarkdown, groupQueryCards, restoreHistoryCardState, resetHistoryGroups, renderTaskPlan, renderTaskPlanResult, appendArtifactList };
 }

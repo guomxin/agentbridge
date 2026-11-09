@@ -222,3 +222,34 @@ test("Skill cards distinguish rule loading from business success and render text
   assert.equal(failure.children[1].textContent, "加载失败");
   assert.equal(failure.children[2].textContent, "未分配");
 });
+
+test("OA reports group only trusted pure continuations and retain mixed or failed task cards", () => {
+  const document=createDocument(), chat=document.createElement("main");
+  const state={account:{accountId:"account-a"},taskCards:new Map(),taskCardMeta:new Map(),queryGroupOpen:new Map()};
+  const {groupQueryCards}=createResultView({document,state,openTask(){}});
+  const cards=createTaskCards({document,state,$:()=>chat,setTimelineNode(){},appendArtifactList(){},renderTaskPlan(){}});
+  const report={schema_version:"agentbridge.oa_history_query.v1",query_id:"query-one",collection:"done",state:"complete",
+    progress:{source_total:1,scanned_count:1,matched_count:1,details_checked:1,details_failed:0},
+    coverage:{status:"complete",scan_complete:true,details_complete:true},items:[{affair_id:"one",title:"only report row"}],has_more:false};
+  const base={task:{task_id:"first",status:"succeeded",version:1,title:"用户的初始查询"},oaHistoryQuery:report,events:[]};
+  cards.upsertTaskCard(base,{render:false});
+  const marker={queryId:report.query_id,eligible:true};
+  for (const [id,extra] of [
+    ["next",{oaHistoryGrouping:marker}],
+    ["untrusted",{}],
+    ["mismatch",{oaHistoryGrouping:{queryId:"different-query",eligible:true}}],
+    ["file",{oaHistoryGrouping:marker,artifacts:[{filename:"report.csv"}]}],
+    ["older-file",{oaHistoryGrouping:marker,artifactsHasMore:true}],
+    ["interaction",{oaHistoryGrouping:marker,interactions:[{interactionId:"input",type:"business_input",state:"completed"}]}],
+    ["batch",{oaHistoryGrouping:marker,batch:{batchId:"batch",items:[]}}],
+    ["failed",{oaHistoryGrouping:marker,task:{...base.task,status:"failed"}}],
+  ]) cards.upsertTaskCard({...base,...extra,task:{...base.task,...extra.task,task_id:id}},{render:false});
+  const output=groupQueryCards([...state.taskCards.values()]);
+  assert.equal(output.length,8);
+  assert.equal(output[0],state.taskCards.get("first:summary"));
+  assert.equal(output[0].dataset.oaHistoryGroupCount,"2");
+  assert.equal(output[0].dataset.oaHistoryScope,"account-a");
+  assert.ok(!output.includes(state.taskCards.get("next:summary")));
+  for (const id of ["untrusted","mismatch","file","older-file","interaction","failed"])
+    assert.ok(output.includes(state.taskCards.get(`${id}:summary`)),id);
+});

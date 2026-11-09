@@ -12,7 +12,7 @@ import { renderSkillTrialStatus } from "./workspace_skill_trial.mjs";
 import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
 import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot, enqueueActionableSources } from "./workspace_projection.mjs";
-import { createWorkspaceViewState, createReadingScroll, createPreparationHandoff } from './workspace_navigation.mjs';
+import { createWorkspaceViewState, createReadingScroll, createPreparationHandoff, timelineNodeMatchesKey } from './workspace_navigation.mjs';
 
 const state = {
   account: null,
@@ -95,8 +95,9 @@ const { api, fetchChatStreamResponse } = createWorkspaceRequests({
   document, getScope: () => sessionScope,
   addLiveProgress: (...args) => addLiveProgress(...args),
 });
-const { renderMarkdown, groupQueryCards, renderTaskPlan, appendArtifactList } =
+const { renderMarkdown, groupQueryCards, restoreHistoryCardState, resetHistoryGroups, renderTaskPlan, appendArtifactList } =
   createResultView({ document, state, reissueArtifact,
+    openTask:async taskId => { if (await switchView("tasks") !== false) await loadTaskDetail(taskId); },
     timers:{setTimeout:(fn,ms)=>sessionScope.timeout(fn,ms),clearTimeout:id=>lifecycle.clearTimer(id)} });
 const { ensureLiveMessage, adoptLiveMessage, handleChatProgress, addLiveProgress,
   handleChatDelta, restoreActiveDispatches } = createChatProgress({
@@ -107,7 +108,7 @@ const { consumeChatStream } = createChatStream({
   addLiveProgress, ensureLiveMessage, handleChatProgress, handleChatDelta,
   attachDispatchCancel, agentFailureMessage, renderRunFailure,
 });
-const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTaskCardControllers } = createTaskCards({
+const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTaskCardControllers, retireTaskCardControllers } = createTaskCards({
   document, state, $, renderChatTimeline, scrollChat, setTimelineNode,
   loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
   submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery: queryOaPending, probeRecovery:probeOaPendingRecovery,
@@ -171,6 +172,7 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  resetHistoryGroups();
   resetTaskCardControllers();
   projectionQueue.reset();
   projectionOrder.reset();
@@ -612,7 +614,7 @@ async function loadChat() {
           }
           scope.assertCurrent();
           const restored = await restoreHistoryAnchor({reading, scope,
-            hasAnchor:key => Boolean([...container.children].some(node => node.dataset.timelineKey === key)),
+            hasAnchor:key => [...container.children].some(node => timelineNodeMatchesKey(node, key)),
             pending:() => !missingSkillNotice && historyPresentation(state).pending,
             load:loadMoreHistory,
             progress:() => JSON.stringify([state.historyCursor,state.historyHasMore,state.legacyHistoryLoaded]),
@@ -782,10 +784,12 @@ function renderChatTimeline() {
     .filter((item) => item?.isConnected);
   const controls = olderChatControl();
   if (stable.length === 0 && live.length === 0) {
+    resetHistoryGroups();
     reconcileChildren(container, [controls, messageElement({ role: "system", text: "开始一个新的工作会话" })]);
     return;
   }
   reconcileChildren(container, [controls, ...groupQueryCards(stable), ...live]);
+  restoreHistoryCardState(container);
 }
 
 function olderChatControl() {
@@ -1305,6 +1309,7 @@ async function hydrateSkillCards() {
 }
 
 function retireTaskCard(taskId) {
+  retireTaskCardControllers(taskId);
   for (const [key, card] of state.taskCards) {
     if (card.dataset.taskId !== taskId) continue;
     card.remove(); state.taskCards.delete(key); state.taskCardMeta.delete(key);

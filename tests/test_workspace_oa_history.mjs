@@ -29,8 +29,8 @@ function page(overrides = {}) {
     coverage:{status:"complete",scan_complete:true,details_complete:true}, items:[item("first")],
     next_cursor:"opaque-next", has_more:true, ...overrides};
 }
-function task(query = page(), version = 1) {
-  return {task:{task_id:"history-task",version,status:"succeeded",title:"查询 OA 历史",created_at:"2026-11-09T01:00:00Z"},
+function task(query = page(), version = 1, taskId = "history-task") {
+  return {task:{task_id:taskId,version,status:"succeeded",title:"查询 OA 历史",created_at:"2026-11-09T01:00:00Z"},
     oaHistoryQuery:query,interactions:[],events:[]};
 }
 function fixture(options = {}) {
@@ -174,10 +174,118 @@ test("unavailable and error projections are visible on first load without retain
     assert.match(byClass(f.root,"oa-history-notice").textContent,/登录或权限已变化/);
     assert.equal(byClass(f.root,"oa-history-range").hidden,true);
     assert.doesNotMatch(f.root.textContent,/private exception|must-not-render/);
-    f.render(f.root,task(page(),2));assert.equal(rows(f.root).length,1);
+    f.render(f.root,task(page(),2));assert.equal(rows(f.root).length,0);
     f.render(f.root,task(failure,3));assert.equal(rows(f.root).length,0);
     f.render(f.root,task(page(),2));assert.equal(rows(f.root).length,0);
   }
+});
+
+test("independent tasks for one query share live progress and paging without comparing task versions", async () => {
+  const request=deferred(),calls=[];
+  const f=fixture({loadHistoryPage:(id,cursor)=>{calls.push([id,cursor]);return request.promise;}});
+  const next=f.document.createElement("section"),detail=f.document.createElement("section");
+  const scan=page({state:"scanning",items:[],coverage:{status:"partial"},progress:{scanned_count:1000,details_checked:0}});
+  f.render(f.root,task(scan,20,"initial-task"));f.render(detail,task(scan,20,"initial-task"));
+  f.render(next,task(page({state:"details",items:[],coverage:{status:"partial"},progress:{scanned_count:1125,details_checked:5}}),2,"next-task"));
+  assert.equal(f.state.oaHistoryQueries.get("initial-task"),f.state.oaHistoryQueries.get("next-task"));
+  for(const root of [f.root,next,detail])assert.match(byClass(root,"oa-history-progress").textContent,/已扫描 1125.*已核对详情 5/);
+  f.render(f.root,task(scan,21,"initial-task"));
+  assert.match(byClass(next,"oa-history-heading").textContent,/核对中/);
+  f.render(next,task(page(),3,"next-task"));
+  for(const root of [f.root,next,detail])assert.match(rows(root)[0].textContent,/first/);
+  button(next,"下一页").events.click();button(detail,"正在读取…").events.click();
+  assert.deepEqual(calls,[["initial-task","opaque-next"]]);
+  request.resolve(page({items:[item("shared-second")],has_more:false,next_cursor:null}));await settle();
+  f.render(next,task(page(),4,"next-task"));
+  for(const root of [f.root,next,detail]){
+    assert.match(rows(root)[0].textContent,/shared-second/);
+    assert.match(byClass(root,"oa-history-page").textContent,/第 2 页/);
+  }
+  button(detail,"上一页").events.click();
+  for(const root of [f.root,next,detail])assert.match(rows(root)[0].textContent,/first/);
+});
+
+test("different query identities and dates never share models or pages", async () => {
+  const f=fixture({loadHistoryPage:async()=>page({items:[item("query-one-second")],has_more:false,next_cursor:null})});
+  const second=f.document.createElement("section"),unbound=f.document.createElement("section");
+  f.render(f.root,task());
+  f.render(second,task(page({query_id:"query-two",items:[item("separate-date")],
+    temporal:{absoluteRange:{start:"2026-10-01",end:"2026-10-31"},dateBasis:"processed_at",precision:"day"}}),1,"another-task"));
+  const pending=task(undefined,1,"unbound-next");delete pending.oaHistoryQuery;f.render(unbound,pending);
+  assert.equal(f.state.oaHistoryQueries.has("unbound-next"),false);
+  assert.notEqual(f.state.oaHistoryQueries.get("history-task"),f.state.oaHistoryQueries.get("another-task"));
+  button(f.root,"下一页").events.click();await settle();
+  assert.match(rows(second)[0].textContent,/separate-date/);
+  assert.match(byClass(second,"oa-history-range").textContent,/2026-10-01 至 2026-10-31/);
+  assert.match(byClass(second,"oa-history-page").textContent,/第 1 页/);
+});
+
+test("query access loss clears every task alias and blocks higher-version and new-task stale snapshots", async () => {
+  for(const status of [401,403,404,410]){
+    const f=fixture({loadHistoryPage:async()=>{throw Object.assign(new Error("denied"),{status});}});
+    const second=f.document.createElement("section"),late=f.document.createElement("section");
+    f.render(f.root,task());f.render(second,task(page(),50,"next-task"));
+    button(second,"下一页").events.click();await settle();
+    f.render(f.root,task(page(),100));f.render(second,task(page(),51,"next-task"));
+    f.render(late,task(page(),1,"late-task"));
+    for(const root of [f.root,second,late]){assert.equal(rows(root).length,0);assert.match(root.textContent,/已清除旧结果/);}
+    f.render(second,task(page({query_id:"new-authorized-query",items:[item("new-query")]}),52,"next-task"));
+    assert.match(rows(second)[0].textContent,/new-query/);assert.equal(rows(f.root).length,0);
+  }
+});
+
+test("a task losing its projection cannot erase another task's authorized shared query", () => {
+  const f=fixture(),second=f.document.createElement("section"),detail=f.document.createElement("section");
+  f.render(f.root,task());f.render(detail,task());f.render(second,task(page(),1,"next-task"));
+  const missing=task(undefined,2);delete missing.oaHistoryQuery;f.render(f.root,missing);
+  for(const root of [f.root,detail]){assert.equal(rows(root).length,0);assert.match(root.textContent,/已清除旧结果/);}
+  assert.match(rows(second)[0].textContent,/first/);
+  f.render(f.root,task());assert.equal(rows(f.root).length,0);
+  f.render(f.root,task(page(),2));assert.equal(rows(f.root).length,0);
+  assert.notEqual(f.state.oaHistoryQueries.get("history-task"),f.state.oaHistoryQueries.get("next-task"));
+});
+
+test("retiring the last unavailable task removes query data while retaining its account-scoped access barrier", async () => {
+  const lifecycle=createLifecycle();let scope=lifecycle.scope();
+  const f=fixture({getScope:()=>scope,loadHistoryPage:async()=>{throw Object.assign(new Error("expired"),{status:410});}});
+  f.render(f.root,task());button(f.root,"下一页").events.click();await settle();
+  f.retire("history-task");assert.equal(f.state.oaHistoryQueries.size,0);
+  f.render(f.root,task(page(),100,"late-task"));assert.equal(rows(f.root).length,0);
+  assert.match(f.root.textContent,/旧结果已清除/);
+  scope.dispose();scope=lifecycle.scope();
+  f.render(f.root,task(page({items:[item("fresh-scope")]}),1,"fresh-task"));
+  assert.match(rows(f.root)[0].textContent,/fresh-scope/);
+});
+
+test("retiring a task cancels its pending reply, keeps other members and releases the last query", async () => {
+  const first=deferred(),second=deferred(),calls=[];
+  const f=fixture({loadHistoryPage:(id,cursor)=>{calls.push([id,cursor]);return calls.length===1?first.promise:second.promise;}});
+  const peer=f.document.createElement("section");
+  f.render(f.root,task());f.render(peer,task(page(),1,"next-task"));
+  const model=f.state.oaHistoryQueries.get("history-task");
+  button(peer,"下一页").events.click();f.retire("history-task");
+  assert.equal(f.root.hidden,true);assert.equal(f.root.childNodes.length,0);
+  assert.equal(f.state.oaHistoryQueries.has("history-task"),false);
+  button(peer,"下一页").events.click();
+  first.resolve(page({items:[item("retired-reply")]}));await settle();
+  assert.equal(button(peer,"正在读取…").disabled,true);assert.doesNotMatch(peer.textContent,/retired-reply/);
+  second.resolve(page({items:[item("remaining-task-page")],has_more:false,next_cursor:null}));await settle();
+  assert.match(rows(peer)[0].textContent,/remaining-task-page/);
+  assert.deepEqual(calls,[["history-task","opaque-next"],["next-task","opaque-next"]]);
+  f.retire("next-task");assert.equal(f.state.oaHistoryQueries.size,0);
+  assert.equal(model.disposed,true);assert.equal(model.pages.length,0);assert.equal(model.projection,null);
+});
+
+test("account reset clears all aliases and permits a fresh model without reviving outstanding replies", async () => {
+  const request=deferred(),f=fixture({loadHistoryPage:()=>request.promise}),peer=f.document.createElement("section");
+  f.render(f.root,task());f.render(peer,task(page(),1,"next-task"));
+  const old=f.state.oaHistoryQueries.get("history-task");button(peer,"下一页").events.click();f.reset();
+  assert.equal(f.state.oaHistoryQueries.size,0);
+  for(const root of [f.root,peer])assert.equal(root.childNodes.length,0);
+  f.render(f.root,task(page({items:[item("fresh-account")]})));
+  assert.notEqual(f.state.oaHistoryQueries.get("history-task"),old);
+  request.resolve(page({items:[item("old-account-reply")]}));await settle();
+  assert.match(rows(f.root)[0].textContent,/fresh-account/);assert.doesNotMatch(f.root.textContent,/old-account-reply/);
 });
 
 test("an unavailable continuation projection clears the current result even without an HTTP error", async () => {
