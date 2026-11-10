@@ -282,7 +282,30 @@ def main():
             for number in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(number, lambda *_args: stop.set())
             print(json.dumps({"workspaceUrl": origin, "home": str(home)}, ensure_ascii=False), flush=True)
-            stop.wait(args.shutdown_after or None)
+            deadline = time.monotonic()+args.shutdown_after if args.shutdown_after else None
+            while not stop.wait(.1):
+                if deadline is not None and time.monotonic()>=deadline:
+                    break
+                marker=home/'run-due-watch'
+                if not marker.exists(): continue
+                try:
+                    if marker.is_symlink() or not marker.is_file():
+                        raise ValueError('Fixture control must be a regular file')
+                    watch_id=marker.read_text().strip(); marker.unlink()
+                    if not re.fullmatch(r'[0-9a-f-]{36}',watch_id):
+                        raise ValueError('Invalid isolated watch')
+                    # Only fixture scheduling is accelerated. Production frequency,
+                    # permissions, leases, consent and observation code are unchanged.
+                    with service.business_watch.store._connect() as db:
+                        changed=db.execute('UPDATE business_watches SET next_check_at=? WHERE watch_id=?',
+                            (datetime.now(timezone.utc).isoformat(),watch_id)).rowcount
+                    if changed!=1: raise ValueError('Unknown isolated watch')
+                    result=service.business_watch.run_due_checks(limit=4)
+                    private_json(home/'scheduler-cycle.json',{'counts':result,
+                        'syntheticDueTimeOverride':True,'realDownstreamCalls':0,'businessWrites':0})
+                except Exception as exc:
+                    private_json(home/'scheduler-cycle.json',{'errorType':type(exc).__name__,
+                        'syntheticDueTimeOverride':True,'realDownstreamCalls':0,'businessWrites':0})
     finally:
         stop.set()
         if server:

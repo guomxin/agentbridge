@@ -6703,6 +6703,8 @@ def serve_central_mcp(
         activity_lease_seconds=keepalive_activity_lease_seconds,
     )
     governance = CentralRuntimeGovernanceWorker(service)
+    from agentbridge.core.business_watch_worker import BusinessWatchWorker
+    business_watches = BusinessWatchWorker(service)
     auth_thread.start()
     if admin_thread is not None:
         admin_thread.start()
@@ -6710,6 +6712,7 @@ def serve_central_mcp(
         workspace_thread.start()
     keepalive.start()
     governance.start()
+    business_watches.start()
     try:
         mcp = create_central_mcp_server(
             service=service,
@@ -6732,6 +6735,7 @@ def serve_central_mcp(
             timeout_keep_alive=5,
         )
     finally:
+        business_watches.stop()
         governance.stop()
         keepalive.stop()
         interactive_broker.shutdown()

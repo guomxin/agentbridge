@@ -24,7 +24,7 @@ class Clock:
 @pytest.fixture
 def context(tmp_path):
     clock = Clock()
-    store = BusinessWatchStore(tmp_path / "ledger.db", clock=clock)
+    store = BusinessWatchStore(tmp_path / "ledger.db", clock=clock, max_active_per_owner=100)
     tasks = TaskHubStore(store.db_path, maintain_on_startup=False)
     endpoints = {}
     for owner in ("user-a", "user-b"):
@@ -345,3 +345,327 @@ def test_concurrent_creation_and_same_version_observation_have_one_winner(contex
         observed = list(pool.map(observing, range(8)))
     assert sum(result is not None for result in observed) == 1
     assert row_counts(store) == (1, 1, 0)
+
+
+def due_watch(store, clock, **kwargs):
+    watch, _ = create(store, allow_mark_read=True, **kwargs)
+    watch = observe(store, watch, clock)["watch"]
+    clock.advance(seconds=watch["interval_seconds"])
+    return watch
+
+
+def finish(store, claim, **kwargs):
+    return store.finish_check(claim["check_id"], claim["lease_token"], **kwargs)
+
+
+def check_rows(store):
+    with sqlite3.connect(store.db_path) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(row) for row in db.execute("SELECT * FROM business_watch_checks ORDER BY claimed_at,check_id")]
+
+
+def test_default_quota_counts_paused_but_not_stopped_expired_or_other_owners(tmp_path):
+    clock = Clock()
+    store = BusinessWatchStore(tmp_path / "quota.db", clock=clock)
+    assert store.max_active_per_owner == 50
+    watches = [create(store, source=source(index + 1))[0] for index in range(50)]
+    assert create(store)[1]  # A replay is not another active slot.
+    paused = store.update(watches[0]["watch_id"], user_subject="user-a", expected_version=1, state="paused")
+    with pytest.raises(BusinessWatchError) as error:
+        create(store, source=source(51))
+    assert error.value.code == "BUSINESS_WATCH_LIMIT_REACHED"
+    create(store, user_subject="user-b")
+    store.update(paused["watch_id"], user_subject="user-a", expected_version=paused["version"], state="stopped")
+    create(store, source=source(51))
+    clock.advance(days=7)
+    assert not create(store, source=source(52))[1]
+
+
+def test_quota_is_atomic_across_real_instances(tmp_path):
+    clock = Clock()
+    instances = [BusinessWatchStore(tmp_path / "quota.db", clock=clock, max_active_per_owner=3) for _ in range(8)]
+    barrier = threading.Barrier(8)
+
+    def creating(index):
+        barrier.wait(timeout=10)
+        try:
+            return create(instances[index], source=source(index + 1))[0]
+        except BusinessWatchError as error:
+            assert error.code == "BUSINESS_WATCH_LIMIT_REACHED"
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(creating, range(8)))
+    assert sum(result is not None for result in results) == 3
+
+
+def test_claim_only_due_active_consented_watch_and_releases_writer(context):
+    store, clock, _ = context
+    ready, _ = create(store, source=source(1), allow_mark_read=True)
+    create(store, source=source(2))  # Never consented.
+    paused, _ = create(store, source=source(3), allow_mark_read=True)
+    store.update(paused["watch_id"], user_subject="user-a", expected_version=1, state="paused")
+    stopped, _ = create(store, source=source(4), allow_mark_read=True)
+    store.update(stopped["watch_id"], user_subject="user-a", expected_version=1, state="stopped")
+    ended, _ = create(store, source=source(5), allow_mark_read=True)
+    observe(store, ended, clock, state="ended")
+    expiring, _ = create(store, source=source(6), allow_mark_read=True, expires_at=(clock() + timedelta(seconds=1)).isoformat())
+    future, _ = create(store, source=source(7), allow_mark_read=True)
+    observe(store, future, clock)
+    clock.advance(seconds=1)
+    claims = store.claim_due()
+    assert len(claims) == 1 and claims[0]["watch"]["watch_id"] == ready["watch_id"]
+    assert claims[0]["claimed_version"] == ready["version"] == claims[0]["watch"]["version"]
+    assert claims[0]["watch"]["source"] == source()
+    assert store.claim_due() == []
+    assert store.get(expiring["watch_id"], user_subject="user-a")["state"] == "expired"
+    assert check_rows(store)[0]["lease_token_hash"] != claims[0]["lease_token"]
+    assert claims[0]["lease_token"] not in json.dumps(store.get(ready["watch_id"], user_subject="user-a"))
+    with sqlite3.connect(store.db_path, timeout=.1) as db:
+        db.execute("BEGIN IMMEDIATE")  # A downstream read can start without a held writer.
+        db.rollback()
+
+
+@pytest.mark.parametrize("kwargs", [{"limit": True}, {"limit": 0}, {"limit": 101},
+                                    {"lease_seconds": True}, {"lease_seconds": 0}, {"lease_seconds": 301}])
+def test_claim_parameters_are_bounded(context, kwargs):
+    store, _, _ = context
+    with pytest.raises(BusinessWatchError):
+        store.claim_due(**kwargs)
+    assert check_rows(store) == []
+
+
+def test_real_threads_and_instances_claim_and_finish_one_change_once(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    instances = [BusinessWatchStore(store.db_path, clock=clock) for _ in range(8)]
+    barrier = threading.Barrier(8)
+
+    def claiming(index):
+        barrier.wait(timeout=10)
+        return instances[index].claim_due()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claims = [claim for result in pool.map(claiming, range(8)) for claim in result]
+    assert len(claims) == 1
+    barrier = threading.Barrier(8)
+
+    def finishing(index):
+        barrier.wait(timeout=10)
+        return finish(instances[index], claims[0], snapshot=snapshot(clock, name="合成新节点"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(finishing, range(8)))
+    assert sum(result["status"] == "finished" for result in results) == 1
+    assert row_counts(store) == (1, 2, 1)
+    assert store.get(watch["watch_id"], user_subject="user-a")["change_seq"] == 1
+    assert check_rows(store)[0]["status"] == "succeeded"
+
+
+def test_restart_reclaims_expired_lease_without_accepting_old_worker(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    original = store.claim_due(lease_seconds=90)[0]
+    reopened = BusinessWatchStore(store.db_path, clock=clock)
+    assert reopened.claim_due() == []
+    clock.advance(seconds=90)
+    replacement = reopened.claim_due()[0]
+    assert replacement["check_id"] != original["check_id"] and replacement["lease_token"] != original["lease_token"]
+    before = reopened.get(watch["watch_id"], user_subject="user-a")
+    obsolete = finish(store, original, snapshot=snapshot(clock, state="ended"))
+    assert obsolete["status"] == "discarded" and obsolete["reason"] == "lease_expired"
+    assert reopened.get(watch["watch_id"], user_subject="user-a") == before
+    assert finish(reopened, replacement, snapshot=snapshot(clock))["status"] == "finished"
+    assert row_counts(store) == (1, 2, 0)
+    assert sorted(row["status"] for row in check_rows(store)) == ["lease_expired", "succeeded"]
+
+
+def test_wrong_token_and_duplicate_finish_cannot_consume_or_advance_live_lease(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    claim = store.claim_due()[0]
+    rejected = store.finish_check(claim["check_id"], "synthetic-wrong-token", snapshot=snapshot(clock))
+    assert rejected == {"status": "discarded", "reason": "lease_not_owned", "watch": None, "outcome": None}
+    assert check_rows(store)[0]["status"] == "running"
+    assert finish(store, claim, snapshot=snapshot(clock))["status"] == "finished"
+    current = store.get(watch["watch_id"], user_subject="user-a")
+    assert finish(store, claim, error_code="WATCH_SOURCE_UNAVAILABLE")["status"] == "discarded"
+    assert store.get(watch["watch_id"], user_subject="user-a") == current and row_counts(store) == (1, 2, 0)
+
+
+@pytest.mark.parametrize("action", ["pause", "stop", "configure", "manual", "consent"])
+def test_changes_and_foreground_observation_invalidate_inflight_lease(context, action):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    claim = store.claim_due()[0]
+    if action == "manual":
+        observe(store, watch, clock, name="手工核实节点")
+    else:
+        changes = {"pause": {"state": "paused"}, "stop": {"state": "stopped"},
+            "configure": {"rules": ["ended"]}, "consent": {"allow_mark_read": False}}[action]
+        store.update(watch["watch_id"], user_subject="user-a", expected_version=watch["version"], **changes)
+    before, counts = store.get(watch["watch_id"], user_subject="user-a"), row_counts(store)
+    result = finish(store, claim, snapshot=snapshot(clock, state="ended"))
+    assert result["status"] == "discarded"
+    assert store.get(watch["watch_id"], user_subject="user-a") == before and row_counts(store) == counts
+    if action == "consent":
+        assert store.claim_due() == []
+
+
+def test_expiry_during_read_only_discards_check_record_without_advancing_watch(context):
+    store, clock, _ = context
+    watch, _ = create(store, allow_mark_read=True, expires_at=(clock() + timedelta(seconds=30)).isoformat())
+    claim = store.claim_due()[0]
+    clock.advance(seconds=30)
+    before = store.get(watch["watch_id"], user_subject="user-a")
+    result = finish(store, claim, snapshot=snapshot(clock, state="ended"))
+    assert result["status"] == "discarded" and result["reason"] == "watch_expired"
+    assert store.get(watch["watch_id"], user_subject="user-a") == before and row_counts(store) == (1, 0, 0)
+
+
+def test_failure_backoff_is_bounded_preserves_baseline_and_success_resets(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    baseline = watch["last_snapshot"]
+    for failures, wait in enumerate((3600, 7200, 14400, 21600, 21600), start=1):
+        claim = store.claim_due()[0]
+        result = finish(store, claim, error_code="WATCH_SOURCE_UNAVAILABLE")
+        current = result["watch"]
+        assert result["status"] == "finished" and result["outcome"] is None
+        assert current["last_snapshot"] == baseline and current["consecutive_failures"] == failures
+        assert current["last_error_code"] == "WATCH_SOURCE_UNAVAILABLE" and current["state"] == "active"
+        assert current["next_check_at"] == (clock() + timedelta(seconds=wait)).isoformat()
+        assert store.claim_due() == []
+        clock.advance(seconds=wait)
+    recovered = finish(store, store.claim_due()[0], snapshot=snapshot(clock))["watch"]
+    assert recovered["consecutive_failures"] == 0 and recovered["last_error_code"] is None
+    assert recovered["last_success_at"] == clock().isoformat()
+    assert recovered["next_check_at"] == (clock() + timedelta(seconds=3600)).isoformat()
+    assert row_counts(store) == (1, 2, 0)
+
+
+@pytest.mark.parametrize("changes,reason", [({"state": "unknown"}, "unknown"),
+    ({"current_nodes": None, "unavailable_fields": ["current_nodes"]}, "incomplete"),
+    ({"completeness": "partial"}, "incomplete"),
+    ({"observed_at": "2026-11-09T00:00:00+00:00"}, "older_observation")])
+def test_unverified_background_result_never_overwrites_trusted_baseline(context, changes, reason):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    result = finish(store, store.claim_due()[0], snapshot=snapshot(clock, **changes))
+    assert result["status"] == "finished" and result["outcome"]["ignored"] and result["reason"] == reason
+    assert result["watch"]["last_snapshot"] == watch["last_snapshot"]
+    assert result["watch"]["last_verified_at"] == watch["last_verified_at"]
+    assert result["watch"]["consecutive_failures"] == 1 and result["watch"]["last_error_code"]
+    assert row_counts(store) == (1, 2, 0) and check_rows(store)[0]["status"] == "unverified"
+
+
+def test_permission_failure_can_pause_without_overwriting_baseline(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    result = finish(store, store.claim_due()[0], error_code="WATCH_PERMISSION_REVOKED", pause_reason="permission_revoked")
+    paused = result["watch"]
+    assert paused["state"] == "paused" and paused["pause_reason"] == "permission_revoked"
+    assert paused["next_check_at"] is None and paused["last_snapshot"] == watch["last_snapshot"]
+    clock.advance(days=1)
+    assert store.claim_due() == []
+    resumed = store.update(watch["watch_id"], user_subject="user-a", expected_version=paused["version"], state="active")
+    assert store.claim_due()[0]["claimed_version"] == resumed["version"]
+
+
+def test_finish_change_and_notification_hook_use_one_atomic_transaction(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("CREATE TABLE synthetic_outbox(event_id TEXT PRIMARY KEY)")
+    claim = store.claim_due()[0]
+    failure = [True]
+
+    def callback(connection, event, private_watch):
+        assert connection.in_transaction and private_watch["change_seq"] == 1
+        connection.execute("INSERT INTO synthetic_outbox VALUES (?)", (event["event_id"],))
+        if failure[0]:
+            raise RuntimeError("synthetic outbox failure")
+
+    store.on_change = callback
+    before = check_rows(store)
+    with pytest.raises(RuntimeError, match="synthetic outbox failure"):
+        finish(store, claim, snapshot=snapshot(clock, name="合成变化"))
+    assert check_rows(store) == before and row_counts(store) == (1, 1, 0)
+    assert store.get(watch["watch_id"], user_subject="user-a") == watch
+    with sqlite3.connect(store.db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM synthetic_outbox").fetchone()[0] == 0
+    failure[0] = False
+    assert finish(store, claim, snapshot=snapshot(clock, name="合成变化"))["status"] == "finished"
+    assert row_counts(store) == (1, 2, 1) and check_rows(store)[0]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"error_code": []}, {"pause_reason": "raw content not a code"},
+    {"error_code": "WATCH_ERROR", "snapshot": {}}, {"snapshot": {"workflow_state": []}}])
+def test_bad_finish_input_does_not_consume_lease_or_partially_update(context, kwargs):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    claim = store.claim_due()[0]
+    before = check_rows(store)
+    with pytest.raises(BusinessWatchError):
+        finish(store, claim, **kwargs)
+    assert store.get(watch["watch_id"], user_subject="user-a") == watch
+    assert check_rows(store) == before and row_counts(store) == (1, 1, 0)
+
+
+def test_actual_thread_stopping_before_late_finish_cannot_add_a_change(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    claim = store.claim_due()[0]
+    stopped = threading.Event()
+    other = BusinessWatchStore(store.db_path, clock=clock)
+
+    def stopping():
+        result = other.update(watch["watch_id"], user_subject="user-a", expected_version=watch["version"], state="stopped")
+        stopped.set()
+        return result
+
+    def completing():
+        assert stopped.wait(5)
+        return finish(store, claim, snapshot=snapshot(clock, state="ended"))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        late = pool.submit(completing)
+        closed = pool.submit(stopping).result(timeout=5)
+        result = late.result(timeout=5)
+    assert result["status"] == "discarded"
+    assert store.get(watch["watch_id"], user_subject="user-a") == closed and row_counts(store) == (1, 1, 0)
+
+
+def test_session_busy_yields_for_a_short_bounded_delay_without_observing(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    claim = store.claim_due()[0]
+    result = finish(store, claim, error_code="WATCH_SESSION_BUSY")
+    assert result["watch"]["state"] == "active" and result["watch"]["last_snapshot"] == watch["last_snapshot"]
+    assert result["watch"]["next_check_at"] == (clock() + timedelta(seconds=60)).isoformat()
+    assert row_counts(store) == (1, 1, 0)  # Lock refusal produced no new observation.
+    assert store.claim_due() == []
+    clock.advance(seconds=59)
+    assert store.claim_due() == []
+    clock.advance(seconds=1)
+    assert len(store.claim_due()) == 1
+
+
+def test_first_batch_ledger_upgrade_preserves_identity_snapshot_and_version(context):
+    store, clock, _ = context
+    watch = due_watch(store, clock)
+    # These columns did not exist in the first-batch persisted schema. Keep
+    # its actual watch, observation and identity rows while removing only them.
+    added = {"consecutive_failures", "last_error_code", "last_success_at"}
+    with sqlite3.connect(store.db_path) as db:
+        for column in sorted(added):
+            db.execute(f"ALTER TABLE business_watches DROP COLUMN {column}")
+    reopened = BusinessWatchStore(store.db_path, clock=clock)
+    actual = reopened.get(watch["watch_id"], user_subject="user-a")
+    assert {key: value for key, value in actual.items() if key not in added} == {
+        key: value for key, value in watch.items() if key not in added}
+    assert actual["consecutive_failures"] == 0 and actual["last_error_code"] is None
+    claim = reopened.claim_due()[0]
+    assert claim["watch"]["source"] == source() and claim["claimed_version"] == watch["version"]
+    assert finish(reopened, claim, snapshot=snapshot(clock))["status"] == "finished"
+    assert row_counts(reopened) == (1, 2, 0)

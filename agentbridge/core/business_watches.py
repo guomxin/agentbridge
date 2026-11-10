@@ -9,9 +9,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 from typing import Any, Callable, Iterator
 from uuid import UUID, uuid4
@@ -25,6 +27,7 @@ SOURCE_IDS = ("affair_id", "summary_id", "process_id", "case_id")
 MAX_WATCH_DAYS = 30
 DEFAULT_WATCH_DAYS = 7
 MIN_INTERVAL_SECONDS = 900
+MAX_RETRY_SECONDS = 6 * 3600
 
 
 class BusinessWatchError(RuntimeError):
@@ -93,6 +96,17 @@ def _boolean(value):
     return value
 
 
+def _short_code(value, label):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", value):
+        _fail("BUSINESS_WATCH_INVALID", f"{label}不合法。")
+    return value
+
+
+def _retry_seconds(interval, failures):
+    # Failed observations must not poll more often than the selected interval.
+    return min(max(interval, MAX_RETRY_SECONDS), interval * 2 ** min(failures - 1, 16))
+
+
 def _source(value):
     if not isinstance(value, dict) or not isinstance(value.get("collection"), str) or value["collection"] not in {"sent", "done"}:
         _fail("BUSINESS_WATCH_INVALID_SOURCE", "关注来源须为已发或已办的精确流程。")
@@ -123,6 +137,11 @@ def _normal_snapshot(value, rules):
     observed = _time(value["observed_at"], "来源观察时间").isoformat() if value.get("observed_at") is not None else None
     if state == "unknown":
         return None, "unknown", observed
+    completeness = value.get("completeness")
+    if completeness is not None and completeness not in ("complete", "partial"):
+        _fail("BUSINESS_WATCH_SNAPSHOT_INVALID", "核验结果完整性说明不合法。")
+    if completeness == "partial":
+        return None, "incomplete", observed
     if observed is None:
         _fail("BUSINESS_WATCH_SNAPSHOT_INVALID", "核验结果缺少来源观察时间。")
     required = {"workflow_state"}
@@ -186,11 +205,14 @@ def _diff(before, after, rules):
 
 class BusinessWatchStore:
     def __init__(self, db_path: Path | str, *, clock: Callable[[], datetime] | None = None,
-                 on_change: Callable | None = None):
+                 on_change: Callable | None = None, max_active_per_owner: int = 50):
+        if type(max_active_per_owner) is not int or not 1 <= max_active_per_owner <= 10000:
+            raise ValueError("max_active_per_owner must be an integer between 1 and 10000")
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.on_change = on_change
+        self.max_active_per_owner = max_active_per_owner
         self._initialize()
 
     def _now(self):
@@ -251,7 +273,24 @@ class BusinessWatchStore:
                     change_types_json TEXT NOT NULL, diff_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE (watch_id,sequence)
                 );
+                CREATE TABLE IF NOT EXISTS business_watch_checks (
+                    check_id TEXT PRIMARY KEY, watch_id TEXT NOT NULL REFERENCES business_watches(watch_id),
+                    user_subject TEXT NOT NULL, claimed_version INTEGER NOT NULL,
+                    lease_token_hash TEXT NOT NULL, lease_expires_at TEXT NOT NULL,
+                    status TEXT NOT NULL, claimed_at TEXT NOT NULL, finished_at TEXT,
+                    result_code TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS business_watch_checks_one_running
+                    ON business_watch_checks(watch_id) WHERE status='running';
+                CREATE INDEX IF NOT EXISTS business_watch_checks_lease
+                    ON business_watch_checks(status,lease_expires_at);
             """)
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(business_watches)")}
+            for name, definition in (("consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
+                                     ("last_error_code", "TEXT"), ("last_success_at", "TEXT")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE business_watches ADD COLUMN {name} {definition}")
 
     def _owned(self, connection, watch_id, user_subject):
         row = connection.execute("SELECT * FROM business_watches WHERE watch_id=? AND user_subject=?",
@@ -266,7 +305,8 @@ class BusinessWatchStore:
     def _view(self, row, *, include_private=False, now=None):
         result = {key: row[key] for key in ("watch_id", "title", "interval_seconds", "expires_at", "version",
             "created_at", "updated_at", "pause_reason", "last_checked_at", "last_verified_at",
-            "last_source_observed_at", "last_check_status", "change_seq")}
+            "last_source_observed_at", "last_check_status", "change_seq", "consecutive_failures",
+            "last_error_code", "last_success_at")}
         result.update(state=self._state(row, now or self._now()), rules=json.loads(row["rules_json"]),
             endpoints=json.loads(row["endpoints_json"]), allow_mark_read=bool(row["allow_mark_read"]),
             last_snapshot=json.loads(row["last_snapshot_json"]) if row["last_snapshot_json"] else None)
@@ -289,6 +329,14 @@ class BusinessWatchStore:
         if not now < expiry <= now + timedelta(days=MAX_WATCH_DAYS):
             _fail("BUSINESS_WATCH_INVALID", "关注期限须在未来30天内。")
         return expiry.isoformat()
+
+    def _discard_checks(self, connection, watch_id, reason, now, *, exclude_check_id=None):
+        query = "UPDATE business_watch_checks SET status='discarded',finished_at=?,result_code=? WHERE watch_id=? AND status='running'"
+        values = [now.isoformat(), reason, watch_id]
+        if exclude_check_id is not None:
+            query += " AND check_id<>?"
+            values.append(exclude_check_id)
+        connection.execute(query, values)
 
     def create(self, *, user_subject, principal_ref, system_instance, source, title, rules=None,
                interval_seconds=3600, expires_at=None, endpoints=(), allow_mark_read=False,
@@ -323,6 +371,10 @@ class BusinessWatchStore:
             reused = existing is not None
             watch_id = existing["watch_id"] if existing else str(uuid4())
             if not existing:
+                count = connection.execute("SELECT COUNT(*) FROM business_watches WHERE user_subject=? "
+                    "AND state IN ('active','paused') AND expires_at>?", (owner, now.isoformat())).fetchone()[0]
+                if count >= self.max_active_per_owner:
+                    _fail("BUSINESS_WATCH_LIMIT_REACHED", "本人有效关注数量已达上限，请先停止不再需要的关注。", status=409)
                 connection.execute("INSERT INTO business_watches (watch_id,user_subject,principal_ref,system_instance,source_json,target_key,"
                     "title,rules_json,interval_seconds,expires_at,endpoints_json,allow_mark_read,state,version,created_at,updated_at,"
                     "next_check_at,last_check_status,snapshot_rules_json,observation_seq,change_seq) "
@@ -403,6 +455,7 @@ class BusinessWatchStore:
                 "allow_mark_read=?,state=?,pause_reason=?,snapshot_rules_json=?,next_check_at=?,version=version+1,updated_at=? WHERE watch_id=?",
                 (_json(next_rules), next_interval, next_expiry, _json(next_endpoints), int(consent), next_state, reason,
                  _json(snapshot_rules), next_check, now.isoformat(), watch_id))
+            self._discard_checks(connection, watch_id, "watch_updated", now)
             return self._view(self._owned(connection, watch_id, user_subject), include_private=include_private, now=now)
 
     def apply_observation(self, watch_id, *, user_subject, expected_version, snapshot, include_private=False):
@@ -415,41 +468,133 @@ class BusinessWatchStore:
                 raise BusinessWatchConflict()
             if self._state(row, now) != "active":
                 _fail("BUSINESS_WATCH_NOT_ACTIVE", "该关注当前不能接收核验结果。", status=409)
-            rules = json.loads(row["rules_json"])
-            normalized, status, observed = _normal_snapshot(snapshot, rules)
-            if normalized and row["last_source_observed_at"] and observed < row["last_source_observed_at"]:
-                normalized, status = None, "older_observation"
-            baseline_created = normalized is not None and row["last_snapshot_json"] is None
-            before = json.loads(row["last_snapshot_json"]) if row["last_snapshot_json"] else None
-            changes = _diff(before, normalized, json.loads(row["snapshot_rules_json"])) if before and normalized else {}
-            sequence = row["change_seq"] + int(bool(changes))
-            observation_seq = row["observation_seq"] + 1
-            snapshot_hash = _hash({key: value for key, value in normalized.items() if key != "observed_at"}) if normalized else None
-            state = "completed" if normalized and normalized["workflow_state"] == "ended" else "active"
-            connection.execute("INSERT INTO business_watch_observations VALUES (?,?,?,?,?,?,?,?,?)",
-                (str(uuid4()), watch_id, user_subject, observation_seq, expected_version, status, observed, now.isoformat(), snapshot_hash))
-            connection.execute("UPDATE business_watches SET version=version+1,updated_at=?,last_checked_at=?,last_check_status=?,"
-                "observation_seq=?,next_check_at=?,state=? WHERE watch_id=?",
-                (now.isoformat(), now.isoformat(), status, observation_seq,
-                 (now + timedelta(seconds=row["interval_seconds"])).isoformat() if state == "active" else None, state, watch_id))
-            if normalized:
-                connection.execute("UPDATE business_watches SET last_verified_at=?,last_source_observed_at=?,last_snapshot_json=?,"
-                    "last_snapshot_hash=?,snapshot_rules_json=?,change_seq=? WHERE watch_id=?",
-                    (now.isoformat(), observed, _json(normalized), snapshot_hash, _json(rules), sequence, watch_id))
-            event = None
-            if changes:
-                event = {"event_id": str(uuid4()), "watch_id": watch_id, "sequence": sequence,
-                    "event_type": "watch.completed" if "ended" in changes and normalized["workflow_state"] == "ended" else "watch.changed",
-                    "change_types": [rule for rule in WATCH_RULES if rule in changes], "diff": changes,
-                    "observed_at": observed, "created_at": now.isoformat()}
-                connection.execute("INSERT INTO business_watch_changes VALUES (?,?,?,?,?,?,?,?,?)",
-                    (event["event_id"], watch_id, user_subject, sequence, event["event_type"], _json(event["change_types"]),
-                     _json(changes), observed, now.isoformat()))
-                if self.on_change:
-                    self.on_change(connection, event, self._view(self._owned(connection, watch_id, user_subject), include_private=True, now=now))
-            return {"watch": self._view(self._owned(connection, watch_id, user_subject), include_private=include_private, now=now),
-                "baseline_created": baseline_created, "changed": bool(changes), "event": event,
-                "ignored": normalized is None, "reason": None if normalized else status}
+            return self._apply_observation(connection, row, snapshot, now, include_private=include_private)
+
+    def _apply_observation(self, connection, row, snapshot, now, *, include_private=False, check_id=None):
+        """Use the caller's writer transaction, including the optional outbox hook."""
+        watch_id, user_subject = row["watch_id"], row["user_subject"]
+        rules = json.loads(row["rules_json"])
+        normalized, status, observed = _normal_snapshot(snapshot, rules)
+        if normalized and row["last_source_observed_at"] and observed < row["last_source_observed_at"]:
+            normalized, status = None, "older_observation"
+        baseline_created = normalized is not None and row["last_snapshot_json"] is None
+        before = json.loads(row["last_snapshot_json"]) if row["last_snapshot_json"] else None
+        changes = _diff(before, normalized, json.loads(row["snapshot_rules_json"])) if before and normalized else {}
+        sequence = row["change_seq"] + int(bool(changes))
+        observation_seq = row["observation_seq"] + 1
+        snapshot_hash = _hash({key: value for key, value in normalized.items() if key != "observed_at"}) if normalized else None
+        state = "completed" if normalized and normalized["workflow_state"] == "ended" else "active"
+        failures = 0 if normalized else row["consecutive_failures"] + 1
+        error = None if normalized else {"unknown": "WATCH_STATE_UNKNOWN", "incomplete": "WATCH_STATE_INCOMPLETE",
+                                        "older_observation": "WATCH_OBSERVATION_OLDER"}[status]
+        wait = row["interval_seconds"] if normalized else _retry_seconds(row["interval_seconds"], failures)
+        connection.execute("INSERT INTO business_watch_observations VALUES (?,?,?,?,?,?,?,?,?)",
+            (str(uuid4()), watch_id, user_subject, observation_seq, row["version"], status, observed, now.isoformat(), snapshot_hash))
+        connection.execute("UPDATE business_watches SET version=version+1,updated_at=?,last_checked_at=?,last_check_status=?,"
+            "observation_seq=?,next_check_at=?,state=?,consecutive_failures=?,last_error_code=? WHERE watch_id=?",
+            (now.isoformat(), now.isoformat(), status, observation_seq,
+             (now + timedelta(seconds=wait)).isoformat() if state == "active" else None, state, failures, error, watch_id))
+        if normalized:
+            connection.execute("UPDATE business_watches SET last_verified_at=?,last_success_at=?,last_source_observed_at=?,last_snapshot_json=?,"
+                "last_snapshot_hash=?,snapshot_rules_json=?,change_seq=? WHERE watch_id=?",
+                (now.isoformat(), now.isoformat(), observed, _json(normalized), snapshot_hash, _json(rules), sequence, watch_id))
+        self._discard_checks(connection, watch_id, "watch_observed", now, exclude_check_id=check_id)
+        event = None
+        if changes:
+            event = {"event_id": str(uuid4()), "watch_id": watch_id, "sequence": sequence,
+                "event_type": "watch.completed" if "ended" in changes and normalized["workflow_state"] == "ended" else "watch.changed",
+                "change_types": [rule for rule in WATCH_RULES if rule in changes], "diff": changes,
+                "observed_at": observed, "created_at": now.isoformat()}
+            connection.execute("INSERT INTO business_watch_changes VALUES (?,?,?,?,?,?,?,?,?)",
+                (event["event_id"], watch_id, user_subject, sequence, event["event_type"], _json(event["change_types"]),
+                 _json(changes), observed, now.isoformat()))
+            if self.on_change:
+                self.on_change(connection, event, self._view(self._owned(connection, watch_id, user_subject), include_private=True, now=now))
+        return {"watch": self._view(self._owned(connection, watch_id, user_subject), include_private=include_private, now=now),
+            "baseline_created": baseline_created, "changed": bool(changes), "event": event,
+            "ignored": normalized is None, "reason": None if normalized else status}
+
+    def claim_due(self, *, limit=4, lease_seconds=90):
+        """Reserve bounded checks. Never hold this transaction during downstream IO.
+
+        Returned lease tokens are private worker authority, never API fields.
+        The caller still verifies grants, principal and read consent before IO.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100 or type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
+            _fail("BUSINESS_WATCH_INVALID", "检查领取参数不合法。")
+        result = []
+        with store_transaction(self) as connection:
+            now = self._now()
+            connection.execute("UPDATE business_watches SET state='expired',version=version+1,updated_at=?,next_check_at=NULL "
+                "WHERE state IN ('active','paused') AND expires_at<=?", (now.isoformat(), now.isoformat()))
+            connection.execute("UPDATE business_watch_checks SET status='discarded',finished_at=?,result_code='watch_changed' "
+                "WHERE status='running' AND EXISTS (SELECT 1 FROM business_watches w WHERE w.watch_id=business_watch_checks.watch_id "
+                "AND (w.version<>business_watch_checks.claimed_version OR w.state<>'active' OR w.allow_mark_read=0))", (now.isoformat(),))
+            connection.execute("UPDATE business_watch_checks SET status='lease_expired',finished_at=?,result_code='lease_expired' "
+                "WHERE status='running' AND lease_expires_at<=?", (now.isoformat(), now.isoformat()))
+            rows = connection.execute("SELECT w.* FROM business_watches w WHERE w.state='active' AND w.allow_mark_read=1 "
+                "AND w.expires_at>? AND w.next_check_at<=? AND NOT EXISTS (SELECT 1 FROM business_watch_checks c "
+                "WHERE c.watch_id=w.watch_id AND c.status='running') ORDER BY w.next_check_at,w.created_at,w.watch_id LIMIT ?",
+                (now.isoformat(), now.isoformat(), limit)).fetchall()
+            for row in rows:
+                check_id, token = str(uuid4()), secrets.token_urlsafe(32)
+                connection.execute("INSERT INTO business_watch_checks "
+                    "(check_id,watch_id,user_subject,claimed_version,lease_token_hash,lease_expires_at,status,claimed_at) "
+                    "VALUES (?,?,?,?,?,?,'running',?)", (check_id, row["watch_id"], row["user_subject"], row["version"],
+                    hashlib.sha256(token.encode()).hexdigest(), (now + timedelta(seconds=lease_seconds)).isoformat(), now.isoformat()))
+                result.append({"watch": self._view(row, include_private=True, now=now), "check_id": check_id,
+                    "lease_token": token, "claimed_version": row["version"]})
+        return result
+
+    def finish_check(self, check_id, lease_token, *, snapshot=None, error_code=None, pause_reason=None):
+        """Apply only the live lease's unchanged watch, with one atomic commit.
+
+        An obsolete completion can only close its own check record. It never
+        advances the watch, baseline, changes, or a replacement worker's lease.
+        """
+        if not isinstance(check_id, str) or not isinstance(lease_token, str) or not 1 <= len(lease_token) <= 256:
+            _fail("BUSINESS_WATCH_INVALID", "检查租约不合法。")
+        if error_code is not None:
+            error_code = _short_code(error_code, "检查错误码")
+        if pause_reason is not None:
+            pause_reason = _short_code(pause_reason, "暂停原因")
+        if (snapshot is not None) == (error_code is not None or pause_reason is not None):
+            _fail("BUSINESS_WATCH_INVALID", "请提供检查结果或安全错误码。")
+        with store_transaction(self) as connection:
+            now = self._now()
+            run = connection.execute("SELECT * FROM business_watch_checks WHERE check_id=?", (check_id,)).fetchone()
+            if run is None or not hmac.compare_digest(run["lease_token_hash"], hashlib.sha256(lease_token.encode()).hexdigest()):
+                return {"status": "discarded", "reason": "lease_not_owned", "watch": None, "outcome": None}
+            row = self._owned(connection, run["watch_id"], run["user_subject"])
+            reason = (run["result_code"] or "already_finished") if run["status"] != "running" else (
+                "lease_expired" if run["lease_expires_at"] <= now.isoformat() else
+                "version_changed" if row["version"] != run["claimed_version"] else
+                "watch_expired" if row["expires_at"] <= now.isoformat() else
+                "watch_not_active" if row["state"] != "active" else
+                "read_consent_required" if not row["allow_mark_read"] else None)
+            if reason:
+                if run["status"] == "running":
+                    connection.execute("UPDATE business_watch_checks SET status='discarded',finished_at=?,result_code=? WHERE check_id=?",
+                        (now.isoformat(), reason, check_id))
+                return {"status": "discarded", "reason": reason,
+                    "watch": self._view(row, include_private=True, now=now), "outcome": None}
+            outcome = None
+            if snapshot is not None:
+                outcome = self._apply_observation(connection, row, snapshot, now, include_private=True, check_id=check_id)
+                result_code = outcome["reason"]
+                run_status = "unverified" if outcome["ignored"] else "succeeded"
+            else:
+                failures = row["consecutive_failures"] + 1
+                result_code, run_status = error_code or pause_reason, "failed"
+                wait = min(row["interval_seconds"], 60) if result_code == "WATCH_SESSION_BUSY" else _retry_seconds(row["interval_seconds"], failures)
+                connection.execute("UPDATE business_watches SET version=version+1,updated_at=?,last_checked_at=?,last_check_status='failed',"
+                    "consecutive_failures=?,last_error_code=?,state=?,pause_reason=?,next_check_at=? WHERE watch_id=?",
+                    (now.isoformat(), now.isoformat(), failures, result_code, "paused" if pause_reason else "active", pause_reason,
+                     None if pause_reason else (now + timedelta(seconds=wait)).isoformat(), row["watch_id"]))
+            connection.execute("UPDATE business_watch_checks SET status=?,finished_at=?,result_code=? WHERE check_id=?",
+                (run_status, now.isoformat(), result_code, check_id))
+            return {"status": "finished", "reason": result_code,
+                "watch": self._view(self._owned(connection, row["watch_id"], row["user_subject"]), include_private=True, now=now), "outcome": outcome}
 
     def history(self, watch_id, *, user_subject, limit=100, before_seq=None):
         if type(limit) is not int or not 1 <= limit <= 100 or (before_seq is not None and (type(before_seq) is not int or before_seq < 1)):

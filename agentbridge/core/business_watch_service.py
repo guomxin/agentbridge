@@ -121,7 +121,7 @@ class BusinessWatchService:
                 request_kind='read',system_id='oa',capability_name=STATE_CAPABILITY)
         trace_id = context.trace_id if context else trace['trace_id']
         try:
-            with read_deadline_scope(time.monotonic()+30), self.service._session_lock(
+            with read_deadline_scope(time.monotonic()+(15 if background else 30)), self.service._session_lock(
                 session['session_id'],wait_seconds=0.05 if background else 1,
                 trace_id=trace_id,purpose='business_watch'):
                 current,binding = self._session(subject,principal=principal)
@@ -160,6 +160,8 @@ class BusinessWatchService:
                 raise BusinessWatchError('WATCH_SESSION_UNAVAILABLE','OA登录已失效，请重新登录后恢复关注。',status=401) from exc
             if isinstance(exc,TimeoutError):
                 raise BusinessWatchError('WATCH_CHECK_TIMEOUT','检查超时，已保留上次可信结果。',status=504) from exc
+            if getattr(exc,'code',None)=='SESSION_BUSY':
+                raise BusinessWatchError('WATCH_SESSION_BUSY','当前有其他操作，稍后再检查。',status=409) from exc
             raise BusinessWatchError('WATCH_SOURCE_UNAVAILABLE','本次未能核实流程状态，已保留上次可信结果。',status=409) from exc
 
     def state(self, subject, target_ref, *, context=None):
@@ -280,6 +282,10 @@ class BusinessWatchService:
                               ('endpoint_ids','endpoints'),('allow_mark_read','allow_mark_read')]:
             if source in body:
                 if source=='endpoint_ids': self._endpoints(subject,body[source])
+                if source=='interval_seconds' and (type(body[source]) is not int or not 900<=body[source]<=86400):
+                    raise BusinessWatchError('WATCH_ARGUMENTS_INVALID','检查间隔需要为15分钟至24小时。')
+                if source=='allow_mark_read' and type(body[source]) is not bool:
+                    raise BusinessWatchError('WATCH_ARGUMENTS_INVALID','读取设置不合法。')
                 kwargs[target]=body[source]
         if body.get('allow_mark_read') is False:
             kwargs['state']='paused'
@@ -315,3 +321,64 @@ class BusinessWatchService:
         outcome = self.store.apply_observation(watch_id,user_subject=subject,
             expected_version=expected_version,snapshot=snapshot,include_private=True)
         return {'watch':public_watch(outcome['watch']),'events':self.store.history(watch_id,user_subject=subject)}
+
+    def run_due_checks(self, *, limit=4, should_stop=None):
+        """A bounded internal-only cycle. No model token, login card or activity."""
+        if type(limit) is not int or not 1<=limit<=20:
+            raise ValueError('watch cycle limit must be 1..20')
+        counts = dict(claimed=0,checked=0,changed=0,paused=0,failed=0,discarded=0)
+        for _ in range(limit):
+            if should_stop is not None and should_stop(): break
+            # Each lease starts immediately before its IO, not while waiting
+            # behind other targets in a serial per-session browser queue.
+            jobs = self.store.claim_due(limit=1,lease_seconds=90)
+            if not jobs: break
+            job = jobs[0]; value = job['watch']; subject = value['user_subject']
+            counts['claimed'] += 1
+            trace,_ = self.service.runtime_governance.ensure_trace(user_subject=subject,
+                request_id='business-watch:'+job['check_id'],request_kind='read',
+                system_id='oa',capability_name=STATE_CAPABILITY)
+            context = type('WatchCheckContext',(),{'trace_id':trace['trace_id']})()
+            error,pause,snapshot = None,None,None
+            try:
+                self.require_permission(subject)
+                latest = self._owned(subject,value['watch_id'])
+                if latest['state']!='active' or latest['version']!=job['claimed_version']:
+                    raise BusinessWatchError('WATCH_VERSION_CHANGED','关注已变化，本轮不再读取。',status=409)
+                if not latest.get('allow_mark_read'):
+                    raise BusinessWatchError('WATCH_READ_CONSENT_REQUIRED','读取同意已撤销。',status=409)
+                source = {**latest['source'],'title':latest['title']}; collection=source.pop('collection')
+                snapshot = self._observe(subject,source,collection,
+                    principal=latest['principal_ref'],background=True,context=context)
+                self.require_permission(subject)
+                self._session(subject,principal=latest['principal_ref'])
+            except PermissionError:
+                error,pause='WATCH_PERMISSION_DENIED','permission_denied'
+            except BusinessWatchError as exc:
+                error=exc.code
+                pause={'WATCH_SESSION_UNAVAILABLE':'session_unavailable','WATCH_PRINCIPAL_CHANGED':'principal_changed',
+                    'WATCH_READ_CONSENT_REQUIRED':'read_consent_required'}.get(error)
+            except Exception:
+                # Never store arbitrary exception text, business fields or URLs.
+                error='WATCH_CHECK_FAILED'
+            try:
+                outcome = self.store.finish_check(job['check_id'],job['lease_token'],
+                    **({'snapshot':snapshot} if error is None else {'error_code':error,'pause_reason':pause}))
+                if outcome['status']=='discarded': counts['discarded']+=1
+                elif error:
+                    counts['failed']+=1
+                    counts['paused']+=int(bool(pause))
+                elif (outcome.get('outcome') or {}).get('ignored'):
+                    counts['failed']+=1
+                else:
+                    counts['checked']+=1
+                    counts['changed']+=int(bool((outcome.get('outcome') or {}).get('changed')))
+                self.service.runtime_governance.update_trace(trace['trace_id'],
+                    status='failed' if error or (outcome.get('outcome') or {}).get('ignored') else 'succeeded',finished=True)
+            except Exception:
+                # Keep the durable lease for bounded recovery; do not immediately
+                # reread a target or replay its business state transition.
+                self.service.runtime_governance.update_trace(trace['trace_id'],status='failed',finished=True)
+                counts['failed']+=1
+                break
+        return counts
