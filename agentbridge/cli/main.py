@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         return handle_auth(args, home)
     if args.area == "operation":
         return handle_operation(args, home)
+    if args.area == 'watch':
+        return handle_watch(args,home)
     if args.area == "interaction":
         return handle_interaction(args, home)
     if args.area == "adapter":
@@ -120,6 +122,18 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("id")
     system_sub.add_parser("list")
     system_sub.add_parser("init-seeyon-oa")
+
+    watch = subparsers.add_parser('watch',help='Manage owned business watches')
+    watch_sub = watch.add_subparsers(dest='action',required=True)
+    for action in ('list','get','create','update','check'):
+        command=watch_sub.add_parser(action)
+        command.add_argument('--user-subject',required=True)
+        command.add_argument('--base-url')
+        if action in {'get','update','check'}: command.add_argument('watch_id')
+        if action in {'create','update','check'}: command.add_argument('--json',required=True)
+        if action=='list':
+            command.add_argument('--cursor')
+            command.add_argument('--limit',type=int,default=32)
 
     capability = subparsers.add_parser("capability")
     capability_sub = capability.add_subparsers(dest="action", required=True)
@@ -825,6 +839,27 @@ def handle_auth(args: argparse.Namespace, home: Path) -> int:
     finally:
         interactive_broker.shutdown()
     return 0
+
+
+def handle_watch(args,home):
+    from agentbridge.core.business_watches import BusinessWatchError
+    service=CentralCapabilityService(home=home,base_url=_central_base_url(home,args.base_url))
+    watch=service.business_watch
+    try:
+        if args.action=='list': result=watch.list(args.user_subject,cursor=args.cursor,limit=args.limit)
+        elif args.action=='get': result=watch.get(args.user_subject,args.watch_id)
+        elif args.action=='create': result=watch.create(args.user_subject,json.loads(args.json))
+        elif args.action=='update': result=watch.update(args.user_subject,args.watch_id,json.loads(args.json))
+        else:
+            body=json.loads(args.json)
+            if not isinstance(body,dict) or set(body)!={'expected_version'}:
+                raise ValueError('核验需要当前关注版本。')
+            result=watch.check(args.user_subject,args.watch_id,**body)
+        print_json(result)
+        return 0
+    except (BusinessWatchError,PermissionError,ValueError) as exc:
+        print_json(_central_cli_error(getattr(exc,'code','PERMISSION_DENIED' if isinstance(exc,PermissionError) else 'WATCH_ARGUMENTS_INVALID'),str(exc)))
+        return 2
 
 
 def handle_operation(args: argparse.Namespace, home: Path) -> int:

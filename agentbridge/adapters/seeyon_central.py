@@ -557,6 +557,8 @@ def build_central_capability_registry() -> CapabilityRegistry:
     from agentbridge.core.oa_history_query_service import history_query_capability_specs
     for spec in history_query_capability_specs():
         registry.register(spec)
+    from agentbridge.core.business_watch_service import watch_state_capability
+    registry.register(watch_state_capability())
     # Keep each projection at its original position among read capabilities.
     write_specs = oa_write_capability_specs_by_name()
     registry.register(

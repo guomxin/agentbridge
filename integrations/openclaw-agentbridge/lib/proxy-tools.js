@@ -21,6 +21,8 @@ export const AGENTBRIDGE_GOVERNED_ENTRY_TOOL_NAMES = Object.freeze([
   "agentbridge_task_plan_prepare",
   "agentbridge_task_plan_cancel",
   "agentbridge_task_cancel",
+  "agentbridge_business_watch_create",
+  "agentbridge_business_watch_update",
   "oa_efficiency_data_approval_prepare",
   "oa_travel_expense_approval_prepare",
   "oa_business_trip_approval_prepare",

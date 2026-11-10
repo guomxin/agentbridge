@@ -14,10 +14,12 @@ import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performa
 import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot, enqueueActionableSources } from "./workspace_projection.mjs";
 import { createWorkspaceViewState, createReadingScroll, createPreparationHandoff, timelineNodeMatchesKey } from './workspace_navigation.mjs';
 import { createTaskSearch } from './workspace_task_search.mjs';
+import { createBusinessWatches } from './workspace_watches.mjs';
 
 const state = {
   account: null,
   activeView: "chat",
+  taskPanel: "records",
   tasks: [],
   selectedTaskId: null,
   taskDetailRequest: 0,
@@ -128,6 +130,8 @@ const taskSearch = createTaskSearch({state,$,getScope:() => sessionScope,
     detail.replaceChildren(emptyState('选择一个任务查看进展'));
     detail.classList.add('mobile-empty'); delete detail.dataset.taskId;
   }});
+const businessWatches = createBusinessWatches({document, $, getScope:() => viewScope,
+  request:(path,scope,options) => scopedApi(scope)(path,options)});
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
   document, state, $, toast, getScope: () => sessionScope, executeChatMessage, queryOaPending,
@@ -152,7 +156,7 @@ const projectionQueue = createProjectionQueue({
       invalidate: sourceId => projectionOrder.invalidate(sourceId),
       enqueue: sourceId => projectionQueue.enqueue(sourceId),
     });
-    if (state.activeView === "tasks" && state.selectedTaskId === detail.task.task_id) loadTaskDetail(detail.task.task_id);
+    if (state.activeView === "tasks" && state.taskPanel !== 'watches' && state.selectedTaskId === detail.task.task_id) loadTaskDetail(detail.task.task_id);
   },
   retire: retireTaskCard,
   render: () => { renderChatTimeline(); scrollChat(); },
@@ -182,6 +186,8 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  businessWatches.reset();
+  selectTaskPanel('records', {load:false});
   taskSearch.reset();
   resetHistoryGroups();
   resetTaskCardControllers();
@@ -269,7 +275,17 @@ function bindActions() {
     loadChat();
     loadGatewayStatus();
   });
-  $("#refresh-tasks").addEventListener("click", loadTasks);
+  $("#refresh-tasks").addEventListener("click", () => state.taskPanel === 'watches' ? businessWatches.refresh() : loadTasks());
+  $('#task-records-tab').addEventListener('click', () => selectTaskPanel('records'));
+  $('#business-watches-tab').addEventListener('click', () => selectTaskPanel('watches'));
+  for (const [id, panel] of [['#task-records-tab','records'], ['#business-watches-tab','watches']]) {
+    $(id).addEventListener('keydown', event => {
+      if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+      event.preventDefault();
+      const target = event.key === 'Home' ? 'records' : event.key === 'End' ? 'watches' : panel === 'records' ? 'watches' : 'records';
+      selectTaskPanel(target); $(target === 'records' ? '#task-records-tab' : '#business-watches-tab').focus();
+    });
+  }
   taskSearch.bind();
   $("#refresh-endpoints").addEventListener("click", loadEndpoints);
   $("#refresh-skills").addEventListener("click", loadSkills);
@@ -474,6 +490,7 @@ async function switchView(view, permit) {
   if (!await canLeaveSkillEditor(permit) || !previousScope.current()) return false;
   if (view !== 'chat') preparationHandoff.cancel();
   if (view !== state.activeView) {
+    businessWatches.deactivate();
     viewScope.dispose();
     viewScope = sessionScope.child();
   }
@@ -486,11 +503,28 @@ async function switchView(view, permit) {
   });
   if (view === "tasks") {
     $("#task-detail").classList.add("mobile-empty");
-    loadTasks();
+    if (state.taskPanel === 'watches') businessWatches.activate();
+    else loadTasks();
   }
   if (view === "endpoints") loadEndpoints();
   if (view === "skills") loadSkills();
   return true;
+}
+
+function selectTaskPanel(panel, {load = true} = {}) {
+  const watches = panel === 'watches';
+  state.taskPanel = watches ? 'watches' : 'records';
+  for (const [id, selected] of [['#task-records-tab', !watches], ['#business-watches-tab', watches]]) {
+    $(id).classList.toggle('active', selected); $(id).setAttribute('aria-selected', String(selected));
+    $(id).tabIndex = selected ? 0 : -1;
+  }
+  $('#task-records-panel').hidden = watches; $('#business-watches-panel').hidden = !watches;
+  if (watches) { viewScope.replace('task-detail').dispose(); state.taskDetailRequest++; }
+  businessWatches.deactivate();
+  if (load && state.activeView === 'tasks') {
+    if (watches) businessWatches.activate();
+    else loadTasks();
+  }
 }
 
 async function startTrial(trial, permit) {
@@ -1355,6 +1389,7 @@ async function loadTasks(options = {}) {
 }
 
 async function loadTaskDetail(taskId) {
+  if (state.taskPanel === 'watches') selectTaskPanel('records', {load:false});
   const scope = viewScope.replace("task-detail");
   const api = scopedApi(scope);
   state.selectedTaskId = taskId;

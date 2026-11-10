@@ -280,6 +280,9 @@ class CentralCapabilityService:
             transforms=self.transforms,
         )
         self._task_plan_authority_resolver = None
+        from agentbridge.core.business_watch_service import BusinessWatchService
+        self.business_watch = BusinessWatchService(self)
+        self.oa_history_query_service.target_ref_factory = self.business_watch.target_reference
         self.write_authorizations.decision_observer = self._record_authorization_decision
 
     def _record_authorization_decision(self, connection, authorization):
@@ -861,7 +864,7 @@ class CentralCapabilityService:
             )
         else:
             adapter, selected_worker_factory = runtime
-            if capability_name != DOCUMENT_CERTIFICATE_SEARCH_CAPABILITY:
+            if capability_name not in {DOCUMENT_CERTIFICATE_SEARCH_CAPABILITY, 'oa.workflow.state.get'}:
                 self._record_user_activity(
                     user_subject=user_subject,
                     system_id=system_id,
@@ -869,7 +872,8 @@ class CentralCapabilityService:
                 )
             engine.register_handler(
                 capability_name,
-                lambda context, inputs: self._invoke_adapter(
+                lambda context, inputs: self.business_watch.state(user_subject,inputs['target_ref'],context=context)
+                if capability_name == 'oa.workflow.state.get' else self._invoke_adapter(
                     context=context,
                     user_subject=user_subject,
                     system_id=system_id,

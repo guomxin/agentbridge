@@ -127,6 +127,11 @@
               <button id="refresh-tasks" class="secondary" type="button">刷新</button>
             </div>
           </header>
+          <div class="task-sections" role="tablist" aria-label="任务视图">
+            <button id="task-records-tab" class="secondary active" type="button" role="tab" aria-selected="true" aria-controls="task-records-panel">任务记录</button>
+            <button id="business-watches-tab" class="secondary" type="button" role="tab" aria-selected="false" aria-controls="business-watches-panel" tabindex="-1">我关注的事项</button>
+          </div>
+          <div id="task-records-panel" class="task-records-panel" role="tabpanel" aria-labelledby="task-records-tab">
           <form id="task-filters" class="task-filters">
             <label class="task-search-label">任务名称<input id="task-search" type="search" maxlength="200" placeholder="搜索任务"></label>
             <label>状态<select id="task-status">
@@ -159,6 +164,21 @@
               <div class="empty-state">选择一个任务查看进展</div>
             </aside>
           </div>
+          </div>
+          <section id="business-watches-panel" class="business-watches-panel" role="tabpanel" aria-labelledby="business-watches-tab" hidden>
+            <p class="business-watch-explanation">查看已关注流程的最新核验记录；手工核验不会办理 OA 事项。</p>
+            <div class="business-watch-layout">
+              <div class="business-watch-browser">
+                <div id="business-watch-list" class="business-watch-list" aria-label="我关注的事项列表"></div>
+                <div class="task-pagination">
+                  <span id="business-watch-list-status" role="status" aria-live="polite"></span>
+                  <button id="business-watch-retry" class="secondary" type="button" hidden>重试</button>
+                  <button id="business-watch-more" class="secondary" type="button" hidden>加载更多</button>
+                </div>
+              </div>
+              <aside id="business-watch-detail" class="business-watch-detail mobile-empty" aria-label="关注详情"></aside>
+            </div>
+          </section>
         </section>
 
         <section id="view-endpoints" class="workspace-view" hidden>

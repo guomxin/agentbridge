@@ -229,6 +229,10 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "agentbridge_task_plan_get": frozenset(),
     "agentbridge_task_plan_cancel": frozenset(),
     "agentbridge_task_cancel": frozenset(),
+    "agentbridge_business_watch_create": frozenset({'oa:read'}),
+    "agentbridge_business_watch_list": frozenset({'oa:read'}),
+    "agentbridge_business_watch_get": frozenset({'oa:read'}),
+    "agentbridge_business_watch_update": frozenset({'oa:read'}),
     "agentbridge_interaction_get": frozenset(),
     "agentbridge_operation_get": frozenset(),
     "agentbridge_operation_list": frozenset(),
@@ -241,6 +245,7 @@ AGENT_FACING_TOOL_SCOPE_REQUIREMENTS: Mapping[str, frozenset[str]] = {
     "oa_workflow_done_list": frozenset({"oa:read"}),
     "oa_workflow_history_query": frozenset({"oa:read"}),
     "oa_workflow_history_next": frozenset({"oa:read"}),
+    "oa_workflow_state_get": frozenset({'oa:read'}),
     "oa_workflow_tracked_list": frozenset({"oa:read"}),
     "oa_workflow_detail_get": frozenset({"oa:read"}),
     "oa_workflow_opinions_list": frozenset({"oa:read"}),
@@ -2079,6 +2084,75 @@ def create_central_mcp_server(
         ctx: Context, cursor: Annotated[str, Field(min_length=1, max_length=128)],
     ) -> dict[str, Any]:
         return _history_query_tool_result(await invoke(ctx, "oa.workflow.history.next", {"cursor": cursor}, None))
+
+    @mcp.tool(name='oa_workflow_state_get', title='核验OA流程当前状态',
+        description='Read one exact workflow from target_ref returned by the current owned history query. '
+                    'Shows verified current nodes and handlers. Opening OA details may mark them read. '
+                    'A completed workflow does not prove payment. Never invent a source reference.',
+        annotations=read_annotations,structured_output=True)
+    async def oa_workflow_state_get(ctx:Context,
+        target_ref:Annotated[str,Field(min_length=1,max_length=8192)]) -> dict[str,Any]:
+        return await invoke(ctx,'oa.workflow.state.get',{'target_ref':target_ref},None)
+
+    @mcp.tool(name='agentbridge_business_watch_create',title='关注OA流程后续',
+        description='Create a persistent watch only when the user explicitly requests it. '
+            'Use target_ref from a fresh owned OA history row. Confirm the duration, interval and personal endpoints. '
+            'allow_mark_read must express explicit user consent to detail reads that may mark the item read; '
+            'never infer that consent from a query or deployment request. This cannot approve or modify a workflow.',
+        annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_business_watch_create(ctx:Context,
+        target_ref:Annotated[str,Field(min_length=1,max_length=8192)],
+        allow_mark_read:bool=False,
+        interval_seconds:Annotated[int,Field(ge=900,le=86400)]=3600,
+        expires_in_days:Annotated[int,Field(ge=1,le=30)]=7,
+        event_types:list[Literal['nodes','handlers','ended']]|None=None,
+        endpoint_ids:list[str]|None=None,
+        idempotency_key:Annotated[str|None,Field(max_length=200)]=None) -> dict[str,Any]:
+        identity=_request_identity(identity_store)
+        await _registered_host_context(ctx,service=service,identity=identity,minimum_level='L3')
+        return await asyncio.to_thread(service.business_watch.create,identity['user_subject'],
+            {'target_ref':target_ref,'allow_mark_read':allow_mark_read,'interval_seconds':interval_seconds,
+             'expires_in_days':expires_in_days,'event_types':event_types or ['nodes','handlers','ended'],
+             'endpoint_ids':endpoint_ids or [],'idempotency_key':idempotency_key})
+
+    @mcp.tool(name='agentbridge_business_watch_list',title='查看我关注的事项',
+        description='List only the current user’s watches with last verified states and check times.',
+        annotations=read_annotations,structured_output=True)
+    async def agentbridge_business_watch_list(ctx:Context,
+        cursor:Annotated[str|None,Field(max_length=8192)]=None,
+        limit:Annotated[int,Field(ge=1,le=100)]=32) -> dict[str,Any]:
+        identity=_request_identity(identity_store)
+        return await asyncio.to_thread(service.business_watch.list,identity['user_subject'],cursor=cursor,limit=limit)
+
+    @mcp.tool(name='agentbridge_business_watch_get',title='查看关注进展',
+        description='Read one owned watch and its verified change history; cached state is timestamped, not live.',
+        annotations=read_annotations,structured_output=True)
+    async def agentbridge_business_watch_get(ctx:Context,
+        watch_id:Annotated[str,Field(min_length=16,max_length=128)]) -> dict[str,Any]:
+        identity=_request_identity(identity_store)
+        return await asyncio.to_thread(service.business_watch.get,identity['user_subject'],watch_id)
+
+    @mcp.tool(name='agentbridge_business_watch_update',title='调整或停止关注',
+        description='Pause, resume, stop or configure one owned watch at its current version. '
+            'Stopping a watch never cancels its business workflow. Never automatically enable allow_mark_read.',
+        annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_business_watch_update(ctx:Context,
+        watch_id:Annotated[str,Field(min_length=16,max_length=128)],
+        expected_version:Annotated[int,Field(ge=1)],action:Literal['pause','resume','stop','configure'],
+        allow_mark_read:bool|None=None,
+        interval_seconds:Annotated[int|None,Field(ge=900,le=86400)]=None,
+        expires_in_days:Annotated[int|None,Field(ge=1,le=30)]=None,
+        event_types:list[Literal['nodes','handlers','ended']]|None=None,
+        endpoint_ids:list[str]|None=None) -> dict[str,Any]:
+        identity=_request_identity(identity_store)
+        await _registered_host_context(ctx,service=service,identity=identity,minimum_level='L3')
+        body={'expected_version':expected_version,'action':action}
+        for key,value in locals().copy().items():
+            if key in {'allow_mark_read','interval_seconds','expires_in_days','event_types','endpoint_ids'} and value is not None:
+                body[key]=value
+        return await asyncio.to_thread(service.business_watch.update,identity['user_subject'],watch_id,body)
 
     @mcp.tool(
         name="oa_workflow_tracked_list",

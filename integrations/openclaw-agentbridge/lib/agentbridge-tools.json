@@ -4384,6 +4384,331 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
+      "description": "Read one exact workflow from target_ref returned by the current owned history query. Shows verified current nodes and handlers. Opening OA details may mark them read. A completed workflow does not prove payment. Never invent a source reference.",
+      "inputSchema": {
+        "properties": {
+          "target_ref": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Target Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_ref"
+        ],
+        "title": "oa_workflow_state_getArguments",
+        "type": "object"
+      },
+      "name": "oa_workflow_state_get",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "oa_workflow_state_getDictOutput",
+        "type": "object"
+      },
+      "title": "核验OA流程当前状态"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Create a persistent watch only when the user explicitly requests it. Use target_ref from a fresh owned OA history row. Confirm the duration, interval and personal endpoints. allow_mark_read must express explicit user consent to detail reads that may mark the item read; never infer that consent from a query or deployment request. This cannot approve or modify a workflow.",
+      "inputSchema": {
+        "properties": {
+          "allow_mark_read": {
+            "default": false,
+            "title": "Allow Mark Read",
+            "type": "boolean"
+          },
+          "endpoint_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Endpoint Ids"
+          },
+          "event_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "nodes",
+                    "handlers",
+                    "ended"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Types"
+          },
+          "expires_in_days": {
+            "default": 7,
+            "maximum": 30,
+            "minimum": 1,
+            "title": "Expires In Days",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
+          },
+          "interval_seconds": {
+            "default": 3600,
+            "maximum": 86400,
+            "minimum": 900,
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "target_ref": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Target Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_ref"
+        ],
+        "title": "agentbridge_business_watch_createArguments",
+        "type": "object"
+      },
+      "name": "agentbridge_business_watch_create",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agentbridge_business_watch_createDictOutput",
+        "type": "object"
+      },
+      "title": "关注OA流程后续"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List only the current user’s watches with last verified states and check times.",
+      "inputSchema": {
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 8192,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cursor"
+          },
+          "limit": {
+            "default": 32,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "agentbridge_business_watch_listArguments",
+        "type": "object"
+      },
+      "name": "agentbridge_business_watch_list",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agentbridge_business_watch_listDictOutput",
+        "type": "object"
+      },
+      "title": "查看我关注的事项"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read one owned watch and its verified change history; cached state is timestamped, not live.",
+      "inputSchema": {
+        "properties": {
+          "watch_id": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Watch Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "watch_id"
+        ],
+        "title": "agentbridge_business_watch_getArguments",
+        "type": "object"
+      },
+      "name": "agentbridge_business_watch_get",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agentbridge_business_watch_getDictOutput",
+        "type": "object"
+      },
+      "title": "查看关注进展"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Pause, resume, stop or configure one owned watch at its current version. Stopping a watch never cancels its business workflow. Never automatically enable allow_mark_read.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "enum": [
+              "pause",
+              "resume",
+              "stop",
+              "configure"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "allow_mark_read": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Allow Mark Read"
+          },
+          "endpoint_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Endpoint Ids"
+          },
+          "event_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "nodes",
+                    "handlers",
+                    "ended"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event Types"
+          },
+          "expected_version": {
+            "minimum": 1,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "expires_in_days": {
+            "anyOf": [
+              {
+                "maximum": 30,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expires In Days"
+          },
+          "interval_seconds": {
+            "anyOf": [
+              {
+                "maximum": 86400,
+                "minimum": 900,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Interval Seconds"
+          },
+          "watch_id": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Watch Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "watch_id",
+          "expected_version",
+          "action"
+        ],
+        "title": "agentbridge_business_watch_updateArguments",
+        "type": "object"
+      },
+      "name": "agentbridge_business_watch_update",
+      "outputSchema": {
+        "additionalProperties": true,
+        "title": "agentbridge_business_watch_updateDictOutput",
+        "type": "object"
+      },
+      "title": "调整或停止关注"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": true
+      },
       "description": "List workflows followed by the authenticated OA user from the Tracked page. This is distinct from Sent and Done workflows.",
       "inputSchema": {
         "properties": {

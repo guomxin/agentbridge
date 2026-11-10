@@ -13,7 +13,8 @@
         "oa.workflow.opinions.list",
         "oa.workflow.pending.list",
         "oa.workflow.sent.list",
-        "oa.workflow.tracked.list"
+        "oa.workflow.tracked.list",
+        "oa.workflow.state.get"
       ],
       "tools": [
         "oa_workflow_pending_list",
@@ -23,13 +24,28 @@
         "oa_workflow_history_next",
         "oa_workflow_tracked_list",
         "oa_workflow_detail_get",
-        "oa_workflow_opinions_list"
+        "oa_workflow_opinions_list",
+        "oa_workflow_state_get"
       ],
       "legacy_scopes": [
         "oa:read"
       ],
       "dependencies": "无额外业务权限",
       "resource": "绑定下游账号实际可见范围"
+    },
+    {
+      "id": "oa.workflow.watch",
+      "label": "流程持续跟踪",
+      "capabilities": [],
+      "tools": [
+        "agentbridge_business_watch_create",
+        "agentbridge_business_watch_list",
+        "agentbridge_business_watch_get",
+        "agentbridge_business_watch_update"
+      ],
+      "legacy_scopes": [],
+      "dependencies": "流程查询；用户明确选择事项、期限和读取方式",
+      "resource": "本人明确关注且当前下游账号可见的OA流程"
     },
     {
       "id": "oa.addressbook.read",

@@ -48,7 +48,7 @@ class CentralCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["protocolVersion"], "0.1")
-        self.assertEqual(len(payload["capabilities"]), 120)
+        self.assertEqual(len(payload["capabilities"]), 121)
         capabilities = {item["name"]: item for item in payload["capabilities"]}
         for name in ("oa.workflow.history.query", "oa.workflow.history.next"):
             self.assertEqual(capabilities[name]["effect"], "read")

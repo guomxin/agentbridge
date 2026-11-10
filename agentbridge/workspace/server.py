@@ -387,6 +387,14 @@ def create_workspace_http_server(
                         ),
                     )
                     return
+                if route.path == '/api/business-watches':
+                    self._json(200, application.business_watches(account,
+                        cursor=_query_value(query,'cursor'),limit=_query_int(query,'limit',32)))
+                    return
+                watch_match = re.fullmatch(r'/api/business-watches/([0-9a-f-]{36})',route.path)
+                if watch_match:
+                    self._json(200,application.business_watch_detail(account,watch_match.group(1)))
+                    return
                 if route.path == "/api/events":
                     self._json(
                         200,
@@ -582,6 +590,16 @@ def create_workspace_http_server(
                         else MAX_BODY_BYTES
                     )
                 )
+                if route.path == '/api/business-watches':
+                    self._json(201,application.create_business_watch(account,body))
+                    return
+                watch_match = re.fullmatch(r'/api/business-watches/([0-9a-f-]{36})/(update|check)',route.path)
+                if watch_match:
+                    watch_id,action = watch_match.groups()
+                    result = application.update_business_watch(account,watch_id,body) if action=='update' else \
+                        application.check_business_watch(account,watch_id,body)
+                    self._json(200,result)
+                    return
                 if route.path == "/api/skill-regressions":
                     if not isinstance(body, dict) or set(body) != {'draft_id', 'expected_revision', 'job_id'}:
                         raise ValueError('常用回归题需要草稿、修订和报告标识')
@@ -1163,6 +1181,10 @@ def create_workspace_http_server(
                 )
 
         def _handle_error(self, exc: Exception) -> None:
+            from agentbridge.core.business_watches import BusinessWatchError
+            if isinstance(exc,BusinessWatchError):
+                self._json(exc.status,{'error':{'code':exc.code,'message':str(exc)}})
+                return
             from agentbridge.core.oa_history_queries import OaHistoryQueryError
             if isinstance(exc, OaHistoryQueryError):
                 self._json(exc.status, {"error": {"code": exc.code, "message": str(exc)}})

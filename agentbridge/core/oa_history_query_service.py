@@ -65,9 +65,10 @@ class _Partial(Exception):
 
 class OaHistoryQueryService:
     def __init__(self, store, *, read_page=None, read_nodes=None, monotonic=time.monotonic,
-                 limits: QueryLimits | None = None):
+                 limits: QueryLimits | None = None, target_ref_factory=None):
         self.store, self.read_page, self.read_nodes = store, read_page, read_nodes
         self.monotonic, self.limits = monotonic, limits or QueryLimits()
+        self.target_ref_factory = target_ref_factory
 
     def query(self, *, user_subject, session_id, principal_ref, adapter, worker,
               collection, temporal, accepted_at, keyword=None, limit=50):
@@ -307,6 +308,11 @@ class OaHistoryQueryService:
 
     def _results(self, record, data, offset):
         public_rows = [{key: deepcopy(row.get(key)) for key in PUBLIC_FIELDS} for row in data["rows"]]
+        if self.target_ref_factory:
+            for source, public in zip(data['rows'], public_rows):
+                reference = self.target_ref_factory(record, source)
+                if reference:
+                    public['target_ref'] = reference
         response = result_page(public_rows, offset=offset, limit=record["query"]["limit"],
             envelope={**self._envelope(record, data), "delivery": {"offset": offset, "complete": False}})
         next_offset = response.pop("next_offset")

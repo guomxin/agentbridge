@@ -74,6 +74,23 @@ class WorkspaceChatResult:
 
 
 class WorkspaceApplication:
+    def business_watches(self, account, *, cursor=None, limit=32):
+        return self.service.business_watch.list(account['user_subject'],cursor=cursor,limit=limit)
+
+    def business_watch_detail(self, account, watch_id):
+        return self.service.business_watch.get(account['user_subject'],watch_id)
+
+    def create_business_watch(self, account, body):
+        return self.service.business_watch.create(account['user_subject'],body)
+
+    def update_business_watch(self, account, watch_id, body):
+        return self.service.business_watch.update(account['user_subject'],watch_id,body)
+
+    def check_business_watch(self, account, watch_id, body):
+        if not isinstance(body,dict) or set(body) != {'expected_version'}:
+            raise ValueError('核验需要当前关注版本。')
+        return self.service.business_watch.check(account['user_subject'],watch_id,**body)
+
     def __init__(
         self,
         *,
