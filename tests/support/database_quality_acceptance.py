@@ -65,8 +65,33 @@ def load_blind_cases(path=CASES_PATH):
     return result
 
 
-def question_prompt(case):
+def validate_selection(selected_ids, variant='standard'):
+    if (not isinstance(selected_ids, (tuple, list)) or not selected_ids or
+            any(not isinstance(value, str) or value not in CASE_IDS for value in selected_ids) or
+            len(selected_ids) != len(set(selected_ids))):
+        raise ValueError('Select nonempty, distinct known case IDs')
+    if variant not in {'standard', 'paraphrase'}:
+        raise ValueError('Unknown prompt variant')
+    if variant == 'paraphrase' and tuple(selected_ids) != ('pagination',):
+        raise ValueError('The paraphrase variant supports only --cases pagination')
+    return tuple(selected_ids)
+
+
+def parse_case_ids(value):
+    return validate_selection(tuple(part.strip() for part in value.split(',')))
+
+
+def select_blind_cases(cases, selected_ids, variant='standard'):
+    selected = validate_selection(selected_ids, variant)
+    by_id = {case['id']: case for case in cases}
+    return [deepcopy(by_id[case_id]) for case_id in selected]
+
+
+def question_prompt(case, variant='standard'):
     # Do not add expected states, paragraph numbers, item IDs or exclusion labels.
+    validate_selection((case['id'],), variant)
+    if variant == 'paraphrase':
+        return '把甲部门、乙部门及其下级2026年9月1日至7日的工作进展一起整理一下。'
     return {
         'same-name': '汇总甲部门2026年9月1日至2日甲、乙项目的接口联调进展。',
         'empty': '2026年9月1日有哪些完成事项？',
@@ -237,8 +262,12 @@ def quality_source_identity(skill_root):
 
 
 class DatabaseQualityAcceptance(SkillHostAcceptance):
-    def __init__(self, home, *, skill_root=None, label='baseline', cases_path=CASES_PATH):
+    def __init__(self, home, *, skill_root=None, label='baseline', cases_path=CASES_PATH,
+                 selected_cases=CASE_IDS, prompt_variant='standard'):
+        self.selected_case_ids = validate_selection(selected_cases, prompt_variant)
+        self.prompt_variant = prompt_variant
         self.blind_cases = load_blind_cases(cases_path)
+        self.selected_blind_cases = select_blind_cases(self.blind_cases, self.selected_case_ids, prompt_variant)
         self.active_case = None
         self.database_calls = []
         self.skill_root = Path(skill_root) if skill_root else ROOT / 'agentbridge/business_skills'
@@ -289,6 +318,7 @@ class DatabaseQualityAcceptance(SkillHostAcceptance):
         self.runtime_patch = patch('agentbridge.database.independent.IndependentDatabase', FixtureDatabase)
         self.runtime_patch.start()
         self.report.update(suite='database-quality', label=label,
+            selected_cases=list(self.selected_case_ids), prompt_variant=prompt_variant,
             fixture_cases_sha256=hashlib.sha256(Path(cases_path).read_bytes()).hexdigest(),
             frozen_skills={sid: {'version': bundle['manifest']['version'], 'content_hash': bundle['content_hash']}
                            for sid, bundle in self.frozen_skills.items()},
@@ -352,7 +382,9 @@ class DatabaseQualityAcceptance(SkillHostAcceptance):
         self.active_case = case
         start = len(self.database_calls)
         try:
-            rows = super().run_case({'id': case['id'], 'prompt': question_prompt(case)}, **kwargs)
+            if case['id'] not in self.selected_case_ids:
+                raise ValueError('The case was not selected for this run')
+            rows = super().run_case({'id': case['id'], 'prompt': question_prompt(case, self.prompt_variant)}, **kwargs)
             row = rows[0]
             calls = deepcopy(self.database_calls[start:])
             coverage = observed_coverage(case, calls)
@@ -365,7 +397,7 @@ class DatabaseQualityAcceptance(SkillHostAcceptance):
                 all_evidence_observed=coverage['all_evidence_observed'],
                 no_business_calls=not row['synthetic_calls'],
                 no_rejected_database_calls=all(call['status'] == 'succeeded' for call in calls))
-            row.update(database_calls=calls, observed_transport=coverage)
+            row.update(database_calls=calls, observed_transport=coverage, prompt_variant=self.prompt_variant)
             private_text(self.home / 'evidence' / (case['id'] + '.answer.txt'), row['output'])
             write_metadata(self.home / 'evidence' / (case['id'] + '.manual-review.json'),
                            review_template(case, row['output'], coverage))
@@ -394,14 +426,23 @@ def main():
     parser.add_argument('--model', default='openai/gpt-5.6-sol')
     parser.add_argument('--label', choices=('baseline', 'candidate'), default='baseline')
     parser.add_argument('--skill-root', type=Path, help='Frozen built-in skill directory; never a production draft')
+    parser.add_argument('--cases', type=parse_case_ids, default=CASE_IDS,
+                        help='Comma-separated, distinct case IDs; default all seven')
+    parser.add_argument('--prompt-variant', choices=('standard', 'paraphrase'), default='standard',
+                        help='Whitelisted short wording; paraphrase currently supports pagination only')
     parser.add_argument('--timeout', type=int, default=180)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--prepare', action='store_true', help='Offline fixture/config checks only; no model authentication')
-    mode.add_argument('--run', action='store_true', help='Run all seven blind cases against an isolated real host')
+    mode.add_argument('--run', action='store_true', help='Run the selected blind cases against an isolated real host')
     args = parser.parse_args()
     if args.run and (not args.source_config or not args.source_agent_dir):
         parser.error('--run requires explicit official model source config and agent directory')
-    fixture = DatabaseQualityAcceptance(args.home, skill_root=args.skill_root, label=args.label)
+    try:
+        validate_selection(args.cases, args.prompt_variant)
+    except ValueError as error:
+        parser.error(str(error))
+    fixture = DatabaseQualityAcceptance(args.home, skill_root=args.skill_root, label=args.label,
+        selected_cases=args.cases, prompt_variant=args.prompt_variant)
     try:
         fixture.configure(provider_plugin=args.provider_plugin.resolve(), model=args.model, ca=args.ca,
                           mcp_url='http://127.0.0.1:1/mcp' if args.prepare else None)
@@ -411,7 +452,7 @@ def main():
             fixture.prepare_auth(node=args.node, sdk=args.openclaw.parent / 'dist/plugin-sdk/agent-runtime.js',
                                  source_config=args.source_config, source_agent_dir=args.source_agent_dir)
             fixture.start_gateway(node=args.node, openclaw=args.openclaw)
-            for case in fixture.blind_cases:
+            for case in fixture.selected_blind_cases:
                 row = fixture.run_blind_case(case, node=args.node, openclaw=args.openclaw, timeout=args.timeout)
                 print(json.dumps({'id': case['id'], 'elapsed_seconds': row['elapsed_seconds'],
                                   'checks': row['checks'], 'semantic_review': 'pending'}), flush=True)
@@ -419,7 +460,7 @@ def main():
     finally:
         fixture.finalize_source_identity()
         fixture.report['automatic_transport_status'] = ('not_run' if not args.run else
-            'passed' if ([row['id'] for row in fixture.report['cases']] == list(CASE_IDS)
+            'passed' if ([row['id'] for row in fixture.report['cases']] == list(fixture.selected_case_ids)
                          and all(all(row['checks'].values()) for row in fixture.report['cases'])
                          and fixture.report['quality_code_identity']['unchanged']
                          and all(fixture.report['code_identity'][key] for key in
@@ -430,6 +471,7 @@ def main():
     print(json.dumps({'home': str(fixture.home), 'model_run_attempted': args.run,
                       'report': str(fixture.home / 'evidence/report.json'),
                       'automatic_transport_status': fixture.report['automatic_transport_status'],
+                      'selected_cases': list(fixture.selected_case_ids), 'prompt_variant': fixture.prompt_variant,
                       'semantic_review': 'pending'}))
     return int(fixture.report['automatic_transport_status'] == 'failed')
 

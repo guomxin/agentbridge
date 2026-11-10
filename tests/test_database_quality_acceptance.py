@@ -1,19 +1,90 @@
 """Offline boundaries for the optional log-analysis real-host blind harness."""
 from copy import deepcopy
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from agentbridge.core.business_skills import skill_catalog, validate_binding
 from agentbridge.database.independent import DatabaseRejected
+from tests.support import database_quality_acceptance as harness
 from tests.support.database_quality_acceptance import (
     ALICE, BOB, CAPABILITIES, SOURCE, DatabaseQualityAcceptance,
     load_blind_cases, observed_coverage, question_prompt, review_template, synthetic_page,
+    parse_case_ids, select_blind_cases,
 )
 
 
 class DatabaseQualityAcceptanceTests(unittest.TestCase):
+    def test_case_selection_rejects_empty_duplicate_and_unknown_ids(self):
+        for value in ('', ' ', ',', 'empty,', ',empty', 'empty,,long-text', 'empty,empty', 'unknown', 'EMPTY'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_case_ids(value)
+        self.assertEqual(parse_case_ids('long-text, empty'), ('long-text', 'empty'))
+        for selected in ([], ['empty', 'empty'], ['unknown']):
+            with self.subTest(selected=selected), self.assertRaises(ValueError):
+                select_blind_cases(load_blind_cases(), selected)
+
+    def test_only_selected_cases_are_dispatched_and_result_names_that_scope(self):
+        instances = []
+
+        class FakeFixture:
+            def __init__(self, home, *, selected_cases, prompt_variant, **kwargs):
+                self.home = home
+                self.selected_case_ids = selected_cases
+                self.prompt_variant = prompt_variant
+                self.selected_blind_cases = select_blind_cases(load_blind_cases(), selected_cases, prompt_variant)
+                self.report = {'cases': [], 'selected_cases': list(selected_cases), 'prompt_variant': prompt_variant}
+                self.dispatched = []
+                instances.append(self)
+
+            def configure(self, **kwargs): pass
+            def validate_host(self, **kwargs): pass
+            def prepare_provider(self, **kwargs): pass
+            def prepare_auth(self, **kwargs): pass
+            def start_gateway(self, **kwargs): pass
+            def save_report(self): pass
+            def close(self): pass
+
+            def finalize_source_identity(self):
+                self.report.update(quality_code_identity={'unchanged': True}, code_identity={
+                    key: True for key in ('relevant_content_unchanged', 'git_head_unchanged', 'tracked_diff_unchanged')})
+
+            def run_blind_case(self, case, **kwargs):
+                self.dispatched.append(case['id'])
+                row = {'id': case['id'], 'checks': {'fixture_ok': True}, 'elapsed_seconds': 0}
+                self.report['cases'].append(row)
+                return row
+
+        argv = ['blind', '--run', '--home', '/synthetic/home', '--node', '/synthetic/node',
+                '--openclaw', '/synthetic/openclaw', '--provider-plugin', '/synthetic/provider',
+                '--source-config', '/synthetic/config', '--source-agent-dir', '/synthetic/agent',
+                '--cases', 'empty,long-text']
+        with patch.object(harness, 'DatabaseQualityAcceptance', FakeFixture), patch('sys.argv', argv), redirect_stdout(StringIO()):
+            self.assertEqual(harness.main(), 0)
+        fixture = instances[0]
+        self.assertEqual(fixture.dispatched, ['empty', 'long-text'])
+        self.assertEqual(fixture.report['selected_cases'], ['empty', 'long-text'])
+        self.assertEqual(fixture.report['automatic_transport_status'], 'passed')
+
+    def test_paraphrase_changes_only_whitelisted_wording_not_scope_or_evidence(self):
+        cases = load_blind_cases()
+        snapshot = deepcopy(cases)
+        selected = select_blind_cases(cases, ('pagination',), 'paraphrase')
+        self.assertEqual(selected[0], next(case for case in snapshot if case['id'] == 'pagination'))
+        prompt = question_prompt(selected[0], 'paraphrase')
+        self.assertEqual(prompt, '把甲部门、乙部门及其下级2026年9月1日至7日的工作进展一起整理一下。')
+        for marker in ('{', 'source_id', 'scope', 'items', 'destination', 'state', 'max_chars'):
+            self.assertNotIn(marker, prompt)
+        self.assertEqual(cases, snapshot)
+        for ids, variant in ((('empty',), 'paraphrase'), (('pagination', 'empty'), 'paraphrase'),
+                             (('pagination',), 'unknown')):
+            with self.subTest(ids=ids, variant=variant), self.assertRaises(ValueError):
+                select_blind_cases(cases, ids, variant)
+
     def test_blind_projection_and_prompt_do_not_include_oracle_fields(self):
         cases = load_blind_cases()
         self.assertEqual(len(cases), 7)
