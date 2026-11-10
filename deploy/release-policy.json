@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "023b7b20396a"
+    "2376f4d2e197"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Reviewed against deployed 023b7b20396a on 2026-11-09. Workspace-only projection metadata, query-scoped presentation and timeline grouping; no database schema or stored-data semantic change. No host plugin, credential, query execution, authorization or business write change."
+  "reason": "Reviewed against deployed 2376f4d2e197 on 2026-11-10. Task search reuses existing tables and ownership checks; analysis guidance retains explicit scope and existing authorization; completed diagnostic stages use one atomic transaction and bounded host timing events. Schemas and stored business semantics are unchanged. Host plugin 0.4.130 adds diagnostic observations and an additive compatibility registration, without changing credentials, grants, business authorization or write behavior."
 }

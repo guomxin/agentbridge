@@ -8,11 +8,13 @@ const MAX_IDENTITIES = 256;
 const MAX_EVENTS_PER_IDENTITY = 256;
 const MAX_RUNS = 1024;
 const MAX_AGE_MS = 30 * 60_000;
+const SYNC_STAGES = new Set(["host.before_tool_call", "host.tool_factory"]);
 const STAGES = new Set([
   "host.prompt_build", "host.model_started", "host.model_call",
   "host.llm_input", "host.llm_output", "host.tool_call",
   "host.mcp_request", "host.mcp_transport", "host.agent_end",
   "host.reply_sending",
+  ...SYNC_STAGES,
 ]);
 const IDS = ["requestId", "dispatchId", "runId", "taskId", "toolCallId", "operationId", "callId"];
 const LABELS = ["toolName", "provider", "model"];
@@ -51,14 +53,7 @@ export function createHostPerformance({ identityRouter, sharedState = {},
       toolName: safeLabel(context.toolName) };
   }
 
-  function record(stage, details = {}, context = {}) {
-    try {
-    if (!STAGES.has(stage)) return;
-    const current = { ...contextFor(context), ...details };
-    if (!current.requestId && !current.dispatchId && !current.runId) return;
-    const bindingKey = identityRouter?.sessionBindings?.get(current.sessionKey)
-      || identityRouter?.resolveToolContext?.({ sessionKey: current.sessionKey })?.binding?.key;
-    if (!bindingKey || bindingKey === "conflict") return;
+  function enqueue(stage, details, current, bindingKey) {
     const event = { eventId: randomUUID(), stage,
       kind: Object.hasOwn(details, "durationMs") ? "span" : "event",
       observedAt: new Date(now()).toISOString() };
@@ -75,7 +70,73 @@ export function createHostPerformance({ identityRouter, sharedState = {},
     if (!queue || queue.length >= MAX_EVENTS_PER_IDENTITY) { state.dropped += 1; return; }
     queue.push(event);
     try { state.onPending?.(); } catch { /* Reporting never affects execution. */ }
+  }
+
+  function record(stage, details = {}, context = {}) {
+    try {
+    // Synchronous phases must use startSync: the legacy context resolver can
+    // inherit the newest turn, and cannot attest identity at both boundaries.
+    if (!STAGES.has(stage) || SYNC_STAGES.has(stage)) return;
+    const current = { ...contextFor(context), ...details };
+    if (!current.requestId && !current.dispatchId && !current.runId) return;
+    const bindingKey = identityRouter?.sessionBindings?.get(current.sessionKey)
+      || identityRouter?.resolveToolContext?.({ sessionKey: current.sessionKey })?.binding?.key;
+    if (!bindingKey || bindingKey === "conflict") return;
+    enqueue(stage, details, current, bindingKey);
     } catch { /* An observer must never replace a business result or error. */ }
+  }
+
+  function strictContext(context) {
+    if (!context || typeof context.sessionKey !== "string" || !context.sessionKey || !safeId(context.runId)) return null;
+    const value = { sessionKey: context.sessionKey, runId: context.runId };
+    for (const field of IDS) {
+      if (context[field] == null) continue;
+      const id = safeId(context[field]);
+      if (!id) return null;
+      value[field] = id;
+    }
+    const toolName = safeLabel(context.toolName);
+    if (toolName) value.toolName = toolName;
+    return value;
+  }
+
+  function strictIdentity(sessionKey) {
+    const pinned = identityRouter?.sessionBindings?.get(sessionKey);
+    if (pinned === "conflict") return null;
+    const identity = identityRouter?.resolveToolContext?.({ sessionKey });
+    const key = identity?.bound && identity.binding?.key;
+    if (typeof key !== "string" || !key || key === "conflict" || (pinned && pinned !== key)) return null;
+    const namespace = identityRouter.catalogCacheKeyForBinding
+      ? identityRouter.catalogCacheKeyForBinding(identity.binding) : key;
+    if (!namespace) return null;
+    return { key, namespace, endpoint: identityRouter.endpointKeyForSession?.(sessionKey) ?? null };
+  }
+
+  function startSync(context, stage) {
+    try {
+      if (!SYNC_STAGES.has(stage)) return null;
+      // Never resolve through contextFor or state.turns. Missing run correlation
+      // is a missing sample, rather than evidence for the newest user request.
+      const captured = strictContext(context);
+      const identity = captured && strictIdentity(captured.sessionKey);
+      const started = monotonic();
+      if (!captured || !identity || !Number.isFinite(started)) return null;
+      let finished = false;
+      return (outcome, finalContext) => {
+        if (finished) return;
+        finished = true;
+        try {
+          const current = strictContext(finalContext);
+          const owner = current && strictIdentity(current.sessionKey);
+          if (!current || !owner || JSON.stringify(current) !== JSON.stringify(captured)
+              || JSON.stringify(owner) !== JSON.stringify(identity)) return;
+          const elapsed = monotonic() - started;
+          if (!Number.isFinite(elapsed) || elapsed < 0) return;
+          const details = { durationMs: elapsed, outcome };
+          enqueue(stage, details, { ...captured, ...details }, identity.key);
+        } catch { /* Lost diagnostic context or clocks never change execution. */ }
+      };
+    } catch { return null; }
   }
 
   return {
@@ -89,6 +150,7 @@ export function createHostPerformance({ identityRouter, sharedState = {},
     forgetSession(sessionKey) { state.turns.delete(sessionKey); },
     onPending(callback) { state.onPending = callback; },
     record,
+    startSync,
     async run(context, callback, stage = null) {
       const resolved = contextFor(context);
       const start = monotonic();
@@ -108,6 +170,21 @@ export function createHostPerformance({ identityRouter, sharedState = {},
     // Reporting failures drop the bounded batch instead of replaying stale data.
     status() { return { queued: [...state.queues.values()].reduce((sum, list) => sum + list.length, 0), dropped: state.dropped }; },
   };
+}
+
+// Prepare/finalize observation outside the callback's exception handling. A
+// broken recorder must never cause a fallback that executes business twice.
+export function observeHostSync(recorder, context, callback, stage, finalContext = context) {
+  let finish;
+  try { finish = recorder?.startSync?.(typeof context === "function" ? context() : context, stage); } catch {}
+  let outcome = "completed";
+  try { return callback(); }
+  catch (error) { outcome = "error"; throw error; }
+  finally {
+    try {
+      if (typeof finish === "function") finish(outcome, typeof finalContext === "function" ? finalContext() : finalContext);
+    } catch { /* Best effort, including custom recorders supplied by the host. */ }
+  }
 }
 
 export function timingContext() { return callContext.getStore(); }

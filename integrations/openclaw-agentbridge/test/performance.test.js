@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createHostPerformance, TIMING_META_KEY } from "../lib/performance.js";
+import { createHostPerformance, observeHostSync, TIMING_META_KEY } from "../lib/performance.js";
 import { createAgentBridgeMcpClient } from "../lib/mcp-client.js";
 import { createHostRuntimeReporter } from "../lib/runtime-reporter.js";
 import { registerAgentBridgeInteractions } from "../lib/plugin.js";
+import { createInteractionSharedState } from "../lib/coordinator.js";
 
 function recorder(options = {}) {
   return createHostPerformance({ identityRouter: {
@@ -146,4 +147,148 @@ test("2026.7.1 native model hooks record TTFB and usage, never synthesize first 
   assert.equal(events[1].durationClock, "host.wall");
   assert.equal(events[2].cacheReadTokens, 80);
   assert.equal(/PRIVATE_BODY|firstToken|ttft/iu.test(JSON.stringify(events)), false);
+});
+
+function syncRecorder(options = {}) {
+  let owner = "identity-a", namespace = "namespace-a", endpoint = "endpoint-a";
+  const identityRouter = { enabled: true, sessionBindings: new Map([["session-a", owner]]),
+    resolveToolContext: () => ({ bound: true, binding: { key: owner }, client: {} }),
+    catalogCacheKeyForBinding: () => namespace, endpointKeyForSession: () => endpoint };
+  const perf = createHostPerformance({ identityRouter, ...options });
+  return { perf, identityRouter,
+    changeOwner(value) { owner = value; identityRouter.sessionBindings.set("session-a", value); },
+    changeNamespace(value) { namespace = value; }, changeEndpoint(value) { endpoint = value; } };
+}
+
+test("synchronous phases preserve undefined, block, arrays, promises and original errors", () => {
+  let mono = 10, calls = 0;
+  const { perf } = syncRecorder({ monotonic: () => mono });
+  const context = { sessionKey: "session-a", runId: "run-a", toolCallId: "call-a", toolName: "database_execute" };
+  const values = [undefined, { block: true, blockReason: "unchanged" }, [{ name: "tool" }], Promise.resolve("same-promise")];
+  for (const value of values) assert.equal(observeHostSync(perf, context, () => {
+    calls++; mono += 2; return value;
+  }, "host.tool_factory"), value);
+  const original = new Error("original business error");
+  assert.throws(() => observeHostSync(perf, context, () => { calls++; mono += 3; throw original; },
+    "host.before_tool_call"), error => error === original);
+  assert.equal(calls, 5);
+  const events = perf.take("identity-a");
+  assert.deepEqual(events.map(event => event.durationMs), [2, 2, 2, 2, 3]);
+  assert.equal(events.at(-1).outcome, "error");
+  assert.equal(events.every(event => event.durationClock === "host.monotonic"), true);
+});
+
+test("clock, recorder and correlation failures never run the synchronous callback twice", () => {
+  let calls = 0;
+  const context = { sessionKey: "session-a", runId: "run-a" };
+  const original = new Error("original");
+  const broken = [
+    syncRecorder({ monotonic() { throw new Error("clock"); } }).perf,
+    syncRecorder({ now() { throw new Error("wall-clock"); } }).perf,
+    syncRecorder({ monotonic: (() => { let n = 0; return () => { if (n++) throw new Error("finish clock"); return 1; }; })() }).perf,
+    { startSync() { throw new Error("recorder start"); } },
+    { startSync() { return () => { throw new Error("recorder finish"); }; } },
+  ];
+  for (const perf of broken) {
+    const value = {};
+    assert.equal(observeHostSync(perf, context, () => { calls++; return value; }, "host.tool_factory"), value);
+    assert.throws(() => observeHostSync(perf, context, () => { calls++; throw original; },
+      "host.before_tool_call"), error => error === original);
+  }
+  assert.equal(observeHostSync(broken[0], () => { throw new Error("context"); },
+    () => { calls++; return "once"; }, "host.tool_factory"), "once");
+  assert.equal(calls, broken.length * 2 + 1);
+});
+
+test("new synchronous phases never infer a request from the latest turn or an unknown run", () => {
+  const { perf } = syncRecorder();
+  perf.bindTurn("session-a", "old-request");
+  perf.record("host.model_started", {}, { sessionKey: "session-a", runId: "old-run" });
+  perf.take("identity-a");
+  perf.bindTurn("session-a", "new-request");
+  for (const runId of ["old-run", "unknown-run"]) observeHostSync(perf, { sessionKey: "session-a", runId },
+    () => {}, "host.tool_factory");
+  observeHostSync(perf, { sessionKey: "session-a", requestId: "explicit-without-run" }, () => {}, "host.tool_factory");
+  perf.record("host.before_tool_call", { durationMs: 1 }, { sessionKey: "session-a", runId: "unknown-run" });
+  observeHostSync(perf, { sessionKey: "session-a", runId: "known-run", requestId: "explicit-request" },
+    () => {}, "host.before_tool_call");
+  const events = perf.take("identity-a");
+  assert.equal(events.length, 3);
+  assert.deepEqual(events.slice(0, 2).map(event => event.requestId), [undefined, undefined]);
+  assert.equal(events[2].requestId, "explicit-request");
+  assert.doesNotMatch(JSON.stringify(events), /new-request|old-request|explicit-without-run/);
+});
+
+test("synchronous samples are dropped on identity, namespace, endpoint or final call changes", () => {
+  for (const change of [h => h.changeOwner("identity-b"), h => h.changeOwner("conflict"),
+                       h => h.changeNamespace("namespace-b"), h => h.changeEndpoint("endpoint-b")]) {
+    const h = syncRecorder();
+    const context = { sessionKey: "session-a", runId: "run-a" };
+    assert.equal(observeHostSync(h.perf, context, () => { change(h); return "result"; }, "host.tool_factory"), "result");
+    assert.equal(h.perf.status().queued, 0);
+  }
+  const { perf, identityRouter } = syncRecorder();
+  const context = { sessionKey: "session-a", runId: "run-a", toolCallId: "exact-call" };
+  observeHostSync(perf, context, () => {}, "host.before_tool_call", { ...context, runId: "new-run" });
+  observeHostSync(perf, context, () => {}, "host.before_tool_call", () => null);
+  identityRouter.resolveToolContext = () => ({ bound: false });
+  observeHostSync(perf, context, () => {}, "host.tool_factory");
+  assert.equal(perf.status().queued, 0);
+});
+
+test("synchronous diagnostics share bounded queues and never serialize business fields", () => {
+  const { perf } = syncRecorder();
+  perf.onPending(() => { throw new Error("reporter failed"); });
+  const context = { sessionKey: "session-a", runId: "run-a", toolName: "database_execute",
+    prompt: "PRIVATE_PROMPT", arguments: { password: "PRIVATE_PASSWORD" }, url: "https://private.test/" };
+  let calls = 0;
+  for (let i = 0; i < 300; i++) observeHostSync(perf, context, () => { calls++; }, "host.tool_factory");
+  assert.equal(calls, 300);
+  assert.deepEqual(perf.status(), { queued: 256, dropped: 44 });
+  assert.doesNotMatch(JSON.stringify(perf.take("identity-a")), /PRIVATE_|https:|password|prompt|session-a/);
+});
+
+function synchronousPlugin() {
+  const h = syncRecorder(), hooks = {}, sharedState = { ...createInteractionSharedState(), hostPerformance: h.perf };
+  let factory;
+  const api = { pluginConfig: { autoPoll: false, syncTimeline: false }, config: {},
+    logger: { info() {}, warn() {} }, registerTool(value) { factory = value; }, registerAgentToolResultMiddleware() {},
+    registerCommand() {}, registerGatewayMethod() {}, on(name, callback) { hooks[name] = callback; } };
+  const coordinator = registerAgentBridgeInteractions(api, { sharedState, identityRouter: h.identityRouter });
+  return { ...h, hooks, coordinator, factory };
+}
+
+test("real before-tool guards and lazy factories remain synchronous and report exact observed calls", () => {
+  const h = synchronousPlugin();
+  const context = { sessionKey: "session-a", runId: "run-a" };
+  assert.equal(h.hooks.before_tool_call({ toolCallId: "read-call", toolName: "database_execute", runId: "run-a", params: {} }, context), undefined);
+  const blocked = h.hooks.before_tool_call({ toolCallId: "blocked-call", toolName: "agentbridge__read", runId: "run-a", params: {} }, context);
+  assert.equal(blocked.block, true);
+  assert.equal(blocked.then, undefined);
+  const tools = h.factory(context);
+  assert.equal(Array.isArray(tools), true);
+  const events = h.perf.take("identity-a");
+  assert.deepEqual(events.map(event => event.stage), ["host.before_tool_call", "host.before_tool_call", "host.tool_factory"]);
+  assert.equal(events[0].toolCallId, "read-call");
+  assert.equal(events.every(event => event.runId === "run-a"), true);
+  const original = new Error("original guard error");
+  h.coordinator.bindToolCall = () => { throw original; };
+  assert.throws(() => h.hooks.before_tool_call({ toolCallId: "failed-call", runId: "run-a" }, context), error => error === original);
+});
+
+test("plugin phases omit absent runs, conflicting calls, ended runs and event/context disagreement", () => {
+  const h = synchronousPlugin();
+  const context = { sessionKey: "session-a", runId: "run-a" };
+  h.hooks.before_tool_call({ toolCallId: "same-call", runId: "run-a", params: {} }, context);
+  h.perf.take("identity-a");
+  // Reusing the exact tool call in another run is rejected for diagnostics.
+  h.hooks.before_tool_call({ toolCallId: "same-call", runId: "run-b", params: {} }, { ...context, runId: "run-b" });
+  h.factory({ ...context, toolCallId: "same-call" });
+  h.factory({ sessionKey: "session-a" });
+  h.hooks.before_tool_call({ toolCallId: "no-run", params: {} }, { sessionKey: "session-a" });
+  h.hooks.before_tool_call({ toolCallId: "different-session", sessionKey: "session-b", runId: "run-a", params: {} }, context);
+  h.hooks.before_tool_call({ toolCallId: "different-run", runId: "run-b", params: {} }, context);
+  h.coordinator.releaseToolRun("session-a", "run-a");
+  h.factory(context);
+  assert.equal(h.perf.status().queued, 0);
 });

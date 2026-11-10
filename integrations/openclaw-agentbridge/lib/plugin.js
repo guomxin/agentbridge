@@ -23,11 +23,11 @@ import {
 } from "./proxy-tools.js";
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
-import { createHostPerformance } from "./performance.js";
+import { createHostPerformance, observeHostSync } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.129";
+export const PLUGIN_VERSION = "0.4.130";
 
 // Only fixed host guidance enters system context. Catalogs, trial material and
 // task history keep their existing data context and do not gain authority.
@@ -156,10 +156,25 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     : null;
   coordinator.hostRuntimeReporter = hostRuntimeReporter;
 
+  function toolTimingContext(event = {}, context = {}, requireObservedCall = false) {
+    const value = {};
+    for (const name of ["sessionKey", "runId", "toolCallId", "requestId", "dispatchId"]) {
+      if (event[name] != null && context[name] != null && event[name] !== context[name]) return null;
+      if (event[name] != null || context[name] != null) value[name] = event[name] ?? context[name];
+    }
+    if (!value.sessionKey) return null;
+    const exact = coordinator.toolRunContextForCall(value.toolCallId, value.sessionKey, value.runId);
+    if (exact.status === "rejected" || (requireObservedCall && exact.status !== "bound")) return null;
+    if (exact.status === "bound") value.runId = exact.runId;
+    if (!value.runId) return null;
+    if (event.toolName || context.toolName) value.toolName = event.toolName || context.toolName;
+    return value;
+  }
+
   if (identityRouter.enabled) {
     api.registerTool(
-      (context) =>
-        createAgentBridgeProxyTools({
+      (context) => observeHostSync(performanceRecorder, () => toolTimingContext({}, context),
+        () => createAgentBridgeProxyTools({
           context,
           identityRouter,
           serverName: config.mcpServerName,
@@ -203,7 +218,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
           trustedResultContextFactory: request => coordinator.createTrustedResultContext(request),
           performanceRecorder,
           logger: api.logger,
-        }),
+        }), "host.tool_factory", () => toolTimingContext({}, context)),
       { names: AGENTBRIDGE_PROXY_TOOL_NAMES },
     );
   }
@@ -240,7 +255,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   );
 
   // OpenClaw 2026.7.1 omits session context from result middleware.
-  api.on("before_tool_call", (event, context) => {
+  api.on("before_tool_call", (event, context) => observeHostSync(performanceRecorder,
+    () => toolTimingContext(event, context), () => {
     coordinator.bindToolCall(event, context);
     const trial = coordinator.skillTrialForSession(event.sessionKey || context.sessionKey);
     // The Codex native relay qualifies this tool with its `openclaw` namespace.
@@ -273,7 +289,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         blockReason: "Use the identity-routed native AgentBridge tool instead of the legacy global MCP server.",
       };
     }
-  });
+  }, "host.before_tool_call", () => toolTimingContext(event, context, true)));
 
   api.on("message_received", (event, context) => {
     coordinator.recordUserMessage(event, context);

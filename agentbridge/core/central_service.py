@@ -2305,7 +2305,7 @@ class CentralCapabilityService:
         """Accept bounded diagnostic facts, never arbitrary host payloads."""
         stages = {"host.prompt_build", "host.model_call", "host.model_started", "host.llm_input",
             "host.llm_output", "host.tool_call", "host.mcp_request", "host.mcp_transport",
-            "host.agent_end", "host.reply_sending"}
+            "host.agent_end", "host.reply_sending", "host.before_tool_call", "host.tool_factory"}
         identifiers = ("requestId", "dispatchId", "runId", "taskId", "toolCallId", "operationId", "callId")
         labels = ("toolName", "provider", "model")
         numbers = ("timeToFirstByteMs", "requestPayloadBytes", "responseStreamBytes", "inputTokens", "outputTokens",

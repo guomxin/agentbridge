@@ -106,6 +106,36 @@ class RuntimeLatencyTests(unittest.TestCase):
         counts = service._record_host_timing_events("user-a", registration, invalid)
         self.assertEqual(counts, {"recorded": 0, "ignored": 3})
 
+    def test_sync_host_stages_are_owned_deduplicated_and_keep_terminal_trace(self):
+        service = authorized_service(home=Path(self.temp.name) / "sync-service", base_url="http://oa.example.test/seeyon/main.do?method=main")
+        trace, _ = service.runtime_governance.ensure_trace(user_subject="user-a", request_id="sync-request")
+        service.runtime_governance.update_trace(trace["trace_id"], status="succeeded", side_effect_boundary="B5_VERIFIED")
+        before = service.runtime_governance.get_trace(trace["trace_id"])
+        registration = {"agentHost":"openclaw", "hostInstanceId":"sync-host", "hostVersion":"1.0.0"}
+        events = [{"eventId":f"sync-{index}", "stage":stage, "kind":"span",
+            "observedAt":datetime.now(timezone.utc).isoformat(), "durationMs":index + 1,
+            "requestId":"sync-request", "runId":"sync-run", "toolCallId":"sync-call",
+            "toolName":"database_execute", "arguments":{"password":"private-value"}, "url":"private-url"}
+            for index, stage in enumerate(("host.before_tool_call", "host.tool_factory"))]
+        for _ in range(2):
+            self.assertEqual(service._record_host_timing_events("user-a", registration, events), {"recorded":2,"ignored":0})
+        detail = service.runtime_governance.trace_detail(trace["trace_id"])
+        self.assertEqual(len(detail["spans"]), 2)
+        self.assertEqual({span["stage"] for span in detail["spans"]}, {event["stage"] for event in events})
+        after = service.runtime_governance.get_trace(trace["trace_id"])
+        for field in ("status", "finished_at", "side_effect_boundary"):
+            self.assertEqual(after[field], before[field])
+        self.assertNotIn("private-value", json.dumps(detail))
+        self.assertNotIn("private-url", json.dumps(detail))
+        self.assertEqual(service._record_host_timing_events("user-a", registration,
+            [{**events[0], "eventId":"unregistered-stage", "stage":"host.arbitrary"}]), {"recorded":0,"ignored":1})
+        # A diagnostic request cannot attach its span to another user's task.
+        other = service.ensure_host_task(user_subject="user-b", token_id="token-b", agent_host="openclaw",
+            host_task_key="other-sync", endpoint_key="workspace:b", client_type="web", external_subject="b",
+            conversation_ref="conversation-b", title="Other user's timing")["task"]
+        self.assertEqual(service._record_host_timing_events("user-a", registration,
+            [{**events[1], "eventId":"foreign-sync", "taskId":other["taskId"]}]), {"recorded":0,"ignored":1})
+
     def test_first_progress_measures_trace_to_message_instead_of_recording_action(self):
         service = authorized_service(home=Path(self.temp.name) / "service", base_url="http://oa.example.test/seeyon/main.do?method=main")
         common = dict(user_subject="user-a", token_id="token-a", agent_host="openclaw", endpoint_key="workspace:a",

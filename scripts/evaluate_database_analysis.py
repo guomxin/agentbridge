@@ -1,4 +1,4 @@
-"""Score human-normalized analysis answers against a fixed, source-bound oracle.
+"""Score reviewer-normalized analysis answers against a fixed, source-bound oracle.
 
 This checks labeled claims, not the meaning of arbitrary prose. A reviewer must
 first map every sentence/table claim to items and flag unsupported metrics.
@@ -65,7 +65,7 @@ def main():
     answers=submission['answers']
     results=[evaluate(case,answers.get(case['id'],{})) for case in cases]
     report={'schema':'agentbridge.analysis-quality-result.v1','run':submission.get('run',{}),
-            'basis':'human-normalized claims; not an automatic semantic judge',
+            'basis':'reviewer-normalized claims; not an automatic semantic judge; reviewer identity is in run',
             'passed':all(r['passed'] for r in results),'cases':results,
             'failure_counts':{k:sum(bool(r['errors'][k]) for r in results) for k in ('scope','completeness','relevance','support')}}
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
