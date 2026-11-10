@@ -720,49 +720,75 @@ class RuntimeGovernanceStore:
         finished_at: str | None = None,
         duration_ms: int | None = None,
     ) -> dict[str, Any]:
-        attempt = 1
+        # Omitted association keys retain their existing wildcard semantics.
+        # A read-only hit avoids taking the writer lock; a miss is checked again
+        # under SQLite's writer transaction so separate store instances agree.
+        filters = ["trace_id = ?", "stage = ?"]
+        values: list[Any] = [trace_id, stage]
+        for column, value in (
+            ("operation_id", operation_id),
+            ("interaction_id", interaction_id),
+            ("artifact_id", artifact_id),
+            ("delivery_id", delivery_id),
+        ):
+            if value:
+                filters.append(f"{column} = ?")
+                values.append(value)
+        query = (
+            f"SELECT * FROM runtime_spans WHERE {' AND '.join(filters)} "
+            "ORDER BY started_at DESC LIMIT 1"
+        )
         with self._connect() as connection:
-            filters = ["trace_id = ?", "stage = ?"]
-            values: list[Any] = [trace_id, stage]
-            for column, value in (
-                ("operation_id", operation_id),
-                ("interaction_id", interaction_id),
-                ("artifact_id", artifact_id),
-                ("delivery_id", delivery_id),
-            ):
-                if value:
-                    filters.append(f"{column} = ?")
-                    values.append(value)
-            existing = connection.execute(
-                f"SELECT * FROM runtime_spans WHERE {' AND '.join(filters)} "
-                "ORDER BY started_at DESC LIMIT 1",
-                values,
+            existing = connection.execute(query, values).fetchone()
+            if existing is not None:
+                return _span_from_row(existing)
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(query, values).fetchone()
+            if existing is not None:
+                return _span_from_row(existing)
+            _validate_boundary(side_effect_boundary)
+            trace = connection.execute(
+                "SELECT * FROM runtime_traces WHERE trace_id = ?", (trace_id,)
             ).fetchone()
-        if existing is not None:
-            return _span_from_row(existing)
-        span = self.start_span(
-            trace_id=trace_id,
-            stage=stage,
-            operation_id=operation_id,
-            interaction_id=interaction_id,
-            artifact_id=artifact_id,
-            delivery_id=delivery_id,
-            system_id=system_id,
-            capability_name=capability_name,
-            attempt=attempt,
-            side_effect_boundary=side_effect_boundary,
-            metadata=metadata,
-            started_at=started_at,
-        )
-        return self.finish_span(
-            span["span_id"],
-            status=status,
-            error_code=error_code,
-            side_effect_boundary=side_effect_boundary,
-            metadata=metadata,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-        )
+            if trace is None:
+                raise KeyError(f"runtime trace not found: {trace_id}")
+            span_id = str(uuid4())
+            effective_started = started_at or self._now()
+            effective_finished = finished_at or self._now()
+            effective_duration = duration_ms
+            if effective_duration is None:
+                effective_duration = _duration_ms(effective_started, effective_finished)
+            connection.execute(
+                """
+                INSERT INTO runtime_spans (
+                    span_id, trace_id, stage, status, user_subject, task_id,
+                    operation_id, interaction_id, artifact_id, delivery_id,
+                    system_id, capability_name, attempt, side_effect_boundary,
+                    error_code, started_at, finished_at, duration_ms, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    span_id, trace_id, _bounded_text(stage, 120, required=True),
+                    _bounded_text(status, 40, required=True), trace["user_subject"], trace["task_id"],
+                    _bounded_text(operation_id, 256), _bounded_text(interaction_id, 256),
+                    _bounded_text(artifact_id, 256), _bounded_text(delivery_id, 256),
+                    _bounded_text(system_id or trace["system_id"], 80),
+                    _bounded_text(capability_name or trace["capability_name"], 200),
+                    side_effect_boundary, _bounded_text(error_code, 120),
+                    effective_started, effective_finished, max(int(effective_duration), 0),
+                    _canonical_json(_safe_metadata(metadata)),
+                ),
+            )
+            # A late audit phase can advance evidence, but cannot change the
+            # execution outcome or clear an already recorded completion time.
+            connection.execute(
+                "UPDATE runtime_traces SET side_effect_boundary = ?, updated_at = ? WHERE trace_id = ?",
+                (_max_boundary(str(trace["side_effect_boundary"]), side_effect_boundary), self._now(), trace_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM runtime_spans WHERE span_id = ?", (span_id,)
+            ).fetchone()
+        return _span_from_row(row)
 
     def observe_operation(
         self,
