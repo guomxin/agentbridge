@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "c7f2db9f7f3c"
+    "a0cb9e34888f"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "reason": "Reviewed against deployed c7f2db9f7f3c on 2026-11-10. Adds seven owned business-watch ledger/control tables and fourteen indexes without altering or removing existing objects; other three databases unchanged. Existing grants, source validity, business decisions and commit semantics remain intact. Before/after digests come from an exact empty-DDL clone of all four deployed schemas initialized offline with candidate code. Host plugin 0.4.131 adds governed watch tools and fresh delivery validation. Publication retains verified backups; post-transition failure requires reviewed manual recovery without overwriting later business data.",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "438a377b368a5b61f83b4f2acbe3fa7f3d1cbe26d876042c4b14f7d62fe1ce90",
-      "afterSha256": "b984945db13720725eafbc341d2863fde7ec182b2880cee092686269602b7c15"
-    }
-  }
+  "dataCompatibility": "no-migration",
+  "reason": "Reviewed against deployed a0cb9e34888f on 2026-11-10. Corrects only the Workspace watch-list empty-state notice after the first watch is created. No capability, host plugin, permission, schema, stored semantics, due time or business authorization change. Existing active watch retains its persisted schedule across the normal release restart; host plugin remains 0.4.131 with identical files."
 }

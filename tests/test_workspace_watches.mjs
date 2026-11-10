@@ -281,6 +281,45 @@ test('creating requires explicit read consent and submits the chosen owned optio
   assert.equal(descendants(h.$('#business-watch-detail')).some(n=>n.tag==='img'),false);h.lifecycle.dispose();
 });
 
+test('creating from an empty list updates its count and retains the separate creation and check notices',async()=>{
+  let value=watch('new'),posts=0;
+  const h=harness(call=>call.path.endsWith('/options')?options():call.method
+    ? {watch:++posts===1?value:(value={...value,version:2})}:{items:[],hasMore:false});
+  await h.controller.activate();assert.equal(h.$('#business-watch-list-status').textContent,'暂时没有关注的事项。');
+  await h.controller.createFrom({title:'尚未关注的来源',target_ref:'opaque-source'});
+  h.field('allow_mark_read').checked=true;await h.controller.submitEditor();
+  const rows=descendants(h.$('#business-watch-list')).filter(node=>node.tag==='button');
+  assert.equal(rows.length,1);assert.equal(rows[0].dataset.watchId,'new');
+  assert.equal(h.$('#business-watch-list-status').textContent,'已显示 1 项。');
+  assert.match(h.$('#business-watch-detail').textContent,/已开始关注；最新状态以读取时间为准。/);
+  await h.controller.act('check');assert.equal(h.$('#business-watch-list-status').textContent,'已显示 1 项。');
+  assert.match(h.$('#business-watch-detail').textContent,/本次核验已结束，流程状态以读取时间为准。/);
+  assert.equal(posts,2);h.lifecycle.dispose();
+});
+
+test('row updates preserve an in-flight list message and list failures while list reads retain detail conflicts',async()=>{
+  const pending=deferred();let value=watch(),lists=0,mutations=0;
+  const h=harness(call=>{
+    if(call.method){
+      if(++mutations===1)return {watch:(value=watch('one',2,'paused'))};
+      throw Object.assign(new Error('changed'),{status:409,code:'WATCH_VERSION_CONFLICT'});
+    }
+    if(call.path.startsWith('/api/business-watches?'))return pending.promise;
+    if(call.path==='/api/business-watches')return {items:[value],hasMore:++lists===1,nextCursor:'next'};
+    return detail(value);
+  });
+  await h.controller.activate();await h.controller.select('one');const loading=h.controller.load({append:true});
+  await h.controller.act('pause');assert.equal(h.$('#business-watch-list-status').textContent,'正在加载更多…');
+  pending.reject(new Error('offline'));await loading;const failure=h.$('#business-watch-list-status').textContent;
+  assert.match(failure,/读取失败/);assert.equal(h.$('#business-watch-retry').hidden,false);
+  await h.controller.select('one',{preserve:true});await h.controller.act('resume');
+  assert.equal(h.$('#business-watch-list-status').textContent,failure);
+  assert.match(h.$('#business-watch-detail').textContent,/刷新详情后再操作/);
+  await h.controller.load();assert.equal(h.$('#business-watch-list-status').textContent,'已显示 1 项。');
+  assert.match(h.$('#business-watch-detail').textContent,/刷新详情后再操作/);
+  assert.equal(h.button('resume').disabled,true);h.lifecycle.dispose();
+});
+
 test('missing target references and disabled watch permission cannot create or request permission',async()=>{
   const h=harness(call=>call.path.endsWith('/options')?options({enabled:false,endpoints:[]}):{items:[],hasMore:false});
   await h.controller.activate();await h.controller.createFrom({title:'not a source',affair_id:'123',url:'https://example.test'});

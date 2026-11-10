@@ -61,6 +61,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   let listPending = false, detailPending = false, actionPending = false, verified = false;
   let detailVisible = false;
   let lastAppend = false, detailNotice = '', listNotice = '';
+  let listNoticeIsSummary = false;
   let editor = null, editorPending = false, editorTicket = 0;
   const rowViews = new Map();
   const node = (tag, className = '', value = '') => {
@@ -125,7 +126,10 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   back.addEventListener('click', () => { detailVisible = false; $('#business-watch-detail').className = 'business-watch-detail mobile-empty'; });
 
   const current = (scope, epoch) => active && epoch === generation && scope.current();
-  const showListNotice = message => { listNotice = message; $('#business-watch-list-status').textContent = message; };
+  const listSummary = () => items.size ? `已显示 ${items.size} 项${cursor ? '，可继续加载。' : '。'}` : '暂时没有关注的事项。';
+  const showListNotice = (message, {summary = false} = {}) => {
+    listNotice = message; listNoticeIsSummary = summary; $('#business-watch-list-status').textContent = message;
+  };
   const merge = watch => {
     if (!validWatch(watch)) throw new Error('Invalid watch projection');
     const previous = items.get(watch.watch_id);
@@ -185,7 +189,9 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
     }
     for (const [id, view] of rowViews) if (!items.has(id)) { view.root.remove(); rowViews.delete(id); }
     if (!children.length) children.push(node('p', 'empty-state', listPending ? '正在读取关注事项…' : '暂时没有关注的事项。'));
-    reconcileChildren($('#business-watch-list'), children); updateControls();
+    reconcileChildren($('#business-watch-list'), children);
+    if (listNoticeIsSummary) showListNotice(listSummary(), {summary:true});
+    updateControls();
   }
   function renderDetail() {
     content.hidden = !detail; placeholder.hidden = !!detail;
@@ -373,7 +379,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
       const top = $('#business-watch-list').scrollTop;
       items = next; cursor = result.hasMore ? result.nextCursor : null;
       renderList(); $('#business-watch-list').scrollTop = append ? top : 0;
-      showListNotice(items.size ? `已显示 ${items.size} 项${cursor ? '，可继续加载。' : '。'}` : '暂时没有关注的事项。');
+      showListNotice(listSummary(), {summary:true});
     } catch (error) {
       if (isCancellation(error) || !current(scope, epoch) || ticket !== listTicket) return;
       if (error.status === 403 || (error.status === 401 && error.code !== 'WATCH_SESSION_UNAVAILABLE')) clearAccess();
