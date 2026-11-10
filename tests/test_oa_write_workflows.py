@@ -26,6 +26,8 @@ CONTRACT_BYTES = (Path(__file__).parent / "fixtures/oa_write_workflows_contract.
 CONTRACT = json.loads(CONTRACT_BYTES.replace(b'"bscli.adapters.', b'"agentbridge.adapters.'))
 # Explicit read-only extension; no old registry entry or write contract changes.
 HISTORY_READ_CAPABILITIES = ["oa.workflow.history.query", "oa.workflow.history.next"]
+STATE_READ_CAPABILITY = "oa.workflow.state.get"
+READ_EXTENSION_CAPABILITIES = [*HISTORY_READ_CAPABILITIES, STATE_READ_CAPABILITY]
 # The original migration fixture remains immutable. This separately reviewed
 # revision changes only versions/descriptions for the 14 unified pending flows.
 PENDING_REVISION = json.loads(
@@ -218,7 +220,7 @@ def test_oa_write_fixture_remains_the_frozen_5020bf6_contract():
 def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
     registry = seeyon_central.build_central_capability_registry()
     # list() sorts capabilities and would hide movement across read/write blocks.
-    assert list(registry._specs) == [*HISTORY_READ_CAPABILITIES, *CONTRACT["registry_order"]]
+    assert list(registry._specs) == [*READ_EXTENSION_CAPABILITIES, *CONTRACT["registry_order"]]
     assert list(write_catalog._TRUSTED_WRITE_DEFINITIONS) == CONTRACT["catalog_order"]
     assert list(write_catalog._CAPABILITY_SCOPES) == CONTRACT["scope_order"]
     assert [
@@ -228,8 +230,8 @@ def test_full_registry_catalog_and_scope_insertion_orders_are_unchanged():
     ] == CONTRACT["commits"]
 
 
-@pytest.mark.parametrize("name", HISTORY_READ_CAPABILITIES)
-def test_history_query_extension_has_only_existing_read_permissions(name):
+@pytest.mark.parametrize("name", READ_EXTENSION_CAPABILITIES)
+def test_history_and_state_extensions_have_only_existing_read_permissions(name):
     spec = seeyon_central.build_central_capability_registry().get(name)
     tool_name = name.replace(".", "_")
     assert spec.effect == "read"
@@ -239,6 +241,16 @@ def test_history_query_extension_has_only_existing_read_permissions(name):
     assert name not in write_catalog._TRUSTED_WRITE_DEFINITIONS
     assert name not in write_catalog._TRUSTED_WRITE_COMMITS
     assert name not in write_catalog._CAPABILITY_SCOPES
+
+
+def test_exact_workflow_state_extension_accepts_only_an_owned_source_reference():
+    spec = seeyon_central.build_central_capability_registry().get(STATE_READ_CAPABILITY)
+    assert spec.version == "0.1.0"
+    assert spec.adapter == "seeyon-central" and spec.workflow == "workflow-state-v1"
+    assert spec.input_schema == {"type": "object", "additionalProperties": False,
+        "properties": {"target_ref": {"type": "string", "minLength": 1, "maxLength": 8192}},
+        "required": ["target_ref"]}
+    assert spec.output_schema == {"type": "object"}
 
 
 def test_all_oa_write_specs_match_versioned_contract_and_registration_order():

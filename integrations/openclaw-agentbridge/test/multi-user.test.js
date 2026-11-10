@@ -700,7 +700,8 @@ test("agent-facing catalogs hide internal commit and continuation tools", () => 
       (tool) =>
         tool.name.endsWith("_prepare") ||
         tool.name.endsWith("_session_login") ||
-        ["agentbridge_task_plan_cancel", "agentbridge_task_cancel"].includes(tool.name),
+        ["agentbridge_task_plan_cancel", "agentbridge_task_cancel",
+          "agentbridge_business_watch_create", "agentbridge_business_watch_update"].includes(tool.name),
     )
     .map((tool) => tool.name)
     .sort();

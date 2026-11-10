@@ -83,6 +83,18 @@ class CentralStorageTests(unittest.TestCase):
                     ['trigger', 'immutable_oa_history_terminal_results'],
                     ['trigger', 'immutable_oa_history_cursor'],
                     ['trigger', 'immutable_oa_history_receipt'],
+                    ['table', 'business_watch_changes'],
+                    ['table', 'business_watch_checks'],
+                    ['table', 'business_watch_control_events'],
+                    ['table', 'business_watch_controls'],
+                    ['table', 'business_watch_create_requests'],
+                    ['table', 'business_watch_observations'],
+                    ['table', 'business_watches'],
+                    ['index', 'business_watch_checks_lease'],
+                    ['index', 'business_watch_checks_one_running'],
+                    ['index', 'business_watches_active_target'],
+                    ['index', 'business_watches_due'],
+                    ['index', 'business_watches_owner_created'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))

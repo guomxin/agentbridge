@@ -53,15 +53,18 @@ class OaHistoryQueryMcpTests(unittest.TestCase):
 
     def request(self, client, token, kind, arguments):
         response = mcp_fixtures.CentralMcpTests._request(client, "tools/call",
-            request_id="d2a42300-b5aa-415b-8e8d-a0e79ee120b0", token=token,
+            request_id=getattr(self, "rpc_request_id", "d2a42300-b5aa-415b-8e8d-a0e79ee120b0"), token=token,
             params={"name": f"oa_workflow_history_{kind}", "arguments": arguments})
         self.assertEqual(response.status_code, 200)
         return response.json()["result"]
 
     def test_whole_row_boundary_is_compact_through_real_mcp_and_native(self):
+        self.rpc_request_id = "history-boundary-" + "x" * 100
         self.rows = [history_fixtures.row(i, ended=False, title="中" * 10) for i in range(3)]
         for row in self.rows:
-            row["current_handlers"] = [chr(0x4e00+i) for i in range(310)]
+            # Keep two rows near 10k with expiry/cursor metadata; the synthetic
+            # valid JSON-RPC string ID pushes the raw MCP envelope beyond 12k.
+            row["current_handlers"] = [chr(0x4e00+i) for i in range(306)]
         with mcp_fixtures.CentralMcpFixture() as (service, _store, token, client):
             service.invoke.side_effect = self.invoke
             first = self.request(client, token, "query", {"collection": "done", "temporal": {"kind": "all"}})
@@ -75,7 +78,13 @@ class OaHistoryQueryMcpTests(unittest.TestCase):
             replay = self.request(client, token, "next", {"cursor": payload["replay_cursor"]})
             self.assertEqual(replay["structuredContent"]["result"], payload)
             next_page = self.request(client, token, "next", {"cursor": cursor})
-            self.assertEqual(len(next_page["structuredContent"]["result"]["items"]), 1)
+            last = next_page["structuredContent"]["result"]
+            self.assertEqual(len(last["items"]), 1)
+            self.assertFalse(last["has_more"])
+            self.assertIsNone(last["next_cursor"])
+            delivered = payload["items"] + last["items"]
+            self.assertEqual([row["affair_id"] for row in delivered], [row["affair_id"] for row in self.rows])
+            self.assertEqual([row["current_handlers"] for row in delivered], [row["current_handlers"] for row in self.rows])
             listed = mcp_fixtures.CentralMcpTests._request(client, "tools/list", request_id=2, token=token).json()
             for tool in listed["result"]["tools"]:
                 if tool["name"] in {"oa_workflow_history_query", "oa_workflow_history_next"}:

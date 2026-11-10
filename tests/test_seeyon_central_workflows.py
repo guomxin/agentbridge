@@ -102,12 +102,14 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                 "oa.workflow.revoke",
                 "oa.workflow.revoke.prepare",
                 "oa.workflow.sent.list",
+                "oa.workflow.state.get",
                 "oa.workflow.tracked.list",
             ],
         )
         effects = {spec.name: spec.effect for spec in registry.list(system="oa")}
         self.assertEqual(effects["oa.workflow.history.query"], "read")
         self.assertEqual(effects["oa.workflow.history.next"], "read")
+        self.assertEqual(effects["oa.workflow.state.get"], "read")
         self.assertEqual(effects["oa.document.certificate.search"], "read")
         self.assertEqual(effects["oa.meeting_room.availability.list"], "read")
         self.assertEqual(effects["oa.meeting_room.my_applications.list"], "read")
@@ -193,6 +195,7 @@ class SeeyonCentralWorkflowTests(unittest.TestCase):
                     "oa.workflow.opinions.list",
                     "oa.workflow.pending.list",
                     "oa.workflow.sent.list",
+                    "oa.workflow.state.get",
                     "oa.workflow.tracked.list",
                 }
             )
