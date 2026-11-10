@@ -27,6 +27,13 @@ class DatabaseQualityAcceptanceTests(unittest.TestCase):
             self.assertNotIn(SOURCE, prompt)
             self.assertNotIn('max_chars', prompt)
             self.assertNotIn('{', prompt)
+            if case['id'] == 'long-text':
+                self.assertEqual(prompt, '读完1号日志，汇总所有事项并说明是否完成。')
+            else:
+                self.assertIn('2026年9月', prompt)
+        by_id = {case['id']: question_prompt(case) for case in cases}
+        self.assertIn('联系厂家处理的事项', by_id['progress-not-completion'])
+        self.assertIn('材料验收', by_id['time-window'])
         last = next(case for case in cases if case['id'] == 'time-window')
         self.assertNotIn('9月5日', json.dumps(last, ensure_ascii=False))
 

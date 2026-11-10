@@ -68,13 +68,13 @@ def load_blind_cases(path=CASES_PATH):
 def question_prompt(case):
     # Do not add expected states, paragraph numbers, item IDs or exclusion labels.
     return {
-        'same-name': '汇总甲部门9月1日至2日甲、乙项目的接口联调进展。',
-        'empty': '9月1日有哪些完成事项？',
+        'same-name': '汇总甲部门2026年9月1日至2日甲、乙项目的接口联调进展。',
+        'empty': '2026年9月1日有哪些完成事项？',
         'long-text': '读完1号日志，汇总所有事项并说明是否完成。',
-        'pagination': '汇总甲、乙部门及下级9月1日至7日的进展。',
-        'adjacent-irrelevant': '查找9月1日至7日APP登录失败的处理案例。',
-        'progress-not-completion': '看9月1日的日志，这个问题处理完成了吗？',
-        'time-window': '截至9月2日，9月1日起这项验收是否完成？',
+        'pagination': '汇总甲、乙部门及下级2026年9月1日至7日的进展。',
+        'adjacent-irrelevant': '查找2026年9月1日至7日APP登录失败的处理案例。',
+        'progress-not-completion': '看2026年9月1日日志里联系厂家处理的事项，完成了吗？',
+        'time-window': '看看2026年9月1日至2日的材料验收，完成了吗？',
     }[case['id']]
 
 
