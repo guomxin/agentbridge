@@ -324,20 +324,14 @@ def create_workspace_http_server(
                         self._json(status, rejection_result(exc))
                     return
                 if route.path == "/api/tasks":
-                    self._json(
-                        200,
-                        {
-                            "items": application.list_tasks(
-                                account,
-                                active_only=_query_bool(
-                                    query,
-                                    "active_only",
-                                    False,
-                                ),
-                                limit=_query_int(query, "limit", 100),
-                            )
-                        },
-                    )
+                    self._json(200, application.task_page(account,
+                        q=_query_value(query, "q"), system_id=_query_value(query, "system_id"),
+                        status=_query_value(query, "status") or "all",
+                        updated_from=_query_value(query, "updated_from"), updated_to=_query_value(query, "updated_to"),
+                        cursor=_query_value(query, "cursor"),
+                        before_updated_at=_query_value(query, "before_updated_at"),
+                        before_task_id=_query_value(query, "before_task_id"),
+                        limit=_query_int(query, "limit", 32), active_only=_query_bool(query, "active_only", False)))
                     return
                 if route.path == "/api/current":
                     self._json(200, application.current(account,

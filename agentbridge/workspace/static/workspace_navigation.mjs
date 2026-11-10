@@ -14,7 +14,14 @@ export function createWorkspaceViewState({storage, getAccountId, now = Date.now}
   const source = value => ({search:String(value?.search || '').slice(0,160), type:String(value?.type || '').slice(0,120),
     onlySelected:value?.onlySelected === true,
     selected:Array.isArray(value?.selected) ? value.selected.filter(item => typeof item === 'string' && item.length <= 256).slice(0,100) : []});
+  const taskFilters = value => ({q:String(value?.q || '').slice(0,200),
+    status:['all','active','attention','waiting_user','outcome_unknown','failed','completed','canceled'].includes(value?.status) ? value.status : 'all',
+    system_id:['oa','taihua','yuque','smartlight','database','other'].includes(value?.system_id) ? value.system_id : '',
+    ...Object.fromEntries(['updated_from','updated_to'].map(name => [name,
+      /^\d{4}-\d{2}-\d{2}$/.test(value?.[name] || '') ? value[name] : '']))});
   return {
+    taskFilters() { return taskFilters(read().taskFilters); },
+    saveTaskFilters(value) { const record = read(); record.taskFilters = taskFilters(value); write(record); },
     getSource(id) { return source(read().sources?.[id]); },
     setSource(id, value) {
       if (typeof id !== 'string' || id.length > 300) return;

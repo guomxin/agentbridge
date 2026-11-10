@@ -13,6 +13,7 @@ import { reconcileChildren } from "./workspace_dom.mjs";
 import { markWorkspaceTiming, clearWorkspaceTimings } from "./workspace_performance.mjs";
 import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot, enqueueActionableSources } from "./workspace_projection.mjs";
 import { createWorkspaceViewState, createReadingScroll, createPreparationHandoff, timelineNodeMatchesKey } from './workspace_navigation.mjs';
+import { createTaskSearch } from './workspace_task_search.mjs';
 
 const state = {
   account: null,
@@ -118,6 +119,15 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTas
   loadHistoryPage:(taskId,cursor) => scopedApi(sessionScope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-history/next`,
     {method:"POST",body:{cursor},csrf:true,timeoutMs:45000}),
 });
+const taskSearch = createTaskSearch({state,$,getScope:() => sessionScope,
+  request:(path,scope) => scopedApi(scope)(path,{timeoutMs:15000}),renderTasks,viewState,
+  onApply:() => {
+    viewScope.replace('task-detail').dispose();
+    state.taskDetailRequest++; state.selectedTaskId = null;
+    const detail = $('#task-detail');
+    detail.replaceChildren(emptyState('选择一个任务查看进展'));
+    detail.classList.add('mobile-empty'); delete detail.dataset.taskId;
+  }});
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
   document, state, $, toast, getScope: () => sessionScope, executeChatMessage, queryOaPending,
@@ -172,6 +182,7 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  taskSearch.reset();
   resetHistoryGroups();
   resetTaskCardControllers();
   projectionQueue.reset();
@@ -259,7 +270,7 @@ function bindActions() {
     loadGatewayStatus();
   });
   $("#refresh-tasks").addEventListener("click", loadTasks);
-  $("#active-only").addEventListener("change", loadTasks);
+  taskSearch.bind();
   $("#refresh-endpoints").addEventListener("click", loadEndpoints);
   $("#refresh-skills").addEventListener("click", loadSkills);
   $$(".nav-item").forEach((button) => {
@@ -415,6 +426,7 @@ async function enterWorkspace(account) {
   const accountScope = sessionScope;
   resetWorkspaceState();
   state.account = account;
+  taskSearch.restore();
   initialReading = viewState.reading();
   readingScroll?.dispose();
   readingScroll = createReadingScroll({container:$('#chat-messages'),notice:$('#chat-new-content'),save:value => viewState.saveReading(value)});
@@ -1331,32 +1343,15 @@ function scheduleTaskSync(taskId, eventType) {
   projectionOrder.invalidate(taskId);
   projectionQueue.enqueue(taskId);
   lifecycle.clearTimer(state.taskListTimer);
-  state.taskListTimer = sessionScope.timeout(loadTasks, 260);
+  state.taskListTimer = sessionScope.timeout(() => loadTasks({automatic:true}), 260);
   if (["task.operation.failed", "task.operation.outcome_unknown"].includes(eventType)) {
     toast(eventType === "task.operation.outcome_unknown" ? "一项业务操作的最终结果需要核对。" : "一项业务操作执行失败。",
       true, `task:${taskId}:failure`);
   }
 }
 
-async function loadTasks() {
-  const scope = sessionScope.replace("task-list");
-  const api = scopedApi(scope);
-  try {
-    const activeOnly = $("#active-only").checked;
-    const result = await api(
-      `/api/tasks?active_only=${activeOnly}&limit=150`,
-    );
-    scope.assertCurrent();
-    state.tasks = result.items;
-    renderTasks();
-    const active = result.items.filter((task) =>
-      ["active", "waiting_user", "running"].includes(task.status),
-    ).length;
-    $("#active-task-count").textContent = String(active);
-  } catch (error) {
-    if (isCancellation(error)) return;
-    toast(friendlyError(error), true);
-  }
+async function loadTasks(options = {}) {
+  await taskSearch.load(options);
 }
 
 async function loadTaskDetail(taskId) {

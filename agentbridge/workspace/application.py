@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -20,6 +20,7 @@ from agentbridge.core.user_grants import UserGrantConflict
 from agentbridge.core.task_plans import task_plan_response
 from agentbridge.core.task_projections import workspace_batch_projection
 from agentbridge.core.tasks import TaskNotFound, WORKSPACE_RESPONSE_MAX_CHARACTERS
+from agentbridge.core.session_secrets import SessionSecretError
 from agentbridge.core.timeline_attachments import (
     TimelineAttachmentExpired,
     TimelineAttachmentIntegrityError,
@@ -211,6 +212,97 @@ class WorkspaceApplication:
 
     def task_detail(self, account: dict, task_id: str) -> dict:
         return self._task_projection(account, task_id, include_history=True)
+
+    def task_page(self, account: dict, *, q: str | None = None, system_id: str | None = None,
+                  status: str = "all", updated_from: str | None = None, updated_to: str | None = None,
+                  cursor: str | None = None, before_updated_at: str | None = None,
+                  before_task_id: str | None = None, limit: int = 32, active_only: bool = False) -> dict:
+        """Owned task discovery; date filters use Shanghai calendar days.
+
+        A cursor is a read boundary, never authorization. Authenticate it against
+        the account and normalized filters using the existing protector, then
+        reapply user ownership and every filter in the query on every page.
+        """
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("每页数量需为1至100。")
+        if q is not None and (not isinstance(q, str) or len(q) > 200 or "\x00" in q):
+            raise ValueError("关键词不能超过200字。")
+        q = (q or "").strip()
+        status_filters = {
+            "all": None, "active": ("active", "running", "waiting_user"),
+            "attention": ("waiting_user", "outcome_unknown", "failed"),
+            "waiting_user": ("waiting_user",), "outcome_unknown": ("outcome_unknown",),
+            "failed": ("failed",), "completed": ("succeeded",), "canceled": ("canceled",),
+            "succeeded": ("succeeded",), "running": ("running",), "expired": ("expired",),
+            "superseded": ("superseded",), "partially_succeeded": ("partially_succeeded",),
+        }
+        if not isinstance(status, str) or status not in status_filters:
+            raise ValueError("请选择有效任务状态。")
+        if active_only:
+            if status not in {"all", "active"}:
+                raise ValueError("任务状态条件冲突。")
+            status = "active"
+        known_systems = tuple(sorted({spec.system for spec in self.service.registry.list()} | {"database"}))
+        if system_id in (None, "", "all"):
+            system_id = None
+        elif not isinstance(system_id, str) or system_id not in {*known_systems, "other"}:
+            raise ValueError("请选择有效系统。")
+        dates = []
+        for value in (updated_from, updated_to):
+            if value in (None, ""):
+                dates.append(None)
+                continue
+            try:
+                if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise ValueError()
+                dates.append(date.fromisoformat(value))
+            except ValueError as exc:
+                raise ValueError("请输入有效日期。") from exc
+        if dates[0] and dates[1] and dates[0] > dates[1]:
+            raise ValueError("开始日期不能晚于结束日期。")
+        shanghai = timezone(timedelta(hours=8))
+        try:
+            lower = datetime.combine(dates[0], datetime.min.time(), shanghai).astimezone(timezone.utc).isoformat() if dates[0] else None
+            upper = datetime.combine(dates[1] + timedelta(days=1), datetime.min.time(), shanghai).astimezone(timezone.utc).isoformat() if dates[1] else None
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("日期超出可查询范围。") from exc
+        scope = {"account": account["account_id"], "subject": account["user_subject"], "q": q,
+                 "system": system_id, "status": status, "from": lower, "before": upper}
+        context = b"agentbridge.workspace-task-search.v1\x00" + json.dumps(scope, sort_keys=True, ensure_ascii=False).encode()
+        boundary = None
+        if cursor is not None:
+            try:
+                if not isinstance(cursor, str) or not 1 <= len(cursor) <= 1024:
+                    raise ValueError()
+                ciphertext = base64.b64decode(cursor, altchars=b"-_", validate=True)
+                boundary = json.loads(self.service.session_states.protector.unprotect(ciphertext, context=context))
+                if (not isinstance(boundary, list) or len(boundary) != 2
+                        or not isinstance(boundary[0], str) or not isinstance(boundary[1], str)
+                        or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\+00:00", boundary[0])
+                        or datetime.fromisoformat(boundary[0]).utcoffset() != timedelta(0)
+                        or str(UUID(boundary[1])) != boundary[1]):
+                    raise ValueError()
+            except (ValueError, TypeError, UnicodeError, SessionSecretError) as exc:
+                raise ValueError("翻页信息已失效，请重新查询。") from exc
+        if before_updated_at is not None or before_task_id is not None:
+            if boundary is None or [before_updated_at, before_task_id] != boundary:
+                raise ValueError("翻页信息与当前查询不一致。")
+        page = self.service.tasks.list_task_page(user_subject=account["user_subject"],
+            title_query=q, statuses=status_filters[status], updated_from=lower, updated_before=upper,
+            system_id=system_id, known_systems=known_systems,
+            before_updated_at=boundary[0] if boundary else None,
+            before_task_id=boundary[1] if boundary else None, limit=limit + 1)
+        rows = page["items"]
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = None
+        if has_more:
+            last = rows[-1]
+            value = json.dumps([last["updated_at"], last["task_id"]]).encode()
+            opaque = base64.urlsafe_b64encode(self.service.session_states.protector.protect(value, context=context)).decode()
+            next_cursor = {"updatedAt": last["updated_at"], "taskId": last["task_id"], "cursor": opaque}
+        return {"items": [_public_task(row) for row in rows], "hasMore": has_more,
+                "nextCursor": next_cursor, "timeZone": "Asia/Shanghai", "activeCount": page["activeCount"]}
 
     def task_history(self, account: dict, *, before_updated_at: str | None = None,
                      before_task_id: str | None = None, limit: int = 32) -> dict:

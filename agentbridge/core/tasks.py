@@ -3260,6 +3260,13 @@ class TaskHubStore:
         before_updated_at: str | None = None,
         before_task_id: str | None = None,
         limit: int = 100,
+        title_query: str | None = None,
+        statuses: tuple[str, ...] | None = None,
+        updated_from: str | None = None,
+        updated_before: str | None = None,
+        system_id: str | None = None,
+        known_systems: tuple[str, ...] = (),
+        connection: sqlite3.Connection | None = None,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 500)
         query = "SELECT * FROM agent_tasks WHERE user_subject = ?"
@@ -3273,6 +3280,51 @@ class TaskHubStore:
             if active_only:
                 raise ValueError("active_only and terminal_only are mutually exclusive")
             query += " AND status NOT IN ('active', 'waiting_user', 'running')"
+        if title_query:
+            # instr is literal: '%' and '_' are ordinary title characters.
+            query += " AND instr(lower(title), lower(?)) > 0"
+            parameters.append(title_query)
+        if statuses is not None:
+            if not statuses or any(status not in TASK_STATUSES for status in statuses):
+                raise ValueError("invalid task status filter")
+            query += " AND status IN (" + ",".join("?" for _ in statuses) + ")"
+            parameters.extend(statuses)
+        if updated_from:
+            query += " AND updated_at >= ?"
+            parameters.append(updated_from)
+        if updated_before:
+            query += " AND updated_at < ?"
+            parameters.append(updated_before)
+        if system_id:
+            systems = known_systems if system_id == "other" else (system_id,)
+            if not systems or (system_id != "other" and system_id not in known_systems):
+                raise ValueError("invalid task system filter")
+            placeholders = ",".join("?" for _ in systems)
+            # Use owned ledger associations, never display titles or summaries.
+            # CapabilitySpec.system is the capability name's first component.
+            database_marker = ("OR coalesce(json_extract(agent_tasks.summary_json, '$.workspaceQueryGroup.toolName'), '') "
+                               "IN ('database_capabilities', 'database_execute')") if "database" in systems else ""
+            source = f"""(
+                EXISTS (SELECT 1 FROM task_operations AS link JOIN operations AS op
+                    ON op.operation_id = link.operation_id
+                    AND op.user_subject = link.user_subject
+                    WHERE link.task_id = agent_tasks.task_id
+                    AND link.user_subject = agent_tasks.user_subject
+                    AND substr(op.capability_name, 1, instr(op.capability_name, '.') - 1) IN ({placeholders}))
+                OR EXISTS (SELECT 1 FROM task_interactions AS link JOIN interactions AS interaction
+                    ON interaction.interaction_id = link.interaction_id
+                    AND interaction.user_subject = link.user_subject
+                    WHERE link.task_id = agent_tasks.task_id
+                    AND link.user_subject = agent_tasks.user_subject
+                    AND interaction.system_id IN ({placeholders}))
+                OR EXISTS (SELECT 1 FROM task_batches AS batch
+                    WHERE batch.parent_task_id = agent_tasks.task_id
+                    AND batch.user_subject = agent_tasks.user_subject
+                    AND batch.system_id IN ({placeholders}))
+                {database_marker}
+            )"""
+            query += " AND " + ("NOT " if system_id == "other" else "") + source
+            parameters.extend((*systems, *systems, *systems))
         if (before_updated_at is None) != (before_task_id is None):
             raise ValueError("both task cursor fields are required")
         if before_updated_at is not None:
@@ -3280,10 +3332,22 @@ class TaskHubStore:
             parameters.extend((before_updated_at, before_updated_at, before_task_id))
         query += " ORDER BY updated_at DESC, task_id DESC LIMIT ?"
         parameters.append(limit)
-        with self._connect() as connection:
+        if connection is not None and not connection.in_transaction:
+            raise ValueError("an explicit task connection requires an active transaction")
+        with self._connect() if connection is None else nullcontext(connection) as connection:
             self._expire_orphan_task_shells(connection)
             rows = connection.execute(query, parameters).fetchall()
         return [_task_from_row(row) for row in rows]
+
+    def list_task_page(self, *, user_subject: str, **filters) -> dict:
+        # Listing already performs orphan maintenance. Keep that maintenance,
+        # the page and the unfiltered active badge on one consistent snapshot.
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = self.list_tasks(user_subject=user_subject, connection=connection, **filters)
+            active_count = connection.execute("SELECT count(*) FROM agent_tasks WHERE user_subject = ? "
+                "AND status IN ('active', 'waiting_user', 'running')", (user_subject,)).fetchone()[0]
+        return {"items": rows, "activeCount": active_count}
 
     def continuation_candidates(
         self,

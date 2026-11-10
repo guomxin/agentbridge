@@ -124,12 +124,37 @@
               <h2>任务</h2>
             </div>
             <div class="header-controls">
-              <label class="toggle-label"><input id="active-only" type="checkbox">仅进行中</label>
               <button id="refresh-tasks" class="secondary" type="button">刷新</button>
             </div>
           </header>
+          <form id="task-filters" class="task-filters">
+            <label class="task-search-label">任务名称<input id="task-search" type="search" maxlength="200" placeholder="搜索任务"></label>
+            <label>状态<select id="task-status">
+              <option value="all">全部状态</option><option value="attention">需要处理</option>
+              <option value="waiting_user">等我处理</option><option value="outcome_unknown">结果待核对</option>
+              <option value="failed">失败</option><option value="active">进行中</option>
+              <option value="completed">已完成</option><option value="canceled">已取消</option>
+            </select></label>
+            <label>系统<select id="task-system"><option value="">全部系统</option><option value="oa">协同办公</option>
+              <option value="taihua">泰华日志</option><option value="yuque">语雀</option><option value="smartlight">照明</option>
+              <option value="database">数据库</option><option value="other">其他</option></select></label>
+            <label>开始日期<input id="task-from" type="date"></label>
+            <label>结束日期<input id="task-to" type="date"></label>
+            <div class="task-filter-actions"><button class="primary" type="submit">查找</button>
+              <button id="task-clear" class="secondary" type="button">清空</button></div>
+          </form>
+          <div class="task-shortcuts"><span class="task-date-note">按更新时间（北京时间）</span>
+            <button id="tasks-waiting" class="secondary" type="button">等我处理</button>
+            <button id="tasks-review" class="secondary" type="button">待核对</button>
+            <button id="tasks-failed" class="secondary" type="button">失败</button>
+          </div>
           <div class="task-layout">
-            <div id="task-list" class="task-list" aria-label="任务列表"></div>
+            <div class="task-browser">
+              <div id="task-list" class="task-list" aria-label="任务列表"></div>
+              <div class="task-pagination"><span id="task-list-status" role="status" aria-live="polite"></span>
+                <button id="task-retry" class="secondary" type="button" hidden>重试</button>
+                <button id="task-more" class="secondary" type="button" hidden>加载更多</button></div>
+            </div>
             <aside id="task-detail" class="task-detail mobile-empty" aria-label="任务详情">
               <div class="empty-state">选择一个任务查看进展</div>
             </aside>

@@ -522,6 +522,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
 
   function renderTasks() {
     const list = $("#task-list");
+    const top = list.scrollTop;
     list.replaceChildren();
     taskListRows.clear();
     if (state.tasks.length === 0) {
@@ -543,6 +544,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       button.addEventListener("click", () => loadTaskDetail(task.task_id));
       list.append(button);
     });
+    list.scrollTop = top;
   }
 
   function renderTaskDetail(result) {
