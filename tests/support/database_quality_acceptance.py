@@ -98,7 +98,7 @@ def question_prompt(case, variant='standard'):
         'long-text': '读完1号日志，汇总所有事项并说明是否完成。',
         'pagination': '汇总甲、乙部门及下级2026年9月1日至7日的进展。',
         'adjacent-irrelevant': '查找2026年9月1日至7日APP登录失败的处理案例。',
-        'progress-not-completion': '看2026年9月1日日志里联系厂家处理的事项，完成了吗？',
+        'progress-not-completion': '仅按2026年9月1日日志，联系厂家处理的事项完成了吗？',
         'time-window': '看看2026年9月1日至2日的材料验收，完成了吗？',
     }[case['id']]
 

@@ -104,6 +104,7 @@ class DatabaseQualityAcceptanceTests(unittest.TestCase):
                 self.assertIn('2026年9月', prompt)
         by_id = {case['id']: question_prompt(case) for case in cases}
         self.assertIn('联系厂家处理的事项', by_id['progress-not-completion'])
+        self.assertEqual(by_id['progress-not-completion'], '仅按2026年9月1日日志，联系厂家处理的事项完成了吗？')
         self.assertIn('材料验收', by_id['time-window'])
         last = next(case for case in cases if case['id'] == 'time-window')
         self.assertNotIn('9月5日', json.dumps(last, ensure_ascii=False))
