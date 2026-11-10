@@ -402,3 +402,35 @@ test("continuation synchronizes card and detail outer statuses through details, 
   assert.match(list.textContent,/暂不可读/);
   for(const root of [card,detail])assert.doesNotMatch(root.textContent,/本次查询已完成/);
 });
+
+test('watch entry exists only for trusted references and passes only the current target and title',()=>{
+  const calls=[],f=fixture({onWatch:value=>calls.push(value)});
+  const query=page({items:[item('one',{target_ref:'opaque-first'}),item('without-source')]});
+  f.render(f.root,task(query));
+  const first=button(rows(f.root)[0],'关注后续'),missing=button(rows(f.root)[1],'关注后续');
+  assert.equal(first.hidden,false);assert.equal(missing.hidden,true);missing.events.click();assert.deepEqual(calls,[]);
+  first.events.click();assert.deepEqual(calls,[{title:'业务结算单 one',target_ref:'opaque-first'}]);
+  f.render(f.root,task(page({items:[item('one',{title:'新标题',target_ref:'opaque-new'})]}),2));
+  assert.equal(button(rows(f.root)[0],'关注后续'),first);first.events.click();
+  assert.deepEqual(calls.at(-1),{title:'新标题',target_ref:'opaque-new'});
+  f.render(f.root,task(page({items:[item('one')]}),3));first.events.click();assert.equal(calls.length,2);
+});
+
+test('expired queries, removed pages and access loss cannot activate an old watch button',async()=>{
+  const calls=[],f=fixture({onWatch:value=>calls.push(value),loadHistoryPage:async()=>page({items:[item('second',{target_ref:'second-ref'})],has_more:false})});
+  f.render(f.root,task(page({expires_at:'2020-01-01T00:00:00Z',items:[item('one',{target_ref:'expired-ref'})]})));
+  const expired=button(rows(f.root)[0],'关注后续');assert.equal(expired.disabled,true);expired.events.click();assert.equal(calls.length,0);
+  f.render(f.root,task(page({items:[item('one',{target_ref:'current-ref'})]}),2));
+  const old=button(rows(f.root)[0],'关注后续');button(f.root,'下一页').events.click();await settle();
+  old.events.click();assert.equal(calls.length,0);
+  const current=button(rows(f.root)[0],'关注后续');current.events.click();assert.equal(calls.length,1);
+  f.render(f.root,task({schema_version:'agentbridge.oa_history_query.v1',query_id:'query-one',state:'unavailable'},3));
+  current.events.click();assert.equal(calls.length,1);
+});
+
+test('disposing the account clears watch sources and prevents retained callbacks from opening creation',()=>{
+  const lifecycle=createLifecycle(),scope=lifecycle.scope(),calls=[],f=fixture({getScope:()=>scope,onWatch:value=>calls.push(value)});
+  f.render(f.root,task(page({items:[item('one',{target_ref:'account-a-ref'})]})));
+  const old=button(rows(f.root)[0],'关注后续');scope.dispose();old.events.click();
+  assert.deepEqual(calls,[]);assert.equal(f.root.childNodes.length,0);lifecycle.dispose();
+});

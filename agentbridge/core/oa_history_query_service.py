@@ -297,6 +297,7 @@ class OaHistoryQueryService:
         details_complete = data["details_index"] == len(data["rows"]) and not data["details_failed"]
         complete = data["scan_complete"] and details_complete and record["state"] == "complete"
         return {"schema_version": "agentbridge.oa_history_query.v1", "query_id": record["query_id"],
+            "expires_at":record.get('expires_at'),
             "collection": record["query"]["collection"], "state": "scanning" if record["state"] == "scan" else record["state"],
             "temporal": record["query"]["temporal"],
             "progress": {"source_total": (data["metadata"] or {}).get("total"),

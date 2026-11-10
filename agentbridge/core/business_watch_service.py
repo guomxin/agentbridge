@@ -47,6 +47,52 @@ class BusinessWatchService:
     def __init__(self, service):
         self.service = service
         self.store = BusinessWatchStore(service.db_path)
+        from agentbridge.core.business_watch_controls import BusinessWatchControls
+        self.controls=BusinessWatchControls(service.db_path)
+        from agentbridge.core.business_watch_notifications import on_watch_change
+        self.store.on_change=lambda connection,event,watch:on_watch_change(service,connection,event,watch)
+
+    def options(self,subject):
+        try: self.require_permission(subject)
+        except PermissionError:
+            return {'enabled':False,'endpoints':[],'message':'尚未开通流程持续跟踪，请联系管理员。'}
+        labels={'telegram':'Telegram','openclaw-weixin':'微信','wechat':'微信','weixin':'微信'}
+        owned=[e for e in self.service.tasks.list_endpoints(user_subject=subject,active_only=True,limit=500)
+            if e['client_type'] in labels]
+        channel_counts,display_counts={},{}
+        for endpoint in owned:
+            channel=labels[endpoint['client_type']]
+            channel_counts[channel]=channel_counts.get(channel,0)+1
+            name=endpoint.get('label')
+            name=name.strip()[:120] if isinstance(name,str) else ''
+            if name==channel: name=''
+            endpoint['_watch_display']=f'{channel} · {name}' if name else channel
+            endpoint['_watch_named']=bool(name)
+            display_counts[endpoint['_watch_display']]=display_counts.get(endpoint['_watch_display'],0)+1
+        endpoints=[]
+        for endpoint in owned:
+            display=endpoint['_watch_display']
+            if display_counts[display]>1 or (not endpoint['_watch_named'] and channel_counts[labels[endpoint['client_type']]]>1):
+                length=8
+                identity=endpoint['endpoint_id']
+                while length<len(identity) and any(other['endpoint_id']!=identity and
+                    other['endpoint_id'].startswith(identity[:length]) for other in owned):
+                    length+=4
+                display+=f' · {identity[:length]}'
+            endpoints.append({'endpoint_id':endpoint['endpoint_id'],'client_type':endpoint['client_type'],'label':display})
+        return {'enabled':True,'endpoints':endpoints,'backgroundPaused':self.controls.is_paused(subject),
+            'defaults':{'interval_seconds':3600,'expires_in_days':7,'event_types':['nodes','handlers','ended']},
+            'readNotice':'检查可能将事项标为已读。'}
+
+    def _public(self,subject,value):
+        result=public_watch(value)
+        result['background_paused']=self.controls.is_paused(subject)
+        if result['background_paused']: result['next_check_at']=None
+        return result
+
+    def _allow_check(self,subject):
+        if self.controls.is_paused(subject):
+            raise BusinessWatchError('WATCH_ADMIN_PAUSED','管理员已暂停关注检查，请稍后再试。',status=409)
 
     @property
     def system_instance(self):
@@ -179,6 +225,7 @@ class BusinessWatchService:
 
     def create(self, subject, body):
         self.require_permission(subject)
+        self._allow_check(subject)
         allowed = {'target_ref','event_types','interval_seconds','expires_in_days','endpoint_ids',
                    'idempotency_key','allow_mark_read'}
         if not isinstance(body,dict) or set(body)-allowed or not body.get('target_ref'):
@@ -218,7 +265,7 @@ class BusinessWatchService:
             outcome = self.store.apply_observation(watch['watch_id'],user_subject=subject,
                 expected_version=watch['version'],snapshot=snapshot,include_private=True)
             watch = outcome['watch']
-        return {'watch':public_watch(watch),'reused':reused}
+        return {'watch':self._public(subject,watch),'reused':reused}
 
     def _endpoints(self, subject, endpoints):
         if not isinstance(endpoints,list) or len(endpoints)>8 or any(not isinstance(e,str) for e in endpoints):
@@ -240,7 +287,7 @@ class BusinessWatchService:
         value = self._owned(subject,watch_id)
         events = self.store.history(watch_id,user_subject=subject)
         self._owned(subject,watch_id)
-        return {'watch':public_watch(value),'events':events}
+        return {'watch':self._public(subject,value),'events':events}
 
     def list(self, subject, *, cursor=None, limit=32):
         self.require_permission(subject)
@@ -253,7 +300,7 @@ class BusinessWatchService:
             parameters.update(before_created_at=data['before_created_at'],before_watch_id=data['before_watch_id'])
         result = self.store.list(**parameters)
         # Old-account watches never become readable after a rebind.
-        items = [public_watch(w) for w in result['items'] if w['principal_ref']==principal and w['system_instance']==self.system_instance]
+        items = [self._public(subject,w) for w in result['items'] if w['principal_ref']==principal and w['system_instance']==self.system_instance]
         next_page = result.get('next_cursor')
         token = self._pack('page',subject,{**next_page,'principal':principal,'instance':self.system_instance}) if next_page else None
         self.require_permission(subject)
@@ -275,6 +322,7 @@ class BusinessWatchService:
         if action not in {'pause','stop'}:
             self._owned(subject,watch_id)
             self._session(subject,principal=value['principal_ref'])
+            self._allow_check(subject)
         kwargs = {'user_subject':subject,'expected_version':body.get('expected_version'),'include_private':True}
         if action in {'pause','resume','stop'}:
             kwargs['state']={'pause':'paused','resume':'active','stop':'stopped'}[action]
@@ -302,12 +350,13 @@ class BusinessWatchService:
                 self._session(subject,principal=value['principal_ref'])
             except (PermissionError,BusinessWatchError):
                 return {'watch':{k:updated[k] for k in ('watch_id','state','version')}}
-        return {'watch':public_watch(updated),'events':self.store.history(watch_id,user_subject=subject)}
+        return {'watch':self._public(subject,updated),'events':self.store.history(watch_id,user_subject=subject)}
 
     def check(self, subject, watch_id, *, expected_version):
         if type(expected_version) is not int or expected_version < 1:
             raise BusinessWatchError('WATCH_ARGUMENTS_INVALID','请提供当前关注版本。')
         value = self._owned(subject,watch_id)
+        self._allow_check(subject)
         if value['version'] != expected_version:
             raise BusinessWatchError('WATCH_VERSION_CONFLICT','关注已更新，请刷新后再试。',status=409)
         if value['state'] != 'active' or datetime.fromisoformat(value['expires_at']) <= _now():
@@ -320,7 +369,7 @@ class BusinessWatchService:
         self._owned(subject,watch_id)
         outcome = self.store.apply_observation(watch_id,user_subject=subject,
             expected_version=expected_version,snapshot=snapshot,include_private=True)
-        return {'watch':public_watch(outcome['watch']),'events':self.store.history(watch_id,user_subject=subject)}
+        return {'watch':self._public(subject,outcome['watch']),'events':self.store.history(watch_id,user_subject=subject)}
 
     def run_due_checks(self, *, limit=4, should_stop=None):
         """A bounded internal-only cycle. No model token, login card or activity."""
@@ -342,6 +391,7 @@ class BusinessWatchService:
             error,pause,snapshot = None,None,None
             try:
                 self.require_permission(subject)
+                self._allow_check(subject)
                 latest = self._owned(subject,value['watch_id'])
                 if latest['state']!='active' or latest['version']!=job['claimed_version']:
                     raise BusinessWatchError('WATCH_VERSION_CHANGED','关注已变化，本轮不再读取。',status=409)
@@ -351,6 +401,7 @@ class BusinessWatchService:
                 snapshot = self._observe(subject,source,collection,
                     principal=latest['principal_ref'],background=True,context=context)
                 self.require_permission(subject)
+                self._allow_check(subject)
                 self._session(subject,principal=latest['principal_ref'])
             except PermissionError:
                 error,pause='WATCH_PERMISSION_DENIED','permission_denied'

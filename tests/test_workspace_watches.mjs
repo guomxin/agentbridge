@@ -11,15 +11,19 @@ const watch = (id='one', version=1, state='active', extra={}) => ({watch_id:id, 
   snapshot:{workflow_state:'in_progress',current_nodes:[{name:'核对',handlers:['甲']}],current_handlers:['甲'],
     observed_at:'2026-11-10T08:00:00Z',unavailable_fields:[]},last_checked_at:'2026-11-10T08:00:00Z',
   next_check_at:'2026-11-10T09:00:00Z',expires_at:'2026-11-17T08:00:00Z',...extra});
+const options = (extra={}) => ({enabled:true,endpoints:[{endpoint_id:'my-phone',client_type:'telegram',label:'我的合成手机'}],
+  defaults:{interval_seconds:3600,expires_in_days:7,event_types:['nodes','handlers','ended']},readNotice:'检查可能将事项标为已读。',...extra});
 const detail = value => ({watch:value,events:[{event_id:'created',event_type:'created',created_at:'2026-11-10T08:00:00Z',summary:'开始关注'}]});
 function harness(handler) {
   const document=createDocument(),nodes=new Map(),lifecycle=createLifecycle();let scope=lifecycle.scope();
   const $=selector=>{if(!nodes.has(selector))nodes.set(selector,document.createElement('div'));return nodes.get(selector);};
-  const calls=[];
+  const calls=[];let keyCalls=0;
   const controller=createBusinessWatches({document,$,getScope:()=>scope,
+    makeKey:()=>`synthetic-watch-key-${++keyCalls}`,
     request:(path,current,options={})=>{const call={path,scope:current,...options};calls.push(call);return handler(call,calls.length);}});
   const button=action=>descendants($('#business-watch-detail')).find(node=>node.dataset.watchAction===action);
-  return {document,$,nodes,calls,controller,lifecycle,button,get scope(){return scope;},
+  const field=(name,value)=>descendants($('#business-watch-detail')).find(node=>node.name===name&&(value===undefined||node.value===value));
+  return {document,$,nodes,calls,controller,lifecycle,button,field,get keyCalls(){return keyCalls;},get scope(){return scope;},
     replaceAccount(){scope.dispose();controller.reset();scope=lifecycle.scope();}};
 }
 
@@ -89,7 +93,8 @@ test('pause and resume consume the current projected version once and leave OA a
 test('a manual check renders the authoritative new observation and deduplicates event receipts',async()=>{
   const changed=watch('one',2,'active',{snapshot:{workflow_state:'running',current_nodes:[{name:'复核',handlers:['乙','丙']}],
     current_handlers:['乙','丙'],observed_at:'2026-11-10T09:00:00Z',unavailable_fields:[]}});
-  const event={event_id:'change-1',event_type:'changed',created_at:'2026-11-10T09:00:00Z',summary:'当前节点有变化'};
+  const event={event_id:'change-1',event_type:'watch.changed',observed_at:'2026-11-10T09:00:00Z',
+    change_types:['nodes'],diff:{nodes:{before:['核对'],after:['复核']}}};
   const h=harness(call=>call.method?{watch:changed,events:[event,event,null]}
     :call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');await h.controller.act('check');
@@ -117,7 +122,7 @@ test('a redacted pause receipt after permission loss clears all formerly readabl
     :call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');await h.controller.act('pause');
   assert.match(h.$('#business-watch-detail').textContent,/关注已暂停/);
-  assert.doesNotMatch(h.$('#business-watch-detail').textContent,/合成关注one|核对（甲）|开始关注/);
+  assert.doesNotMatch(h.$('#business-watch-detail').textContent,/合成关注one|核对（甲）/);
   assert.doesNotMatch(h.$('#business-watch-list').textContent,/合成关注one/);h.lifecycle.dispose();
 });
 
@@ -256,4 +261,132 @@ test('the production request helper sends watch mutations with same-origin crede
   await api('/api/business-watches/one/update',{scope,method:'POST',csrf:true,body:{expected_version:1,action:'pause'}});
   assert.equal(calls[0].credentials,'same-origin');assert.equal(calls[0].headers['X-AgentBridge-CSRF'],'synthetic-csrf');
   assert.deepEqual(JSON.parse(calls[0].body),{expected_version:1,action:'pause'});lifecycle.dispose();
+});
+
+test('creating requires explicit read consent and submits the chosen owned options with one idempotency key',async()=>{
+  const pending=deferred(),h=harness(call=>call.path.endsWith('/options')?options():call.method?pending.promise:{items:[],hasMore:false});
+  await h.controller.activate();await h.controller.createFrom({title:'<img>合成来源',target_ref:'opaque-current-source'});
+  assert.equal(h.field('allow_mark_read').checked,false);assert.equal(h.field('interval_seconds').value,'3600');
+  assert.equal(h.field('expires_in_days').value,'7');assert.equal(h.field('endpoint_ids','my-phone').checked,false);
+  await h.controller.submitEditor();assert.equal(h.calls.filter(c=>c.method).length,0);
+  assert.match(h.$('#business-watch-detail').textContent,/请主动确认/);
+  h.field('allow_mark_read').checked=true;h.field('interval_seconds').value='900';h.field('expires_in_days').value='30';
+  h.field('event_types','handlers').checked=false;h.field('event_types','ended').checked=false;h.field('endpoint_ids','my-phone').checked=true;
+  const submit=h.controller.submitEditor();await h.controller.submitEditor();
+  const sent=h.calls.filter(c=>c.method);assert.equal(sent.length,1);assert.equal(sent[0].path,'/api/business-watches');
+  assert.equal(sent[0].csrf,true);assert.deepEqual(sent[0].body,{target_ref:'opaque-current-source',idempotency_key:'synthetic-watch-key-1',
+    interval_seconds:900,expires_in_days:30,event_types:['nodes'],endpoint_ids:['my-phone'],allow_mark_read:true});
+  pending.resolve({watch:watch('new',1)});await submit;
+  assert.match(h.$('#business-watch-detail').textContent,/已开始关注/);assert.equal(h.keyCalls,1);
+  assert.equal(descendants(h.$('#business-watch-detail')).some(n=>n.tag==='img'),false);h.lifecycle.dispose();
+});
+
+test('missing target references and disabled watch permission cannot create or request permission',async()=>{
+  const h=harness(call=>call.path.endsWith('/options')?options({enabled:false,endpoints:[]}):{items:[],hasMore:false});
+  await h.controller.activate();await h.controller.createFrom({title:'not a source',affair_id:'123',url:'https://example.test'});
+  assert.equal(h.calls.length,1);
+  await h.controller.createFrom({title:'合成来源',target_ref:'opaque'});await h.controller.submitEditor();
+  assert.match(h.$('#business-watch-detail').textContent,/当前账号没有持续跟踪权限/);
+  assert.equal(h.calls.filter(c=>c.method).length,0);assert.equal(h.field('allow_mark_read').checked,false);
+  assert.ok(h.calls.every(c=>!/(grant|permission|authorize)/.test(c.path)));h.lifecycle.dispose();
+});
+
+test('expired source errors retain form choices but never replay a create, even after a list refresh',async()=>{
+  const h=harness(call=>{
+    if(call.path.endsWith('/options'))return options();
+    if(call.method)throw Object.assign(new Error('来源引用已失效，请重新查询。'),{status:400,code:'WATCH_REFERENCE_INVALID'});
+    return {items:[],hasMore:false};
+  });
+  await h.controller.activate();await h.controller.createFrom({title:'合成来源',target_ref:'expired-opaque'});
+  h.field('allow_mark_read').checked=true;h.field('interval_seconds').value='14400';h.field('expires_in_days').value='12';
+  await h.controller.submitEditor();await h.controller.submitEditor();await h.controller.refreshEditor();await h.controller.submitEditor();
+  assert.equal(h.calls.filter(c=>c.method).length,1);assert.equal(h.keyCalls,1);
+  assert.equal(h.field('interval_seconds').value,'14400');assert.equal(h.field('expires_in_days').value,'12');
+  assert.equal(h.field('allow_mark_read').checked,true);assert.match(h.$('#business-watch-detail').textContent,/不会重复提交/);
+  h.controller.closeEditor();await h.controller.createFrom({title:'新查询',target_ref:'new-opaque'});
+  assert.equal(h.field('allow_mark_read').checked,false);assert.equal(h.keyCalls,2);h.lifecycle.dispose();
+});
+
+test('configure conflicts preserve drafts and require a fresh version before an explicit save',async()=>{
+  let value=watch('one',1,'active',{interval_seconds:3600,event_types:['nodes','ended'],endpoint_ids:[],allow_mark_read:true}),posts=0;
+  const h=harness(call=>{
+    if(call.path.endsWith('/options'))return options();
+    if(!call.method)return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+    if(++posts===1){value={...value,version:4};throw Object.assign(new Error('changed'),{status:409,code:'WATCH_VERSION_CONFLICT'});}
+    return {watch:{...value,version:5,interval_seconds:900}};
+  });
+  await h.controller.activate();await h.controller.select('one');await h.controller.openSettings();
+  assert.equal(h.field('allow_mark_read').checked,true);assert.equal(h.field('expires_in_days').value,'');
+  h.field('interval_seconds').value='900';h.field('expires_in_days').value='9';h.field('endpoint_ids','my-phone').checked=true;
+  await h.controller.submitEditor();await h.controller.submitEditor();
+  assert.equal(posts,1);assert.equal(h.field('interval_seconds').value,'900');assert.equal(h.field('expires_in_days').value,'9');
+  await h.controller.refreshEditor();assert.equal(posts,1);assert.equal(h.field('endpoint_ids','my-phone').checked,true);
+  assert.match(h.$('#business-watch-detail').textContent,/保留了你的编辑内容/);
+  await h.controller.submitEditor();assert.equal(posts,2);
+  assert.deepEqual(h.calls.filter(c=>c.method).at(-1).body,{expected_version:4,action:'configure',interval_seconds:900,
+    expires_in_days:9,event_types:['nodes','ended'],endpoint_ids:['my-phone'],allow_mark_read:true});h.lifecycle.dispose();
+});
+
+test('unknown configure outcomes retain choices, never resend on refresh, and preserve expiry when blank',async()=>{
+  let value=watch('one',1,'active',{interval_seconds:3600,event_types:['nodes'],endpoint_ids:[],allow_mark_read:true});
+  const h=harness(call=>{
+    if(call.path.endsWith('/options'))return options();
+    if(call.method){value={...value,version:2,interval_seconds:86400};throw Object.assign(new Error('timeout'),{code:'WORKSPACE_REQUEST_TIMEOUT'});}
+    return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+  });
+  await h.controller.activate();await h.controller.select('one');await h.controller.openSettings();h.field('interval_seconds').value='86400';
+  await h.controller.submitEditor();await h.controller.submitEditor();await h.controller.refresh();
+  const posts=h.calls.filter(c=>c.method);assert.equal(posts.length,1);assert.equal(Object.hasOwn(posts[0].body,'expires_in_days'),false);
+  assert.equal(h.field('interval_seconds').value,'86400');assert.equal(h.field('expires_in_days').value,'');
+  assert.match(h.$('#business-watch-detail').textContent,/保留了你的编辑内容/);h.lifecycle.dispose();
+});
+
+test('form rejects invalid terms and empty conditions before mutation and only uses current options endpoints',async()=>{
+  const h=harness(call=>call.path.endsWith('/options')?options({endpoints:[{endpoint_id:'safe',label:'<img onerror=x>'+'端点'.repeat(80)}]}):{items:[],hasMore:false});
+  await h.controller.activate();await h.controller.createFrom({title:'合成来源',target_ref:'opaque'});h.field('allow_mark_read').checked=true;
+  for(const days of ['0','31','1.5','NaN','']){h.field('expires_in_days').value=days;await h.controller.submitEditor();}
+  h.field('expires_in_days').value='7';for(const rule of ['nodes','handlers','ended'])h.field('event_types',rule).checked=false;
+  await h.controller.submitEditor();assert.equal(h.calls.filter(c=>c.method).length,0);
+  assert.match(h.$('#business-watch-detail').textContent,/至少选择一种/);
+  assert.equal(descendants(h.$('#business-watch-detail')).some(n=>n.tag==='img'),false);
+  assert.equal(h.field('endpoint_ids','safe').checked,false);h.lifecycle.dispose();
+});
+
+test('account reset disposes late options and creation receipts and clears every editable source and endpoint',async()=>{
+  const delayed=deferred(),h=harness(call=>call.path.endsWith('/options')?delayed.promise:{items:[],hasMore:false});
+  await h.controller.activate();const opening=h.controller.createFrom({title:'Alice-private-title',target_ref:'Alice-private-source'});
+  h.replaceAccount();delayed.resolve(options({endpoints:[{endpoint_id:'Alice-endpoint',label:'Alice-private-endpoint'}]}));await opening;
+  assert.doesNotMatch(h.$('#business-watch-detail').textContent,/Alice/);assert.equal(h.field('allow_mark_read').checked,false);
+  assert.equal(h.field('expires_in_days').value,'');assert.equal(h.field('endpoint_ids','Alice-endpoint'),undefined);h.lifecycle.dispose();
+  const receipt=deferred(),next=harness(call=>call.path.endsWith('/options')?options():call.method?receipt.promise:{items:[],hasMore:false});
+  await next.controller.activate();await next.controller.createFrom({title:'Alice-private-title',target_ref:'Alice-source'});
+  next.field('allow_mark_read').checked=true;const creating=next.controller.submitEditor();next.replaceAccount();
+  receipt.resolve({watch:watch('Alice-private-result')});await creating;
+  assert.doesNotMatch(next.$('#business-watch-detail').textContent,/Alice/);assert.doesNotMatch(next.$('#business-watch-list').textContent,/Alice/);next.lifecycle.dispose();
+});
+
+test('only confirmed change diffs produce bounded observed history; failed or unchanged checks create no change copy',async()=>{
+  const events=[{event_id:'fake',event_type:'checked',summary:'错误地声称完成',created_at:'2026-11-10T10:00:00Z'},
+    {event_id:'invalid',event_type:'watch.changed',summary:'无证据摘要',diff:{nodes:{before:['A'],after:['A']}}},
+    ...Array.from({length:103},(_,i)=>({event_id:'change-'+i,event_type:'watch.changed',observed_at:'2026-11-10T08:00:00Z',
+      created_at:'2026-11-10T09:00:00Z',diff:{nodes:{before:['节点'+i],after:['新节点'+i]}}}))];
+  const h=harness(call=>call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:{watch:watch(),events});
+  await h.controller.activate();await h.controller.select('one');
+  const copy=h.$('#business-watch-detail').textContent;assert.match(copy,/最多 100 条/);assert.doesNotMatch(copy,/错误地声称完成|无证据摘要/);
+  const records=descendants(h.$('#business-watch-detail')).filter(n=>n.tag==='li');assert.equal(records.length,100);
+  assert.equal(records.some(n=>n.textContent.includes('新节点102')),false);
+  assert.match(copy,/2026\/11\/10 16:00:00/);h.lifecycle.dispose();
+});
+
+test('maintenance pause keeps the saved snapshot but prevents check, resume and configure while pause and stop remain available',async()=>{
+  let value=watch('one',1,'active',{background_paused:true,next_check_at:null});
+  const h=harness(call=>call.method?{watch:{...value,version:2,state:call.body.action==='pause'?'paused':'stopped'}}
+    :call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value));
+  await h.controller.activate();await h.controller.select('one');
+  assert.match(h.$('#business-watch-detail').textContent,/维护暂停中/);assert.match(h.$('#business-watch-detail').textContent,/核对（甲）/);
+  assert.equal(h.button('check').disabled,true);await h.controller.act('check');await h.controller.openSettings();
+  assert.equal(h.calls.filter(c=>c.method).length,0);assert.equal(h.calls.some(c=>c.path.endsWith('/options')),false);
+  assert.equal(h.button('pause').disabled,false);await h.controller.act('pause');
+  assert.equal(h.button('resume').disabled,true);await h.controller.act('resume');assert.equal(h.calls.filter(c=>c.method).length,1);
+  await h.controller.act('stop');assert.equal(h.calls.filter(c=>c.method).length,2);h.lifecycle.dispose();
 });

@@ -194,6 +194,7 @@ class AdminControlPlane:
                 "agent_hosts": self.service.host_runtime_overview(),
             },
             "governance": governance,
+            "business_watches": self.service.business_watch.controls.summary(),
         }
 
     def readiness(self) -> dict:

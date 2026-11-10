@@ -134,6 +134,15 @@ def build_parser() -> argparse.ArgumentParser:
         if action=='list':
             command.add_argument('--cursor')
             command.add_argument('--limit',type=int,default=32)
+    watch_sub.add_parser('runtime',help='Read local watch runtime counts without starting services')
+    watch_control=watch_sub.add_parser('control',help='Local operator pause/resume for business observations')
+    watch_control.add_argument('--scope',choices=('global','system','user'),required=True)
+    watch_control.add_argument('--target',required=True)
+    watch_control.add_argument('--expected-version',type=int,required=True)
+    watch_control.add_argument('--reason',required=True)
+    watch_mode=watch_control.add_mutually_exclusive_group(required=True)
+    watch_mode.add_argument('--paused','--pause',dest='paused',action='store_true')
+    watch_mode.add_argument('--resume',dest='paused',action='store_false')
 
     capability = subparsers.add_parser("capability")
     capability_sub = capability.add_subparsers(dest="action", required=True)
@@ -843,6 +852,30 @@ def handle_auth(args: argparse.Namespace, home: Path) -> int:
 
 def handle_watch(args,home):
     from agentbridge.core.business_watches import BusinessWatchError
+    if args.action in {'control','runtime'}:
+        from agentbridge.core.business_watch_controls import BusinessWatchControls
+        try:
+            db_path=_central_db_path(home)
+            # Operations inspect an existing local ledger. They neither load
+            # session secrets nor run startup maintenance or downstream IO.
+            controls=BusinessWatchControls(db_path,initialize=False)
+            if args.action=='runtime':
+                result={'runtime':controls.summary()}
+            else:
+                import pwd
+                # Validate the existing ledger before initializing control rows.
+                controls.summary()
+                controls=BusinessWatchControls(db_path)
+                actor=pwd.getpwuid(os.geteuid()).pw_name
+                result={'control':controls.set(scope=args.scope,target=args.target,paused=args.paused,
+                    expected_version=args.expected_version,reason=args.reason,actor=actor)}
+            print_json({'protocolVersion':'0.1','status':'succeeded',**result})
+            return 0
+        except (ValueError,KeyError,OSError,sqlite3.Error) as exc:
+            code=getattr(exc,'code','WATCH_RUNTIME_UNAVAILABLE' if isinstance(exc,sqlite3.Error) else 'WATCH_CONTROL_INVALID')
+            message='本机业务关注账本不可用，请核对运行目录。' if isinstance(exc,sqlite3.Error) else str(exc)
+            print_json(_central_cli_error(code,message))
+            return 2
     service=CentralCapabilityService(home=home,base_url=_central_base_url(home,args.base_url))
     watch=service.business_watch
     try:

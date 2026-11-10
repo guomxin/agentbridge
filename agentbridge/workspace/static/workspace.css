@@ -1275,6 +1275,14 @@ code {
 .business-watch-events {padding-left:20px;font-size:12px;line-height:1.7;overflow-wrap:anywhere;}
 .business-watch-events li {margin-bottom:8px;}
 .business-watch-detail .mobile-detail-back {margin-bottom:12px;}
+.business-watch-form {display:flex;flex-direction:column;gap:12px;min-width:0;}
+.business-watch-form-label {display:flex;flex-direction:column;gap:6px;font-size:13px;line-height:1.6;}
+.business-watch-form input[type=number],.business-watch-form select {max-width:100%;width:100%;min-width:0;}
+.business-watch-form fieldset {min-width:0;border:1px solid var(--line);border-radius:6px;padding:10px 12px;}
+.business-watch-form legend {font-size:13px;padding:0 4px;}
+.business-watch-check {display:flex;flex-direction:row;align-items:flex-start;min-width:0;gap:8px;margin:8px 0;font-size:13px;line-height:1.6;overflow-wrap:anywhere;}
+.business-watch-check input[type=checkbox] {flex:0 0 1rem;width:1rem;height:1rem;min-width:1rem;max-width:1rem;padding:0;margin:3px 0 0;accent-color:var(--teal);}
+.business-watch-check span {flex:1 1 auto;min-width:0;}
 @media(max-width:820px) {
   .business-watch-layout {grid-template-columns:minmax(0,1fr);}
   .business-watch-browser {border-right:0;}

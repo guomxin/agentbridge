@@ -387,6 +387,9 @@ def create_workspace_http_server(
                         ),
                     )
                     return
+                if route.path == '/api/business-watches/options':
+                    self._json(200,application.service.business_watch.options(account['user_subject']))
+                    return
                 if route.path == '/api/business-watches':
                     self._json(200, application.business_watches(account,
                         cursor=_query_value(query,'cursor'),limit=_query_int(query,'limit',32)))

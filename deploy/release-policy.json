@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "2376f4d2e197"
+    "c7f2db9f7f3c"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Reviewed against deployed 2376f4d2e197 on 2026-11-10. Task search reuses existing tables and ownership checks; analysis guidance retains explicit scope and existing authorization; completed diagnostic stages use one atomic transaction and bounded host timing events. Schemas and stored business semantics are unchanged. Host plugin 0.4.130 adds diagnostic observations and an additive compatibility registration, without changing credentials, grants, business authorization or write behavior."
+  "dataCompatibility": "reviewed-schema-transition",
+  "reason": "Reviewed against deployed c7f2db9f7f3c on 2026-11-10. Adds seven owned business-watch ledger/control tables and fourteen indexes without altering or removing existing objects; other three databases unchanged. Existing grants, source validity, business decisions and commit semantics remain intact. Before/after digests come from an exact empty-DDL clone of all four deployed schemas initialized offline with candidate code. Host plugin 0.4.131 adds governed watch tools and fresh delivery validation. Publication retains verified backups; post-transition failure requires reviewed manual recovery without overwriting later business data.",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "438a377b368a5b61f83b4f2acbe3fa7f3d1cbe26d876042c4b14f7d62fe1ce90",
+      "afterSha256": "b984945db13720725eafbc341d2863fde7ec182b2880cee092686269602b7c15"
+    }
+  }
 }

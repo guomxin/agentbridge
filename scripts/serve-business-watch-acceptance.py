@@ -122,6 +122,63 @@ def reference(service, account, value):
     return service.business_watch.target_reference(record, {"title": value["title"], "_source": value})
 
 
+def seed_history_entry(service, account, candidate):
+    """Use the real query receipts, result projector, operation and task link.
+
+    Only the retained row is synthetic; no capability invocation or history
+    adapter runs. The normal projector issues the same bounded target reference
+    and expiry that an authenticated history result would contain.
+    """
+    from agentbridge.core.business_content_identity import principal_binding
+    from agentbridge.core.oa_query_temporal import normalize_oa_query_temporal
+    now = datetime.now(timezone.utc)
+    session = service.sessions.find(user_subject=account["user_subject"], system_id="oa")
+    binding = {"user_subject": account["user_subject"], "session_id": session["session_id"],
+        "principal_ref": principal_binding(session)}
+    temporal = normalize_oa_query_temporal({"kind": "all", "date_basis": "processed_at"},
+        accepted_at=now.isoformat(), default_date_basis="processed_at")
+    row = {"affair_id": candidate["affair_id"], "title": candidate["title"], "category": "合成流程",
+        "initiated_at": (now-timedelta(days=2)).isoformat(), "processed_at": (now-timedelta(days=1)).isoformat(),
+        "workflow_state": "in_progress", "workflow_state_text": "流转中",
+        "current_nodes": [{"name": "合成待关注节点", "handlers": ["合成经办人甲", "合成协办人乙"]}],
+        "current_handlers": ["合成经办人甲", "合成协办人乙"], "observed_at": now.isoformat(),
+        "unavailable_fields": [], "_source": deepcopy(candidate)}
+    data = {"rows": [row], "seen_ids": [candidate["affair_id"]], "next_page": 2,
+        "metadata": {"total": 1}, "scan_complete": True, "scanned_count": 1,
+        "details_index": 1, "details_checked": 1, "details_failed": 0, "timeouts": 0,
+        "completion_reason": "complete"}
+    created = service.oa_history_queries.create(**binding,
+        query={"collection": "done", "temporal": temporal, "keyword": "", "limit": 50}, state_data=data)
+    response, offset = service.oa_history_query_service._results({**created["record"], "state": "complete"}, data, 0)
+    if offset is not None or not response["items"][0].get("target_ref"):
+        raise AssertionError("Synthetic history entry did not retain its bounded source reference")
+    response = service.oa_history_queries.advance(created["cursor"], **binding, expected_version=1,
+        state="complete", state_data=data, response=response, scanned_delta=1, detail_delta=1)
+    task, _ = service.tasks.ensure_task(user_subject=account["user_subject"], agent_host="openclaw",
+        host_task_key="business-watch-acceptance:history-entry", origin_endpoint_id=account["endpoint_id"],
+        active_conversation_ref=account["openclaw_session_key"], title="查询未关注的合成 OA 已办事项·从此处关注后续")
+    operation, _ = service.operations.create(user_subject=account["user_subject"],
+        capability_name="oa.workflow.history.query", capability_version="0.1.0",
+        input_summary={"synthetic": True, "collection": "done", "temporal": {"kind": "all"}},
+        idempotency_key="business-watch-acceptance:history-entry")
+    operation = service.operations.mark_succeeded(operation["operation_id"], response)
+    service.tasks.link_operation(task_id=task["task_id"], user_subject=account["user_subject"], operation=operation)
+    if service.tasks.get_task(task["task_id"], user_subject=account["user_subject"])["status"] != "succeeded":
+        raise AssertionError("Synthetic history task was not completed by its real operation link")
+    return {"taskId": task["task_id"], "queryId": response["query_id"], "collection": response["collection"],
+        "expiresAt": response["expires_at"], "itemCount": 1, "syntheticOnly": True}, response["items"][0]["target_ref"]
+
+
+def seed_notification_endpoint(service, account):
+    endpoint, _ = service.tasks.ensure_endpoint(user_subject=account["user_subject"],
+        token_id="synthetic-watch-notification:"+account["user_subject"], agent_host="synthetic-acceptance",
+        endpoint_key="synthetic-telegram:"+account["user_subject"], client_type="telegram",
+        external_subject="synthetic:"+account["user_subject"],
+        conversation_ref="synthetic-watch-notification:"+account["user_subject"],
+        label="仅本地合成 Telegram 端点", capabilities=["notifications"])
+    return endpoint["endpoint_id"]
+
+
 def seed(service, accounts, home):
     watches, special = [], {}
     primary, secondary = accounts
@@ -160,12 +217,59 @@ def seed(service, accounts, home):
     service.tasks.append_timeline_message(user_subject=secondary["user_subject"], source_endpoint_id=secondary["endpoint_id"],
         message_key="watch-other-private-chat", role="assistant", text="第二账号私有聊天 BUSINESS_WATCH_OTHER_PRIVATE")
     candidate = source(999, "尚未关注·平台创建与默认读取同意验收")
+    history, target_ref = seed_history_entry(service, primary, candidate)
+    endpoints = {"primary": seed_notification_endpoint(service, primary),
+        "secondary": seed_notification_endpoint(service, secondary)}
     private_json(home / "create-case.json", {"syntheticOnly": True,
-        "body": {"target_ref": reference(service, primary, candidate)},
+        "body": {"target_ref": target_ref}, "historyTaskId": history["taskId"],
         "notice": "默认缺少allow_mark_read，必须拒绝且不执行合成读取；显式true仅用于隔离平台设置验收。"})
     return {"primaryWatchCount": len(watches), "secondaryWatchCount": 3, "longHistoryMessages": 160,
         "secondaryPrivateMarker": "BUSINESS_WATCH_OTHER_PRIVATE", "specialCases": special,
+        "historyEntry": history, "syntheticNotificationEndpoints": endpoints,
         "createCaseFile": str(home / "create-case.json")}
+
+
+def fixture_controls(service, primary, home):
+    """Local 0700-home markers only; never an HTTP control or production API."""
+    def consume(name):
+        marker = home/name
+        if not marker.exists() and not marker.is_symlink():
+            return None
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 128:
+            raise ValueError("Fixture control must be a small regular local file")
+        value = marker.read_text().strip(); marker.unlink()
+        return value
+    for name in ("configure-conflict-watch", "maintenance-pause", "maintenance-resume"):
+        try:
+            value = consume(name)
+            if value is None:
+                continue
+            receipt = {"marker": name, "syntheticOnly": True, "realDownstreamCalls": 0, "businessWrites": 0}
+            if name == "configure-conflict-watch":
+                if not re.fullmatch(r"[0-9a-f-]{36}", value):
+                    raise ValueError("Invalid isolated watch")
+                watch = service.business_watch.store.get(value, user_subject=primary["user_subject"])
+                with service.business_watch.store._connect() as db:
+                    count = db.execute("UPDATE business_watches SET version=version+1 WHERE watch_id=? AND user_subject=? AND version=?",
+                        (value, primary["user_subject"], watch["version"])).rowcount
+                if count != 1:
+                    raise ValueError("Isolated watch changed before conflict injection")
+                receipt.update(watchId=value, versionBefore=watch["version"], versionAfter=watch["version"]+1)
+            else:
+                if value:
+                    raise ValueError("Maintenance markers take no parameters")
+                controls = service.business_watch.controls
+                with controls._connect() as db:
+                    row = db.execute("SELECT version FROM business_watch_controls WHERE scope='user' AND target=?",
+                        (primary["user_subject"],)).fetchone()
+                result = controls.set(scope="user", target=primary["user_subject"], paused=name == "maintenance-pause",
+                    expected_version=row["version"] if row else 0, reason="Synthetic Workspace acceptance maintenance",
+                    actor="synthetic-acceptance")
+                receipt.update(paused=result["paused"], version=result["version"], subject=primary["user_subject"])
+            private_json(home/(name+"-receipt.json"), receipt)
+        except Exception as exc:
+            private_json(home/(name+"-receipt.json"), {"marker": name, "errorType": type(exc).__name__,
+                "syntheticOnly": True, "realDownstreamCalls": 0, "businessWrites": 0})
 
 
 def wrap_server(server, service, home):
@@ -273,7 +377,11 @@ def main():
                 "workspaceUrl": origin, "sourceRoot": str(ROOT), **shape, "businessAudit": result,
                 "modelStarted": False, "coordinatorStarted": False, "cardServerStarted": False,
                 "allowedPostRoutes": ["/api/login", "/api/logout", "/api/business-watches", "/api/business-watches/{id}/update", "/api/business-watches/{id}/check"],
-                "faultMarkers": ["fail-next-watch-check", "delay-next-watch-check", "partial-next-watch-check"],
+                "faultMarkers": ["fail-next-watch-check", "delay-next-watch-check", "partial-next-watch-check",
+                    "configure-conflict-watch", "maintenance-pause", "maintenance-resume"],
+                "fixtureControls": {"configure-conflict-watch": "Write an owned watch ID: increment only its version once.",
+                    "maintenance-pause": "Touch empty file: pause only the primary synthetic user.",
+                    "maintenance-resume": "Touch empty file: resume only the primary synthetic user."},
                 "evidenceBoundary": "Real Workspace HTTP/authentication/grants/watch service/session lock/stores; synthetic downstream principal probe and workflow snapshots only. No real OA, model or business execution."})
             private_json(home / "request-metrics.json", {"watchRequests": 0, "requests": []})
             private_json(home / "business-audit.json", result)
@@ -286,6 +394,7 @@ def main():
             while not stop.wait(.1):
                 if deadline is not None and time.monotonic()>=deadline:
                     break
+                fixture_controls(service, accounts[0], home)
                 marker=home/'run-due-watch'
                 if not marker.exists(): continue
                 try:

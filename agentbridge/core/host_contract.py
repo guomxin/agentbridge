@@ -577,7 +577,7 @@ class HostContractStore:
                 "shared-contract-h01-h29-skill-package-name-v1",
             ),
             (
-                "openclaw", "0.4.130", "L3",
+                "openclaw", "0.4.131", "L3",
                 "shared-contract-h01-h29-sync-host-timings-v1",
             ),
         )

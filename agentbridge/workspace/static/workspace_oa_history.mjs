@@ -88,7 +88,7 @@ function rowValues(row) {
 // In-memory, account-scoped paging shared by every task for one trusted query.
 // Work cursors advance the query on the same result page; delivery cursors turn
 // result pages. Neither path prepares, authorizes, or submits an OA business.
-export function createOaHistoryResults({ document, state = {}, getScope, loadHistoryPage }) {
+export function createOaHistoryResults({ document, state = {}, getScope, loadHistoryPage, onWatch }) {
   const models = state.oaHistoryQueries ||= new Map();
   const queries = new Map(), versions = new Map(), blockedQueries = new Map();
   const roots = new WeakMap();
@@ -159,6 +159,7 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
     for (const label of ["标题", "提交／发起时间", "我的处理时间", "流程状态", "当前节点", "当前处理人", "读取时间"]) {
       const cell = node("th", "", label); cell.setAttribute("scope", "col"); header.append(cell);
     }
+    if (typeof onWatch === 'function') { const cell = node('th','','后续'); cell.setAttribute('scope','col'); header.append(cell); }
     head.append(header); table.append(head, body); scroll.append(table);
     const navigation = node("div", "oa-history-navigation"); navigation.setAttribute("aria-label", "OA 历史查询分页");
     const previous = node("button", "secondary", "上一页"), next = node("button", "secondary", "下一页");
@@ -204,7 +205,27 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
       items.forEach((item, ordinal) => {
         const key = `${copy(item.affair_id)}:${ordinal}`; retained.add(key);
         let row = view.rows.get(key);
-        if (!row) { const root = node("tr"), cells = Array.from({length: 7}, () => node("td")); root.append(...cells); row = {root, cells}; view.rows.set(key, row); }
+        if (!row) {
+          const root = node("tr"), cells = Array.from({length: 7}, () => node("td")); root.append(...cells); row = {root, cells}; view.rows.set(key, row);
+          if (typeof onWatch === 'function') {
+            const cell = node('td'), button = node('button','secondary','关注后续'); button.type = 'button'; cell.append(button); root.append(cell); row.watch = button;
+            button.addEventListener('click', () => {
+              const currentModel = view.model;
+              const expires = currentModel.projection?.expires_at || currentModel.projection?.expiresAt;
+              if (button.hidden || button.disabled || !current(currentModel) || currentModel.blocked ||
+                  view.rows.get(key) !== row || !copy(row.item?.target_ref) ||
+                  expires && (!Number.isFinite(Date.parse(expires)) || Date.parse(expires) <= Date.now())) return;
+              return onWatch({target_ref:row.item.target_ref,title:copy(row.item.title) || '标题未读到'});
+            });
+          }
+        }
+        row.item = item;
+        if (row.watch) {
+          const expires = projection.expires_at || projection.expiresAt;
+          row.watch.hidden = !copy(item.target_ref);
+          row.watch.disabled = model.pending || !!expires && (!Number.isFinite(Date.parse(expires)) || Date.parse(expires) <= Date.now());
+          row.watch.title = row.watch.disabled ? '原查询已过期，请重新查询后再关注' : '创建时重新核验来源；过期后需重新查询';
+        }
         rowValues(item).forEach((value, index) => { if (row.cells[index].textContent !== value) row.cells[index].textContent = value; });
         desired.push(row.root);
       });

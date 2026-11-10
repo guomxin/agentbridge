@@ -1556,6 +1556,31 @@ export class InteractionCoordinator {
   }
 
   async processEndpointNotification(identityRouter, binding, client, signal, endpoint, notification) {
+      const watchNotification = notification?.deliveryMode === 'business_watch';
+      let staleWatch = false;
+      const validateWatch = async () => {
+        const validation = await client.callTool('agentbridge_host_notification_validate', {
+          agent_host:'openclaw', endpoint_key:binding.key, delivery_id:notification.deliveryId,
+          attempt_count:notification.attemptCount,
+        }, {signal,meta:hostContextMeta()});
+        if (signal.aborted || validation?.stale === true) {
+          staleWatch = true;
+          return null;
+        }
+        if (validation?.allowed !== true && validation?.allowed !== false) {
+          throw new Error('Watch notification authorization is temporarily unavailable');
+        }
+        if (validation.allowed && typeof validation.message !== 'string') {
+          throw new Error('Watch notification content is unavailable');
+        }
+        return validation;
+      };
+      if (watchNotification) {
+        const validation = await validateWatch();
+        if (staleWatch) return;
+        notification = {...notification,deliveryMode:validation.allowed ? 'status' : 'no_op',
+          message:validation.allowed ? validation.message : null};
+      }
       let delivered = false;
       const sessionKey = endpoint?.conversationRef;
       const route = endpoint?.route;
@@ -1646,12 +1671,16 @@ export class InteractionCoordinator {
           ) &&
           typeof notification.message === "string"
         ) {
-          delivered = await this.deliverTextDirect(
-            sessionKey,
-            notification.message,
-          );
+          delivered = watchNotification
+            ? await this.sendRoutePayload(sessionKey, this.sessionRoutes.get(sessionKey),
+                {text:notification.message}, null, null, async () => {
+                  const current = await validateWatch();
+                  return current?.allowed === true ? {text:current.message} : null;
+                })
+            : await this.deliverTextDirect(sessionKey, notification.message);
         }
       }
+      if (staleWatch) return;
       try {
         const deferUntilActivity =
           !delivered && recovered !== false &&
@@ -1662,6 +1691,7 @@ export class InteractionCoordinator {
             agent_host: "openclaw",
             endpoint_key: binding.key,
             delivery_id: notification.deliveryId,
+            ...(watchNotification ? {attempt_count:notification.attemptCount} : {}),
             succeeded: delivered,
             retry_after_seconds: 5,
             defer_until_activity: deferUntilActivity,
@@ -2752,7 +2782,7 @@ export class InteractionCoordinator {
     }
   }
 
-  async sendRoutePayload(sessionKey, route, initialPayload, presentation = null, beforeSend = null) {
+  async sendRoutePayload(sessionKey, route, initialPayload, presentation = null, beforeSend = null, preparePayload = null) {
     const depth = this.directDeliveries.get(sessionKey) || 0;
     this.directDeliveries.set(sessionKey, depth + 1);
     try {
@@ -2773,7 +2803,7 @@ export class InteractionCoordinator {
         ...(route.accountId ? { accountId: route.accountId } : {}),
         ...(route.threadId !== null ? { threadId: route.threadId } : {}),
       };
-      const payload =
+      let payload =
         presentation && adapter.renderPresentation
           ? await adapter.renderPresentation({
               payload: initialPayload,
@@ -2785,6 +2815,12 @@ export class InteractionCoordinator {
             : initialPayload;
       if (!payload) {
         return false;
+      }
+      if (preparePayload) {
+        payload = await preparePayload(payload);
+        // A revoked or stale watch is suppressed without sending cached text.
+        if (payload === null) return true;
+        if (!payload) return false;
       }
       if (beforeSend && !beforeSend()) return false;
       if (!adapter.sendPayload) {

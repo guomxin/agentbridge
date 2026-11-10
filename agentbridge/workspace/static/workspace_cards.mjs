@@ -13,7 +13,7 @@ import {createBatchRemaining} from './workspace_batch_remaining.mjs';
 import { createOaHistoryResults, oaHistoryPresentation } from './workspace_oa_history.mjs';
 
 export function createTaskCards({ document, state = {}, $, renderChatTimeline, scrollChat, setTimelineNode, loadTaskDetail, switchView, continueTask, emptyState, appendArtifactList, renderTaskPlan,
-  submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, loadHistoryPage, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
+  submitTaskFeedback, submitSkillFeedback, prepareTargets, refreshQuery, queryRemaining, probeRecovery, prepareRecovery, loadHistoryPage, onWatch, openPreparation, viewState, getScope, makeFeedbackRequestKey = () => crypto.randomUUID() }) {
   const views = new WeakMap();
   const detailViews = new WeakMap();
   const taskListRows = new Map();
@@ -21,7 +21,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
   let clockTimer = null, clockScope = null;
   state.taskFeedback ||= new Map();
   const remaining = createBatchRemaining({document,state,queryRemaining,getScope,makeKey:makeFeedbackRequestKey});
-  const oaHistory = createOaHistoryResults({document,state,getScope,loadHistoryPage});
+  const oaHistory = createOaHistoryResults({document,state,getScope,loadHistoryPage,onWatch});
   const recovery = createOaPendingRecovery({document, state, probeRecovery, prepareRecovery, getScope,
     makeRequestKey:makeFeedbackRequestKey, openTask: async taskId => {
       if (await switchView("tasks") === false) return;

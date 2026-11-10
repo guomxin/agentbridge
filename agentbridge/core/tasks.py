@@ -4468,15 +4468,18 @@ class TaskHubStore:
         succeeded: bool,
         retry_after_seconds: int = 5,
         defer_until_activity: bool = False,
+        expected_attempt_count: int | None = None,
     ) -> dict:
+        if expected_attempt_count is not None and (type(expected_attempt_count) is not int or not 1 <= expected_attempt_count <= 5):
+            raise ValueError("notification attempt count is invalid")
         if succeeded and defer_until_activity:
             raise ValueError(
                 "successful delivery cannot be deferred until endpoint activity"
             )
         retry_after_seconds = min(max(int(retry_after_seconds), 1), 300)
-        now = _utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = _utc_now()
             row = connection.execute(
                 """
                 SELECT * FROM notification_outbox
@@ -4486,6 +4489,14 @@ class TaskHubStore:
             ).fetchone()
             if row is None:
                 raise TaskNotFound("notification delivery not found")
+            if expected_attempt_count is not None and (
+                row["state"] != "delivering" or row["attempt_count"] != expected_attempt_count
+                or datetime.fromisoformat(row["next_attempt_at"]) <= datetime.fromisoformat(now)
+            ):
+                # A delayed worker never acknowledges, defers or reschedules
+                # the lease now owned by another attempt. Legacy callers keep
+                # their existing behavior when no attempt fence is supplied.
+                return _outbox_from_row(row)
             if succeeded:
                 connection.execute(
                     """

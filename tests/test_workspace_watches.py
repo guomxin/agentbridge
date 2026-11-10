@@ -289,3 +289,94 @@ def test_owner_can_pause_or_stop_after_authority_loss_but_http_receipt_is_redact
     assert result["watch"]["version"]>watch["version"]
     assert "合成" not in json.dumps(result,ensure_ascii=False)
     ctx.read.assert_not_called()
+
+
+def test_http_watch_options_are_authenticated_owned_and_do_not_grant_missing_permission(http_context):
+    ctx=http_context
+    assert _request(ctx.port,"GET","/api/business-watches/options")[0]==401
+    owned={}
+    for subject in ("user-a","user-b"):
+        status,headers,result=request(ctx,"GET","/api/business-watches/options",subject=subject)
+        assert status==200 and headers.get("Cache-Control")=="no-store" and result["enabled"] is True
+        assert result["defaults"]=={"interval_seconds":3600,"expires_in_days":7,"event_types":["nodes","handlers","ended"]}
+        assert result["readNotice"]=="检查可能将事项标为已读。" and result["backgroundPaused"] is False
+        owned[subject]={item["endpoint_id"] for item in result["endpoints"]}
+        assert owned[subject] and all(set(item)=={"endpoint_id","client_type","label"} for item in result["endpoints"])
+        assert all(item["client_type"] in {"telegram","openclaw-weixin","wechat","weixin"} for item in result["endpoints"])
+    assert owned["user-a"].isdisjoint(owned["user-b"])
+    grant_permissions(ctx.service.user_grants,"user-a",["oa.workflow.read"])
+    status,_,disabled=request(ctx,"GET","/api/business-watches/options")
+    assert status==200 and disabled["enabled"] is False and disabled["endpoints"]==[] and disabled["message"]
+    assert ctx.service.user_grants.get("user-a")["permissions"]==["oa.workflow.read"]
+    ctx.read.assert_not_called();assert ctx.workers==[] and counts(ctx)==(0,0,0)
+
+
+def test_http_watch_option_labels_distinguish_owned_devices_without_exposing_private_routes(http_context):
+    ctx=http_context
+    with ctx.service.tasks._connect() as db:
+        db.execute("UPDATE client_endpoints SET label=NULL WHERE user_subject='user-a' AND client_type='telegram'")
+    status,_,single=request(ctx,"GET","/api/business-watches/options")
+    assert status==200 and len(single["endpoints"])==1 and single["endpoints"][0]["label"]=="Telegram"
+    unnamed=single["endpoints"][0]["endpoint_id"]
+    created={}
+    for key,label in (("office","办公室电脑"),("same-office","办公室电脑"),("unnamed",None),("phone","我的手机")):
+        endpoint,_=ctx.service.tasks.ensure_endpoint(user_subject="user-a",token_id="synthetic-private-token-"+key,
+            agent_host="synthetic-test",endpoint_key="synthetic:"+key,client_type="telegram",
+            external_subject="synthetic-private-external-"+key,conversation_ref="synthetic-private-conversation-"+key,
+            label=label,route={"private":"synthetic-private-route-"+key})
+        created[key]=endpoint["endpoint_id"]
+    status,_,options=request(ctx,"GET","/api/business-watches/options")
+    assert status==200
+    by_id={item["endpoint_id"]:item["label"] for item in options["endpoints"]}
+    assert len(set(by_id.values()))==len(by_id)==5
+    assert by_id[created["phone"]]=="Telegram · 我的手机"
+    for key in ("office","same-office"):
+        assert by_id[created[key]]=="Telegram · 办公室电脑 · "+created[key][:8]
+    for endpoint_id in (unnamed,created["unnamed"]):
+        assert by_id[endpoint_id]=="Telegram · "+endpoint_id[:8]
+    assert request(ctx,"GET","/api/business-watches/options")[2]==options
+    assert "synthetic-private-" not in json.dumps(options)
+    assert all(set(item)=={"endpoint_id","client_type","label"} for item in options["endpoints"])
+    bob=request(ctx,"GET","/api/business-watches/options",subject="user-b")[2]
+    assert set(by_id).isdisjoint(item["endpoint_id"] for item in bob["endpoints"])
+    ctx.read.assert_not_called();assert ctx.workers==[] and counts(ctx)==(0,0,0)
+
+
+def test_http_configure_preserves_expiry_when_omitted_and_cancelled_read_consent_pauses_without_oa_io(http_context):
+    ctx=http_context
+    status,_,created=request(ctx,"POST","/api/business-watches",body={"target_ref":reference(ctx),"allow_mark_read":True})
+    assert status==201;watch=created["watch"];wid=watch["watch_id"]
+    status,_,options=request(ctx,"GET","/api/business-watches/options")
+    endpoint=options["endpoints"][0]["endpoint_id"]
+    status,_,changed=request(ctx,"POST",f"/api/business-watches/{wid}/update",body={"expected_version":watch["version"],
+        "action":"configure","interval_seconds":900,"event_types":["nodes"],"endpoint_ids":[endpoint],"allow_mark_read":True})
+    assert status==200 and changed["watch"]["expires_at"]==watch["expires_at"]
+    watch=changed["watch"]
+    assert watch["interval_seconds"]==900 and watch["event_types"]==["nodes"] and watch["endpoint_ids"]==[endpoint]
+    status,_,paused=request(ctx,"POST",f"/api/business-watches/{wid}/update",body={"expected_version":watch["version"],
+        "action":"configure","allow_mark_read":False})
+    assert status==200 and paused["watch"]["state"]=="paused" and paused["watch"]["allow_mark_read"] is False
+    assert paused["watch"]["expires_at"]==watch["expires_at"] and ctx.read.call_count==1
+
+
+def test_http_maintenance_pause_projects_read_only_state_and_still_permits_owner_pause_and_stop(http_context):
+    ctx=http_context;watch=seed(ctx);wid=watch["watch_id"]
+    ctx.service.business_watch.controls.set(scope="user",target="user-a",paused=True,expected_version=0,
+        reason="synthetic maintenance",actor="isolated test")
+    status,_,result=request(ctx,"GET",f"/api/business-watches/{wid}")
+    assert status==200 and result["watch"]["background_paused"] is True and result["watch"]["next_check_at"] is None
+    assert result["watch"]["snapshot"]["current_nodes"][0]["name"]=="合成核对节点"
+    watch=result["watch"]
+    assert request(ctx,"GET","/api/business-watches/options")[2]["backgroundPaused"] is True
+    assert request(ctx,"GET","/api/business-watches/options",subject="user-b")[2]["backgroundPaused"] is False
+    for suffix,body in (("check",{"expected_version":watch["version"]}),
+                        ("update",{"expected_version":watch["version"],"action":"configure","interval_seconds":900})):
+        status,_,error=request(ctx,"POST",f"/api/business-watches/{wid}/{suffix}",body=body)
+        assert status==409 and error["error"]["code"]=="WATCH_ADMIN_PAUSED"
+    status,_,paused=request(ctx,"POST",f"/api/business-watches/{wid}/update",body={"expected_version":watch["version"],"action":"pause"})
+    assert status==200 and paused["watch"]["state"]=="paused"
+    status,_,error=request(ctx,"POST",f"/api/business-watches/{wid}/update",body={"expected_version":paused["watch"]["version"],"action":"resume"})
+    assert status==409 and error["error"]["code"]=="WATCH_ADMIN_PAUSED"
+    status,_,stopped=request(ctx,"POST",f"/api/business-watches/{wid}/update",body={"expected_version":paused["watch"]["version"],"action":"stop"})
+    assert status==200 and stopped["watch"]["state"]=="stopped"
+    ctx.read.assert_not_called();assert ctx.workers==[]

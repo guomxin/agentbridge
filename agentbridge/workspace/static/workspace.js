@@ -118,6 +118,7 @@ const { upsertTaskCard, renderTasks, renderTaskDetail, renderSkillCard, resetTas
   prepareRecovery:prepareOaPendingRecovery, getScope:() => sessionScope,
   openPreparation:(taskId,options) => preparationHandoff.start(taskId,options), viewState,
   queryRemaining:queryOaBatchRemaining,
+  onWatch:target => openBusinessWatch(target),
   loadHistoryPage:(taskId,cursor) => scopedApi(sessionScope)(`/api/tasks/${encodeURIComponent(taskId)}/oa-history/next`,
     {method:"POST",body:{cursor},csrf:true,timeoutMs:45000}),
 });
@@ -525,6 +526,15 @@ function selectTaskPanel(panel, {load = true} = {}) {
     if (watches) businessWatches.activate();
     else loadTasks();
   }
+}
+
+async function openBusinessWatch(target) {
+  const accountScope = sessionScope.replace('watch-open');
+  if (await switchView('tasks') === false || !accountScope.current()) return;
+  selectTaskPanel('watches',{load:false});
+  await businessWatches.activate();
+  if (accountScope.current() && state.activeView === 'tasks' && state.taskPanel === 'watches')
+    await businessWatches.createFrom(target);
 }
 
 async function startTrial(trial, permit) {

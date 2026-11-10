@@ -389,6 +389,7 @@ HOST_COORDINATION_TOOL_NAMES = (
     "agentbridge_host_task_continuation_resolve",
     "agentbridge_host_cross_endpoint_context",
     "agentbridge_host_notification_claim",
+    "agentbridge_host_notification_validate",
     "agentbridge_host_notification_ack",
     "agentbridge_host_artifact_delivery_report",
     "agentbridge_host_artifact_reissue",
@@ -2113,7 +2114,7 @@ def create_central_mcp_server(
         await _registered_host_context(ctx,service=service,identity=identity,minimum_level='L3')
         return await asyncio.to_thread(service.business_watch.create,identity['user_subject'],
             {'target_ref':target_ref,'allow_mark_read':allow_mark_read,'interval_seconds':interval_seconds,
-             'expires_in_days':expires_in_days,'event_types':event_types or ['nodes','handlers','ended'],
+             'expires_in_days':expires_in_days,'event_types':['nodes','handlers','ended'] if event_types is None else event_types,
              'endpoint_ids':endpoint_ids or [],'idempotency_key':idempotency_key})
 
     @mcp.tool(name='agentbridge_business_watch_list',title='查看我关注的事项',
@@ -6321,6 +6322,21 @@ def create_central_mcp_server(
             wait_seconds=wait_seconds,
         )
 
+    @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Watch Delivery Before Sending',
+        description='Host-private fresh authorization of one claimed watch notification immediately before sending.',
+        annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_host_notification_validate(ctx:Context,
+        agent_host:Annotated[str,Field(min_length=1,max_length=80)],
+        endpoint_key:Annotated[str,Field(min_length=1,max_length=768)],
+        delivery_id:Annotated[str,Field(min_length=16,max_length=128)],
+        attempt_count:Annotated[int,Field(ge=1,le=5)]) -> dict[str,Any]:
+        identity=_request_identity(identity_store)
+        await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
+        return await _run_host_control('agentbridge_host_notification_validate',service.validate_host_notification,
+            user_subject=identity['user_subject'],agent_host=agent_host,endpoint_key=endpoint_key,
+            delivery_id=delivery_id,attempt_count=attempt_count)
+
     @mcp.tool(
         name="agentbridge_host_notification_ack",
         title="Acknowledge Endpoint Notification",
@@ -6344,6 +6360,7 @@ def create_central_mcp_server(
         succeeded: bool,
         retry_after_seconds: Annotated[int, Field(ge=1, le=300)] = 5,
         defer_until_activity: bool = False,
+        attempt_count: Annotated[int | None, Field(ge=1, le=5)] = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         await _require_registered_host_call(
@@ -6362,6 +6379,7 @@ def create_central_mcp_server(
             succeeded=succeeded,
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
+            attempt_count=attempt_count,
         )
 
     @mcp.tool(

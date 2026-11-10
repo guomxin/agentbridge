@@ -1773,6 +1773,18 @@ class CentralCapabilityService:
                     },
                 )
             event = delivery["payload"]
+            from agentbridge.core.business_watch_notifications import WATCH_EVENT_TYPES, validate_watch_delivery
+            if event.get('eventType') in WATCH_EVENT_TYPES:
+                validated=validate_watch_delivery(self,delivery)
+                if validated is None:
+                    self.tasks.acknowledge_outbox(user_subject=user_subject,endpoint_id=endpoint['endpoint_id'],
+                        delivery_id=delivery['delivery_id'],succeeded=True,expected_attempt_count=delivery['attempt_count'])
+                    continue
+                notifications.append({'deliveryId':delivery['delivery_id'],'attemptCount':delivery['attempt_count'],
+                    'task':task_response(self.tasks.get_task(delivery['task_id'],user_subject=user_subject)),
+                    'event':event,'deliveryMode':'business_watch','interaction':None,'artifact':None,
+                    'message':None,'watchId':validated['watchId']})
+                continue
             if delivery["payload_type"] == "timeline_message":
                 notifications.append(
                     {
@@ -1897,6 +1909,19 @@ class CentralCapabilityService:
             "notifications": notifications,
         }
 
+    def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count):
+        endpoint=self.tasks.endpoint_for_key(user_subject=user_subject,agent_host=agent_host,endpoint_key=endpoint_key)
+        delivery=self.tasks.get_delivery(delivery_id)
+        if delivery['user_subject']!=user_subject or delivery['endpoint_id']!=endpoint['endpoint_id']:
+            raise PermissionError('Notification does not belong to this endpoint')
+        if (type(attempt_count) is not int or delivery['state']!='delivering'
+            or delivery['attempt_count']!=attempt_count
+            or datetime.fromisoformat(delivery['next_attempt_at'])<=datetime.now(timezone.utc)):
+            return {'allowed':False,'stale':True}
+        from agentbridge.core.business_watch_notifications import validate_watch_delivery
+        value=validate_watch_delivery(self,delivery)
+        return {'allowed':False} if value is None else {'allowed':True,**value}
+
     def acknowledge_host_notification(
         self,
         *,
@@ -1907,6 +1932,7 @@ class CentralCapabilityService:
         succeeded: bool,
         retry_after_seconds: int = 5,
         defer_until_activity: bool = False,
+        attempt_count: int | None = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1921,6 +1947,16 @@ class CentralCapabilityService:
             raise ValueError(
                 "endpoint does not support activity-gated notification delivery"
             )
+        pending=self.tasks.get_delivery(delivery_id)
+        if pending['user_subject']!=user_subject or pending['endpoint_id']!=endpoint['endpoint_id']:
+            raise PermissionError('Notification does not belong to this endpoint')
+        from agentbridge.core.business_watch_notifications import WATCH_EVENT_TYPES, validate_watch_delivery
+        watch_delivery=pending['payload'].get('eventType') in WATCH_EVENT_TYPES
+        if watch_delivery:
+            if type(attempt_count) is not int or not 1<=attempt_count<=5:
+                raise ValueError('Watch notification acknowledgement requires its current attempt count')
+            if validate_watch_delivery(self,pending) is None:
+                succeeded,defer_until_activity=True,False
         delivery = self.tasks.acknowledge_outbox(
             user_subject=user_subject,
             endpoint_id=endpoint["endpoint_id"],
@@ -1928,6 +1964,7 @@ class CentralCapabilityService:
             succeeded=succeeded,
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
+            expected_attempt_count=attempt_count if watch_delivery else None,
         )
         if delivery.get("task_id"):
             trace = self.runtime_governance.trace_for_task(
@@ -2827,6 +2864,11 @@ class CentralCapabilityService:
         }
 
     def require_task_result_access(self, *, user_subject: str, task_id: str) -> None:
+        task=self.tasks.get_task(task_id,user_subject=user_subject)
+        watch_id=(task.get('summary') or {}).get('businessWatchId')
+        if watch_id:
+            watch=self.business_watch._owned(user_subject,watch_id)
+            self.business_watch._session(user_subject,principal=watch['principal_ref'])
         plan = self.task_plans.get_for_task(parent_task_id=task_id, user_subject=user_subject)
         transform_operations = {}
         if plan:
