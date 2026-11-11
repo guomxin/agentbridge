@@ -12,7 +12,7 @@ import time
 
 from agentbridge.core.business_content_identity import principal_binding
 from agentbridge.core.capability import CapabilitySpec
-from agentbridge.core.business_watches import BusinessWatchError, BusinessWatchStore
+from agentbridge.core.business_watches import BusinessWatchError, BusinessWatchStore, WATCH_STATES
 
 STATE_CAPABILITY = 'oa.workflow.state.get'
 WATCH_PERMISSION = 'oa.workflow.watch'
@@ -289,20 +289,25 @@ class BusinessWatchService:
         self._owned(subject,watch_id)
         return {'watch':self._public(subject,value),'events':events}
 
-    def list(self, subject, *, cursor=None, limit=32):
+    def list(self, subject, *, cursor=None, limit=32, state=None):
         self.require_permission(subject)
         session,principal = self._session(subject)
-        parameters = {'user_subject':subject,'limit':limit,'include_private':True}
+        state = 'all' if state is None else state
+        if not isinstance(state,str) or state not in WATCH_STATES | {'all'}:
+            raise BusinessWatchError('WATCH_ARGUMENTS_INVALID','关注状态筛选不合法。')
+        parameters = {'user_subject':subject,'limit':limit,'state':state,'include_private':True}
         if cursor:
             data = self._unpack('page',subject,cursor)
             if data.get('principal') != principal or data.get('instance') != self.system_instance:
                 raise BusinessWatchError('WATCH_REFERENCE_INVALID','账号已变化，请刷新关注列表。')
+            if data.get('state','all') != state:
+                raise BusinessWatchError('WATCH_REFERENCE_INVALID','关注状态筛选已变化，请重新加载列表。')
             parameters.update(before_created_at=data['before_created_at'],before_watch_id=data['before_watch_id'])
         result = self.store.list(**parameters)
         # Old-account watches never become readable after a rebind.
         items = [self._public(subject,w) for w in result['items'] if w['principal_ref']==principal and w['system_instance']==self.system_instance]
         next_page = result.get('next_cursor')
-        token = self._pack('page',subject,{**next_page,'principal':principal,'instance':self.system_instance}) if next_page else None
+        token = self._pack('page',subject,{**next_page,'principal':principal,'instance':self.system_instance,'state':state}) if next_page else None
         self.require_permission(subject)
         self._session(subject,principal=principal)
         return {'items':items,'hasMore':bool(result.get('has_more')),'nextCursor':token}

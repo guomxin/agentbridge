@@ -169,6 +169,16 @@
             <p class="business-watch-explanation">从 OA 已发、已办历史查询结果点“关注后续”开始。只核验流程状态，不办理 OA 事项。</p>
             <div class="business-watch-layout">
               <div class="business-watch-browser">
+                <label class="business-watch-filter">关注状态
+                  <select id="business-watch-state-filter">
+                    <option value="active" selected>关注中</option>
+                    <option value="paused">已暂停</option>
+                    <option value="stopped">已停止</option>
+                    <option value="completed">关注已结束</option>
+                    <option value="expired">已到期</option>
+                    <option value="all">全部</option>
+                  </select>
+                </label>
                 <div id="business-watch-list" class="business-watch-list" aria-label="我关注的事项列表"></div>
                 <div class="task-pagination">
                   <span id="business-watch-list-status" role="status" aria-live="polite"></span>

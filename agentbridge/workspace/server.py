@@ -392,7 +392,7 @@ def create_workspace_http_server(
                     return
                 if route.path == '/api/business-watches':
                     self._json(200, application.business_watches(account,
-                        cursor=_query_value(query,'cursor'),limit=_query_int(query,'limit',32)))
+                        cursor=_query_value(query,'cursor'),limit=_query_int(query,'limit',32),state=_query_value(query,'state')))
                     return
                 watch_match = re.fullmatch(r'/api/business-watches/([0-9a-f-]{36})',route.path)
                 if watch_match:

@@ -194,6 +194,87 @@ def test_real_http_paging_is_owned_and_foreign_cursor_cannot_cross_accounts(http
     ctx.read.assert_not_called()
 
 
+def test_http_state_filter_pages_matching_watches_and_includes_effective_expiry(http_context):
+    ctx = http_context
+    store = ctx.service.business_watch.store
+    watches = [seed(ctx, number=number) for number in range(1, 8)]
+    for index, state in ((1, "paused"), (3, "stopped")):
+        item = watches[index]
+        store.update(item["watch_id"], user_subject="user-a", expected_version=item["version"], state=state)
+    completed = watches[4]
+    ended = {**_snapshot(), "workflow_state": "ended", "current_nodes": [], "current_handlers": []}
+    store.apply_observation(completed["watch_id"], user_subject="user-a",
+        expected_version=completed["version"], snapshot=ended)
+    now = datetime.now(timezone.utc)
+    expiring = watches[6]
+    store.update(expiring["watch_id"], user_subject="user-a", expected_version=expiring["version"],
+        state="paused", expires_at=(now + timedelta(days=1)).isoformat())
+    store.clock = lambda: now + timedelta(days=2)
+    before = counts(ctx)
+    expected = {"active": [watches[index]["watch_id"] for index in (5, 2, 0)],
+        "paused": [watches[1]["watch_id"]], "stopped": [watches[3]["watch_id"]],
+        "completed": [completed["watch_id"]], "expired": [expiring["watch_id"]]}
+    for state, ids in expected.items():
+        status, _, page = request(ctx, "GET", "/api/business-watches?" + urlencode({"state": state, "limit": 2}))
+        assert status == 200
+        assert page["hasMore"] is (state == "active")
+        items = page["items"]
+        if page["hasMore"]:
+            status, _, last = request(ctx, "GET", "/api/business-watches?" + urlencode({
+                "state": state, "limit": 2, "cursor": page["nextCursor"]}))
+            assert status == 200 and not last["hasMore"] and last["nextCursor"] is None
+            items += last["items"]
+        assert [item["watch_id"] for item in items] == ids
+        assert {item["state"] for item in items} == {state}
+    status, _, unfiltered = request(ctx, "GET", "/api/business-watches")
+    assert status == 200 and len(unfiltered["items"]) == len(watches)
+    assert {item["state"] for item in unfiltered["items"]} == set(expected)
+    assert counts(ctx) == before
+    ctx.read.assert_not_called()
+
+
+def test_http_state_cursor_rejects_other_filters_accounts_and_invalid_state(http_context):
+    ctx = http_context
+    for number in range(1, 4):
+        seed(ctx, number=number)
+    seed(ctx, subject="user-b", number=100)
+    status, _, page = request(ctx, "GET", "/api/business-watches?state=active&limit=1")
+    assert status == 200 and page["hasMore"]
+    base = {"cursor": page["nextCursor"], "limit": 1}
+    for subject, state in (("user-a", "paused"), ("user-a", "all"), ("user-a", None), ("user-b", "active")):
+        query = {**base, **({"state": state} if state is not None else {})}
+        status, _, error = request(ctx, "GET", "/api/business-watches?" + urlencode(query), subject=subject)
+        assert status == 400 and error["error"]["code"] == "WATCH_REFERENCE_INVALID"
+    status, _, error = request(ctx, "GET", "/api/business-watches?state=running")
+    assert status == 400 and error["error"]["code"] == "WATCH_ARGUMENTS_INVALID"
+    status, _, next_page = request(ctx, "GET", "/api/business-watches?" + urlencode({**base, "state": "active"}))
+    assert status == 200 and next_page["items"][0]["watch_id"] != page["items"][0]["watch_id"]
+    ctx.read.assert_not_called()
+
+
+def test_http_legacy_unfiltered_cursor_continues_all_only(http_context):
+    ctx = http_context
+    for number in range(1, 4):
+        seed(ctx, number=number)
+    status, _, page = request(ctx, "GET", "/api/business-watches?limit=1")
+    assert status == 200 and page["hasMore"]
+    item = page["items"][0]
+    watches = ctx.service.business_watch
+    old_cursor = watches._pack("page", "user-a", {
+        "before_created_at": item["created_at"], "before_watch_id": item["watch_id"],
+        "principal": principal_binding(ctx.sessions["user-a"]), "instance": watches.system_instance})
+    second_ids = set()
+    for cursor, state in ((old_cursor, None), (old_cursor, "all"), (page["nextCursor"], "all")):
+        query = {"limit": 1, "cursor": cursor, **({"state": state} if state is not None else {})}
+        status, _, second = request(ctx, "GET", "/api/business-watches?" + urlencode(query))
+        assert status == 200 and second["hasMore"]
+        second_ids.add(second["items"][0]["watch_id"])
+    assert len(second_ids) == 1 and item["watch_id"] not in second_ids
+    status, _, error = request(ctx, "GET", "/api/business-watches?" + urlencode({"state": "active", "cursor": old_cursor}))
+    assert status == 400 and error["error"]["code"] == "WATCH_REFERENCE_INVALID"
+    ctx.read.assert_not_called()
+
+
 def test_foreign_watch_and_invalid_id_routes_do_not_read_or_mutate_the_owner_record(http_context):
     ctx=http_context;watch=seed(ctx);wid=watch["watch_id"];before=counts(ctx)
     attempts=[("GET",f"/api/business-watches/{wid}",None),

@@ -1256,6 +1256,8 @@ code {
 .business-watches-panel {display:flex;flex:1 1 auto;min-height:0;min-width:0;flex-direction:column;position:relative;}
 .business-watch-layout {display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.15fr);flex:1 1 auto;min-height:0;min-width:0;border:1px solid var(--line);background:var(--surface);}
 .business-watch-browser {display:flex;flex-direction:column;min-width:0;min-height:0;border-right:1px solid var(--line);}
+.business-watch-filter {display:flex;align-items:center;flex:0 0 auto;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);}
+.business-watch-filter select {min-width:0;min-height:36px;}
 .business-watch-list {flex:1 1 auto;min-height:0;overflow:auto;}
 .business-watch-row {display:block;width:100%;border:0;border-bottom:1px solid var(--line);padding:15px 16px;text-align:left;background:var(--surface);white-space:normal;}
 .business-watch-row.active,.business-watch-row:hover {background:#f0f5f2;}

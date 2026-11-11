@@ -13,6 +13,7 @@ const watch = (id='one', version=1, state='active', extra={}) => ({watch_id:id, 
   next_check_at:'2026-11-10T09:00:00Z',expires_at:'2026-11-17T08:00:00Z',...extra});
 const options = (extra={}) => ({enabled:true,endpoints:[{endpoint_id:'my-phone',client_type:'telegram',label:'我的合成手机'}],
   defaults:{interval_seconds:3600,expires_in_days:7,event_types:['nodes','handlers','ended']},readNotice:'检查可能将事项标为已读。',...extra});
+const isList = call => !call.method && call.path.startsWith('/api/business-watches?');
 const detail = value => ({watch:value,events:[{event_id:'created',event_type:'created',created_at:'2026-11-10T08:00:00Z',summary:'开始关注'}]});
 function harness(handler) {
   const document=createDocument(),nodes=new Map(),lifecycle=createLifecycle();let scope=lifecycle.scope();
@@ -23,7 +24,9 @@ function harness(handler) {
     request:(path,current,options={})=>{const call={path,scope:current,...options};calls.push(call);return handler(call,calls.length);}});
   const button=action=>descendants($('#business-watch-detail')).find(node=>node.dataset.watchAction===action);
   const field=(name,value)=>descendants($('#business-watch-detail')).find(node=>node.name===name&&(value===undefined||node.value===value));
-  return {document,$,nodes,calls,controller,lifecycle,button,field,get keyCalls(){return keyCalls;},get scope(){return scope;},
+  const filter = $('#business-watch-state-filter');
+  return {document,$,nodes,calls,controller,lifecycle,button,field,filter,
+    filterTo(state){filter.value=state;return filter.events.change();},get keyCalls(){return keyCalls;},get scope(){return scope;},
     replaceAccount(){scope.dispose();controller.reset();scope=lifecycle.scope();}};
 }
 
@@ -56,10 +59,84 @@ test('failed page retains rows and retries only the same read cursor; empty list
   assert.match(empty.$('#business-watch-list-status').textContent,/暂时没有/);empty.lifecycle.dispose();
 });
 
+test('changing the filter resets paging and discards late list and detail responses', async () => {
+  const nextPage = deferred(), oldDetail = deferred();
+  const h = harness(call => {
+    if (!isList(call)) return oldDetail.promise;
+    const query = new URL(call.path, 'https://workspace.test').searchParams;
+    if (query.has('cursor')) return nextPage.promise;
+    if (query.get('state') === 'stopped') {
+      return {items:[watch('historical', 2, 'stopped')], hasMore:false};
+    }
+    return {items:[watch('current')], hasMore:true, nextCursor:'active-page'};
+  });
+  await h.controller.activate();
+  assert.equal(h.filter.value, 'active');
+  assert.equal(h.calls[0].path, '/api/business-watches?state=active');
+  const reading = h.controller.select('current');
+  const paging = h.controller.load({append:true});
+  assert.equal(h.calls.at(-1).path, '/api/business-watches?state=active&cursor=active-page');
+  await h.filterTo('stopped');
+  assert.equal(h.calls.at(-1).path, '/api/business-watches?state=stopped');
+  oldDetail.resolve(detail(watch('current')));
+  nextPage.resolve({items:[watch('late')],hasMore:true,nextCursor:'stale'});
+  await Promise.all([reading, paging]);
+  assert.match(h.$('#business-watch-list').textContent, /合成关注historical/);
+  assert.doesNotMatch(h.$('#business-watch-list').textContent, /current|late/);
+  assert.doesNotMatch(h.$('#business-watch-detail').textContent, /current/);
+  assert.equal(h.$('#business-watch-more').hidden, true);
+  assert.ok(h.calls.every(call => !call.method));
+  h.lifecycle.dispose();
+});
+
+test('a stopped watch leaves the default list and remains readable in its history filter', async () => {
+  let value = watch();
+  const h = harness(call => {
+    if (call.method) return {watch: (value = watch('one', 2, 'stopped'))};
+    if (!isList(call)) return detail(value);
+    const state = new URL(call.path, 'https://workspace.test').searchParams.get('state');
+    return {items: state === value.state || state === 'all' ? [value] : [], hasMore:false};
+  });
+  await h.controller.activate();
+  await h.controller.select('one');
+  await h.controller.act('stop');
+  assert.match(h.$('#business-watch-list-status').textContent, /暂时没有关注中/);
+  assert.doesNotMatch(h.$('#business-watch-list').textContent, /合成关注one/);
+  assert.match(h.$('#business-watch-detail').textContent, /「已停止」筛选/);
+  const back = descendants(h.$('#business-watch-detail')).find(node => node.textContent === '返回关注列表');
+  back.events.click();
+  assert.equal(h.document.activeElement, h.filter);
+  await h.filterTo('stopped');
+  await h.controller.refresh();
+  assert.equal(h.filter.value, 'stopped');
+  assert.equal(h.calls.at(-1).path, '/api/business-watches?state=stopped');
+  assert.match(h.$('#business-watch-list').textContent, /合成关注one/);
+  await h.controller.select('one');
+  assert.equal(h.button('resume').hidden, true);
+  h.replaceAccount();
+  await h.controller.activate();
+  assert.equal(h.filter.value, 'active');
+  assert.equal(h.calls.at(-1).path, '/api/business-watches?state=active');
+  assert.doesNotMatch(h.$('#business-watch-list').textContent, /合成关注one/);
+  assert.equal(h.calls.filter(call => call.method).length, 1);
+  h.lifecycle.dispose();
+});
+
+test('a filtered empty page with a cursor offers continuation before reporting an empty result', async () => {
+  const h = harness(call => call.path.includes('cursor=')
+    ? {items:[watch('later')], hasMore:false}
+    : {items:[], hasMore:true, nextCursor:'more'});
+  await h.controller.activate();
+  assert.match(h.$('#business-watch-list-status').textContent, /本页.*可继续加载/);
+  await h.$('#business-watch-more').events.click();
+  assert.match(h.$('#business-watch-list').textContent, /合成关注later/);
+  h.lifecycle.dispose();
+});
+
 test('detail distinguishes missing fields, old observations and ended flow from business completion',async()=>{
   const value=watch('one',1,'completed',{snapshot:{workflow_state:'ended',current_nodes:[],current_handlers:[],
     observed_at:'2026-11-10T08:00:00Z',unavailable_fields:[]}});
-  const h=harness(call=>call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value));
+  const h=harness(call=>isList(call)?{items:[value],hasMore:false}:detail(value));
   await h.controller.activate();await h.controller.select('one');
   const copy=h.$('#business-watch-detail').textContent;
   assert.match(copy,/无当前节点（流程已结束）/);assert.match(copy,/流程结束不代表款项已支付/);
@@ -67,14 +144,14 @@ test('detail distinguishes missing fields, old observations and ended flow from 
   assert.equal(h.button('resume').hidden,true);h.lifecycle.dispose();
   const missing=watch('one',1,'active',{snapshot:{workflow_state:'running',current_nodes:[{name:'旧节点'}],
     current_handlers:['旧处理人'],unavailable_fields:['current_nodes','current_handlers']}});
-  const m=harness(call=>call.path==='/api/business-watches'?{items:[missing],hasMore:false}:detail(missing));
+  const m=harness(call=>isList(call)?{items:[missing],hasMore:false}:detail(missing));
   await m.controller.activate();await m.controller.select('one');
   assert.doesNotMatch(m.$('#business-watch-detail').textContent,/旧节点|旧处理人/);m.lifecycle.dispose();
 });
 
 test('pause and resume consume the current projected version once and leave OA actions absent',async()=>{
   const pending=deferred();let value=watch(),mutations=0;
-  const h=harness(call=>call.method?(++mutations===1?pending.promise:{watch:watch('one',3,'active')}):call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value));
+  const h=harness(call=>call.method?(++mutations===1?pending.promise:{watch:watch('one',3,'active')}):isList(call)?{items:[value],hasMore:false}:detail(value));
   await h.controller.activate();await h.controller.select('one');
   const pause=h.controller.act('pause');await h.controller.act('pause');
   const mutation=h.calls.filter(call=>call.method);
@@ -96,7 +173,7 @@ test('a manual check renders the authoritative new observation and deduplicates 
   const event={event_id:'change-1',event_type:'watch.changed',observed_at:'2026-11-10T09:00:00Z',
     change_types:['nodes'],diff:{nodes:{before:['核对'],after:['复核']}}};
   const h=harness(call=>call.method?{watch:changed,events:[event,event,null]}
-    :call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch()));
+    :isList(call)?{items:[watch()],hasMore:false}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');await h.controller.act('check');
   const check=h.calls.find(call=>call.method);
   assert.equal(check.path,'/api/business-watches/one/check');assert.equal(check.timeoutMs,45000);
@@ -110,7 +187,7 @@ test('a manual check renders the authoritative new observation and deduplicates 
 test('an incomplete observation preserves the last snapshot and does not claim a newly verified state',async()=>{
   const incomplete=watch('one',2,'active',{last_check_status:'incomplete'});
   const h=harness(call=>call.method?{watch:incomplete,events:[]}
-    :call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch()));
+    :isList(call)?{items:[watch()],hasMore:false}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');await h.controller.act('check');
   assert.match(h.$('#business-watch-detail').textContent,/未取得完整可信状态/);
   assert.match(h.$('#business-watch-detail').textContent,/流转中/);
@@ -119,7 +196,7 @@ test('an incomplete observation preserves the last snapshot and does not claim a
 
 test('a redacted pause receipt after permission loss clears all formerly readable material',async()=>{
   const h=harness(call=>call.method?{watch:{watch_id:'one',state:'paused',version:2}}
-    :call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch()));
+    :isList(call)?{items:[watch()],hasMore:false}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');await h.controller.act('pause');
   assert.match(h.$('#business-watch-detail').textContent,/关注已暂停/);
   assert.doesNotMatch(h.$('#business-watch-detail').textContent,/合成关注one|核对（甲）/);
@@ -129,7 +206,7 @@ test('a redacted pause receipt after permission loss clears all formerly readabl
 test('version conflict blocks further mutations until a fresh GET establishes the new version',async()=>{
   let value=watch(), rejected=true;
   const h=harness(call=>{
-    if(!call.method)return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+    if(!call.method)return isList(call)?{items:[value],hasMore:false}:detail(value);
     if(rejected){rejected=false;value=watch('one',4,'paused');throw Object.assign(new Error('changed'),{status:409,code:'WATCH_VERSION_CONFLICT'});}
     return {watch:watch('one',5,'stopped')};
   });
@@ -145,7 +222,7 @@ test('a source-read 409 preserves its actual failure reason and old snapshot wit
   const message='本次未能核实流程状态，已保留上次可信结果。';
   const h=harness(call=>{
     if(call.method)throw Object.assign(new Error(message),{status:409,code:'WATCH_SOURCE_UNAVAILABLE'});
-    return call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch());
+    return isList(call)?{items:[watch()],hasMore:false}:detail(watch());
   });
   await h.controller.activate();await h.controller.select('one');await h.controller.act('check');
   const copy=h.$('#business-watch-detail').textContent;
@@ -159,7 +236,7 @@ test('a lost mutation response is never replayed and a GET can reveal that the o
   let value=watch();
   const h=harness(call=>{
     if(call.method){value=watch('one',2,'paused');throw Object.assign(new Error('timeout'),{code:'WORKSPACE_REQUEST_TIMEOUT'});}
-    return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+    return isList(call)?{items:[value],hasMore:false}:detail(value);
   });
   await h.controller.activate();await h.controller.select('one');await h.controller.act('pause');await h.controller.act('pause');
   assert.equal(h.calls.filter(c=>c.method).length,1);
@@ -170,17 +247,17 @@ test('a lost mutation response is never replayed and a GET can reveal that the o
 
 test('a stale list cannot roll back the version confirmed by a completed mutation',async()=>{
   const old=deferred();let lists=0;
-  const h=harness(call=>call.path==='/api/business-watches'?(++lists===1?{items:[watch()],hasMore:false}:old.promise)
+  const h=harness(call=>isList(call)?(++lists===1?{items:[watch()],hasMore:false}:old.promise)
     :call.method?{watch:watch('one',3,'paused')}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');
   const stale=h.controller.load();await h.controller.act('pause');
   old.resolve({items:[watch()],hasMore:false});await stale;
-  assert.match(h.$('#business-watch-list').textContent,/已暂停/);assert.equal(h.button('resume').disabled,false);h.lifecycle.dispose();
+  assert.doesNotMatch(h.$('#business-watch-list').textContent,/合成关注one/);assert.equal(h.button('resume').disabled,false);h.lifecycle.dispose();
 });
 
 test('late detail selection and disposed account reads cannot expose another row or account',async()=>{
   const delayed=deferred();
-  const h=harness(call=>call.path==='/api/business-watches'?{items:[watch('one'),watch('two')],hasMore:false}
+  const h=harness(call=>isList(call)?{items:[watch('one'),watch('two')],hasMore:false}
     :call.path.endsWith('/one')?delayed.promise:detail(watch('two')));
   await h.controller.activate();const first=h.controller.select('one');await h.controller.select('two');
   delayed.resolve(detail(watch('one')));await first;
@@ -193,7 +270,7 @@ test('late detail selection and disposed account reads cannot expose another row
 
 test('leaving during an update ignores its late receipt and re-entry reads before enabling new controls',async()=>{
   const pending=deferred();let value=watch();
-  const h=harness(call=>call.method?pending.promise:call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value));
+  const h=harness(call=>call.method?pending.promise:isList(call)?{items:[value],hasMore:false}:detail(value));
   await h.controller.activate();await h.controller.select('one');const action=h.controller.act('pause');
   h.controller.deactivate();value=watch('one',2,'paused');pending.resolve({watch:value});await action;
   await h.controller.activate();
@@ -201,10 +278,12 @@ test('leaving during an update ignores its late receipt and re-entry reads befor
 });
 
 test('returning to the watch list and refreshing does not reopen the mobile detail overlay',async()=>{
-  const h=harness(call=>call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch()));
+  const h=harness(call=>isList(call)?{items:[watch()],hasMore:false}:detail(watch()));
   await h.controller.activate();await h.controller.select('one');
   const back=descendants(h.$('#business-watch-detail')).find(node=>node.textContent==='返回关注列表');
-  back.events.click();await h.controller.refresh();
+  back.events.click();
+  assert.equal(h.document.activeElement.dataset.watchId,'one');
+  await h.controller.refresh();
   assert.match(h.$('#business-watch-detail').className,/mobile-empty/);
   await h.controller.select('one');assert.doesNotMatch(h.$('#business-watch-detail').className,/mobile-empty/);h.lifecycle.dispose();
 });
@@ -226,7 +305,7 @@ test('permission loss clears cached title and state; session failures preserve o
   let failure=null;
   const h=harness(call=>{
     if(call.method)throw failure;
-    return call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:detail(watch());
+    return isList(call)?{items:[watch()],hasMore:false}:detail(watch());
   });
   await h.controller.activate();await h.controller.select('one');
   failure=Object.assign(new Error('session'),{status:401,code:'WATCH_SESSION_UNAVAILABLE'});
@@ -242,7 +321,7 @@ test('paused and unknown states cannot trigger manual checks, and missing read c
   let value=watch('one',1,'paused');
   const h=harness(call=>{
     if(call.method)throw Object.assign(new Error('consent'),{status:409,code:'WATCH_READ_CONSENT_REQUIRED'});
-    return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+    return isList(call)?{items:[value],hasMore:false}:detail(value);
   });
   await h.controller.activate();await h.controller.select('one');await h.controller.act('check');
   assert.equal(h.calls.filter(c=>c.method).length,0);
@@ -285,8 +364,10 @@ test('creating from an empty list updates its count and retains the separate cre
   let value=watch('new'),posts=0;
   const h=harness(call=>call.path.endsWith('/options')?options():call.method
     ? {watch:++posts===1?value:(value={...value,version:2})}:{items:[],hasMore:false});
-  await h.controller.activate();assert.equal(h.$('#business-watch-list-status').textContent,'暂时没有关注的事项。');
+  await h.controller.activate();assert.equal(h.$('#business-watch-list-status').textContent,'暂时没有关注中的事项。');
+  await h.filterTo('stopped');
   await h.controller.createFrom({title:'尚未关注的来源',target_ref:'opaque-source'});
+  assert.equal(h.filter.value,'active');
   h.field('allow_mark_read').checked=true;await h.controller.submitEditor();
   const rows=descendants(h.$('#business-watch-list')).filter(node=>node.tag==='button');
   assert.equal(rows.length,1);assert.equal(rows[0].dataset.watchId,'new');
@@ -297,6 +378,28 @@ test('creating from an empty list updates its count and retains the separate cre
   assert.equal(posts,2);h.lifecycle.dispose();
 });
 
+test('creating a duplicate of a paused watch keeps it paused and points to its filter', async () => {
+  const value = watch('existing', 3, 'paused');
+  const h = harness(call => {
+    if (call.path.endsWith('/options')) return options();
+    if (call.method) return {watch:value,reused:true};
+    if (isList(call)) return {items:call.path.endsWith('state=paused') ? [value] : [],hasMore:false};
+    return detail(value);
+  });
+  await h.controller.activate();
+  await h.controller.createFrom({title:'合成来源',target_ref:'opaque-source'});
+  h.field('allow_mark_read').checked = true;
+  await h.controller.submitEditor();
+  assert.match(h.$('#business-watch-detail').textContent, /沿用现有设置.*「已暂停」筛选/);
+  assert.doesNotMatch(h.$('#business-watch-detail').textContent, /已开始关注/);
+  assert.equal(h.button('resume').disabled, false);
+  assert.doesNotMatch(h.$('#business-watch-list').textContent, /合成关注existing/);
+  await h.filterTo('paused');
+  assert.match(h.$('#business-watch-list').textContent, /合成关注existing/);
+  assert.equal(h.calls.filter(call => call.method).length, 1);
+  h.lifecycle.dispose();
+});
+
 test('row updates preserve an in-flight list message and list failures while list reads retain detail conflicts',async()=>{
   const pending=deferred();let value=watch(),lists=0,mutations=0;
   const h=harness(call=>{
@@ -304,8 +407,8 @@ test('row updates preserve an in-flight list message and list failures while lis
       if(++mutations===1)return {watch:(value=watch('one',2,'paused'))};
       throw Object.assign(new Error('changed'),{status:409,code:'WATCH_VERSION_CONFLICT'});
     }
-    if(call.path.startsWith('/api/business-watches?'))return pending.promise;
-    if(call.path==='/api/business-watches')return {items:[value],hasMore:++lists===1,nextCursor:'next'};
+    if(isList(call) && call.path.includes('cursor='))return pending.promise;
+    if(isList(call))return {items:[value],hasMore:++lists===1,nextCursor:'next'};
     return detail(value);
   });
   await h.controller.activate();await h.controller.select('one');const loading=h.controller.load({append:true});
@@ -315,7 +418,7 @@ test('row updates preserve an in-flight list message and list failures while lis
   await h.controller.select('one',{preserve:true});await h.controller.act('resume');
   assert.equal(h.$('#business-watch-list-status').textContent,failure);
   assert.match(h.$('#business-watch-detail').textContent,/刷新详情后再操作/);
-  await h.controller.load();assert.equal(h.$('#business-watch-list-status').textContent,'已显示 1 项。');
+  await h.controller.load();assert.equal(h.$('#business-watch-list-status').textContent,'暂时没有关注中的事项。');
   assert.match(h.$('#business-watch-detail').textContent,/刷新详情后再操作/);
   assert.equal(h.button('resume').disabled,true);h.lifecycle.dispose();
 });
@@ -350,7 +453,7 @@ test('configure conflicts preserve drafts and require a fresh version before an 
   let value=watch('one',1,'active',{interval_seconds:3600,event_types:['nodes','ended'],endpoint_ids:[],allow_mark_read:true}),posts=0;
   const h=harness(call=>{
     if(call.path.endsWith('/options'))return options();
-    if(!call.method)return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+    if(!call.method)return isList(call)?{items:[value],hasMore:false}:detail(value);
     if(++posts===1){value={...value,version:4};throw Object.assign(new Error('changed'),{status:409,code:'WATCH_VERSION_CONFLICT'});}
     return {watch:{...value,version:5,interval_seconds:900}};
   });
@@ -371,7 +474,7 @@ test('unknown configure outcomes retain choices, never resend on refresh, and pr
   const h=harness(call=>{
     if(call.path.endsWith('/options'))return options();
     if(call.method){value={...value,version:2,interval_seconds:86400};throw Object.assign(new Error('timeout'),{code:'WORKSPACE_REQUEST_TIMEOUT'});}
-    return call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value);
+    return isList(call)?{items:[value],hasMore:false}:detail(value);
   });
   await h.controller.activate();await h.controller.select('one');await h.controller.openSettings();h.field('interval_seconds').value='86400';
   await h.controller.submitEditor();await h.controller.submitEditor();await h.controller.refresh();
@@ -409,7 +512,7 @@ test('only confirmed change diffs produce bounded observed history; failed or un
     {event_id:'invalid',event_type:'watch.changed',summary:'无证据摘要',diff:{nodes:{before:['A'],after:['A']}}},
     ...Array.from({length:103},(_,i)=>({event_id:'change-'+i,event_type:'watch.changed',observed_at:'2026-11-10T08:00:00Z',
       created_at:'2026-11-10T09:00:00Z',diff:{nodes:{before:['节点'+i],after:['新节点'+i]}}}))];
-  const h=harness(call=>call.path==='/api/business-watches'?{items:[watch()],hasMore:false}:{watch:watch(),events});
+  const h=harness(call=>isList(call)?{items:[watch()],hasMore:false}:{watch:watch(),events});
   await h.controller.activate();await h.controller.select('one');
   const copy=h.$('#business-watch-detail').textContent;assert.match(copy,/最多 100 条/);assert.doesNotMatch(copy,/错误地声称完成|无证据摘要/);
   const records=descendants(h.$('#business-watch-detail')).filter(n=>n.tag==='li');assert.equal(records.length,100);
@@ -420,7 +523,7 @@ test('only confirmed change diffs produce bounded observed history; failed or un
 test('maintenance pause keeps the saved snapshot but prevents check, resume and configure while pause and stop remain available',async()=>{
   let value=watch('one',1,'active',{background_paused:true,next_check_at:null});
   const h=harness(call=>call.method?{watch:{...value,version:2,state:call.body.action==='pause'?'paused':'stopped'}}
-    :call.path==='/api/business-watches'?{items:[value],hasMore:false}:detail(value));
+    :isList(call)?{items:[value],hasMore:false}:detail(value));
   await h.controller.activate();await h.controller.select('one');
   assert.match(h.$('#business-watch-detail').textContent,/维护暂停中/);assert.match(h.$('#business-watch-detail').textContent,/核对（甲）/);
   assert.equal(h.button('check').disabled,true);await h.controller.act('check');await h.controller.openSettings();

@@ -74,8 +74,8 @@ class WorkspaceChatResult:
 
 
 class WorkspaceApplication:
-    def business_watches(self, account, *, cursor=None, limit=32):
-        return self.service.business_watch.list(account['user_subject'],cursor=cursor,limit=limit)
+    def business_watches(self, account, *, cursor=None, limit=32, state=None):
+        return self.service.business_watch.list(account['user_subject'],cursor=cursor,limit=limit,state=state)
 
     def business_watch_detail(self, account, watch_id):
         return self.service.business_watch.get(account['user_subject'],watch_id)

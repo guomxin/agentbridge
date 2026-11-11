@@ -58,12 +58,14 @@ function errorMessage(error, mutation = false) {
 export function createBusinessWatches({document, $, getScope, request, makeKey = () => crypto.randomUUID()}) {
   let active = false, panelScope = null, generation = 0, listTicket = 0, detailTicket = 0;
   let items = new Map(), cursor = null, selectedId = null, detail = null, events = [];
+  let listState = 'active';
   let listPending = false, detailPending = false, actionPending = false, verified = false;
   let detailVisible = false;
   let lastAppend = false, detailNotice = '', listNotice = '';
   let listNoticeIsSummary = false;
   let editor = null, editorPending = false, editorTicket = 0;
   const rowViews = new Map();
+  const stateFilter = $('#business-watch-state-filter');
   const node = (tag, className = '', value = '') => {
     const element = document.createElement(tag); element.className = className; element.textContent = value; return element;
   };
@@ -123,10 +125,23 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   form.addEventListener('submit', event => { event.preventDefault(); return submitEditor(); });
   editorRoot.append(editorTitle,editorTarget,editorNotice,form); editorRoot.hidden = true;
   $('#business-watch-detail').replaceChildren(placeholder, content, editorRoot);
-  back.addEventListener('click', () => { detailVisible = false; $('#business-watch-detail').className = 'business-watch-detail mobile-empty'; });
+  back.addEventListener('click', () => {
+    detailVisible = false;
+    $('#business-watch-detail').className = 'business-watch-detail mobile-empty';
+    (rowViews.get(selectedId)?.root || stateFilter).focus();
+  });
 
   const current = (scope, epoch) => active && epoch === generation && scope.current();
-  const listSummary = () => items.size ? `已显示 ${items.size} 项${cursor ? '，可继续加载。' : '。'}` : '暂时没有关注的事项。';
+  const matchesFilter = watch => !!watch && (listState === 'all' || watch.state === listState);
+  const filterLocation = watch => !matchesFilter(watch) && Object.hasOwn(STATES, watch.state)
+    ? ` 可在「${STATES[watch.state]}」筛选中查看。` : '';
+  const emptyListMessage = () => cursor ? '本页没有符合条件的事项，可继续加载。'
+    : listState === 'active' ? '暂时没有关注中的事项。'
+    : listState === 'all' ? '暂时没有关注的事项。' : '没有符合当前状态的关注事项。';
+  const listSummary = () => {
+    const count = [...items.values()].filter(matchesFilter).length;
+    return count ? `已显示 ${count} 项${cursor ? '，可继续加载。' : '。'}` : emptyListMessage();
+  };
   const showListNotice = (message, {summary = false} = {}) => {
     listNotice = message; listNoticeIsSummary = summary; $('#business-watch-list-status').textContent = message;
   };
@@ -139,6 +154,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   };
   function updateControls() {
     const busy = listPending || actionPending || editorPending;
+    stateFilter.disabled = actionPending || !!editor;
     $('#business-watch-more').hidden = !cursor;
     $('#business-watch-more').disabled = busy;
     $('#business-watch-retry').disabled = busy;
@@ -174,6 +190,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   function renderList() {
     const children = [];
     for (const watch of items.values()) {
+      if (!matchesFilter(watch)) continue;
       let row = rowViews.get(watch.watch_id);
       if (!row) {
         const root = node('button', 'business-watch-row'); root.type = 'button'; root.dataset.watchId = watch.watch_id;
@@ -187,8 +204,10 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
       row.metadata.textContent = `${STATES[watch.state] || '状态待核实'} · 最近检查：${timestamp(watch.last_checked_at)}`;
       children.push(row.root);
     }
-    for (const [id, view] of rowViews) if (!items.has(id)) { view.root.remove(); rowViews.delete(id); }
-    if (!children.length) children.push(node('p', 'empty-state', listPending ? '正在读取关注事项…' : '暂时没有关注的事项。'));
+    for (const [id, view] of rowViews) if (!matchesFilter(items.get(id))) { view.root.remove(); rowViews.delete(id); }
+    if (!children.length && $('#business-watch-retry').hidden) {
+      children.push(node('p', 'empty-state', listPending ? '正在读取关注事项…' : emptyListMessage()));
+    }
     reconcileChildren($('#business-watch-list'), children);
     if (listNoticeIsSummary) showListNotice(listSummary(), {summary:true});
     updateControls();
@@ -291,7 +310,13 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
     }
   }
   async function createFrom(target) {
-    if (!object(target) || !text(target.target_ref).trim() || target.target_ref.length > 8192) return;
+    if (!active || actionPending || editorPending || !object(target)
+        || !text(target.target_ref).trim() || target.target_ref.length > 8192) return;
+    if (listState !== 'active') {
+      const epoch = generation;
+      await changeFilter('active');
+      if (!active || epoch !== generation || listState !== 'active') return;
+    }
     await startEditor('create',target);
   }
   async function openSettings() {
@@ -323,7 +348,15 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
       if (!validWatch(result.watch) || !Object.hasOwn(result.watch,'title') ||
           (editing.mode === 'configure' && (result.watch.watch_id !== editing.id || result.watch.version < editing.version))) throw new Error('Invalid watch receipt');
       const value = merge(result.watch); selectedId = value.watch_id; detail = value; events = Array.isArray(result.events) ? result.events : [];
-      verified = value.version === result.watch.version; detailNotice = editing.mode === 'create' ? '已开始关注；最新状态以读取时间为准。' : '关注设置已保存。';
+      verified = value.version === result.watch.version;
+      if (!verified) detailNotice = '关注记录有更新，请刷新详情后再操作。';
+      else {
+        if (editing.mode === 'configure') detailNotice = '关注设置已保存。';
+        else if (result.reused === true) detailNotice = '已找到同一事项的关注，沿用现有设置。';
+        else if (value.state === 'completed') detailNotice = '流程已结束，已保留本次核验记录。';
+        else detailNotice = '已开始关注；最新状态以读取时间为准。';
+        detailNotice += filterLocation(value);
+      }
       editorPending = false; closeEditor();
     } catch (error) {
       if (isCancellation(error) || !current(scope,epoch) || editor !== editing) return;
@@ -356,18 +389,34 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   }
   function clearAccess(id = null) {
     if (editor) closeEditor();
-    if (id) items.delete(id); else items.clear();
+    if (id) items.delete(id);
+    else { items.clear(); cursor = null; lastAppend = false; }
     if (!id || selectedId === id) { selectedId = null; detail = null; events = []; verified = false; }
     renderList(); renderDetail();
+  }
+  async function changeFilter(state) {
+    if (!active || actionPending || editor || (state !== 'all' && !Object.hasOwn(STATES, state))) {
+      stateFilter.value = listState;
+      return;
+    }
+    if (state === listState) return;
+    listState = stateFilter.value = state;
+    panelScope.replace('detail').dispose();
+    detailTicket++; detailPending = detailVisible = false; detailNotice = '';
+    $('#business-watch-detail').className = 'business-watch-detail mobile-empty';
+    showListNotice('');
+    clearAccess();
+    await load();
   }
   async function load({append = false} = {}) {
     if (!active || (append && (!cursor || listPending)) || actionPending) return;
     const scope = panelScope.replace('list'), epoch = generation, ticket = ++listTicket;
-    const requestedCursor = append ? cursor : null;
+    const query = new URLSearchParams({state: listState});
+    if (append) query.set('cursor', cursor);
     listPending = true; lastAppend = append; $('#business-watch-retry').hidden = true;
-    showListNotice(append ? '正在加载更多…' : '正在读取关注事项…'); updateControls();
+    showListNotice(append ? '正在加载更多…' : '正在读取关注事项…'); renderList();
     try {
-      const result = await request('/api/business-watches' + (requestedCursor ? `?cursor=${encodeURIComponent(requestedCursor)}` : ''), scope, {timeoutMs:15000});
+      const result = await request(`/api/business-watches?${query}`, scope, {timeoutMs:15000});
       if (!current(scope, epoch) || ticket !== listTicket) return;
       if (!Array.isArray(result.items) || result.items.some(item => !validWatch(item)) ||
           (result.hasMore && (typeof result.nextCursor !== 'string' || !result.nextCursor))) throw new Error('Invalid watch list');
@@ -378,7 +427,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
       }
       const top = $('#business-watch-list').scrollTop;
       items = next; cursor = result.hasMore ? result.nextCursor : null;
-      renderList(); $('#business-watch-list').scrollTop = append ? top : 0;
+      $('#business-watch-list').scrollTop = append ? top : 0;
       showListNotice(listSummary(), {summary:true});
     } catch (error) {
       if (isCancellation(error) || !current(scope, epoch) || ticket !== listTicket) return;
@@ -386,7 +435,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
       if (append && error.status === 400) { cursor = null; lastAppend = false; }
       showListNotice(errorMessage(error)); $('#business-watch-retry').hidden = false;
     } finally {
-      if (current(scope, epoch) && ticket === listTicket) { listPending = false; updateControls(); }
+      if (current(scope, epoch) && ticket === listTicket) { listPending = false; renderList(); }
     }
   }
   async function select(id, {preserve = false, reveal = true} = {}) {
@@ -440,6 +489,7 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
       detailNotice = verified ? action === 'check' ? incompleteCheck(detail)
         ? '本次未取得完整可信状态，下方保留上次核实的结果。' : '本次核验已结束，流程状态以读取时间为准。' : '关注记录已更新。'
         : '关注记录有更新，请刷新详情后再操作。';
+      if (verified) detailNotice += filterLocation(detail);
       renderList(); renderDetail();
     } catch (error) {
       if (isCancellation(error) || !current(scope, epoch)) return;
@@ -475,9 +525,11 @@ export function createBusinessWatches({document, $, getScope, request, makeKey =
   }
   $('#business-watch-more').addEventListener('click', () => load({append:true}));
   $('#business-watch-retry').addEventListener('click', () => load({append:lastAppend}));
+  stateFilter.addEventListener('change', () => changeFilter(stateFilter.value));
   function reset() {
     deactivate(); items.clear(); rowViews.clear(); cursor = selectedId = detail = null; events = [];
-    detailNotice = listNotice = ''; detailVisible = false; $('#business-watch-retry').hidden = true;
+    detailNotice = listNotice = ''; detailVisible = lastAppend = false; $('#business-watch-retry').hidden = true;
+    listState = stateFilter.value = 'active';
     showListNotice(''); renderList(); renderDetail();
     $('#business-watch-detail').className = 'business-watch-detail mobile-empty';
   }
