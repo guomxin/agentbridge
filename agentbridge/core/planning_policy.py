@@ -48,6 +48,7 @@ COMPOSED_TASK_PLANNING_POLICY = {
             "- 保留日期、范围、工时及预览/提交意图；目录不能表达必要约束时停止并说明。",
             "- 计划目录默认精简分页，按nextCursor续取；选定条目用view=detail、kind、name、expected_revision取完整契约，必要时section=input/output/planning分段；不重复拉全目录。",
             "- 全部OA已办/已发及时间范围报告用oa_workflow_history_query，collection=done/sent；按原next_cursor调用oa_workflow_history_next直到工作完成，再读完报告分页。scanning/details只是进度，complete/partial是源读取状态；has_more仍可能有结果页。节点与处理人分列，缺字段明确未核实，不把已办当流程结束；匹配数是已办记录数，同一流程可能有多次处理，不称唯一单据数。",
+            "- 最近一条/几条用同一查询的selection：kind=latest、count=所需条数、workflow_state=all/in_progress/ended；limit只管页大小，不代表总数。只读所选结果，不把最近改成近几天；较新状态未知或时间并列时如实说明不能唯一确认。",
             "- 历史查询引用用于只读报告，计划以oa_history_report.v1收尾；终态计划先按nextAction用replay_cursor取当前保存页，再按该页next_cursor续取，单页也须实际读取。不能把单页报告接旧合并转换或写入步骤。预算或来源变化导致partial时报告已查范围/停止原因，不宣称全部完成。",
             "- OA时间按原请求编译：between起止、since以来、until截至、all全部及已登记相对日期。区分processed_at处理与initiated_at发起，不替换口径；全部历史使用支持all的查询，不编造起止日期。检查coverage及续读，首屏和limit不能证明完整；日期筛选不等于历史时点状态。",
             "- 仅用目录参数和绑定；禁止调用隐藏commit/resume工具，或分别调用来源与写入绕过计划。",

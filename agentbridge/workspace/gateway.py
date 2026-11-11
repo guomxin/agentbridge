@@ -30,6 +30,7 @@ _POST_ACCEPT_RECONCILE_CODES = {
     "GATEWAY_CONNECTION_FAILED",
     "GATEWAY_PROCESS_FAILED",
     "GATEWAY_RESPONSE_INVALID",
+    "GATEWAY_RUN_OBSERVATION_TIMEOUT",
 }
 _POST_ACCEPT_RECONCILE_DELAYS_SECONDS = (0.0, 2.0, 5.0, 10.0, 20.0)
 
@@ -185,6 +186,9 @@ class OpenClawGatewayClient:
             **normalized,
             "attachments": list(attachments or []),
             "preflightAbort": True,
+            # A durable Workspace dispatch keeps observing this accepted run
+            # after its bounded stream closes; the bridge must not stop it.
+            "abortAcceptedOnClose": bool(abort_accepted_on_close),
             **({"requireTrialBinding": True} if require_trial_binding else {}),
             "acceptTimeoutMs": 35_000,
             "startupProgressTimeoutMs": 15_000,

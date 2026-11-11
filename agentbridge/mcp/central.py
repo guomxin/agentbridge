@@ -29,6 +29,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl, Field
 import uvicorn
 from agentbridge.mcp.resource_budget import BoundedMcpProtocol, bounded_mcp_app
+from agentbridge.mcp.oa_history import OaHistorySelectionInput
 
 
 from agentbridge.adapters.seeyon_business_trip import (
@@ -2053,6 +2054,9 @@ def create_central_mcp_server(
             "date_basis distinguishes processed_at from initiated_at; Sent supports only initiated_at. "
             "The query scans bounded batches and verifies current workflow nodes. During scanning/details "
             "it returns progress; when complete or terminal partial it returns whole result rows in pages. "
+            "For latest one/few requests, use selection={kind:'latest',count:N,workflow_state:'all'|'in_progress'|'ended'}; "
+            "limit is only page size. Selection returns only the requested rows, not the other history; "
+            "selection_complete=false must be reported as uncertain. Do not invent a recent date range. "
             "While has_more is true, call oa_workflow_history_next with next_cursor until work and delivery "
             "are exhausted. Never call a fresh query to continue, invent a start year, treat a single page "
             "as all results, or infer workflow nodes from handler names. Coverage reports missing source "
@@ -2064,10 +2068,13 @@ def create_central_mcp_server(
         keyword: Annotated[str | None, Field(max_length=200)] = None,
         limit: Annotated[int, Field(ge=1, le=50)] = 50,
         idempotency_key: Annotated[str | None, Field(max_length=256)] = None,
+        selection: OaHistorySelectionInput | None = None,
     ) -> dict[str, Any]:
         arguments = {"collection": collection, "temporal": temporal.model_dump(exclude_none=True), "limit": limit}
         if keyword:
             arguments["keyword"] = keyword
+        if selection is not None:
+            arguments["selection"] = selection.model_dump()
         return _history_query_tool_result(await invoke(ctx, "oa.workflow.history.query", arguments, idempotency_key))
 
     @mcp.tool(

@@ -4198,9 +4198,41 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Query the authenticated user's Done or Sent OA history with explicit temporal intent. Use temporal.kind=all for all history; relative dates are frozen to the original request time. date_basis distinguishes processed_at from initiated_at; Sent supports only initiated_at. The query scans bounded batches and verifies current workflow nodes. During scanning/details it returns progress; when complete or terminal partial it returns whole result rows in pages. While has_more is true, call oa_workflow_history_next with next_cursor until work and delivery are exhausted. Never call a fresh query to continue, invent a start year, treat a single page as all results, or infer workflow nodes from handler names. Coverage reports missing source or detail evidence; partial results must be labelled as partial. No OA business data is written.",
+      "description": "Query the authenticated user's Done or Sent OA history with explicit temporal intent. Use temporal.kind=all for all history; relative dates are frozen to the original request time. date_basis distinguishes processed_at from initiated_at; Sent supports only initiated_at. The query scans bounded batches and verifies current workflow nodes. During scanning/details it returns progress; when complete or terminal partial it returns whole result rows in pages. For latest one/few requests, use selection={kind:'latest',count:N,workflow_state:'all'|'in_progress'|'ended'}; limit is only page size. Selection returns only the requested rows, not the other history; selection_complete=false must be reported as uncertain. Do not invent a recent date range. While has_more is true, call oa_workflow_history_next with next_cursor until work and delivery are exhausted. Never call a fresh query to continue, invent a start year, treat a single page as all results, or infer workflow nodes from handler names. Coverage reports missing source or detail evidence; partial results must be labelled as partial. No OA business data is written.",
       "inputSchema": {
         "$defs": {
+          "OaHistorySelectionInput": {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "maximum": 50,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "kind": {
+                "const": "latest",
+                "title": "Kind",
+                "type": "string"
+              },
+              "workflow_state": {
+                "enum": [
+                  "all",
+                  "in_progress",
+                  "ended"
+                ],
+                "title": "Workflow State",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "count",
+              "workflow_state"
+            ],
+            "title": "OaHistorySelectionInput",
+            "type": "object"
+          },
           "TaskPlanTemporalConstraintInput": {
             "additionalProperties": false,
             "properties": {
@@ -4326,6 +4358,17 @@
             "minimum": 1,
             "title": "Limit",
             "type": "integer"
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OaHistorySelectionInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "temporal": {
             "$ref": "#/$defs/TaskPlanTemporalConstraintInput"

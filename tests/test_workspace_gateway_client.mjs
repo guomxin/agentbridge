@@ -307,6 +307,32 @@ test("reports tool activity when a timed-out run is stopped", () => {
   assert.equal(events.at(-1).error.details.safeToRetry, false);
 });
 
+test("durable observation timeout never aborts or replays an accepted run with tool activity", () => {
+  const { events, trace } = runScenario("timeout_abort_race_with_tool", {abortAcceptedOnClose:false});
+  assert.equal(trace.filter(item => item.method === "chat.send").length, 1);
+  assert.equal(trace.filter(item => item.method === "chat.abort" && item.runId).length, 0);
+  assert.equal(events.at(-1).error.code, "GATEWAY_RUN_OBSERVATION_TIMEOUT");
+  assert.equal(events.at(-1).error.details.hadToolActivity, true);
+  assert.equal(events.at(-1).error.details.abortRequested, false);
+  assert.equal(events.at(-1).error.details.safeToRetry, false);
+});
+
+test("durable observation timeout without tools still cannot automatically resend an accepted run", () => {
+  const { events, trace } = runScenario("timeout_abort_race", {abortAcceptedOnClose:false});
+  assert.equal(trace.filter(item => item.method === "chat.send").length, 1);
+  assert.equal(trace.filter(item => item.method === "chat.abort" && item.runId).length, 0);
+  assert.equal(events.at(-1).error.code, "GATEWAY_RUN_OBSERVATION_TIMEOUT");
+  assert.equal(events.at(-1).error.details.hadToolActivity, false);
+  assert.equal(events.at(-1).error.details.safeToRetry, false);
+});
+
+test("durable observation preserves the separately verified zero-tool startup recovery", () => {
+  const { events, trace } = runScenario("startup_recovery", {abortAcceptedOnClose:false});
+  assert.equal(events.at(-1).state, "final");
+  assert.equal(trace.filter(item => item.method === "chat.send").length, 2);
+  assert.equal(trace.filter(item => item.method === "chat.abort" && item.runId).length, 1);
+});
+
 test("starts the execution budget at the first real progress event", () => {
   const { events } = runScenario("late_start", {
     startupProgressTimeoutMs: 55_000,

@@ -276,7 +276,10 @@ def _oa_history_report_schema(*, output: bool = False) -> dict[str, Any]:
         "schema_version": {"type": "string"}, "query_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "collection": {"type": "string", "enum": ["done", "sent"]},
         "state": {"type": "string", "enum": ["scan", "scanning", "details", "complete", "partial"]},
-        "temporal": {"type": "object"}, "progress": {"type": "object"}, "coverage": {"type": "object"},
+        "temporal": {"type": "object"}, "progress": {"type": "object"},
+        "coverage": {"type": "object", "properties": {
+            "details_scope": {"type": "string", "enum": ["selection_candidates"]}}},
+        "selection": _oa_history_selection_schema(),
         "items": {"type": "array", "maxItems": 50, "items": {"type": "object"}},
         "next_cursor": {"type": ["string", "null"], "maxLength": 128},
         "replay_cursor": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -290,6 +293,23 @@ def _oa_history_report_schema(*, output: bool = False) -> dict[str, Any]:
         properties["completion_meaning"] = {"type": "string", "enum": ["read_only_query_reference"]}
         required += ["source_complete", "delivery_complete", "report_complete", "source_incomplete", "empty", "read_only", "completion_meaning"]
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": not output}
+
+
+_OA_HISTORY_SELECTION_FIELDS = ("kind", "count", "workflow_state", "date_basis", "order", "scope",
+                                "selected_count", "selection_complete", "reason")
+
+
+def _oa_history_selection_schema() -> dict[str, Any]:
+    return {"type": "object", "additionalProperties": False,
+        "properties": {"kind": {"type": "string", "enum": ["latest"]},
+            "count": {"type": "integer", "minimum": 1, "maximum": 50},
+            "workflow_state": {"type": "string", "enum": ["all", "in_progress", "ended"]},
+            "date_basis": {"type": "string", "enum": ["initiated_at", "processed_at"]},
+            "order": {"type": "string", "enum": ["desc"]},
+            "scope": {"type": "string", "enum": ["all_matching_history"]},
+            "selected_count": {"type": "integer", "minimum": 0, "maximum": 50},
+            "selection_complete": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 80}},
+        "required": list(_OA_HISTORY_SELECTION_FIELDS)}
 
 
 def _public_history_fields(value: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
@@ -316,7 +336,9 @@ def project_oa_history_report(report: dict[str, Any]) -> dict[str, Any]:
     result["progress"] = _public_history_fields(report["progress"],
         ("source_total", "scanned_count", "matched_count", "details_checked", "details_failed"))
     result["coverage"] = _public_history_fields(report["coverage"],
-        ("status", "completionReason", "scan_complete", "details_complete"))
+        ("status", "completionReason", "scan_complete", "details_complete", "details_scope"))
+    if "selection" in report:
+        result["selection"] = _public_history_fields(report["selection"], _OA_HISTORY_SELECTION_FIELDS)
     if "delivery" in report:
         result["delivery"] = _public_history_fields(report["delivery"], ("offset", "complete"))
     fields = ("affair_id", "title", "category", "initiated_at", "processed_at", "workflow_state",
@@ -327,7 +349,8 @@ def project_oa_history_report(report: dict[str, Any]) -> dict[str, Any]:
             row["current_nodes"] = [_public_history_fields(node, ("name", "handlers")) for node in row["current_nodes"]]
     coverage = result["coverage"]
     source_complete = (result["state"] == "complete" and coverage.get("status") == "complete"
-                       and coverage.get("scan_complete") is True and coverage.get("details_complete") is True)
+                       and coverage.get("scan_complete") is True and coverage.get("details_complete") is True
+                       and ("selection" not in result or result["selection"].get("selection_complete") is True))
     delivery = result.get("delivery") or {}
     delivery_complete = (delivery.get("offset") == 0 and delivery.get("complete") is True
                          and result.get("has_more") is False and result.get("next_cursor") is None

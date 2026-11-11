@@ -60,6 +60,7 @@ const idempotencyKey =
     : null;
 const preflightAbort =
   mode === "send-stream" && input.preflightAbort !== false;
+const abortAcceptedOnClose = input.abortAcceptedOnClose !== false;
 const acceptTimeoutMs =
   mode === "send-stream"
     ? clampInteger(input.acceptTimeoutMs, 5_000, 60_000, 20_000)
@@ -374,6 +375,15 @@ function handleRequestTimeout() {
     return;
   }
   if (mode === "send-stream" && connected && streamAccepted) {
+    if (!abortAcceptedOnClose) {
+      finishError(
+        "GATEWAY_RUN_OBSERVATION_TIMEOUT",
+        "The accepted OpenClaw run is awaiting same-run result recovery.",
+        { ...stageDetails(), observationOnly: true, abortRequested: false,
+          aborted: false, safeToRetry: false, hadToolActivity: streamHadToolActivity },
+      );
+      return;
+    }
     requestStreamAbort("timeout");
     return;
   }

@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "a0cb9e34888f"
+    "e10d6d2202d4"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Reviewed against deployed a0cb9e34888f on 2026-11-10. Corrects only the Workspace watch-list empty-state notice after the first watch is created. No capability, host plugin, permission, schema, stored semantics, due time or business authorization change. Existing active watch retains its persisted schedule across the normal release restart; host plugin remains 0.4.131 with identical files."
+  "reason": "Reviewed against deployed e10d6d2202d4 on 2026-11-11. Optional latest-item selection stores additional fields in existing expiring OA history query state, preserving legacy queries and cursors. OpenClaw 0.4.132 adds a compatibility entry using the existing ledger. Workspace observation of an accepted run keeps its existing recovery and execution budgets. No schema migration, new permission, business authorization, or watch schedule change."
 }

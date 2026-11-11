@@ -31,6 +31,20 @@ const olderWork = (value, latest) => working(value) && latest && (!working(lates
   || ["scanned_count", "details_checked"].some(key => Number.isSafeInteger(value.progress?.[key])
     && Number.isSafeInteger(latest.progress?.[key]) && value.progress[key] < latest.progress[key])
   || value.state === "scanning" && latest.state === "details");
+const latestSelection = value => object(value?.selection) && value.selection.kind === 'latest'
+  && Number.isSafeInteger(value.selection.count) && value.selection.count >= 1 && value.selection.count <= 50 ? value.selection : null;
+function selectionScope(selection) {
+  const basis = {initiated_at:'提交／发起日期',processed_at:'本人处理日期'}[selection.date_basis] || '查询日期';
+  const state = {all:'事项',in_progress:'流转中事项',ended:'已结束事项'}[selection.workflow_state] || '事项';
+  return `所选范围：全部匹配历史中按${basis}从新到旧的最近 ${selection.count} 条${state}；已选 ${count(selection.selected_count)} 条。`;
+}
+function selectionPartial(selection) {
+  return {selection_tie:'选取边界存在相同时间，暂不能唯一选定。',
+    selection_date_unverified:'部分事项日期未核实，暂不能确认最近顺序。',
+    selection_detail_unverified:'所选候选的详情未核实，本次选取尚未完成。',
+    selection_state_unverified:'更近事项的流程状态未核实，暂不能确认所选范围。'}[selection.reason]
+    || '本次选取尚未核实完整，不能据此认定没有符合条件的事项。';
+}
 
 export function oaHistoryPresentation(value) {
   if (unavailable(value)) return {title: "OA 历史查询", label: value.state === "error" ? "读取失败" : "暂不可读", statusClass: "failed",
@@ -38,10 +52,14 @@ export function oaHistoryPresentation(value) {
       ? "当前登录或权限已变化，旧结果已清除。请确认登录与权限后重新查询。"
       : "当前无法读取该查询，旧结果已清除。请重试或重新查询。"};
   if (!valid(value)) return null;
+  const selection = latestSelection(value);
   const complete = value.state === "complete" && value.coverage?.status === "complete";
   const title = value.collection === "done" ? "OA 已办历史查询" : "OA 已发历史查询";
   if (value.state === "scanning") return {title, label: "读取中", statusClass: "running", message: "正在读取符合条件的历史事项，尚未查全。"};
   if (value.state === "details") return {title, label: "核对中", statusClass: "running", message: "正在核对匹配事项的当前状态和流程节点，详情尚未读完。"};
+  if (selection && !working(value)) return complete && selection.selection_complete === true
+    ? {title,label:'选取完成',statusClass:'succeeded',message:'本次所选范围已核实；结果只包含所选事项。有后续结果页时请翻页查看。'}
+    : {title,label:'选取未完成',statusClass:'partially_succeeded',message:selectionPartial(selection)};
   if (complete) return {title, label: "已查全", statusClass: "succeeded", message: "本次查询已完成；有后续结果页时请翻页查看。"};
   const scanComplete = value.coverage?.scan_complete === true;
   const reason = PARTIAL_REASONS[value.completion_reason || value.coverage?.completionReason];
@@ -190,17 +208,24 @@ export function createOaHistoryResults({ document, state = {}, getScope, loadHis
       view.empty.hidden = !valid(projection) || Boolean(page?.items?.length);
       if (!valid(projection)) { view.notice.textContent = model.notice || presentation?.message || ""; continue; }
       const range = projection.temporal?.absoluteRange;
+      const selection = latestSelection(projection);
       const basis = {processed_at: "本人处理日期", initiated_at: "提交／发起日期"}[projection.temporal?.dateBasis] || "日期口径未确认";
       const precision = projection.temporal?.precision === "day" ? "按天，包含起止日" : "时间精度未确认";
       view.range.textContent = `${basis}：${copy(range?.start) || "不限"} 至 ${copy(range?.end) || "不限"}（${precision}）`;
+      if (selection) view.range.textContent += ` ${selectionScope(selection)}`;
       const progress = projection.progress || {};
       view.progress.textContent = `来源总数 ${count(progress.source_total)} · 已扫描 ${count(progress.scanned_count)} · 匹配 ${count(progress.matched_count)} · 已核对详情 ${count(progress.details_checked)} · 详情未读到 ${count(progress.details_failed)}`;
+      if (selection && projection.coverage?.details_scope === 'selection_candidates')
+        view.progress.textContent = `来源总数 ${count(progress.source_total)} · 已扫描 ${count(progress.scanned_count)} · 全源匹配 ${count(progress.matched_count)} · 所选候选已核对详情 ${count(progress.details_checked)} · 候选详情未读到 ${count(progress.details_failed)}`;
       view.notice.textContent = model.notice || presentation.message;
       if (projection.has_more === true && !nextCursor(projection) && !model.notice) view.notice.textContent += " 续读位置尚未返回，请重新查看任务进度。";
       view.empty.textContent = projection.state === "scanning" ? "正在扫描历史事项，结果准备中。"
         : projection.state === "details" ? "正在读取匹配事项的详情，结果准备中。"
         : projection.state === "complete" && projection.coverage?.status === "complete" && progress.matched_count === 0
           ? "该范围内没有匹配事项。" : "本页尚无可展示事项，不能据此认定没有匹配记录。";
+      if (selection && !working(projection) && !page?.items?.length)
+        view.empty.textContent = selection.selection_complete === true && projection.state === 'complete'
+          ? '该范围内没有符合所选状态的事项。' : selectionPartial(selection);
       const items = page?.items || [], desired = [], retained = new Set();
       items.forEach((item, ordinal) => {
         const key = `${copy(item.affair_id)}:${ordinal}`; retained.add(key);

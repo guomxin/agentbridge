@@ -369,7 +369,7 @@ def _history_plan_reference_response(plan: dict[str, Any], projection: dict[str,
     # Metadata is normally small. If an unusually verbose source fills its
     # 10k budget with metadata, defer whole metadata fields to the same receipt
     # instead of cutting strings, rows, or the final JSON transport envelope.
-    metadata_keys = [key for key in ("temporal", "progress", "coverage", "total", "returned_count", "has_more", "delivery")
+    metadata_keys = [key for key in ("selection", "temporal", "progress", "coverage", "total", "returned_count", "has_more", "delivery")
                      if key in report]
     reference["deferred_fields"] = ["items", *metadata_keys]
     for key in metadata_keys:

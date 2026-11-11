@@ -39,6 +39,34 @@ function fixture(options = {}) {
   return {document,root,state,...renderer};
 }
 
+test('latest selection distinguishes all-source matches from the selected and verified candidate range',()=>{
+  const f=fixture();f.render(f.root,task(page({collection:'sent',items:[item('sixth')],has_more:false,next_cursor:null,
+    selection:{kind:'latest',count:1,workflow_state:'in_progress',date_basis:'initiated_at',order:'desc',scope:'all_matching_history',
+      selected_count:1,selection_complete:true,reason:'complete'},
+    progress:{source_total:224,scanned_count:224,matched_count:224,details_checked:1,details_failed:0},
+    coverage:{status:'complete',scan_complete:true,details_complete:true,details_scope:'selection_candidates'}})));
+  assert.match(byClass(f.root,'oa-history-heading').textContent,/选取完成/);
+  assert.match(byClass(f.root,'oa-history-range').textContent,/最近 1 条流转中事项；已选 1 条/);
+  assert.match(byClass(f.root,'oa-history-progress').textContent,/全源匹配 224.*所选候选已核对详情 1/);
+  assert.doesNotMatch(byClass(f.root,'oa-history-notice').textContent,/全部.*224|所有.*查全/);
+});
+
+test('latest selection empty and uncertain outcomes do not claim no matching history or complete detail coverage',()=>{
+  for(const [reason,message] of [['selection_tie',/相同时间/],['selection_date_unverified',/日期未核实/],
+    ['selection_state_unverified',/更近事项.*未核实/],['source_row_budget',/尚未核实完整/]]){
+    const f=fixture();f.render(f.root,task(page({state:'partial',items:[],has_more:false,next_cursor:null,
+      selection:{kind:'latest',count:1,workflow_state:'in_progress',date_basis:'initiated_at',selected_count:0,selection_complete:false,reason},
+      coverage:{status:'partial',scan_complete:true,details_complete:false,details_scope:'selection_candidates'}})));
+    assert.match(byClass(f.root,'oa-history-heading').textContent,/选取未完成/);
+    assert.match(byClass(f.root,'oa-history-notice').textContent,message);
+    assert.match(byClass(f.root,'oa-history-empty').textContent,message);
+    assert.doesNotMatch(byClass(f.root,'oa-history-empty').textContent,/该范围内没有/);
+  }
+  const empty=fixture();empty.render(empty.root,task(page({items:[],has_more:false,next_cursor:null,
+    selection:{kind:'latest',count:1,workflow_state:'in_progress',selected_count:0,selection_complete:true,reason:'complete'}})));
+  assert.equal(byClass(empty.root,'oa-history-empty').textContent,'该范围内没有符合所选状态的事项。');
+});
+
 test("history fields preserve parallel nodes, date basis, unknown evidence and Shanghai observation time", () => {
   const f = fixture(), query = page({items:[item("first"), item("missing", {
     initiated_at:"stale value", processed_at:null, current_nodes:[], current_handlers:[],
