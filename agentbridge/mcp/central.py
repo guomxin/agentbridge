@@ -6784,7 +6784,9 @@ def serve_central_mcp(
     )
     governance = CentralRuntimeGovernanceWorker(service)
     from agentbridge.core.business_watch_worker import BusinessWatchWorker
+    from agentbridge.core.oa_digest_worker import OADigestWorker
     business_watches = BusinessWatchWorker(service)
+    daily_digests = OADigestWorker(service.oa_digest_settings) if workspace_server is not None else None
     auth_thread.start()
     if admin_thread is not None:
         admin_thread.start()
@@ -6793,6 +6795,8 @@ def serve_central_mcp(
     keepalive.start()
     governance.start()
     business_watches.start()
+    if daily_digests is not None:
+        daily_digests.start()
     try:
         mcp = create_central_mcp_server(
             service=service,
@@ -6815,6 +6819,8 @@ def serve_central_mcp(
             timeout_keep_alive=5,
         )
     finally:
+        if daily_digests is not None:
+            daily_digests.stop()
         business_watches.stop()
         governance.stop()
         keepalive.stop()

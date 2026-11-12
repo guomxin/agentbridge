@@ -387,6 +387,9 @@ def create_workspace_http_server(
                         ),
                     )
                     return
+                if route.path == "/api/oa-daily-digest":
+                    self._json(200, application.daily_digest_settings(account))
+                    return
                 if route.path == '/api/business-watches/options':
                     self._json(200,application.service.business_watch.options(account['user_subject']))
                     return
@@ -593,6 +596,9 @@ def create_workspace_http_server(
                         else MAX_BODY_BYTES
                     )
                 )
+                if route.path == "/api/oa-daily-digest":
+                    self._json(200, application.update_daily_digest_settings(account, body))
+                    return
                 if route.path == '/api/business-watches':
                     self._json(201,application.create_business_watch(account,body))
                     return

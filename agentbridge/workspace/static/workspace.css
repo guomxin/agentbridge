@@ -1273,6 +1273,19 @@ code {
 .business-watch-actions button {white-space:normal;}
 .business-watch-explanation,.business-watch-notice {font-size:12px;line-height:1.6;overflow-wrap:anywhere;margin:0 0 12px;}
 .business-watch-explanation {color:var(--muted);}
+.oa-digest-settings {flex:0 0 auto;min-width:0;margin-bottom:10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);}
+.oa-digest-settings > summary {cursor:pointer;padding:8px 12px;font-size:13px;font-weight:600;line-height:1.6;overflow-wrap:anywhere;}
+.oa-digest-settings > summary:focus-visible {outline:2px solid var(--teal);outline-offset:-2px;}
+#oa-digest-summary {margin-inline-start:6px;color:var(--muted);font-weight:400;}
+.oa-digest-body {max-height:clamp(120px,42dvh,320px);overflow:auto;padding:0 12px 12px;}
+.oa-digest-fields {display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 16px;margin-bottom:8px;min-width:0;}
+.oa-digest-fields > label {margin-top:8px;}
+.oa-digest-time input {min-width:0;height:36px;padding:0 8px;}
+.oa-digest-channels {flex:1 1 230px;min-width:0;margin:0;padding:2px 10px 8px;border:1px solid var(--line);border-radius:6px;}
+.oa-digest-channels legend {padding:0 4px;font-size:12px;color:var(--muted);}
+.oa-digest-channels select {width:100%;min-width:0;max-width:100%;min-height:34px;}
+.oa-digest-note {margin:6px 0;color:var(--muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere;}
+.oa-digest-note:empty {margin:0;}
 .business-watch-notice {padding:10px 12px;background:#f5f7f5;border:1px solid var(--line);border-radius:6px;}
 .business-watch-events {padding-left:20px;font-size:12px;line-height:1.7;overflow-wrap:anywhere;}
 .business-watch-events li {margin-bottom:8px;}

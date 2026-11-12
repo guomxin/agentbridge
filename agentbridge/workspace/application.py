@@ -74,6 +74,12 @@ class WorkspaceChatResult:
 
 
 class WorkspaceApplication:
+    def daily_digest_settings(self, account):
+        return self.service.oa_digest_settings.get(account)
+
+    def update_daily_digest_settings(self, account, body):
+        return self.service.oa_digest_settings.update(account, body)
+
     def business_watches(self, account, *, cursor=None, limit=32, state=None):
         return self.service.business_watch.list(account['user_subject'],cursor=cursor,limit=limit,state=state)
 

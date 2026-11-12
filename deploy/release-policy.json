@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "2b17f9fc9293"
+    "dbc20ef18672"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Reviewed against deployed 2b17f9fc9293 on 2026-11-12. The scheduled OA digest reuses the existing central read session, user timeline, and notification outbox schema. It is opt-in per registered OpenClaw schedule and leaves existing watches, endpoint subscriptions, and the OpenClaw 0.4.132 plugin unchanged."
+  "dataCompatibility": "reviewed-schema-transition",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "b984945db13720725eafbc341d2863fde7ec182b2880cee092686269602b7c15",
+      "afterSha256": "f5c356c16499a488d7fd5aac6d46696860c2079005a3e0aa437e86b664fa8084"
+    }
+  },
+  "reason": "Reviewed against deployed dbc20ef18672 on 2026-11-12. Add only the OA digest settings and run ledger tables and their indexes in agentbridge.db. Existing schemas, business rows and the other three databases are unchanged. Users opt in from Workspace. Older OpenClaw jobs are superseded for users who save Workspace settings."
 }

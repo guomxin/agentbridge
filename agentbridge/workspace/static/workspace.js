@@ -15,6 +15,7 @@ import { createProjectionQueue, createProjectionOrder, applyCurrentSnapshot, enq
 import { createWorkspaceViewState, createReadingScroll, createPreparationHandoff, timelineNodeMatchesKey } from './workspace_navigation.mjs';
 import { createTaskSearch } from './workspace_task_search.mjs';
 import { createBusinessWatches } from './workspace_watches.mjs';
+import { createDailyDigestSettings } from './workspace_daily_digest.mjs';
 
 const state = {
   account: null,
@@ -133,6 +134,8 @@ const taskSearch = createTaskSearch({state,$,getScope:() => sessionScope,
   }});
 const businessWatches = createBusinessWatches({document, $, getScope:() => viewScope,
   request:(path,scope,options) => scopedApi(scope)(path,options)});
+const dailyDigestSettings = createDailyDigestSettings({document, $, getScope:() => viewScope,
+  request:(path,scope,options) => scopedApi(scope)(path,options)});
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
   handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
   document, state, $, toast, getScope: () => sessionScope, executeChatMessage, queryOaPending,
@@ -188,6 +191,7 @@ function scopedApi(scope) {
 
 function resetWorkspaceState() {
   businessWatches.reset();
+  dailyDigestSettings.reset();
   selectTaskPanel('records', {load:false});
   taskSearch.reset();
   resetHistoryGroups();
@@ -276,7 +280,11 @@ function bindActions() {
     loadChat();
     loadGatewayStatus();
   });
-  $("#refresh-tasks").addEventListener("click", () => state.taskPanel === 'watches' ? businessWatches.refresh() : loadTasks());
+  $("#refresh-tasks").addEventListener("click", () => {
+    if (state.taskPanel !== 'watches') return loadTasks();
+    businessWatches.refresh();
+    dailyDigestSettings.refresh({review:true});
+  });
   $('#task-records-tab').addEventListener('click', () => selectTaskPanel('records'));
   $('#business-watches-tab').addEventListener('click', () => selectTaskPanel('watches'));
   for (const [id, panel] of [['#task-records-tab','records'], ['#business-watches-tab','watches']]) {
@@ -492,6 +500,7 @@ async function switchView(view, permit) {
   if (view !== 'chat') preparationHandoff.cancel();
   if (view !== state.activeView) {
     businessWatches.deactivate();
+    dailyDigestSettings.deactivate();
     viewScope.dispose();
     viewScope = sessionScope.child();
   }
@@ -504,7 +513,10 @@ async function switchView(view, permit) {
   });
   if (view === "tasks") {
     $("#task-detail").classList.add("mobile-empty");
-    if (state.taskPanel === 'watches') businessWatches.activate();
+    if (state.taskPanel === 'watches') {
+      businessWatches.activate();
+      dailyDigestSettings.activate();
+    }
     else loadTasks();
   }
   if (view === "endpoints") loadEndpoints();
@@ -522,8 +534,12 @@ function selectTaskPanel(panel, {load = true} = {}) {
   $('#task-records-panel').hidden = watches; $('#business-watches-panel').hidden = !watches;
   if (watches) { viewScope.replace('task-detail').dispose(); state.taskDetailRequest++; }
   businessWatches.deactivate();
+  dailyDigestSettings.deactivate();
   if (load && state.activeView === 'tasks') {
-    if (watches) businessWatches.activate();
+    if (watches) {
+      businessWatches.activate();
+      dailyDigestSettings.activate();
+    }
     else loadTasks();
   }
 }
@@ -532,6 +548,7 @@ async function openBusinessWatch(target) {
   const accountScope = sessionScope.replace('watch-open');
   if (await switchView('tasks') === false || !accountScope.current()) return;
   selectTaskPanel('watches',{load:false});
+  dailyDigestSettings.activate();
   await businessWatches.activate();
   if (accountScope.current() && state.activeView === 'tasks' && state.taskPanel === 'watches')
     await businessWatches.createFrom(target);
@@ -1639,6 +1656,7 @@ function refreshWorkspaceState() {
   reconcileTimeline();
   checkClientVersion();
   loadGatewayStatus();
+  if (state.activeView === 'tasks' && state.taskPanel === 'watches') dailyDigestSettings.refresh();
   if (!state.eventSource) openTimelineStream();
 }
 

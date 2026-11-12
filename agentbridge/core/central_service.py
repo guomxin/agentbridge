@@ -281,7 +281,9 @@ class CentralCapabilityService:
         )
         self._task_plan_authority_resolver = None
         from agentbridge.core.business_watch_service import BusinessWatchService
+        from agentbridge.core.oa_digest_settings import OADigestSettings
         self.business_watch = BusinessWatchService(self)
+        self.oa_digest_settings = OADigestSettings(self)
         self.oa_history_query_service.target_ref_factory = self.business_watch.target_reference
         self.write_authorizations.decision_observer = self._record_authorization_decision
 

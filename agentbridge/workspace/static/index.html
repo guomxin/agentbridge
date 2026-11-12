@@ -167,6 +167,31 @@
           </div>
           <section id="business-watches-panel" class="business-watches-panel" role="tabpanel" aria-labelledby="business-watches-tab" hidden>
             <p class="business-watch-explanation">从 OA 已发、已办历史查询结果点“关注后续”开始。只核验流程状态，不办理 OA 事项。</p>
+            <details id="oa-digest-settings" class="oa-digest-settings">
+              <summary>OA 每日简报 <span id="oa-digest-summary"></span></summary>
+              <div class="oa-digest-body">
+                <form id="oa-digest-form" novalidate hidden>
+                  <div class="oa-digest-fields">
+                    <label class="business-watch-check"><input id="oa-digest-enabled" type="checkbox"> 启用每日简报</label>
+                    <label class="oa-digest-time">发送时间（北京时间）
+                      <input id="oa-digest-time" type="time" step="60">
+                    </label>
+                    <fieldset class="oa-digest-channels">
+                      <legend>接收渠道</legend>
+                      <label class="business-watch-check"><input id="oa-digest-workspace" type="checkbox"> 本人 Workspace</label>
+                      <label>Telegram 私聊
+                        <select id="oa-digest-telegram" aria-describedby="oa-digest-telegram-note"></select>
+                      </label>
+                      <p id="oa-digest-telegram-note" class="oa-digest-note" hidden></p>
+                    </fieldset>
+                  </div>
+                  <p id="oa-digest-runs" class="oa-digest-note" hidden></p>
+                  <button id="oa-digest-save" class="secondary" type="submit">保存简报设置</button>
+                </form>
+                <p id="oa-digest-status" class="oa-digest-note" role="status" aria-live="polite"></p>
+                <button id="oa-digest-reload" class="secondary" type="button" hidden>重新读取简报设置</button>
+              </div>
+            </details>
             <div class="business-watch-layout">
               <div class="business-watch-browser">
                 <label class="business-watch-filter">关注状态

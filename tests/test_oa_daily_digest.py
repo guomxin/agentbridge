@@ -7,6 +7,7 @@ from threading import Barrier
 import pytest
 
 from agentbridge.core import oa_daily_digest as digest
+from agentbridge.core import tasks as task_hub
 from agentbridge.core.mcp_identities import McpIdentityTokenStore
 from agentbridge.core.oa_daily_digest_report import DigestReport
 from agentbridge.core.tasks import TaskIntegrityError
@@ -185,3 +186,126 @@ def test_endpoint_key_pins_sender_and_allows_coherent_wildcard_account(context):
     wildcard = telegram("user-a", "1007", key="telegram:*:1007")
     result = digest.publish_oa_daily_digest(service, trial=False, **arguments(wildcard))
     assert service.tasks.get_delivery(result["deliveryId"])["endpoint_id"] == wildcard["endpoint_id"]
+
+
+def _workspace_account(service, subject="user-a"):
+    with service.tasks._connect() as connection:
+        row = connection.execute(
+            "SELECT account_id FROM workspace_accounts WHERE user_subject = ?", (subject,),
+        ).fetchone()
+    return service.workspace.get_account(row["account_id"])
+
+
+def _claim_schedule(context, *, workspace, telegram):
+    service, target, _, _, _, clock, _ = context
+    settings = service.oa_digest_settings
+    settings.clock = lambda: clock[0]
+    account = _workspace_account(service)
+    selected = target["endpoint_id"] if telegram else None
+    body = {"enabled": True, "time": "08:30", "workspace": workspace,
+            "telegramEndpointId": selected, "expectedVersion": 0}
+    saved = settings.update(account, body)
+    clock[0] = datetime.fromisoformat(saved["nextRunAt"])
+    return settings, account, settings._claim_due(clock[0]), clock, body
+
+
+@pytest.mark.parametrize(("workspace", "telegram"), [(True, False), (False, True), (True, True)])
+def test_scheduled_publication_respects_each_selected_channel(context, monkeypatch, workspace, telegram):
+    service, target, _, _, _, _, calls = context
+    settings, _, claimed, clock, _ = _claim_schedule(context, workspace=workspace, telegram=telegram)
+    monkeypatch.setattr(task_hub, "_utc_now", lambda: clock[0].isoformat())
+    subject = claimed["user_subject"]
+    published = digest.publish_scheduled_oa_digest(service, claimed, now=clock[0], clock=settings._now)
+    assert published["status"] == "published"
+    assert bool(published["timelineEntryId"]) is workspace
+    assert bool(published["deliveryId"]) is telegram
+    assert len(service.tasks.list_timeline(user_subject=subject, entry_type="chat_message")) == int(workspace)
+    assert not service.tasks.list_timeline(user_subject="user-b", entry_type="chat_message")
+    queued = service.tasks.list_outbox(user_subject=subject)
+    assert len(queued) == int(telegram)
+    if telegram:
+        assert queued[0]["endpoint_id"] == target["endpoint_id"]
+        assert queued[0]["payload"]["text"] == "OA 日报\n合成待办和关注事项"
+        assert digest.is_current_digest_destination(service, queued[0])
+        notification, = service.claim_host_notifications(**arguments_for_claim(target))["notifications"]
+        assert notification["deliveryId"] == published["deliveryId"]
+        assert "合成待办和关注事项" in notification["message"]
+        assert "targetEndpointBinding" not in notification["timeline"]
+    reused = digest.publish_scheduled_oa_digest(service, claimed, now=clock[0], clock=settings._now)
+    assert reused == {**published, "status": "reused"}
+    assert len(calls) == 1
+
+
+def arguments_for_claim(target):
+    return {"user_subject": "user-a", "agent_host": "openclaw", "endpoint_key": target["endpoint_key"]}
+
+
+@pytest.mark.parametrize("stop_during_collection", [False, True])
+def test_stopping_fences_an_in_progress_collection_or_a_queued_delivery(context, monkeypatch, stop_during_collection):
+    service, target, _, _, _, _, _ = context
+    settings, account, claimed, clock, body = _claim_schedule(context, workspace=False, telegram=True)
+    monkeypatch.setattr(task_hub, "_utc_now", lambda: clock[0].isoformat())
+    stop = {**body, "enabled": False, "expectedVersion": claimed["version"]}
+
+    def collect(*_args, **_kwargs):
+        if stop_during_collection:
+            settings.update(account, stop)
+        return DigestReport(text="OA 日报", watch_coverage_complete=True)
+
+    monkeypatch.setattr(digest, "collect_oa_daily_digest", collect)
+    result = digest.publish_scheduled_oa_digest(service, claimed, now=clock[0], clock=settings._now)
+    if stop_during_collection:
+        assert result["status"] == "stale"
+        assert not service.tasks.list_outbox(user_subject="user-a")
+    else:
+        assert result["status"] == "published"
+        settings.update(account, stop)
+        queued, = service.tasks.list_outbox(user_subject="user-a")
+        assert not digest.is_current_digest_destination(service, queued)
+        assert service.claim_host_notifications(**arguments_for_claim(target))["notifications"] == []
+    assert not service.tasks.list_timeline(user_subject="user-a", entry_type="chat_message")
+
+
+@pytest.mark.parametrize("workspace", [False, True])
+def test_rebound_telegram_never_receives_digest_and_preserves_selected_workspace(context, workspace):
+    service, target, _, _, telegram, _, calls = context
+    settings, _, claimed, clock, _ = _claim_schedule(context, workspace=workspace, telegram=True)
+    telegram("user-a", target["external_subject"], key=target["endpoint_key"])
+    result = digest.publish_scheduled_oa_digest(service, claimed, now=clock[0], clock=settings._now)
+    assert result["status"] == ("partial" if workspace else "endpoint_unavailable")
+    assert not service.tasks.list_outbox(user_subject="user-a")
+    assert len(calls) == int(workspace)
+    assert len(service.tasks.list_timeline(user_subject="user-a", entry_type="chat_message")) == int(workspace)
+
+
+def test_legacy_publication_deduplicates_and_is_then_superseded_by_workspace_settings(context):
+    service, target, _, _, _, _, calls = context
+    legacy = digest.publish_oa_daily_digest(service, trial=False, **arguments(target))
+    settings, _, claimed, clock, _ = _claim_schedule(context, workspace=False, telegram=True)
+    result = digest.publish_scheduled_oa_digest(service, claimed, now=clock[0], clock=settings._now)
+    assert result["status"] == "reused"
+    assert result["timelineEntryId"] == legacy["timelineEntryId"]
+    assert len(calls) == 1
+    with pytest.raises(PermissionError, match="Workspace 设置"):
+        digest.publish_oa_daily_digest(service, trial=False, **arguments(target))
+    # A queued recurring delivery from the retired path must also respect opt-in.
+    queued, = service.tasks.list_outbox(user_subject="user-a")
+    assert not digest.is_current_digest_destination(service, queued)
+    assert digest.get_oa_daily_digest_receipt(service, digest_id=legacy["digestId"], **arguments(target))[
+        "timelineEntryId"
+    ] == legacy["timelineEntryId"]
+
+
+def test_telegram_only_run_preserves_watch_watermark_without_timeline(context):
+    service, target, _, _, _, _, calls = context
+    settings, _, claimed, clock, _ = _claim_schedule(context, workspace=False, telegram=True)
+    first = clock[0]
+    assert settings.run_due(limit=1)["claimed"] == 0  # already leased
+    result = digest.publish_scheduled_oa_digest(service, claimed, now=first, clock=settings._now)
+    assert result["status"] == "published"
+    assert settings._finish(claimed, "published", first, first)
+    assert not service.tasks.list_timeline(user_subject="user-a", entry_type="chat_message")
+    clock[0] += timedelta(days=1)
+    assert settings.run_due(limit=1)["published"] == 1
+    assert calls[-1]["since"] == first
+    assert len(service.tasks.list_outbox(user_subject="user-a", endpoint_id=target["endpoint_id"])) == 2

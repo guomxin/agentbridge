@@ -95,6 +95,9 @@ class CentralStorageTests(unittest.TestCase):
                     ['index', 'business_watches_active_target'],
                     ['index', 'business_watches_due'],
                     ['index', 'business_watches_owner_created'],
+                    ['table', 'oa_digest_settings'],
+                    ['index', 'idx_oa_digest_settings_due'],
+                    ['table', 'oa_digest_runs'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))

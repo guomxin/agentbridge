@@ -2854,6 +2854,7 @@ class TaskHubStore:
         _workspace_response: bool = False,
         target_endpoint_id: str | None = None,
         target_endpoint_binding: str | None = None,
+        enqueue_notifications: bool = True,
     ) -> tuple[dict, bool]:
         """Append with the caller's transaction; never commit independently."""
         if not connection.in_transaction:
@@ -2927,14 +2928,17 @@ class TaskHubStore:
             "SELECT * FROM user_timeline WHERE entry_id = ?",
             (entry_id,),
         ).fetchone()
-        self._enqueue_timeline_message(
-            connection,
-            entry=row,
-            source_endpoint_id=source_endpoint_id,
-            notify_source=notify_source,
-            target_endpoint_id=target_endpoint_id,
-            target_endpoint_binding=target_endpoint_binding,
-        )
+        if enqueue_notifications:
+            self._enqueue_timeline_message(
+                connection,
+                entry=row,
+                source_endpoint_id=source_endpoint_id,
+                notify_source=notify_source,
+                target_endpoint_id=target_endpoint_id,
+                target_endpoint_binding=target_endpoint_binding,
+            )
+        else:
+            mark_transaction_change(connection, user_subject=user_subject, topics=("timeline",))
         return _timeline_from_row(row), False
 
     def get_timeline_message(
@@ -4858,15 +4862,21 @@ class TaskHubStore:
     def _enqueue_timeline_message(
         connection: sqlite3.Connection,
         *,
-        entry: sqlite3.Row,
+        entry: sqlite3.Row | dict[str, Any],
         source_endpoint_id: str,
         notify_source: bool = False,
         target_endpoint_id: str | None = None,
         target_endpoint_binding: str | None = None,
+        timeline_visible: bool = True,
     ) -> None:
-        mark_transaction_change(connection, user_subject=entry["user_subject"])
         if target_endpoint_binding is not None and target_endpoint_id is None:
             raise ValueError("target binding requires an exact endpoint")
+        if not timeline_visible and not target_endpoint_binding:
+            raise ValueError("a private notification requires an exact bound endpoint")
+        mark_transaction_change(
+            connection, user_subject=entry["user_subject"],
+            topics=("timeline", "notifications") if timeline_visible else ("notifications",),
+        )
         source = connection.execute(
             """
             SELECT endpoint_id, client_type, label

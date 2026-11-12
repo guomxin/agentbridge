@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import compare_digest
 import json
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from agentbridge.core.actionable_results import ActionableResultError, _telegram_endpoint
@@ -34,7 +34,7 @@ def _telegram_account(value):
     return "default" if value is None or value.strip() in {"", "default"} else value
 
 
-def _publication_route(connection, user_subject, agent_host, telegram_endpoint_key):
+def _workspace_publication_endpoint(connection, user_subject, agent_host, account_id=None):
     workspace = connection.execute(
         """SELECT endpoint.endpoint_id, endpoint.endpoint_key, endpoint.conversation_ref
            FROM workspace_accounts AS account
@@ -44,30 +44,44 @@ def _publication_route(connection, user_subject, agent_host, telegram_endpoint_k
              AND endpoint.agent_host = ? AND endpoint.client_type = 'web'
              AND endpoint.endpoint_key = account.endpoint_key
              AND endpoint.conversation_ref = account.openclaw_session_key
-             AND endpoint.external_subject = account.account_id""",
-        (user_subject, agent_host),
+             AND endpoint.external_subject = account.account_id
+             AND (? IS NULL OR account.account_id = ?)""",
+        (user_subject, agent_host, account_id, account_id),
     ).fetchone()
     if workspace is None:
         raise PermissionError("没有可用的本人工作台端点。")
-    recipient = connection.execute(
-        """SELECT endpoint_id, capabilities_json FROM client_endpoints
-           WHERE user_subject = ? AND agent_host = ? AND endpoint_key = ?""",
-        (user_subject, agent_host, telegram_endpoint_key),
-    ).fetchone()
-    if recipient is None:
-        raise PermissionError("没有可用的本人 Telegram 私聊端点。")
+    return tuple(workspace)
+
+
+def check_digest_telegram_endpoint(connection, user_subject, endpoint_id):
+    """Resolve one currently bound, same-owner Telegram private destination."""
     try:
-        checked = _telegram_endpoint(connection, user_subject, recipient["endpoint_id"])
+        checked = _telegram_endpoint(connection, user_subject, endpoint_id)
     except ActionableResultError as exc:
         raise PermissionError("没有可用的本人 Telegram 私聊端点。") from exc
     account = _telegram_account(checked["account_id"])
     sender = checked["external_subject"]
     route_account = _telegram_account(json.loads(checked["route_json"]).get("accountId"))
-    if route_account != account or telegram_endpoint_key not in {f"telegram:{account}:{sender}", f"telegram:*:{sender}"}:
+    if route_account != account or checked["endpoint_key"] not in {
+        f"telegram:{account}:{sender}", f"telegram:*:{sender}",
+    }:
         raise PermissionError("Telegram 端点与原绑定的收件人或机器人账号不一致。")
-    if not set(json.loads(recipient["capabilities_json"])) & {"direct_status", "timeline_message"}:
+    if not set(json.loads(checked["capabilities_json"])) & {"direct_status", "timeline_message"}:
         raise PermissionError("本人 Telegram 私聊端点未启用消息投递。")
-    return tuple(workspace), recipient["endpoint_id"], checked["_binding_hash"]
+    return checked
+
+
+def _publication_route(connection, user_subject, agent_host, telegram_endpoint_key):
+    workspace = _workspace_publication_endpoint(connection, user_subject, agent_host)
+    recipient = connection.execute(
+        """SELECT endpoint_id FROM client_endpoints
+           WHERE user_subject = ? AND agent_host = ? AND endpoint_key = ?""",
+        (user_subject, agent_host, telegram_endpoint_key),
+    ).fetchone()
+    if recipient is None:
+        raise PermissionError("没有可用的本人 Telegram 私聊端点。")
+    checked = check_digest_telegram_endpoint(connection, user_subject, recipient["endpoint_id"])
+    return workspace, checked["endpoint_id"], checked["_binding_hash"]
 
 
 def _grant_revision(connection, user_subject):
@@ -89,10 +103,32 @@ def _oa_authority(connection, user_subject):
     return tuple(session) if session is not None else None
 
 
-def _delivery_binding(service, route, grant_revision, oa_authority):
-    snapshot = json.dumps([route, grant_revision, service.business_watch.system_instance, oa_authority],
+def _delivery_binding(service, route, grant_revision, oa_authority, *, settings_version=None):
+    material = [route, grant_revision, service.business_watch.system_instance, oa_authority]
+    if settings_version is not None:
+        material.append(settings_version)
+    snapshot = json.dumps(material,
                           ensure_ascii=False, separators=(",", ":"))
     return sha256(snapshot.encode()).hexdigest()
+
+
+def _has_table(connection, name):
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,),
+    ).fetchone() is not None
+
+
+def _setting_for_owner(connection, owner):
+    if not _has_table(connection, "oa_digest_settings"):
+        return None
+    return connection.execute(
+        "SELECT * FROM oa_digest_settings WHERE user_subject = ?", (owner,),
+    ).fetchone()
+
+
+def _require_legacy_schedule(connection, owner, trial):
+    if not trial and _setting_for_owner(connection, owner) is not None:
+        raise PermissionError("此账号的日报由 Workspace 设置管理。")
 
 
 def is_current_digest_destination(service, delivery) -> bool:
@@ -105,6 +141,22 @@ def is_current_digest_destination(service, delivery) -> bool:
         return False
     owner = delivery["user_subject"]
     with service.tasks._connect() as connection:
+        connection.execute("BEGIN")
+        setting = _setting_for_owner(connection, owner)
+        run = None
+        if setting is not None:
+            run = connection.execute(
+                """SELECT settings_version FROM oa_digest_runs
+                   WHERE user_subject = ? AND telegram_delivery_id = ?""",
+                (owner, delivery["delivery_id"]),
+            ).fetchone()
+            if run is None and connection.execute(
+                """SELECT 1 FROM user_timeline WHERE user_subject = ? AND entry_id = ?
+                   AND dedupe_key GLOB ?""",
+                (owner, delivery["event_id"], f"message:{_KEY_PREFIX}scheduled:*"),
+            ).fetchone():
+                # Queued legacy recurring sends are superseded by self-service settings.
+                return False
         endpoint = connection.execute(
             """SELECT agent_host, endpoint_key FROM client_endpoints
                WHERE endpoint_id = ? AND user_subject = ?""",
@@ -113,12 +165,25 @@ def is_current_digest_destination(service, delivery) -> bool:
         if endpoint is None:
             return False
         try:
-            route = _publication_route(connection, owner, endpoint["agent_host"], endpoint["endpoint_key"])
+            if run is not None:
+                if (not setting["enabled"] or setting["version"] != run["settings_version"]
+                        or setting["telegram_endpoint_id"] != delivery["endpoint_id"]):
+                    return False
+                workspace = _workspace_publication_endpoint(connection, owner, "openclaw", setting["account_id"])
+                recipient = _scheduled_telegram(connection, setting)
+                if recipient is None:
+                    return False
+                route = workspace, *recipient
+            else:
+                route = _publication_route(connection, owner, endpoint["agent_host"], endpoint["endpoint_key"])
             grant_revision = _grant_revision(connection, owner)
             oa_authority = _oa_authority(connection, owner)
         except PermissionError:
             return False
-    return compare_digest(binding, _delivery_binding(service, route, grant_revision, oa_authority))
+    return compare_digest(binding, _delivery_binding(
+        service, route, grant_revision, oa_authority,
+        settings_version=run["settings_version"] if run is not None else None,
+    ))
 
 
 def _find_entry(connection, user_subject, *, message_key=None, digest_id=None):
@@ -129,6 +194,15 @@ def _find_entry(connection, user_subject, *, message_key=None, digest_id=None):
               AND {field} = ? AND dedupe_key GLOB ?""",
         (user_subject, value, f"message:{_KEY_PREFIX}*"),
     ).fetchone()
+
+
+def _legacy_watch_watermark(connection, owner):
+    return connection.execute(
+        """SELECT MAX(json_extract(payload_json, '$.oaDailyDigest.watchWatermark')) FROM user_timeline
+           WHERE user_subject = ? AND entry_type = 'chat_message' AND role = 'assistant'
+             AND dedupe_key GLOB ?""",
+        (owner, f"message:{_KEY_PREFIX}*"),
+    ).fetchone()[0]
 
 
 def _receipt(connection, entry, *, user_subject, agent_host, telegram_endpoint_key, status):
@@ -175,18 +249,14 @@ def publish_oa_daily_digest(service, *, user_subject, agent_host, telegram_endpo
         return receipt
 
     with service.tasks._connect() as connection:
+        _require_legacy_schedule(connection, user_subject, trial)
         existing = _find_entry(connection, user_subject, message_key=message_key)
         if existing is not None:
             return publication_receipt(connection, existing, "reused")
         route = _publication_route(connection, **receipt_scope)
         grant_revision = _grant_revision(connection, user_subject)
         oa_authority = _oa_authority(connection, user_subject)
-        watermark = connection.execute(
-            """SELECT MAX(json_extract(payload_json, '$.oaDailyDigest.watchWatermark')) FROM user_timeline
-               WHERE user_subject = ? AND entry_type = 'chat_message' AND role = 'assistant'
-                 AND dedupe_key GLOB ?""",
-            (user_subject, f"message:{_KEY_PREFIX}*"),
-        ).fetchone()[0]
+        watermark = _legacy_watch_watermark(connection, user_subject)
     since = min(now, datetime.fromisoformat(watermark)) if watermark else now - timedelta(days=1)
 
     # Business reads can take time. No writer transaction is held while they run.
@@ -195,6 +265,7 @@ def publish_oa_daily_digest(service, *, user_subject, agent_host, telegram_endpo
 
     with service.tasks._connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        _require_legacy_schedule(connection, user_subject, trial)
         existing = _find_entry(connection, user_subject, message_key=message_key)
         if existing is not None:
             return publication_receipt(connection, existing, "reused")
@@ -226,6 +297,204 @@ def publish_oa_daily_digest(service, *, user_subject, agent_host, telegram_endpo
         )
         recorded = _find_entry(connection, user_subject, digest_id=entry["entry_id"])
         return publication_receipt(connection, recorded, "published")
+
+
+def initialize_digest_runs(tasks) -> None:
+    """Keep a daily receipt and watch watermark even when the report is private."""
+    with tasks._connect() as connection:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS oa_digest_runs (
+                user_subject TEXT NOT NULL,
+                local_date TEXT NOT NULL,
+                settings_version INTEGER NOT NULL,
+                published_at TEXT NOT NULL,
+                watch_watermark TEXT NOT NULL,
+                timeline_entry_id TEXT,
+                telegram_delivery_id TEXT UNIQUE,
+                PRIMARY KEY (user_subject, local_date),
+                CHECK (timeline_entry_id IS NOT NULL OR telegram_delivery_id IS NOT NULL)
+            )
+        """)
+
+
+def _current_scheduled_setting(connection, claimed, now, local_date):
+    row = _setting_for_owner(connection, claimed["user_subject"])
+    if (row is None or not row["enabled"] or not row["lease_token"] or not row["lease_until"]
+            or not row["next_run_at"]
+            or any(row[key] != claimed[key] for key in (
+                "account_id", "version", "lease_token", "next_run_at",
+            ))
+            or datetime.fromisoformat(row["lease_until"]) <= now):
+        return None
+    due = datetime.fromisoformat(row["next_run_at"])
+    if due > now or not (due.astimezone(_TIMEZONE).date() == now.astimezone(_TIMEZONE).date() == local_date):
+        return None
+    return row
+
+
+def _scheduled_telegram(connection, setting):
+    endpoint_id = setting["telegram_endpoint_id"]
+    if endpoint_id is None:
+        return None
+    try:
+        recipient = check_digest_telegram_endpoint(connection, setting["user_subject"], endpoint_id)
+    except PermissionError:
+        return None
+    if recipient["_binding_hash"] != setting["telegram_binding"]:
+        return None
+    return endpoint_id, recipient["_binding_hash"]
+
+
+def _published_scheduled_receipt(connection, owner, local_date):
+    run = connection.execute(
+        """SELECT published_at, timeline_entry_id, telegram_delivery_id
+           FROM oa_digest_runs WHERE user_subject = ? AND local_date = ?""",
+        (owner, local_date.isoformat()),
+    ).fetchone()
+    if run is not None:
+        return {
+            "status": "reused", "localDate": local_date.isoformat(), "publishedAt": run["published_at"],
+            "timelineEntryId": run["timeline_entry_id"], "deliveryId": run["telegram_delivery_id"],
+        }
+    # A legacy scheduler may already have sent today's digest. A trial is a
+    # separate receipt and never occupies the scheduled date.
+    entry = _find_entry(connection, owner, message_key=_message_key(local_date.isoformat(), False))
+    if entry is not None:
+        return {
+            "status": "reused", "localDate": local_date.isoformat(), "publishedAt": entry["created_at"],
+            "timelineEntryId": entry["entry_id"],
+        }
+    return None
+
+
+def _scheduled_watch_since(connection, owner, now):
+    run_watermark = connection.execute(
+        "SELECT MAX(watch_watermark) FROM oa_digest_runs WHERE user_subject = ?", (owner,),
+    ).fetchone()[0]
+    watermarks = [datetime.fromisoformat(value) for value in
+                  (run_watermark, _legacy_watch_watermark(connection, owner)) if value]
+    return min(now, max(watermarks)) if watermarks else now - timedelta(days=1)
+
+
+def _queue_private_telegram_digest(service, connection, owner, workspace, telegram, report, binding, now):
+    # The outbox event ID need not reference the shared timeline. In
+    # Telegram-only mode the body exists solely in the exact recipient's queue.
+    event_id = str(uuid4())
+    service.tasks._enqueue_timeline_message(
+        connection,
+        entry={
+            "entry_id": event_id, "user_subject": owner, "sequence": None, "role": "assistant",
+            "text": report.text, "payload_json": "{}", "task_id": None, "created_at": now,
+        },
+        source_endpoint_id=workspace[0], target_endpoint_id=telegram[0],
+        target_endpoint_binding=binding, timeline_visible=False,
+    )
+    return event_id
+
+
+def publish_scheduled_oa_digest(service, setting, *, now, clock=None) -> dict:
+    """Use a current Workspace schedule lease to publish exactly the selected channels."""
+    clock = clock or _now
+    owner = setting["user_subject"]
+    local_date = now.astimezone(_TIMEZONE).date()
+
+    def outcome(status):
+        return {"status": status, "localDate": local_date.isoformat()}
+
+    with service.tasks._connect() as connection:
+        connection.execute("BEGIN")
+        current = _current_scheduled_setting(connection, setting, now, local_date)
+        if current is None:
+            return outcome("stale")
+        previous = _published_scheduled_receipt(connection, owner, local_date)
+        if previous is not None:
+            return previous
+        try:
+            grant_revision = _grant_revision(connection, owner)
+        except PermissionError:
+            return outcome("permission_unavailable")
+        try:
+            workspace = _workspace_publication_endpoint(connection, owner, "openclaw", current["account_id"])
+        except PermissionError:
+            return outcome("endpoint_unavailable")
+        telegram = _scheduled_telegram(connection, current)
+        if not current["send_workspace"] and telegram is None:
+            return outcome("endpoint_unavailable")
+        oa_authority = _oa_authority(connection, owner)
+        since = _scheduled_watch_since(connection, owner, now)
+
+    report = collect_oa_daily_digest(service, user_subject=owner, now=now, since=since, trial=False)
+    watermark = now if report.watch_coverage_complete else since
+
+    with service.tasks._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        finished_at = clock()
+        current = _current_scheduled_setting(connection, setting, finished_at, local_date)
+        if current is None:
+            return outcome("stale")
+        previous = _published_scheduled_receipt(connection, owner, local_date)
+        if previous is not None:
+            return previous
+        try:
+            if (_grant_revision(connection, owner) != grant_revision
+                    or _oa_authority(connection, owner) != oa_authority):
+                return outcome("permission_unavailable")
+        except PermissionError:
+            return outcome("permission_unavailable")
+        try:
+            if _workspace_publication_endpoint(connection, owner, "openclaw", current["account_id"]) != workspace:
+                return outcome("endpoint_unavailable")
+        except PermissionError:
+            return outcome("endpoint_unavailable")
+        if _scheduled_telegram(connection, current) != telegram:
+            telegram = None
+        if not current["send_workspace"] and telegram is None:
+            return outcome("endpoint_unavailable")
+
+        binding = None
+        if telegram is not None:
+            binding = _delivery_binding(service, (workspace, *telegram), grant_revision, oa_authority,
+                                        settings_version=current["version"])
+        timeline_entry_id = None
+        published_at = finished_at.astimezone(timezone.utc).isoformat()
+        if current["send_workspace"]:
+            entry, _ = service.tasks._append_timeline_message_in_connection(
+                connection, user_subject=owner, source_endpoint_id=workspace[0],
+                message_key=_message_key(local_date.isoformat(), False), role="assistant", text=report.text,
+                payload={_METADATA_KEY: {
+                    "localDate": local_date.isoformat(), "trial": False,
+                    "watchWatermark": watermark.astimezone(timezone.utc).isoformat(),
+                }},
+                target_endpoint_id=telegram[0] if telegram is not None else None,
+                target_endpoint_binding=binding, enqueue_notifications=telegram is not None,
+            )
+            timeline_entry_id = entry["entry_id"]
+        delivery_id = None
+        if telegram is not None:
+            event_id = timeline_entry_id or _queue_private_telegram_digest(
+                service, connection, owner, workspace, telegram, report, binding, published_at,
+            )
+            delivery = connection.execute(
+                """SELECT delivery_id FROM notification_outbox
+                   WHERE user_subject = ? AND event_id = ? AND endpoint_id = ? AND payload_type = 'timeline_message'""",
+                (owner, event_id, telegram[0]),
+            ).fetchone()
+            if delivery is None:
+                raise TaskIntegrityError("daily digest did not queue its selected Telegram delivery")
+            delivery_id = delivery["delivery_id"]
+        connection.execute(
+            """INSERT INTO oa_digest_runs (
+                user_subject, local_date, settings_version, published_at, watch_watermark,
+                timeline_entry_id, telegram_delivery_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (owner, local_date.isoformat(), current["version"], published_at,
+             watermark.astimezone(timezone.utc).isoformat(), timeline_entry_id, delivery_id),
+        )
+        status = "partial" if current["telegram_endpoint_id"] and delivery_id is None else "published"
+        return {
+            **outcome(status), "publishedAt": published_at,
+            "timelineEntryId": timeline_entry_id, "deliveryId": delivery_id,
+        }
 
 
 def get_oa_daily_digest_receipt(
