@@ -95,6 +95,18 @@ def test_notification_validation_is_host_control_only_and_requires_host_metadata
     ctx.read.assert_not_called()
 
 
+def test_digest_tools_require_registered_host_and_are_not_model_tools(mcp_context):
+    ctx = mcp_context
+    profile = content(rpc(ctx, "agentbridge_server_profile"))
+    for name in ("agentbridge_host_oa_daily_digest", "agentbridge_host_oa_daily_digest_status"):
+        assert name in profile["toolPlanes"]["hostControl"]["levels"]["L3"]
+        assert name not in profile["agentToolAccess"]["allowedToolNames"]
+        arguments = {"agent_host": "openclaw", "telegram_endpoint_key": "telegram:*:1001", "trial": True}
+        assert rpc(ctx, name, arguments, meta=False)["isError"]
+        assert rpc(ctx, name, arguments)["isError"]
+    ctx.read.assert_not_called()
+
+
 def test_l3_registered_create_default_consent_and_cas_update(mcp_context):
     ctx = mcp_context
     target = reference(ctx)

@@ -1786,6 +1786,17 @@ class CentralCapabilityService:
                     'message':None,'watchId':validated['watchId']})
                 continue
             if delivery["payload_type"] == "timeline_message":
+                if "targetEndpointBinding" in event:
+                    from agentbridge.core.oa_daily_digest import is_current_digest_destination
+
+                    if not is_current_digest_destination(self, delivery):
+                        self.tasks.acknowledge_outbox(
+                            user_subject=user_subject, endpoint_id=endpoint["endpoint_id"],
+                            delivery_id=delivery["delivery_id"], succeeded=False,
+                            retry_after_seconds=300, expected_attempt_count=delivery["attempt_count"],
+                        )
+                        continue
+                    event = {key: value for key, value in event.items() if key != "targetEndpointBinding"}
                 notifications.append(
                     {
                         "deliveryId": delivery["delivery_id"],

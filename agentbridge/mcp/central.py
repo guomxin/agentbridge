@@ -382,6 +382,8 @@ HOST_COORDINATION_TOOL_NAMES = (
     "agentbridge_host_task_ensure",
     "agentbridge_host_task_prepare",
     "agentbridge_host_timeline_append",
+    "agentbridge_host_oa_daily_digest",
+    "agentbridge_host_oa_daily_digest_status",
     "agentbridge_host_task_observe",
     "agentbridge_host_task_finish",
     "agentbridge_host_task_recovery_list",
@@ -5974,6 +5976,59 @@ def create_central_mcp_server(
             label=label,
             route=route,
             task_id=task_id,
+        )
+
+    async def authorize_oa_digest(ctx: Context, agent_host: str) -> str:
+        identity = _request_identity(identity_store)
+        if "oa:read" not in identity["scopes"]:
+            raise PermissionError("OA read scope is required for the daily digest")
+        await _require_registered_host_call(ctx, service=service, identity=identity, agent_host=agent_host)
+        return identity["user_subject"]
+
+    @mcp.tool(
+        name="agentbridge_host_oa_daily_digest",
+        title="Publish the Scheduled OA Digest",
+        description="Host-private. Read the owner's OA pending list and verified watch changes, then persist a digest for Workspace and the selected bound Telegram private chat.",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+        structured_output=True,
+    )
+    async def agentbridge_host_oa_daily_digest(
+        ctx: Context,
+        agent_host: Literal["openclaw"],
+        telegram_endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
+        trial: bool = False,
+    ) -> dict[str, Any]:
+        from agentbridge.core.oa_daily_digest import publish_oa_daily_digest
+
+        subject = await authorize_oa_digest(ctx, agent_host)
+        return await _run_host_control(
+            "agentbridge_host_oa_daily_digest", publish_oa_daily_digest, warn_after_seconds=30,
+            service=service, user_subject=subject, agent_host=agent_host,
+            telegram_endpoint_key=telegram_endpoint_key, trial=trial,
+        )
+
+    @mcp.tool(
+        name="agentbridge_host_oa_daily_digest_status",
+        title="Read the Scheduled OA Digest Receipt",
+        description="Host-private. Return publication and Telegram acknowledgement state for the owner's digest, without returning the report text.",
+        annotations=read_annotations,
+        structured_output=True,
+    )
+    async def agentbridge_host_oa_daily_digest_status(
+        ctx: Context,
+        agent_host: Literal["openclaw"],
+        telegram_endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
+        trial: bool = False,
+        digest_id: Annotated[str | None, Field(max_length=128)] = None,
+        local_date: Annotated[str | None, Field(max_length=10)] = None,
+    ) -> dict[str, Any]:
+        from agentbridge.core.oa_daily_digest import get_oa_daily_digest_receipt
+
+        subject = await authorize_oa_digest(ctx, agent_host)
+        return await _run_host_control(
+            "agentbridge_host_oa_daily_digest_status", get_oa_daily_digest_receipt,
+            service=service, user_subject=subject, agent_host=agent_host,
+            telegram_endpoint_key=telegram_endpoint_key, trial=trial, digest_id=digest_id, local_date=local_date,
         )
 
     @mcp.tool(

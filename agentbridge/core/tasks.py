@@ -2852,6 +2852,8 @@ class TaskHubStore:
         payload: dict[str, Any] | None = None,
         notify_source: bool = False,
         _workspace_response: bool = False,
+        target_endpoint_id: str | None = None,
+        target_endpoint_binding: str | None = None,
     ) -> tuple[dict, bool]:
         """Append with the caller's transaction; never commit independently."""
         if not connection.in_transaction:
@@ -2930,6 +2932,8 @@ class TaskHubStore:
             entry=row,
             source_endpoint_id=source_endpoint_id,
             notify_source=notify_source,
+            target_endpoint_id=target_endpoint_id,
+            target_endpoint_binding=target_endpoint_binding,
         )
         return _timeline_from_row(row), False
 
@@ -4857,8 +4861,12 @@ class TaskHubStore:
         entry: sqlite3.Row,
         source_endpoint_id: str,
         notify_source: bool = False,
+        target_endpoint_id: str | None = None,
+        target_endpoint_binding: str | None = None,
     ) -> None:
         mark_transaction_change(connection, user_subject=entry["user_subject"])
+        if target_endpoint_binding is not None and target_endpoint_id is None:
+            raise ValueError("target binding requires an exact endpoint")
         source = connection.execute(
             """
             SELECT endpoint_id, client_type, label
@@ -4873,8 +4881,10 @@ class TaskHubStore:
             FROM client_endpoints
             WHERE user_subject = ? AND state = 'active'
               AND (endpoint_id != ? OR ?)
+              AND (? IS NULL OR endpoint_id = ?)
             """,
-            (entry["user_subject"], source_endpoint_id, notify_source),
+            (entry["user_subject"], source_endpoint_id, notify_source,
+             target_endpoint_id, target_endpoint_id),
         ).fetchall()
         entry_payload = json.loads(entry["payload_json"] or "{}")
         mirrored_text = entry["text"]
@@ -4891,6 +4901,7 @@ class TaskHubStore:
                 **({"textTruncated": True, "originalTextLength": len(entry["text"])} if truncated else {}),
                 "attachments": list(entry_payload.get("attachments") or []),
                 "createdAt": entry["created_at"],
+                **({"targetEndpointBinding": target_endpoint_binding} if target_endpoint_binding is not None else {}),
                 "source": {
                     "endpointId": source_endpoint_id,
                     "clientType": source["client_type"] if source else "unknown",

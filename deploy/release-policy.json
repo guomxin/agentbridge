@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "849808638318"
+    "2b17f9fc9293"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Reviewed against deployed 849808638318 on 2026-11-11. Workspace filters the existing watch list by effective state and binds the selected state to its page cursor. Legacy unfiltered requests and their cursors remain valid. The release uses the existing database structures, watch states and schedules, authorization rules, and unchanged OpenClaw 0.4.132 plugin."
+  "reason": "Reviewed against deployed 2b17f9fc9293 on 2026-11-12. The scheduled OA digest reuses the existing central read session, user timeline, and notification outbox schema. It is opt-in per registered OpenClaw schedule and leaves existing watches, endpoint subscriptions, and the OpenClaw 0.4.132 plugin unchanged."
 }
