@@ -147,7 +147,9 @@ _LOGGER = logging.getLogger("uvicorn.error")
 
 
 class SeeyonLoginRequired(AdapterLoginRequired):
-    pass
+    def __init__(self, message: str, *, probe_status: int = 0) -> None:
+        super().__init__(message)
+        self.probe_status = probe_status
 
 
 class SeeyonAuthenticationRejected(AdapterAuthenticationRejected):
@@ -186,6 +188,8 @@ _AUTHENTICATION_FIELDS = [
         "required": True,
     },
 ]
+
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 _USERNAME_SELECTORS = (
     '#login_username',
@@ -857,10 +861,11 @@ class SeeyonCentralAdapter:
         final_url = str(response.get("url") or "")
         payload = response.get("json")
         text = str(response.get("text") or "")
-        if status in {301, 302, 303, 307, 308, 401, 403} or _looks_like_login_url(
-            final_url
-        ):
-            raise SeeyonLoginRequired("The central OA session is not logged in or has expired.")
+        if status in _REDIRECT_STATUSES or status in {401, 403} or _looks_like_login_url(final_url):
+            raise SeeyonLoginRequired(
+                "The central OA session is not logged in or has expired.",
+                probe_status=status,
+            )
         if status < 200 or status >= 300:
             diagnostics = _safe_response_diagnostics(response)
             if status in {408, 425, 429} or status >= 500:
@@ -873,7 +878,8 @@ class SeeyonCentralAdapter:
         if not isinstance(payload, dict):
             if _looks_like_login_html(text):
                 raise SeeyonLoginRequired(
-                    "The central OA session is not logged in or has expired."
+                    "The central OA session is not logged in or has expired.",
+                    probe_status=status,
                 )
             raise SeeyonSessionCheckUnavailable(
                 "OA session check did not return JSON "
@@ -895,6 +901,40 @@ class SeeyonCentralAdapter:
             "template_count": int(templates.get("count") or 0),
             "transport": templates["transport"],
         }
+
+    def keepalive_session(self, worker) -> dict:
+        """Only let a corroborated OA login response discard the saved session."""
+        try:
+            return self.probe_session(worker)
+        except SeeyonLoginRequired as exc:
+            template_status = exc.probe_status
+
+        try:
+            # Use the same session, but a separate read-only endpoint. The Worker
+            # does not follow Location, so this probe never navigates to its target.
+            response = worker.request_bytes(
+                "GET", self.base_url, timeout_seconds=remaining_seconds(5),
+            )
+            check_read_deadline()
+        except ReadBudgetExceeded:
+            raise
+        except Exception as exc:
+            raise SeeyonSessionCheckUnavailable(
+                f"OA keepalive could not confirm login (template HTTP {template_status}; "
+                f"home request failed: {_safe_exception_code(exc)})."
+            ) from None
+
+        home_status = int(response.get("status") or 0)
+        login_signal = _confirmed_home_login(response, self.origin, home_status)
+        if login_signal:
+            raise SeeyonLoginRequired(
+                f"OA keepalive confirmed login required (template HTTP {template_status}; "
+                f"home HTTP {home_status}: {login_signal})."
+            )
+        raise SeeyonSessionCheckUnavailable(
+            f"OA keepalive could not confirm login (template HTTP {template_status}; "
+            f"home HTTP {home_status}: inconclusive)."
+        )
 
     def probe_business_draft_session(self, worker) -> dict:
         """Observe the account on the authenticated home page before draft reads."""
@@ -1968,6 +2008,102 @@ def _looks_like_login_html(value: str) -> bool:
     except Exception:
         return False
     return detector.has_username and detector.has_password
+
+
+def _confirmed_home_login(response: dict, origin: str, status: int) -> str | None:
+    try:
+        response_url = str(response.get("url") or "")
+        page = urlparse(response_url)
+        if page.username is not None or f"{page.scheme}://{page.netloc.lower()}" != origin:
+            return None
+        if status in _REDIRECT_STATUSES:
+            location = str(response.get("location") or "")
+            if not location or "\\" in location or any(ord(char) < 32 for char in location):
+                return None
+            redirect = urlparse(location)
+            if (redirect.scheme or location.startswith("//")) and not redirect.netloc:
+                return None
+            if _is_oa_login_endpoint(urljoin(response_url, location), origin):
+                return "oa_login_redirect"
+        media_type = str(response.get("content_type") or "").split(";", 1)[0].strip().lower()
+        if 200 <= status < 300 and media_type == "text/html":
+            body = response.get("body")
+            if isinstance(body, bytes):
+                detector = _OALoginFormDetector(response_url, origin)
+                detector.feed(body[:262_144].decode("utf-8", errors="replace"))
+                if detector.found:
+                    return "oa_login_form"
+    except (AssertionError, ValueError):
+        # A malformed Location or HTML is not evidence of expiry.
+        return None
+    return None
+
+
+def _is_oa_login_endpoint(url: str, origin: str) -> bool:
+    target = urlparse(url)
+    if target.username is not None or f"{target.scheme}://{target.netloc.lower()}" != origin:
+        return False
+    methods = parse_qs(target.query, keep_blank_values=True).get("method", [])
+    if target.path == "/seeyon/login.do":
+        return methods in ([], ["login"])
+    return target.path == "/seeyon/main.do" and methods == ["login"]
+
+
+class _OALoginFormDetector(HTMLParser):
+    """Require the OA login fields in the same form, rather than generic inputs."""
+
+    def __init__(self, page_url: str, origin: str) -> None:
+        super().__init__()
+        self._page_url = page_url
+        self._origin = origin
+        self._form: tuple[bool, bool] | None = None
+        self._inert_tags = 0
+        self._found_form = False
+        self._in_title = False
+        self._title: list[str] = []
+
+    @property
+    def found(self) -> bool:
+        return self._found_form and not _principal_from_title("".join(self._title)[:512])
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"template", "noscript"}:
+            self._inert_tags += 1
+        if self._inert_tags:
+            return
+        values = dict(attrs)
+        if tag == "title":
+            self._in_title = True
+        elif tag == "form":
+            self._form = None
+            if "hidden" in values or "inert" in values:
+                return
+            action = values.get("action") or ""
+            if not action or _is_oa_login_endpoint(urljoin(self._page_url, action), self._origin):
+                self._form = (False, False)
+        elif tag == "input" and self._form is not None and "hidden" not in values:
+            names = {str(values.get(key) or "").lower() for key in ("name", "id")}
+            kind = str(values.get("type") or "").lower()
+            username, password = self._form
+            if kind == "password":
+                password = password or bool({"login_password1", "login_password"} & names)
+            elif kind in {"", "text"}:
+                username = username or "login_username" in names
+            self._form = (username, password)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._inert_tags:
+            if tag in {"template", "noscript"}:
+                self._inert_tags -= 1
+        elif tag == "title":
+            self._in_title = False
+        elif tag == "form" and self._form is not None:
+            self._found_form = self._found_form or all(self._form)
+            self._form = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and not self._inert_tags:
+            self._title.append(data)
 
 
 def _safe_response_diagnostics(response: dict) -> str:

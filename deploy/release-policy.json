@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "dbc20ef18672"
+    "a3187973e03e"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "b984945db13720725eafbc341d2863fde7ec182b2880cee092686269602b7c15",
-      "afterSha256": "f5c356c16499a488d7fd5aac6d46696860c2079005a3e0aa437e86b664fa8084"
-    }
-  },
-  "reason": "Reviewed against deployed dbc20ef18672 on 2026-11-12. Add only the OA digest settings and run ledger tables and their indexes in agentbridge.db. Existing schemas, business rows and the other three databases are unchanged. Users opt in from Workspace. Older OpenClaw jobs are superseded for users who save Workspace settings."
+  "dataCompatibility": "no-migration",
+  "reason": "Reviewed against deployed a3187973e03e on 2026-11-12. OA background keepalive uses the existing session transitions and deferred events. No persisted schema or data contract changes."
 }

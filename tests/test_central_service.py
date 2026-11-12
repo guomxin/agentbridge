@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import json
 import threading
 import time
@@ -44,6 +45,12 @@ from tests.test_smartlight_adapter import FakeSmartlightWorker
 
 
 BASE_URL = "http://oa.example.test/seeyon/main.do?method=main"
+_OA_KEEPALIVE_PRIVATE_MARKER = "synthetic-oa-private-diagnostic-marker"
+_OA_LOGIN_FORM = (
+    '<html><form id="loginForm" action="/seeyon/login.do" method="post">'
+    '<input name="login_username"><input name="login_password1" type="password"></form>'
+    f'{_OA_KEEPALIVE_PRIVATE_MARKER}</html>'
+).encode()
 SMARTLIGHT_ACTION_CASES = (
     ("smartlight.alarm.work_area.submit", "/rHisHitchAlarm/updateIsSubmitWorkArea",
      "isSubmitWorkArea", 1),
@@ -69,6 +76,11 @@ def _unit_missed_punch_preflight(_adapter, _worker, arguments, profile):
             "review_fingerprint": "sha256:unit-material-" + arguments["affair_id"],
             "review": {"title": "合成补签材料", "fields": [{"label": "事项", "value": arguments["affair_id"]}],
                        "completeness": {"status": "complete", "scope": "synthetic_unit_fixture"}}}
+
+
+def _oa_template_response(template_url):
+    return {"status": 200, "url": template_url, "content_type": "application/json",
+            "json": {"data": [{"id": "100", "subject": "合成模板", "formAppId": "200"}]}}
 
 
 class CentralCapabilityServiceTests(unittest.TestCase):
@@ -1394,6 +1406,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
     def test_keepalive_cycle_refreshes_oa_without_renewing_its_own_lease(self):
         with TemporaryDirectory() as tmp:
             worker = FakeWorker()
+            worker.request_bytes = MagicMock()
             service = self._service(tmp, worker, keepalive_lease_seconds=604_800)
             session = self._activate(service)
             service.adapter.probe_session = MagicMock(
@@ -1425,6 +1438,7 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             )
             self.assertIsNotNone(persisted["last_keepalive_at"])
             service.adapter.probe_session.assert_called_once_with(worker)
+            worker.request_bytes.assert_not_called()
 
     def test_keepalive_cycle_prefers_adapter_keepalive_probe(self):
         with TemporaryDirectory() as tmp:
@@ -1452,6 +1466,21 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             service.adapter.keepalive_session.assert_called_once_with(worker)
             service.adapter.probe_session.assert_not_called()
 
+    def test_keepalive_cycle_falls_back_for_adapter_without_keepalive_hook(self):
+        with TemporaryDirectory() as tmp:
+            worker = FakeWorker()
+            service = self._service(tmp, worker)
+            self._activate(service)
+            adapter = SimpleNamespace(probe_session=MagicMock(return_value={
+                "authenticated": True,
+                "transport": "synthetic_fallback_session",
+            }))
+            with patch.object(service, "_runtime_for_system", return_value=(adapter, lambda *_: worker)):
+                summary = service.run_session_keepalive_cycle(activity_lease_seconds=3_600)
+
+            self.assertEqual(summary["keptAlive"], 1)
+            adapter.probe_session.assert_called_once_with(worker)
+
     def test_keepalive_cycle_stops_after_activity_lease(self):
         with TemporaryDirectory() as tmp:
             service = self._service(tmp, FakeWorker())
@@ -1472,31 +1501,109 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             service.adapter.probe_session.assert_not_called()
 
     def test_keepalive_cycle_expires_only_an_explicitly_logged_out_session(self):
+        cases = (
+            ("login.do redirect", 302, {"status": 302, "location": "/seeyon/login.do"}),
+            ("main.do login redirect", 403,
+             {"status": 307, "location": "http://oa.example.test/seeyon/main.do?method=login"}),
+            ("login form", 403, {"status": 200, "body": _OA_LOGIN_FORM}),
+        )
+        for name, template_status, home_response in cases:
+            with self.subTest(name=name), TemporaryDirectory() as tmp:
+                service, worker, session = self._keepalive_confirmation_fixture(
+                    tmp, home_response, template_status=template_status,
+                )
+                session_id = session["session_id"]
+
+                summary = service.run_session_keepalive_cycle(activity_lease_seconds=28_800)
+
+                self.assertEqual((summary["expired"], summary["deferred"], summary["keptAlive"]), (1, 0, 0))
+                self.assertEqual(len(summary["issues"]), 1)
+                self.assertEqual(summary["issues"][0]["outcome"], "expired")
+                self.assertEqual(service.sessions.get(session_id)["state"], "expired")
+                self.assertIsNone(service.session_states.load(session_id))
+                self.assertFalse(service.session_states.path_for(session_id).exists())
+                self.assertNotIn(_OA_KEEPALIVE_PRIVATE_MARKER, json.dumps(summary))
+                self._assert_one_keepalive_home_request(service, worker)
+
+    def test_keepalive_cycle_defers_unconfirmed_oa_login_hint_and_recovers_on_next_template_probe(self):
+        cases = (
+            ("authenticated home with embedded login fields", {
+                "status": 200,
+                "body": '<title>OA, Synthetic user, 您好</title>'.encode() + _OA_LOGIN_FORM,
+            }, "200"),
+            ("home denied even with a login form", {"status": 403, "body": _OA_LOGIN_FORM}, "403"),
+            ("unknown same-origin redirect", {"status": 302, "location": "/seeyon/portal/login.do"}, "302"),
+            ("cross-origin redirect", {"status": 302, "location": "http://other.example.test/seeyon/login.do"}, "302"),
+            ("different port", {"status": 302, "location": "http://oa.example.test:8080/seeyon/login.do"}, "302"),
+            ("ambiguous login method", {"status": 302, "location": "/seeyon/main.do?method=login&method=main"}, "302"),
+            ("logout redirect", {"status": 302, "location": "/seeyon/login.do?method=logout"}, "302"),
+            ("home timeout", TimeoutError(_OA_KEEPALIVE_PRIVATE_MARKER), "timeout"),
+            ("normal home", {"status": 200, "body": b"<html>OA home</html>"}, "200"),
+            ("hidden OA login form", {"status": 200, "body": _OA_LOGIN_FORM.replace(b"<form ", b"<form hidden ")}, "200"),
+            ("generic sign-in form", {"status": 200, "body": b'<form><input name="username"><input type="password"></form>'}, "200"),
+            ("one input with both OA field names", {"status": 200, "body": (
+                b'<form action="/seeyon/login.do"><input type="password" id="login_username" '
+                b'name="login_password1"></form>'
+            )}, "200"),
+            ("OA form in inactive template", {"status": 200, "body": _OA_LOGIN_FORM
+                .replace(b"<form ", b"<template><form ").replace(b"</form>", b"</form></template>")}, "200"),
+            ("OA form posting to another origin", {"status": 200, "body": _OA_LOGIN_FORM.replace(
+                b'action="/seeyon/login.do"', b'action="http://other.example.test/seeyon/login.do"',
+            )}, "200"),
+        )
+        for name, home_response, category in cases:
+            with self.subTest(name=name), TemporaryDirectory() as tmp:
+                service, worker, session = self._keepalive_confirmation_fixture(tmp, home_response)
+                session_id = session["session_id"]
+                path = service.session_states.path_for(session_id)
+                original_ciphertext = path.read_bytes()
+
+                deferred = service.run_session_keepalive_cycle(activity_lease_seconds=28_800)
+
+                self.assertEqual((deferred["expired"], deferred["deferred"], deferred["keptAlive"]), (0, 1, 0))
+                issue, = deferred["issues"]
+                self.assertEqual(issue["errorCode"], "SESSION_CHECK_UNAVAILABLE")
+                self.assertIn(category, issue["diagnostics"].lower())
+                self.assertEqual(service.sessions.get(session_id), session)
+                self.assertEqual(path.read_bytes(), original_ciphertext)
+                worker.capture_session_state.assert_not_called()
+                event = service.sessions.latest_event(session_id)
+                self.assertEqual((event["event_type"], event["source"]), ("check_deferred", "keepalive"))
+                for private in (_OA_KEEPALIVE_PRIVATE_MARKER, "http://oa.example.test", "http://other.example.test"):
+                    self.assertNotIn(private, json.dumps({"issue": issue, "event": event}))
+                self._assert_one_keepalive_home_request(service, worker)
+
+                recovered = service.run_session_keepalive_cycle(activity_lease_seconds=28_800)
+
+                self.assertEqual((recovered["keptAlive"], recovered["expired"], recovered["deferred"]), (1, 0, 0))
+                self.assertEqual(worker.request.call_count, 2)
+                self.assertEqual(worker.request_bytes.call_count, 1)
+                worker.capture_session_state.assert_called_once_with()
+                refreshed = service.sessions.get(session_id)
+                self.assertEqual(refreshed["state"], "active")
+                self.assertEqual(refreshed["last_user_activity_at"], session["last_user_activity_at"])
+                self.assertEqual(refreshed["last_verified_at"], session["last_verified_at"])
+                self.assertIsNotNone(refreshed["last_keepalive_at"])
+                self.assertEqual(service.session_states.load(session_id), worker.capture_session_state.return_value)
+
+    def test_keepalive_worker_logs_only_safe_confirmation_diagnostics(self):
+        from agentbridge.mcp.central import CentralSessionKeepalive
+
         with TemporaryDirectory() as tmp:
-            service = self._service(tmp, FakeWorker())
-            session = self._activate(service)
-            service.adapter.probe_session = MagicMock(
-                side_effect=SeeyonLoginRequired("OA expired")
+            service, _, _ = self._keepalive_confirmation_fixture(
+                tmp, TimeoutError(f"{BASE_URL} {_OA_KEEPALIVE_PRIVATE_MARKER}"),
             )
+            keepalive = CentralSessionKeepalive(service, interval_seconds=1, activity_lease_seconds=28_800)
+            with patch.object(keepalive._stop_event, "wait", side_effect=(False, True)), self.assertLogs(
+                "uvicorn.error", level="WARNING",
+            ) as captured:
+                keepalive._run()
 
-            summary = service.run_session_keepalive_cycle(
-                activity_lease_seconds=28_800,
-            )
-
-            self.assertEqual(summary["expired"], 1)
-            self.assertEqual(
-                summary["issues"],
-                [
-                    {
-                        "userSubject": "user-a",
-                        "systemId": "oa",
-                        "outcome": "expired",
-                        "diagnostics": "OA expired",
-                    }
-                ],
-            )
-            self.assertEqual(service.sessions.get(session["session_id"])["state"], "expired")
-            self.assertIsNone(service.session_states.load(session["session_id"]))
+            log = "\n".join(captured.output)
+            self.assertIn("SESSION_CHECK_UNAVAILABLE", log)
+            self.assertIn("timeout", log.lower())
+            self.assertNotIn(BASE_URL, log)
+            self.assertNotIn(_OA_KEEPALIVE_PRIVATE_MARKER, log)
 
     def test_keepalive_cycle_defers_transient_failure_and_preserves_state(self):
         with TemporaryDirectory() as tmp:
@@ -1524,9 +1631,20 @@ class CentralCapabilityServiceTests(unittest.TestCase):
 
     def test_keepalive_cycle_isolates_one_expired_user_from_another(self):
         with TemporaryDirectory() as tmp:
-            def worker_factory(session, _adapter):
+            workers = {}
+
+            def worker_factory(session, adapter):
                 worker = FakeWorker()
-                worker.user_subject = session["user_subject"]
+                template_url = adapter.template_center_url
+                if session["user_subject"] == "user-a":
+                    worker.request = MagicMock(return_value={"status": 302, "url": template_url})
+                    worker.request_bytes = MagicMock(return_value={
+                        "status": 302, "url": BASE_URL, "location": "/seeyon/login.do",
+                    })
+                else:
+                    worker.request = MagicMock(return_value=_oa_template_response(template_url))
+                    worker.request_bytes = MagicMock()
+                workers[session["user_subject"]] = worker
                 return worker
 
             service = authorized_service(
@@ -1551,16 +1669,6 @@ class CentralCapabilityServiceTests(unittest.TestCase):
                 )
                 sessions[user_subject] = session
 
-            def probe(worker):
-                if worker.user_subject == "user-a":
-                    raise SeeyonLoginRequired("OA expired")
-                return {
-                    "authenticated": True,
-                    "template_count": 118,
-                    "transport": "central_http_session",
-                }
-
-            service.adapter.probe_session = MagicMock(side_effect=probe)
             checked_at = (
                 datetime.fromisoformat(sessions["user-a"]["last_user_activity_at"])
                 + timedelta(minutes=1)
@@ -1575,6 +1683,8 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             self.assertEqual(summary["eligibleSessions"], 2)
             self.assertEqual(summary["expired"], 1)
             self.assertEqual(summary["keptAlive"], 1)
+            self._assert_one_keepalive_home_request(service, workers["user-a"])
+            workers["user-b"].request_bytes.assert_not_called()
             self.assertEqual(
                 service.sessions.get(sessions["user-a"]["session_id"])["state"],
                 "expired",
@@ -3456,6 +3566,35 @@ class CentralCapabilityServiceTests(unittest.TestCase):
             worker_factory=lambda _session, _adapter: worker,
             session_keepalive_lease_seconds=keepalive_lease_seconds,
         )
+
+    def _keepalive_confirmation_fixture(self, tmp, home_response, *, template_status=403):
+        worker = FakeWorker()
+        service = self._service(tmp, worker)
+        session = self._activate(service)
+        template_url = service.adapter.template_center_url
+        worker.request = MagicMock(side_effect=(
+            {"status": template_status, "url": f"{template_url}#{_OA_KEEPALIVE_PRIVATE_MARKER}",
+             "text": _OA_KEEPALIVE_PRIVATE_MARKER},
+            _oa_template_response(template_url),
+        ))
+        if isinstance(home_response, Exception):
+            worker.request_bytes = MagicMock(side_effect=home_response)
+        else:
+            worker.request_bytes = MagicMock(return_value={
+                "url": BASE_URL, "content_type": "text/html", "body": _OA_KEEPALIVE_PRIVATE_MARKER.encode(),
+                **home_response,
+            })
+        worker.capture_session_state = MagicMock(return_value={"cookies": [{"name": "synthetic-renewed"}]})
+        return service, worker, session
+
+    def _assert_one_keepalive_home_request(self, service, worker):
+        self.assertEqual(worker.request.call_count, 1)
+        self.assertEqual(worker.request.call_args.args, ("GET", service.adapter.template_center_url))
+        self.assertEqual(worker.request_bytes.call_count, 1)
+        args, kwargs = worker.request_bytes.call_args
+        self.assertEqual(args, ("GET", service.adapter.base_url))
+        self.assertGreater(kwargs["timeout_seconds"], 0)
+        self.assertLessEqual(kwargs["timeout_seconds"], 5)
 
     @staticmethod
     def _activate(service):
