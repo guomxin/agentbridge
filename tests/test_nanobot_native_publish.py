@@ -290,14 +290,15 @@ def test_synthetic_launch_verification_observes_stable_pids_and_channel_lock(
     lock = tmp_path / "telegram/poll.lock"
     lock.touch()
     monkeypatch.setattr(host.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(host, "run", lambda argv: "state = running\npid = 5050")
+    monkeypatch.setattr(host, "launchd_info", lambda label: "state = running\npid = 5050")
+    monkeypatch.setattr(host, "owned_resource", lambda args, pid, name: pid == 5050)
     with pytest.raises(RuntimeError, match="channel ownership"):
         host.wait_for_running_jobs(labels, spec)
     with lock.open("rb") as owner:
         fcntl.flock(owner, fcntl.LOCK_EX)
         host.wait_for_running_jobs(labels, spec)
         monkeypatch.setattr(
-            host, "run", lambda argv: "state = spawn scheduled\nlast exit code = 1"
+            host, "launchd_info", lambda label: "state = spawn scheduled\nlast exit code = 1"
         )
         with pytest.raises(RuntimeError, match="stable processes"):
             host.wait_for_running_jobs(labels, spec)
@@ -394,7 +395,10 @@ def test_mid_switch_failure_restores_previous_host_and_keeps_user_data(
     monkeypatch.setattr(
         host, "verify_subjects", lambda *_: {"authenticatedSubjects": 2}
     )
-    monkeypatch.setattr(host, "remote", lambda *args, **kwargs: {"scopePresent": True})
+    monkeypatch.setattr(host, "remote", lambda *args, **kwargs: {"scopePresent": True, "portOccupied": False})
+    monkeypatch.setattr(host, "launchd_info", lambda label: f"path = {paths[label]}" if label in loaded else None)
+    monkeypatch.setattr(host, "local_port_free", lambda _: True)
+    monkeypatch.setattr(host, "wait_for_running_jobs", lambda labels, _: set(labels) == loaded or pytest.fail())
     monkeypatch.setattr(host, "wait_for_route", probe)
     monkeypatch.setattr(host, "job_state", lambda label: label in loaded)
     pub = SimpleNamespace(release=candidate.name, args=SimpleNamespace(resume=False))

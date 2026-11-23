@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import base64
+import errno
 import fcntl
 import json
 import os
 import plistlib
 import re
+import select
 import shlex
+import socket
 import sqlite3
 import subprocess
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from common import ROOT, external, private_file, read, run, save, sha
@@ -499,20 +502,148 @@ def jobs(spec, mac):
     }
 
 
-def job_state(label):
+def launchd_info(label):
     result = subprocess.run(
         ["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True, timeout=5,
     )
     if result.returncode == 0:
-        return True
-    if (
-        "Could not find service" in result.stderr
-        or "Could not find service" in result.stdout
-    ):
-        return False
+        return result.stdout
+    if "Could not find service" in result.stderr or "Could not find service" in result.stdout:
+        return None
     raise RuntimeError("Unable to verify launchd job ownership")
+
+
+def job_state(label):
+    return launchd_info(label) is not None
+
+
+def job_pid(info):
+    match = re.search(r"(?m)^\s*pid = ([1-9]\d*)\s*$", info or "")
+    return int(match[1]) if match else None
+
+
+@contextmanager
+def process_exit_watch(pid):
+    """Register against this process generation before launchctl can detach it."""
+    if pid is None:
+        yield lambda: True
+        return
+    with closing(select.kqueue()) as queue:
+        event = select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                              flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                              fflags=select.KQ_NOTE_EXIT)
+        try:
+            queue.control([event], 0, 0)
+        except ProcessLookupError:
+            yield None
+            return
+
+        def exited():
+            return any(e.fflags & select.KQ_NOTE_EXIT for e in queue.control(None, 1, 0))
+
+        yield exited
+
+
+def stop_job(label, path, deadline):
+    target = f"gui/{os.getuid()}/{label}"
+    origin = r"(?m)^\s*path = " + re.escape(str(path)) + r"\s*$"
+    while time.monotonic() < deadline:
+        info = launchd_info(label)
+        if info is None:
+            return
+        if not re.search(origin, info):
+            raise ValueError("Refusing to stop launchd job with a different origin")
+        pid = job_pid(info)
+        with process_exit_watch(pid) as exited:
+            # A respawn between lookup and registration requires a new process watch.
+            current = launchd_info(label)
+            if current is not None and not re.search(origin, current):
+                raise ValueError("Launchd job origin changed during shutdown")
+            if exited is None or (current is not None and job_pid(current) != pid):
+                time.sleep(0.1)
+                continue
+            if current is not None:
+                try:
+                    ctl("bootout", target)
+                except RuntimeError:
+                    # An earlier bootout may still be removing it. Require both proofs below.
+                    pass
+            gone = False
+            while time.monotonic() < deadline:
+                gone = gone or exited()
+                if gone and launchd_info(label) is None:
+                    return
+                time.sleep(0.1)
+            break
+    raise RuntimeError(f"Timed out draining NanoBot {label.rsplit('.', 1)[-1]} process and launchd registration")
+
+
+def poll_lock_path(spec):
+    return Path(spec["runtimeDir"]) / "telegram" / "poll.lock"
+
+
+def poll_lock_held(path):
+    if path.is_symlink():
+        raise ValueError("Unexpected Telegram poll lock symlink")
+    try:
+        lock = path.open("rb")
+    except FileNotFoundError:
+        return False
+    with lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+    return False
+
+
+def local_port_free(port):
+    with socket.socket() as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED
+
+
+def drain_jobs(pub, spec, definitions):
+    if not definitions:
+        return
+    deadline = time.monotonic() + 45
+    for label, (path, _, loaded) in reversed(list(definitions.items())):
+        if loaded:
+            stop_job(label, path, deadline)
+        elif job_state(label):
+            raise RuntimeError("Launchd job appeared outside the reviewed switch")
+    while time.monotonic() < deadline:
+        if (local_port_free(spec["listenPort"])
+                and (not spec.get("telegram") or not poll_lock_held(poll_lock_path(spec)))
+                and remote(pub, spec, "observe")["portOccupied"] is False):
+            return
+        time.sleep(0.25)
+    raise RuntimeError("NanoBot listener, reverse port or Telegram poll lock remained occupied")
+
+
+def owned_resource(args, pid, name):
+    try:
+        fields = run(["/usr/sbin/lsof", "-nP", *args], timeout=4).splitlines()
+    except RuntimeError:
+        return False
+    return ([field for field in fields if field.startswith("p")] == [f"p{pid}"]
+            and {field for field in fields if field.startswith("n")} == {"n" + name})
+
+
+def owns_runtime_resources(current, spec):
+    for label, pid in current.items():
+        role = label.rsplit(".", 1)[-1]
+        if role == "worker":
+            port = spec["listenPort"]
+            if not owned_resource(["-a", "-p", str(pid), f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpn"],
+                                  pid, f"127.0.0.1:{port}"):
+                return False
+        if role == "telegram":
+            path = poll_lock_path(spec)
+            if not poll_lock_held(path) or not owned_resource(["-Fpn", "--", str(path)], pid, str(path.resolve())):
+                return False
+    return True
 
 
 def wait_for_running_jobs(labels, spec):
@@ -520,25 +651,15 @@ def wait_for_running_jobs(labels, spec):
     for _ in range(20):
         current = {}
         for label in labels:
-            info = run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"])
-            process = re.search(r"(?m)^\s*pid = ([1-9]\d*)\s*$", info)
-            if process and re.search(r"(?m)^\s*state = running\s*$", info):
-                current[label] = process[1]
-        if len(current) == len(labels) and current == previous:
-            if not spec.get("telegram"):
-                return
-            lock_file = Path(spec["runtimeDir"]) / "telegram" / "poll.lock"
-            if lock_file.is_file() and not lock_file.is_symlink():
-                with lock_file.open("rb") as lock:
-                    try:
-                        fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        return
+            info = launchd_info(label)
+            pid = job_pid(info)
+            if pid and re.search(r"(?m)^\s*state = running\s*$", info):
+                current[label] = pid
+        if len(current) == len(labels) and current == previous and owns_runtime_resources(current, spec):
+            return
         previous = current
         time.sleep(0.5)
-    raise RuntimeError(
-        "NanoBot jobs did not maintain stable processes and channel ownership"
-    )
+    raise RuntimeError("NanoBot jobs did not maintain stable processes and channel ownership")
 
 
 def set_current(root, target):
@@ -874,14 +995,7 @@ def _admit(pub, spec, mac, artifact):
         configure_release(pub, spec, mac, root, archive, recovery)
         identities = verify_subjects(spec, archive)
         remote(pub, spec, "tunnel_enable")
-        for label, (_, _, running) in reversed(list(definitions.items())):
-            if running:
-                ctl("bootout", domain + "/" + label)
-        import socket
-
-        with socket.socket() as sock:
-            if sock.connect_ex(("127.0.0.1", spec["listenPort"])) == 0:
-                raise ValueError("The local pilot port is still occupied")
+        drain_jobs(pub, spec, definitions)
         set_current(root, archive)
         for label, (target, body, _) in definitions.items():
             if label.endswith(".telegram"):
@@ -974,15 +1088,16 @@ def restore(pub, spec, mac, record=None):
     record["stage"] = "restoring"
     save(state_file, record)
     domain = f"gui/{os.getuid()}"
-    for label, (path, _, loaded) in reversed(list(defs.items())):
-        if loaded:
-            ctl("bootout", domain + "/" + label)
+    drain_jobs(pub, spec, defs)
+    for label, (path, _, _) in reversed(list(defs.items())):
         if not record["jobs"][label]["existed"]:
             ctl("disable", domain + "/" + label)
             path.unlink(missing_ok=True)
     set_current(root, old)
     for label, (path, _, _) in defs.items():
         if record["jobs"][label]["loaded"]:
+            if label.endswith(".telegram") and record["previousScopePresent"]:
+                wait_for_route(pub, spec)
             ctl("bootstrap", domain, str(path))
     if not record["previousTunnelAuthorized"]:
         remote(pub, spec, "tunnel_disable")
@@ -995,6 +1110,9 @@ def restore(pub, spec, mac, record=None):
         remote(pub, spec, "rollback_scope")
     elif old:
         wait_for_route(pub, spec)
+    restored = [label for label in defs if record["jobs"][label]["loaded"]]
+    if restored:
+        wait_for_running_jobs(restored, spec)
     if record.get("displayNameChange"):
         remote(pub, spec, "name_restore", nameProof=record["displayNameChange"])
     record["stage"] = "rolled_back"

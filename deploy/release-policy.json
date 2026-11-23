@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1ace31474938"
+    "1e57c32397c9"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Scope Workspace projections and Telegram delivery by originating host instance. Central database schemas remain unchanged."
+  "reason": "Wait for the previous managed NanoBot processes to exit before switching or restoring. The central schema is unchanged."
 }
