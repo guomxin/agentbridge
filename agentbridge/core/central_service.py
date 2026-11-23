@@ -2619,7 +2619,12 @@ class CentralCapabilityService:
                 wanted = instance_key(agent_host, host_instance_id)
                 if old and endpoint_instances(db, user_subject).get(old["endpoint_id"]) != wanted:
                     raise PermissionError("Timeline source is outside the registered host instance")
-            if old and old["client_type"] in {"web", "webchat"}:
+            registered_web = old and old["client_type"] in {"web", "webchat"} and db.execute(
+                """SELECT 1 FROM workspace_accounts WHERE user_subject=? AND endpoint_id=?
+                   UNION ALL SELECT 1 FROM workspace_host_bindings WHERE endpoint_id=? LIMIT 1""",
+                (user_subject, old["endpoint_id"], old["endpoint_id"]),
+            ).fetchone()
+            if registered_web:
                 if (old["user_subject"] != user_subject or old["state"] != "active" or
                         (client_type, external_subject, conversation_ref) !=
                         (old["client_type"], old["external_subject"], old["conversation_ref"]) or

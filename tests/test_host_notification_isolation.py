@@ -7,7 +7,27 @@ import pytest
 
 from agentbridge.core.endpoint_instances import endpoint_instances
 from agentbridge.core.tasks import TaskNotFound
+from agentbridge.core.tasks import TaskHubStore
 from tests.test_workspace_host_dispatch_routing import workspace
+
+
+def test_standalone_host_can_claim_only_its_exact_origin_task_event(tmp_path):
+    store = TaskHubStore(tmp_path / "standalone.db")
+    owner = "standalone-owner"
+    def endpoint(key):
+        return store.ensure_endpoint(user_subject=owner, agent_host="custom-host", token_id="shared",
+            endpoint_key=key, client_type="telegram", external_subject=owner,
+            conversation_ref=key, capabilities=["direct_status","timeline_message"])[0]["endpoint_id"]
+    original, other = endpoint("first"), endpoint("second")
+    task, _ = store.ensure_task(user_subject=owner, agent_host="custom-host", host_task_key="run",
+        origin_endpoint_id=original, active_conversation_ref="first", title="Original task")
+    store.append_timeline_message(user_subject=owner, source_endpoint_id=original,
+                                  message_key="private", role="user", text="private")
+    assert store.claim_outbox(user_subject=owner, endpoint_id=other) == []
+    deliveries = store.claim_outbox(user_subject=owner, endpoint_id=original)
+    assert [(d["payload_type"], d["task_id"]) for d in deliveries] == [("task_event",task["task_id"])]
+    with pytest.raises(TaskNotFound):
+        store.claim_outbox(user_subject=owner, endpoint_id=original, host_instance_id="foreign")
 
 
 def register(service, owner, token, instance):

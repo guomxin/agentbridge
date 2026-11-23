@@ -102,6 +102,12 @@ def _is_pull_based_endpoint(endpoint: sqlite3.Row | dict[str, Any]) -> bool:
 def _delivery_scope(ownership, endpoint):
     destination = ownership.get(endpoint["endpoint_id"])
     source_ids = [key for key, scope in ownership.items() if scope == destination]
+    if destination is None and endpoint["agent_host"] not in {"openclaw", "nanobot"}:
+        # A standalone Task Hub can return the original task event to the very same
+        # endpoint even before an external host has registered its instance.
+        return """d.payload_type='task_event' AND EXISTS (
+            SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
+            AND t.agent_host=? AND t.origin_endpoint_id=d.endpoint_id)""", (endpoint["agent_host"],)
     if endpoint["agent_host"] == "nanobot":
         # The pilot consumes only the terminal status of its own private run.
         return """d.payload_type='task_event' AND EXISTS (
@@ -4813,7 +4819,7 @@ class TaskHubStore:
     ) -> None:
         endpoints = connection.execute(
             """
-            SELECT e.endpoint_id, e.client_type, e.capabilities_json, t.origin_endpoint_id
+            SELECT e.endpoint_id, e.client_type, e.capabilities_json, t.origin_endpoint_id, e.agent_host
             FROM client_endpoints e JOIN agent_tasks t ON t.user_subject = e.user_subject
             WHERE t.task_id = ? AND t.user_subject = ? AND e.state = 'active'
               AND t.agent_host = e.agent_host AND t.agent_host <> 'nanobot'
@@ -4825,7 +4831,9 @@ class TaskHubStore:
         ownership = endpoint_instances(connection, user_subject) if endpoints else {}
         for endpoint in endpoints:
             scope = ownership.get(endpoint["origin_endpoint_id"])
-            if scope is None or ownership.get(endpoint["endpoint_id"]) != scope:
+            standalone_origin = (scope is None and endpoint["agent_host"] not in {"openclaw", "nanobot"}
+                                 and endpoint["endpoint_id"] == endpoint["origin_endpoint_id"])
+            if not standalone_origin and (scope is None or ownership.get(endpoint["endpoint_id"]) != scope):
                 continue
             if _is_pull_based_endpoint(endpoint):
                 continue
@@ -4947,12 +4955,16 @@ class TaskHubStore:
         ).fetchall()
         ownership = endpoint_instances(connection, user_subject) if subscriptions else {}
         task_source = connection.execute(
-            "SELECT origin_endpoint_id,agent_host FROM agent_tasks WHERE task_id=? AND user_subject=?",
+            """SELECT t.origin_endpoint_id,t.agent_host FROM agent_tasks t JOIN client_endpoints e
+               ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject AND e.agent_host=t.agent_host
+               WHERE t.task_id=? AND t.user_subject=? AND e.state='active'""",
             (task_id, user_subject),
         ).fetchone()
         origin_scope = ownership.get(task_source[0]) if task_source else None
         for subscription in subscriptions:
-            if (not origin_scope or origin_scope[0] != task_source[1]
+            standalone_origin = (task_source and not origin_scope and task_source[1] not in {"openclaw", "nanobot"}
+                                 and subscription["endpoint_id"] == task_source[0])
+            if not standalone_origin and (not origin_scope or origin_scope[0] != task_source[1]
                     or ownership.get(subscription["endpoint_id"]) != origin_scope
                     or (origin_scope[0] == "nanobot" and subscription["endpoint_id"] != task_source[0])):
                 continue

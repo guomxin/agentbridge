@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from agentbridge.core.skill_workbench import TaskFeedbackError
+from agentbridge.core.tasks import TaskNotFound
 from agentbridge.workspace.application import WorkspaceApplication
 from tests.support.task_feedback_acceptance import TaskFeedbackAcceptanceFixture, OWNER
 
@@ -23,7 +24,7 @@ class TaskFeedbackBoundaryTests(unittest.TestCase):
         self.body = {'rating': 'useful', 'comment': '已核对结果边界。', 'requestKey': 'task-feedback-boundary-01'}
 
     def record(self, case=None, body=None):
-        return WorkspaceApplication(service=self.service).task_feedback({'user_subject': OWNER},
+        return WorkspaceApplication(service=self.service).task_feedback(self.fixture.account,
             (case or self.case)['task_id'], body or self.body)
 
     def rows(self, sql, args=()):
@@ -40,6 +41,12 @@ class TaskFeedbackBoundaryTests(unittest.TestCase):
         self.assertEqual(source['task_id'], self.case['task_id'])
         self.assertEqual(source['binding_id'], self.case['binding_id'])
         self.assertEqual(source['version'], '1.0.0')
+
+    def test_subject_without_authenticated_workspace_account_cannot_record_feedback(self):
+        app = WorkspaceApplication(service=self.service)
+        with self.assertRaises(TaskNotFound):
+            app.task_feedback({'user_subject': OWNER}, self.case['task_id'], self.body)
+        self.assertEqual(self.rows('SELECT count(*) FROM skill_feedback'), [(0,)])
 
     def test_changed_payload_conflict_returns_original_receipt(self):
         original = self.record()
