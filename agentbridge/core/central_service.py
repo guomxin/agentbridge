@@ -1757,6 +1757,7 @@ class CentralCapabilityService:
         limit: int = 10,
         lease_seconds: int = 30,
         host_instance_id: str | None = None,
+        include_workspace_chat: bool = False,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1769,6 +1770,7 @@ class CentralCapabilityService:
             limit=limit,
             lease_seconds=lease_seconds,
             host_instance_id=host_instance_id,
+            include_workspace_chat=include_workspace_chat,
         )
         notifications = []
         for delivery in deliveries:
@@ -1807,6 +1809,8 @@ class CentralCapabilityService:
                     'message':None,'watchId':validated['watchId']})
                 continue
             if delivery["payload_type"] == "timeline_message":
+                if agent_host == "nanobot":
+                    event = {key: value for key, value in event.items() if key != "pairProof"}
                 if "targetEndpointBinding" in event:
                     from agentbridge.core.oa_daily_digest import is_current_digest_destination
 
@@ -2624,7 +2628,21 @@ class CentralCapabilityService:
                    UNION ALL SELECT 1 FROM workspace_host_bindings WHERE endpoint_id=? LIMIT 1""",
                 (user_subject, old["endpoint_id"], old["endpoint_id"]),
             ).fetchone()
-            if registered_web:
+            if agent_host == "nanobot" and (client_type == "telegram" or (old and old["client_type"] == "telegram")):
+                # The pairing service owns this endpoint's identity, route and subscription capabilities.
+                # A display copy must never create, edit or reactivate a delivery target.
+                if (not old or not host_instance_id or old["state"] != "active" or
+                        (old["user_subject"], old["token_id"], old["client_type"], old["external_subject"],
+                         old["account_id"], old["conversation_ref"], json.loads(old["route_json"])) !=
+                        (user_subject, token_id, client_type, external_subject, account_id, conversation_ref, route)):
+                    raise PermissionError("Timeline source differs from the paired Telegram endpoint")
+                from agentbridge.core.chat_mirror import public_mirror_text
+                from agentbridge.core.task_projections import _endpoint_from_row
+                text = public_mirror_text(text)
+                if not text:
+                    raise ValueError("Private content cannot be published to the chat timeline")
+                endpoint, endpoint_reused = _endpoint_from_row(old), True
+            elif registered_web:
                 if (old["user_subject"] != user_subject or old["state"] != "active" or
                         (client_type, external_subject, conversation_ref) !=
                         (old["client_type"], old["external_subject"], old["conversation_ref"]) or

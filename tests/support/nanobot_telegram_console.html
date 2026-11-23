@@ -7,12 +7,14 @@
 <section><h2>发起查询</h2><p>消息内容为“查询我的待办”。每次新查询生成一个消息编号，重送沿用最近一条的编号。</p>
 <button data-command="send">发送待办查询</button><button data-command="replay">重送同一消息</button><button data-command="peer">核验对方运行不可读</button></section>
 <section><h2>验证中断与恢复</h2><button data-command="lost-accept">新查询 · 丢弃受理回执</button><button data-command="admission-unknown">新查询 · 受理未知</button><button data-command="lost-delivery">新查询 · 丢弃送达回执</button><button data-command="restart">重启渠道并恢复</button></section>
+<section PAIR_HIDDEN><h2>网页与私聊同步</h2><button data-command="chat">发送普通私聊问答</button><button data-command="long-chat">发送长答复测试</button><ol id="mirrors" aria-label="来自网页的消息"></ol></section>
 <section PAIR_HIDDEN><h2>原任务终态通知</h2><button data-command="lost-notification">新查询 · 丢弃后台终态通知送达回执</button><ol id="notifications"></ol></section>
 <section><h2>本人的回执</h2><p id="counters"></p><p role="status" id="status"></p><ol id="receipts"></ol></section>
 <script>
 const statusText=document.getElementById("status"), box=document.getElementById("receipts");
 let currentProof=""; document.getElementById("copy-proof").onclick=async()=>{if(currentProof)await navigator.clipboard.writeText(currentProof);};
 function show(d){document.getElementById('counters').textContent="实际宿主运行 "+d.hostRuns+" 次，合成模型发起业务查询 "+d.modelTurns+" 次。";
+  document.getElementById("mirrors").replaceChildren(...(d.mirrors||[]).map(text=>{const li=document.createElement("li");li.textContent=text;return li;}));
   document.getElementById("notifications").replaceChildren(...(d.notifications||[]).map(entry=>{const li=document.createElement("li");li.textContent="原私聊消息 "+entry.message+" · "+entry.state+" · 终态通知发送 "+entry.attempts+" 次 · 中央业务 "+(entry.business||"待核对")+" · 中央送达 "+(entry.centralDelivery||"待核对")+"（收据核对 "+(entry.centralAttempts||0)+" 次）";return li;}));
   box.replaceChildren(...d.rows.map(row=>{const item=document.createElement('li');const line=document.createElement('div');
   line.textContent="消息 "+row.message+" · "+row.state+" · Bot API 发送 "+row.sendCalls+" 次"+(row.receipt?" · 回执 "+row.receipt:"");

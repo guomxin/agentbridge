@@ -1833,6 +1833,11 @@ class CentralMcpTests(unittest.TestCase):
                     self.assertEqual(expected_tools, pilot_tools.intersection(planes["hostControl"]["toolNames"]))
                     self.assertEqual(expected_tools, pilot_tools.intersection(planes["hostControl"]["levels"]["L1"]))
                     self.assertTrue(pilot_tools.isdisjoint(planes["model"]["toolNames"]))
+                    mirror = "agentbridge_host_telegram_mirror_peers"
+                    self.assertEqual(visible, mirror in planes["hostControl"]["levels"]["L3"])
+                    self.assertNotIn(mirror, planes["hostControl"]["levels"]["L1"])
+                    self.assertNotIn(mirror, planes["model"]["toolNames"])
+
 
     def test_host_runtime_lease_and_snapshot_controls_use_registered_identity(self):
         host_meta = {

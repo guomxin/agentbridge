@@ -95,6 +95,99 @@ def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
         ).fetchone()
     )
 
+def mirror_binding(db, subject, instance, ownership):
+    """Return the current deployed Bot and exact private Web binding, failing closed."""
+    from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
+
+    binding = db.execute("""SELECT b.*, h.route_ref,h.all_subjects,e.token_id
+        FROM workspace_host_bindings b JOIN workspace_host_instances h USING(instance_id)
+        JOIN workspace_accounts a ON a.account_id=b.account_id JOIN client_endpoints e ON e.endpoint_id=b.endpoint_id
+        WHERE a.user_subject=? AND b.instance_id=? AND h.host_type='nanobot' AND h.state='enabled'""",
+        (subject, instance)).fetchone()
+    if not binding or ownership.get(binding["endpoint_id"]) != ("nanobot", instance):
+        return None
+    try:
+        spec = load_nanobot_route_specs().get(binding["route_ref"], {})
+        if (spec.get("instanceId") != instance or not isinstance(spec.get("subjects"), dict)
+                or spec["subjects"].get(subject) != binding["credential_ref"]
+                or not isinstance(spec.get("telegram"), dict)):
+            return None
+        bot = numeric_id(spec["telegram"].get("botId"))
+    except (OSError, ValueError):
+        return None
+    return {**dict(binding), "bot": bot}
+
+
+def mirror_sender_ids(db, subject, binding):
+    instance, bot = binding["instance_id"], binding["bot"]
+    candidates = {sender for _, sender in old_peers(db, subject=subject)}
+    candidates.update(row[0] for row in db.execute(
+        "SELECT sender FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND owner=?",
+        (instance, bot, subject)))
+    verified = [sender for sender in candidates if verified_pair(
+        db, subject, instance, bot, sender, allow_new_pair=not binding["all_subjects"])]
+    # Inbound authentication can prove a specific sender. An automatic mirror
+    # needs a single destination when older installations hold multiple IDs.
+    return verified if len(verified) == 1 else []
+
+
+def mirror_pair_proof(db, subject, binding, sender):
+    """Pin a delivery to the same grant that authorized its creation."""
+    if active_claimants(db, sender):
+        grants = []
+        for row in db.execute("""SELECT endpoint_id FROM client_endpoints WHERE user_subject=? AND agent_host='openclaw'
+                AND lower(client_type)='telegram' AND state='active' AND external_subject=? ORDER BY endpoint_id""",
+                (subject, sender)):
+            try:
+                grants.append(_telegram_endpoint(db, subject, row[0])["_binding_hash"])
+            except (TypeError, ValueError):
+                continue
+        if not grants:
+            return None
+    else:
+        row = db.execute("""SELECT confirmed_at FROM workspace_telegram_pilot_links
+            WHERE instance=? AND bot=? AND owner=? AND sender=?""",
+            (binding["instance_id"], binding["bot"], subject, sender)).fetchone()
+        if not row:
+            return None
+        grants = [row[0]]
+    basis = [binding["instance_id"], binding["endpoint_id"], binding["credential_ref"], binding["bot"], subject, sender, grants]
+    return hashlib.sha256(json.dumps(basis, separators=(",", ":")).encode()).hexdigest()
+
+
+def _ensure_telegram_endpoint(db, tasks, subject, binding, bot, sender, token_id, *, refresh):
+    key = f"telegram:{bot}:{sender}"
+    conversation = telegram_conversation_ref(binding["instance_id"], subject, binding["endpoint_id"], bot, sender)
+    route = {"channel": "telegram", "to": sender, "accountId": bot}
+    old = db.execute("SELECT * FROM client_endpoints WHERE agent_host='nanobot' AND endpoint_key=?", (key,)).fetchone()
+    if old and (old["state"] != "active" or old["user_subject"] != subject or old["conversation_ref"] != conversation
+                or old["client_type"] != "telegram" or old["external_subject"] != sender or old["account_id"] != bot
+                or json.loads(old["route_json"]) != route):
+        raise PermissionError("Telegram endpoint ownership changed")
+    if old and not refresh and "timeline_message" in json.loads(old["capabilities_json"]):
+        return old["endpoint_id"]
+    endpoint, _ = tasks.ensure_endpoint(
+        user_subject=subject, token_id=old["token_id"] if old and not refresh else token_id,
+        agent_host="nanobot", endpoint_key=key, client_type="telegram", external_subject=sender,
+        conversation_ref=conversation, account_id=bot, route=route, capabilities=["timeline_message"], connection=db)
+    return endpoint["endpoint_id"]
+
+
+def mirror_destinations(db, tasks, subject, binding):
+    # Materialize on the first new message even when this Bot has no local model-run history.
+    endpoints = []
+    for sender in mirror_sender_ids(db, subject, binding):
+        try:
+            proof = mirror_pair_proof(db, subject, binding, sender)
+            if proof:
+                endpoint_id = _ensure_telegram_endpoint(db, tasks, subject, binding, binding["bot"], sender,
+                                                        binding["token_id"], refresh=False)
+                endpoints.append((endpoint_id, proof))
+        except PermissionError:
+            continue
+    return endpoints
+
+
 def initialize_telegram_pilot_links(connection):
     connection.executescript("""
                 CREATE TABLE IF NOT EXISTS workspace_telegram_pilot_links(
@@ -318,6 +411,16 @@ class TelegramPilotLinks:
         return verified_pair(db, subject, instance, bot, sender,
                              allow_new_pair=eligible(self.service, db, subject, instance, new_link=True))
 
+    def mirror_peers(self, subject, instance, bot_id):
+        from agentbridge.core.endpoint_instances import endpoint_instances
+
+        bot = numeric_id(bot_id)
+        with self.workspace._connect() as db:
+            db.execute("BEGIN")
+            binding = mirror_binding(db, subject, instance, endpoint_instances(db, subject))
+            senders = mirror_sender_ids(db, subject, binding) if binding and binding["bot"] == bot else []
+            return {"senderIds": senders}
+
     def ensure_endpoint(self, subject, token_id, instance, bot_id, sender_id):
         from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
 
@@ -346,33 +449,10 @@ class TelegramPilotLinks:
             conversation = telegram_conversation_ref(
                 instance, subject, binding["endpoint_id"], bot, sender
             )
-            old = db.execute(
-                "SELECT * FROM client_endpoints WHERE agent_host='nanobot' AND endpoint_key=?",
-                (key,),
-            ).fetchone()
-            if old and (
-                old["state"] != "active"
-                or old["user_subject"] != subject
-                or old["conversation_ref"] != conversation
-                or old["client_type"] != "telegram"
-                or old["external_subject"] != sender
-                or old["account_id"] != bot
-            ):
-                raise PermissionError("Telegram endpoint ownership changed")
-            endpoint, _ = self.service.tasks.ensure_endpoint(
-                user_subject=subject,
-                token_id=token_id,
-                agent_host="nanobot",
-                endpoint_key=key,
-                client_type="telegram",
-                external_subject=sender,
-                conversation_ref=conversation,
-                account_id=bot,
-                route={"channel": "telegram", "to": sender, "accountId": bot},
-                connection=db,
-            )
+            endpoint = _ensure_telegram_endpoint(db, self.service.tasks, subject, binding, bot, sender,
+                                                 token_id, refresh=True)
             return {
-                "endpointId": endpoint["endpoint_id"],
+                "endpointId": endpoint,
                 "endpointKey": key,
                 "conversationRef": conversation,
                 "workspaceEndpointId": binding["endpoint_id"],

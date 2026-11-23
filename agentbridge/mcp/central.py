@@ -1623,6 +1623,7 @@ def create_central_mcp_server(
             "allowedToolNames": allowed_tools,
             "allowedToolCount": len(allowed_tools),
         }
+        nanobot_notifications = ("agentbridge_host_telegram_mirror_peers",) if private_registration_tools else ()
         response["toolPlanes"] = {
             "model": {
                 "visibility": "model",
@@ -1636,11 +1637,11 @@ def create_central_mcp_server(
             },
             "hostControl": {
                 "visibility": "host_private",
-                "toolNames": [*HOST_CONTROL_TOOL_NAMES, *private_registration_tools],
+                "toolNames": [*HOST_CONTROL_TOOL_NAMES, *private_registration_tools, *nanobot_notifications],
                 "levels": {
                     "L1": [*HOST_REGISTRATION_TOOL_NAMES, *private_registration_tools],
                     "L2": list(HOST_PRESENTATION_TOOL_NAMES),
-                    "L3": list(HOST_COORDINATION_TOOL_NAMES),
+                    "L3": [*HOST_COORDINATION_TOOL_NAMES, *nanobot_notifications],
                 },
             },
         }
@@ -5825,6 +5826,17 @@ def create_central_mcp_server(
         return await asyncio.to_thread(TelegramPilotLinks(service).ensure_endpoint,
             identity["user_subject"],identity["token_id"],host["hostInstanceId"],bot_id,sender_id)
 
+    @mcp.tool(name="agentbridge_host_telegram_mirror_peers", title="Find verified private Telegram chat peers",
+              description="Host-private. Resolve only the caller's current paired private senders for its deployed Bot.",
+              annotations=read_annotations, structured_output=True)
+    async def agentbridge_host_telegram_mirror_peers(ctx: Context, bot_id: str) -> dict[str, Any]:
+        from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
+        identity = _request_identity(identity_store)
+        host, _ = await _registered_host_context(ctx, service=service, identity=identity, agent_host="nanobot",
+                                                  minimum_level="L3")
+        return await asyncio.to_thread(TelegramPilotLinks(service).mirror_peers, identity["user_subject"],
+                                      host["hostInstanceId"], bot_id)
+
     @mcp.tool(name="agentbridge_host_telegram_pair_present", title="Present private Telegram pairing challenge",
               description="Host-private. Register a numeric private sender against this user's pending Workspace challenge.",
               annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=False,openWorldHint=False))
@@ -6481,6 +6493,7 @@ def create_central_mcp_server(
         limit: Annotated[int, Field(ge=1, le=100)] = 10,
         lease_seconds: Annotated[int, Field(ge=5, le=300)] = 30,
         wait_seconds: Annotated[float, Field(ge=0, le=20)] = 0,
+        include_workspace_chat: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6498,6 +6511,7 @@ def create_central_mcp_server(
             lease_seconds=lease_seconds,
             wait_seconds=wait_seconds,
             host_instance_id=host["hostInstanceId"],
+            **({"include_workspace_chat": True} if include_workspace_chat else {}),
         )
 
     @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Endpoint Delivery Before Sending',

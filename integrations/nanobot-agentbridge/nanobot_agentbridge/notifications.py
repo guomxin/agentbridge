@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import ClassVar
-from uuid import UUID
+from .chat_mirror import ChatMirrors, chat_claim, identifier, projected_chat
 
 TERMINAL = {
     "task.completed": "succeeded",
@@ -56,15 +56,23 @@ async def notifications(host, record, action, body):
             )
 
         path = Path(req["userDir"]) / "coordinated-runs.sqlite3"
-        if not path.exists():
-            return (
-                {"deliveries": []}
-                if action == "telegram-notifications"
-                else {"recorded": False}
-            )
-        with sqlite3.connect(path) as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS notification_claims (
-                delivery TEXT PRIMARY KEY, endpoint TEXT NOT NULL, run TEXT NOT NULL, attempt INTEGER NOT NULL)""")
+        if action in ("telegram-chat-validate", "telegram-chat-receipt"):
+            delivery, attempt = body.get("deliveryId"), body.get("attempt")
+            if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
+                raise web.HTTPBadRequest()
+            if not chat_claim(req["userDir"], req["endpoint"], delivery, attempt):
+                raise web.HTTPForbidden()
+            if action == "telegram-chat-validate":
+                result = await session.call_tool("agentbridge_host_notification_validate", {
+                    **endpoint_params, "delivery_id": delivery, "attempt_count": attempt}, meta=meta)
+                return {"allowed": not result.isError and (result.structuredContent or {}).get("allowed") is True}
+            if type(body.get("delivered")) is not bool:
+                raise web.HTTPBadRequest()
+            return {"recorded": await ack(delivery, attempt, body["delivered"])}
+        if path.exists():
+            with sqlite3.connect(path) as db:
+                db.execute("""CREATE TABLE IF NOT EXISTS notification_claims (
+                    delivery TEXT PRIMARY KEY, endpoint TEXT NOT NULL, run TEXT NOT NULL, attempt INTEGER NOT NULL)""")
         if action == "telegram-notification-receipt":
             delivery, attempt, ok = (
                 body.get("deliveryId"),
@@ -78,6 +86,8 @@ async def notifications(host, record, action, body):
                 or not isinstance(delivery, str)
             ):
                 raise web.HTTPBadRequest()
+            if not path.exists():
+                raise web.HTTPForbidden()
             with sqlite3.connect(path) as db:
                 claim = db.execute(
                     "SELECT run FROM notification_claims WHERE delivery=? AND endpoint=? AND attempt=?",
@@ -91,7 +101,8 @@ async def notifications(host, record, action, body):
             {
                 **endpoint_params,
                 "limit": 32,
-                "lease_seconds": 30,
+                "lease_seconds": 60,
+                "include_workspace_chat": True,
             },
             meta=meta,
         )
@@ -103,6 +114,14 @@ async def notifications(host, record, action, body):
             raise web.HTTPForbidden()
         deliveries = []
         for item in payload.get("notifications", []):
+            delivery, attempt = item.get("deliveryId"), item.get("attemptCount")
+            if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
+                continue
+            if item.get("deliveryMode") == "timeline_message":
+                message = projected_chat(item, req["workspaceEndpointId"])
+                if message and chat_claim(req["userDir"], req["endpoint"], delivery, attempt, register=True):
+                    deliveries.append({"kind": "workspace_chat", "deliveryId": delivery, "attempt": attempt, **message})
+                continue
             task, event = item.get("task") or {}, item.get("event") or {}
             if (
                 item.get("deliveryMode") != "origin_handled"
@@ -112,13 +131,7 @@ async def notifications(host, record, action, body):
                 or task.get("originEndpointId") != req["endpoint"]
             ):
                 continue
-            delivery, attempt = item.get("deliveryId"), item.get("attemptCount")
-            if (
-                not isinstance(delivery, str)
-                or str(UUID(delivery)) != delivery
-                or type(attempt) is not int
-                or not 1 <= attempt <= 5
-            ):
+            if not path.exists():
                 continue
             with sqlite3.connect(path) as db:
                 local = db.execute(
@@ -166,6 +179,7 @@ class TerminalMessages:
 
     def __init__(self, pilot):
         self.pilot = pilot
+        self.chat = ChatMirrors(pilot)
         with pilot.db:
             pilot.db.execute("""CREATE TABLE IF NOT EXISTS notification_receipts(
                     bot INTEGER, chat INTEGER, delivery TEXT, run TEXT, state TEXT NOT NULL,
@@ -183,6 +197,9 @@ class TerminalMessages:
         pilot = self.pilot
         reply = pilot.gateway._request("telegram-notifications", {"binding": binding})
         for event in reply.get("deliveries", []):
+            if event.get("kind") == "workspace_chat":
+                self.chat.poll(chat, binding, digest, event)
+                continue
             if event.get("status") not in self.TEXT:
                 continue
             original = pilot.db.execute(

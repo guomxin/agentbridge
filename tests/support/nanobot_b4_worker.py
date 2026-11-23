@@ -43,6 +43,11 @@ class Model(Scenario):
             if isinstance(content, str)
             else json.dumps(content, ensure_ascii=False)
         )
+        if "合成长文私聊" in text:
+            return "合成长文开始" + "甲🟢" * 2200 + "合成长文结束", None
+        for question, answer in (("合成网页问答", "合成网页答复"), ("合成电报问答", "合成电报答复")):
+            if question in text:
+                return answer, None
         names = {t["function"]["name"] for t in body.get("tools", [])}
         if not names and any(
             m.get("role") == "system" and "业务方法编辑器" in str(m.get("content"))

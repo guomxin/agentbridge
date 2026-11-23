@@ -53,6 +53,7 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
         "updates": [],
         "calls": [],
         "admissions": {},
+        "timeline": {},
         "deliveries": [],
         "lost_accept": False,
         "lost_delivery": False,
@@ -93,11 +94,10 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                         return
                     result = {
                         "message_id": 700 + len(state["deliveries"]),
-                        "chat": {"id": body["chat_id"]},
+                        "chat": {"id": body["chat_id"], "type": "private"},
                         "from": {"id": BOT},
-                        "reply_to_message": {
-                            "message_id": body["reply_parameters"]["message_id"]
-                        },
+                        **({"reply_to_message": {"message_id": body["reply_parameters"]["message_id"]}}
+                           if body.get("reply_parameters") else {}),
                     }
                 else:
                     self.send_error(404)
@@ -125,6 +125,13 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                         "verified": binding["endpoint_key"].split(":")[-1]
                         in state["verified"]
                     }
+                elif self.path == "/v1/telegram-timeline":
+                    key = (binding["endpoint_id"], body["messageId"], body["role"])
+                    state["timeline"].setdefault(key, body["text"])
+                    if state.get("lost_timeline"):
+                        self.close_connection = True
+                        return
+                    answer = {"recorded": True}
                 elif self.path == "/v1/accept":
                     if key in state["admissions"]:
                         self.send_error(409)
@@ -141,7 +148,7 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                     answer = {
                         "runId": matched[1],
                         "state": "accepted" if state["pending"] else "completed",
-                        "answer": "合成结果 " + binding["user_subject"],
+                        "answer": state.get("final_answer", "合成结果 " + binding["user_subject"]),
                     }
                 else:
                     self.send_error(404)

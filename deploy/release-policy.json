@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1e57c32397c9"
+    "7ac2c9272563"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Wait for the previous managed NanoBot processes to exit before switching or restoring. The central schema is unchanged."
+  "reason": "Deliver ordinary text between a verified NanoBot Workspace endpoint and its own Telegram private chat. Existing central ledger tables are reused."
 }

@@ -9,10 +9,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from pathlib import Path
 
-from tests.support import nanobot_b4_files, nanobot_b4_notifications
+from tests.support import nanobot_b4_files, nanobot_b4_notifications, nanobot_chat_sync_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -40,7 +40,8 @@ def wait_for(process, resolve, timeout=35):
     raise TimeoutError("Isolated service did not become ready")
 
 
-def run(python):
+@contextmanager
+def environment(python):
     with (
         tempfile.TemporaryDirectory(prefix="nanobot-file-delivery-") as folder,
         ExitStack() as stack,
@@ -104,6 +105,12 @@ def run(python):
             worker,
             lambda: (home / "b4host" / "telegram" / "fixture-ports.json").exists(),
         )
+        yield home
+
+
+def run(python):
+    with environment(python) as home:
+        chat_sync = nanobot_chat_sync_probe.run(home)
         output = io.StringIO()
         with redirect_stdout(output):
             nanobot_b4_files.run(home, expired_lease=True)
@@ -111,7 +118,7 @@ def run(python):
         pdf, csv, tg = [json.loads(line) for line in output.getvalue().splitlines()]
         return {
             "H13": {"passed": True, "pdf": pdf, "csv": csv},
-            "H14": {"passed": True, **tg},
+            "H14": {"passed": True, "chatSync":chat_sync, **tg},
         }
 
 

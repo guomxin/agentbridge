@@ -17,11 +17,14 @@ import sqlite3
 import time
 from pathlib import Path
 
+from agentbridge.core.chat_mirror import public_mirror_text
 from agentbridge.workspace.gateway import GatewayRequestError
 from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
 
 from .private_files import private_directory, private_text
 from .telegram_credentials import bot_token
+from .telegram_text import split_telegram_text
+from .telegram_timeline import TelegramTimeline, telegram_answer, telegram_text_fits
 
 
 def numeric(value):
@@ -93,6 +96,7 @@ class TelegramPilot:
             CREATE INDEX IF NOT EXISTS messages_waiting ON messages(bot,state);
         """)
 
+        self.timeline = TelegramTimeline(self)
         self.terminal = None
         if allow_pairing:
             from .notifications import TerminalMessages
@@ -143,13 +147,18 @@ class TelegramPilot:
     def _key(self, chat, message):
         return f"tg:{self.bot_id}:{chat}:{message}"
 
-    def _state(self, chat, message, state, *, run=None, receipt=None):
+    def _state(self, chat, message, state, *, run=None, receipt=None, public_answer=None, confirmed_part=None):
         with self.db:
+            if confirmed_part:
+                self.db.execute("INSERT INTO telegram_reply_parts VALUES(?,?,?,?,?,?)",
+                                (self.bot_id, chat, message, *confirmed_part))
             self.db.execute(
                 """UPDATE messages SET state=?,run_id=COALESCE(?,run_id),receipt=COALESCE(?,receipt)
                 WHERE bot=? AND chat=? AND message=?""",
                 (state, run, receipt, self.bot_id, chat, message),
             )
+            if public_answer is not None:
+                self.timeline.queue(chat, message, "assistant", public_answer)
 
     def _record(self, chat, message):
         return self.db.execute(
@@ -182,8 +191,7 @@ class TelegramPilot:
                     "message_thread_id",
                 )
             )
-            or not isinstance(msg.get("text"), str)
-            or not msg["text"].strip()
+            or not telegram_text_fits(msg.get("text"))
         ):
             return
         if self._record(chat_id,message_id):
@@ -210,25 +218,33 @@ class TelegramPilot:
         binding, digest = self._binding(chat_id)
         if binding is None:
             return
+        text = msg["text"].strip()
+        plain = not text.startswith("/") and "reply_to_message" not in msg
+        ordinary = plain and public_mirror_text(text) is not None
         with self.db:
             inserted = self.db.execute(
                 "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,'accepting',NULL,NULL)",
                 (self.bot_id, chat_id, message_id, binding["user_subject"], digest),
             ).rowcount
+            if inserted and ordinary:
+                self.timeline.queue(chat_id, message_id, "user", text)
         if not inserted:
             return
-        text = msg["text"].strip()
-        if text.startswith("/") or "reply_to_message" in msg:
+        if not ordinary:
             # Buttons, replies and slash commands never authorize or resume a business task.
-            if text == "/start":
+            if plain:
+                self.deliver(chat_id, message_id, "请在本人工作台的可信界面填写受保护的信息。")
+            elif text == "/start":
                 self.deliver(
                     chat_id, message_id, "已连接独立 NanoBot 测试助手。请发送只读查询。"
                 )
             elif text == "/status" and isinstance(msg.get("reply_to_message"), dict):
                 original = msg["reply_to_message"]
                 prior = self.db.execute(
-                    "SELECT state FROM messages WHERE bot=? AND chat=? AND receipt=? AND binding_hash=?",
-                    (self.bot_id, chat_id, original.get("message_id"), digest),
+                    """SELECT m.state FROM messages m WHERE m.bot=? AND m.chat=? AND m.binding_hash=?
+                       AND (m.receipt=? OR EXISTS (SELECT 1 FROM telegram_reply_parts p WHERE
+                         (p.bot,p.chat,p.message)=(m.bot,m.chat,m.message) AND p.receipt=?))""",
+                    (self.bot_id, chat_id, digest, original.get("message_id"), original.get("message_id")),
                 ).fetchone()
                 if prior and (original.get("from") or {}).get("id") == self.bot_id:
                     self.deliver(
@@ -272,16 +288,18 @@ class TelegramPilot:
             return
         self._send(chat,message,"请在本人已登录的 Workspace 中输入本次确认码 "+proof+"。若非本人发起，请忽略。")
 
-    def deliver(self, chat, message, answer):
+    def deliver(self, chat, message, answer, *, ordinary=False):
         row = self._record(chat, message)
         binding, digest = self._binding(chat)
         if binding is None or digest != row["binding_hash"]:
             self._state(chat, message, "binding_changed")
             return
-        self._send(chat,message,answer)
+        if ordinary:
+            self._send_public_reply(chat, message, answer, digest)
+        else:
+            self._send(chat, message, answer)
 
-    def _send(self,chat,message,answer):
-        self._state(chat, message, "sending")
+    def _confirmed_send(self, chat, message, answer):
         # Telegram sendMessage has no idempotency key. A lost reply after this
         # durable boundary leaves the receipt unknown and cannot trigger a resend.
         try:
@@ -298,15 +316,51 @@ class TelegramPilot:
             if (
                 not isinstance(result, dict)
                 or not numeric(result.get("message_id"))
-                or (result.get("chat") or {}).get("id") != chat
-                or (result.get("from") or {}).get("id") != self.bot_id
-                or (result.get("reply_to_message") or {}).get("message_id") != message
+                or not isinstance(result.get("chat"), dict)
+                or result["chat"].get("id") != chat or result["chat"].get("type") != "private"
+                or not isinstance(result.get("from"), dict) or result["from"].get("id") != self.bot_id
+                or not isinstance(result.get("reply_to_message"), dict)
+                or result["reply_to_message"].get("message_id") != message
             ):
                 raise TelegramUnavailable("Reply identity not confirmed")
         except TelegramUnavailable:
-            self._state(chat, message, "delivery_unknown")
-            return
-        self._state(chat, message, "delivered", receipt=result["message_id"])
+            return None
+        return result["message_id"]
+
+    def _send(self, chat, message, answer):
+        self._state(chat, message, "sending")
+        receipt = self._confirmed_send(chat, message, answer)
+        self._state(chat, message, "delivered" if receipt else "delivery_unknown", receipt=receipt)
+
+    def _send_public_reply(self, chat, message, answer, binding_digest):
+        key = (self.bot_id, chat, message)
+        parts = list(split_telegram_text(answer))
+        content_digest = hashlib.sha256(answer.encode()).hexdigest()
+        for index, text in enumerate(parts):
+            prior = self.db.execute("""SELECT answer_digest FROM telegram_reply_parts
+                                    WHERE bot=? AND chat=? AND message=? AND part=?""", (*key, index)).fetchone()
+            if prior:
+                if prior[0] != content_digest:
+                    self._state(chat, message, "delivery_unknown")
+                    return
+                continue
+            if index:
+                try:
+                    binding, digest = self._binding(chat)
+                except TelegramUnavailable:
+                    return  # Previous segments are known; a later poll can check this unsent segment.
+                if not binding or digest != binding_digest:
+                    self._state(chat, message, "binding_changed")
+                    return
+            self._state(chat, message, "sending")
+            receipt = self._confirmed_send(chat, message, text)
+            if not receipt or self.db.execute("SELECT 1 FROM telegram_reply_parts WHERE bot=? AND chat=? AND receipt=?",
+                                              (self.bot_id, chat, receipt)).fetchone():
+                self._state(chat, message, "delivery_unknown")
+                return
+            final = index == len(parts) - 1
+            self._state(chat, message, "delivered" if final else "working", receipt=receipt if final else None,
+                        confirmed_part=(index, content_digest, receipt), public_answer=answer if final else None)
 
     def reconcile(self):
         # Only the single owning consumer calls this. A surviving sending row
@@ -345,19 +399,10 @@ class TelegramPilot:
                 continue
             self._state(chat, message, "working", run=run_id)
             if evidence["state"] == "completed":
-                answer = evidence.get("final_text")
-                if (
-                    not isinstance(answer, str)
-                    or not answer.strip()
-                    or len(answer.encode("utf-16-le")) > 8192
-                ):
-                    self.deliver(
-                        chat, message, "原请求已结束，答复未能在 Telegram 完整展示。"
-                    )
-                else:
-                    self.deliver(chat, message, answer)
+                self.deliver(chat, message, telegram_answer(evidence.get("final_text")), ordinary=True)
             elif evidence["state"] in {"stopped", "unknown"}:
                 self.deliver(chat, message, "原请求已停止或结果待核对。")
+        self.timeline.flush()
 
     def poll_once(self):
         state = self.db.execute(
@@ -403,11 +448,19 @@ class TelegramPilot:
         if self.terminal and time.monotonic() >= self.next_notifications:
             self.next_notifications = time.monotonic() + 5
             rows = self.db.execute("SELECT DISTINCT chat FROM messages WHERE bot=? AND run_id IS NOT NULL", (self.bot_id,))
-            for row in rows.fetchall():
+            recipients = {row["chat"] for row in rows.fetchall()}
+            try:
+                peers = self.gateway._request("telegram-mirror-peers", {"botId": str(self.bot_id)})
+                for sender in peers.get("senderIds", []):
+                    if isinstance(sender, str) and re.fullmatch(r"[1-9][0-9]{0,15}", sender) and numeric(int(sender)):
+                        recipients.add(int(sender))
+            except GatewayRequestError:
+                pass
+            for chat in sorted(recipients):
                 try:
-                    route,digest = self._binding(row["chat"])
+                    route, digest = self._binding(chat)
                     if route:
-                        self.terminal.poll(row["chat"],route,digest)
+                        self.terminal.poll(chat, route, digest)
                 except (TelegramUnavailable,GatewayRequestError):
                     continue
 

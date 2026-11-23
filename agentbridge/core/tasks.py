@@ -99,7 +99,10 @@ def _is_pull_based_endpoint(endpoint: sqlite3.Row | dict[str, Any]) -> bool:
     return str(endpoint["client_type"] or "").lower() in PULL_BASED_CLIENT_TYPES
 
 
-def _delivery_scope(ownership, endpoint):
+NANOBOT_WORKSPACE_MIRROR = "nanobot_workspace_text_v1"
+
+
+def _delivery_scope(db, ownership, endpoint):
     destination = ownership.get(endpoint["endpoint_id"])
     source_ids = [key for key, scope in ownership.items() if scope == destination]
     if destination is None and endpoint["agent_host"] not in {"openclaw", "nanobot"}:
@@ -109,10 +112,31 @@ def _delivery_scope(ownership, endpoint):
             SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
             AND t.agent_host=? AND t.origin_endpoint_id=d.endpoint_id)""", (endpoint["agent_host"],)
     if endpoint["agent_host"] == "nanobot":
-        # The pilot consumes only the terminal status of its own private run.
-        return """d.payload_type='task_event' AND EXISTS (
+        original_task = """d.payload_type='task_event' AND EXISTS (
             SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
-              AND t.agent_host='nanobot' AND t.origin_endpoint_id=d.endpoint_id) AND ?""", (bool(destination),)
+              AND t.agent_host='nanobot' AND t.origin_endpoint_id=d.endpoint_id) AND ?"""
+        if not destination or endpoint["client_type"] != "telegram":
+            return original_task, (bool(destination),)
+        from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_pair_proof, mirror_sender_ids
+        binding = mirror_binding(db, endpoint["user_subject"], destination[1], ownership)
+        if (not binding or endpoint["account_id"] != binding["bot"]
+                or mirror_sender_ids(db, endpoint["user_subject"], binding) != [endpoint["external_subject"]]):
+            return original_task, (True,)
+        proof = mirror_pair_proof(db, endpoint["user_subject"], binding, endpoint["external_subject"])
+        return f"""({original_task}) OR (d.payload_type='timeline_message' AND d.task_id=''
+            AND json_extract(d.payload_json,'$.mirrorKind')=? AND json_extract(d.payload_json,'$.pairProof')=? AND EXISTS (
+                SELECT 1 FROM user_timeline u WHERE u.entry_id=d.event_id AND u.user_subject=d.user_subject
+                AND u.source_endpoint_id=? AND u.task_id IS NULL AND u.entry_type='chat_message'
+                AND u.dedupe_key LIKE 'message:workspace:'||u.role||':%'
+                AND json_extract(d.payload_json,'$.source.clientType')='web'
+                AND NOT EXISTS (SELECT 1 FROM json_each(d.payload_json)
+                  WHERE key NOT IN ('mirrorKind','pairProof','entryId','sequence','role','text','createdAt','source'))
+                AND NOT EXISTS (SELECT 1 FROM json_each(d.payload_json,'$.source') WHERE key NOT IN ('endpointId','clientType'))
+                AND u.sequence=json_extract(d.payload_json,'$.sequence')
+                AND u.source_endpoint_id=json_extract(d.payload_json,'$.source.endpointId')
+                AND u.role=json_extract(d.payload_json,'$.role')
+                AND u.entry_id=json_extract(d.payload_json,'$.entryId')
+                AND u.text=json_extract(d.payload_json,'$.text')))""", (True, NANOBOT_WORKSPACE_MIRROR, proof, binding["endpoint_id"])
     marks = ",".join("?" for _ in source_ids) or "NULL"
     # Digest-only rows carry an explicit destination binding and have no public
     # timeline entry. The digest sender separately revalidates that binding.
@@ -2956,6 +2980,7 @@ class TaskHubStore:
         payload: dict[str, Any] | None = None,
         notify_source: bool = False,
         _workspace_response: bool = False,
+        _workspace_chat: bool = False,
         target_endpoint_id: str | None = None,
         target_endpoint_binding: str | None = None,
         enqueue_notifications: bool = True,
@@ -3040,6 +3065,7 @@ class TaskHubStore:
                 notify_source=notify_source,
                 target_endpoint_id=target_endpoint_id,
                 target_endpoint_binding=target_endpoint_binding,
+                workspace_chat=_workspace_chat or _workspace_response,
             )
         else:
             mark_transaction_change(connection, user_subject=user_subject, topics=("timeline",))
@@ -4463,6 +4489,7 @@ class TaskHubStore:
         limit: int = 10,
         lease_seconds: int = 30,
         host_instance_id: str | None = None,
+        include_workspace_chat: bool = False,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 100)
         lease_seconds = min(max(int(lease_seconds), 5), 300)
@@ -4514,7 +4541,7 @@ class TaskHubStore:
             destination = ownership.get(endpoint_id)
             if host_instance_id and destination != instance_key(endpoint["agent_host"], host_instance_id):
                 raise TaskNotFound("client endpoint does not belong to this host instance")
-            predicate, parameters = _delivery_scope(ownership, endpoint)
+            predicate, parameters = _delivery_scope(connection, ownership, endpoint)
             connection.execute(f"""
                 UPDATE notification_outbox AS d SET state='failed', updated_at=?
                 WHERE d.user_subject=? AND d.endpoint_id=? AND d.state IN ('pending','deferred','delivering')
@@ -4531,8 +4558,13 @@ class TaskHubStore:
                 """,
                 (now, user_subject, endpoint_id, now),
             )
+            # Old NanoBot consumers acknowledge unfamiliar deliveries. Leave these rows pending
+            # and untouched until a consumer explicitly understands Workspace chat.
+            chat_clause = ""
+            if endpoint["agent_host"] == "nanobot" and not include_workspace_chat:
+                chat_clause = "AND payload_type <> 'timeline_message'"
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM notification_outbox
                 WHERE user_subject = ? AND endpoint_id = ?
                   AND attempt_count < 5
@@ -4540,6 +4572,7 @@ class TaskHubStore:
                     state IN ('pending', 'delivering')
                     AND next_attempt_at <= ?
                   )
+                {chat_clause}
                 ORDER BY created_at, rowid
                 LIMIT ?
                 """,
@@ -4582,7 +4615,7 @@ class TaskHubStore:
             if (endpoint["state"] != "active" or endpoint["user_subject"] != user_subject or
                     (host_instance_id and ownership.get(endpoint_id) != instance_key(endpoint["agent_host"], host_instance_id))):
                 return False
-            predicate, parameters = _delivery_scope(ownership, endpoint)
+            predicate, parameters = _delivery_scope(db, ownership, endpoint)
             return db.execute(f"""SELECT 1 FROM notification_outbox d
                 WHERE delivery_id=? AND user_subject=? AND endpoint_id=? AND ({predicate})""",
                 (delivery_id, user_subject, endpoint_id, *parameters)).fetchone() is not None
@@ -5001,8 +5034,8 @@ class TaskHubStore:
         mark_transaction_change(connection, user_subject=user_subject)
         return event_id
 
-    @staticmethod
     def _enqueue_timeline_message(
+        self,
         connection: sqlite3.Connection,
         *,
         entry: sqlite3.Row | dict[str, Any],
@@ -5011,6 +5044,7 @@ class TaskHubStore:
         target_endpoint_id: str | None = None,
         target_endpoint_binding: str | None = None,
         timeline_visible: bool = True,
+        workspace_chat: bool = False,
     ) -> None:
         if target_endpoint_binding is not None and target_endpoint_id is None:
             raise ValueError("target binding requires an exact endpoint")
@@ -5020,6 +5054,13 @@ class TaskHubStore:
             connection, user_subject=entry["user_subject"],
             topics=("timeline", "notifications") if timeline_visible else ("notifications",),
         )
+        ownership = None
+        if workspace_chat and timeline_visible and not target_endpoint_id and not notify_source:
+            ownership = endpoint_instances(connection, entry["user_subject"])
+            scope = ownership.get(source_endpoint_id)
+            if scope and scope[0] == "nanobot":
+                self._enqueue_nanobot_chat(connection, entry, ownership, scope[1])
+                return
         source = connection.execute(
             """
             SELECT endpoint_id, client_type, label
@@ -5062,7 +5103,8 @@ class TaskHubStore:
                 },
             }
         )
-        ownership = endpoint_instances(connection, entry["user_subject"]) if endpoints else {}
+        if ownership is None:
+            ownership = endpoint_instances(connection, entry["user_subject"]) if endpoints else {}
         origin_scope = ownership.get(source_endpoint_id)
         if origin_scope is None or origin_scope[0] == "nanobot":
             return
@@ -5097,6 +5139,51 @@ class TaskHubStore:
                     entry["created_at"],
                 ),
             )
+
+    def _enqueue_nanobot_chat(self, db, entry, ownership, instance):
+        from agentbridge.core.chat_mirror import public_mirror_text
+        from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_destinations
+
+        role, subject, source = entry["role"], entry["user_subject"], entry["source_endpoint_id"]
+        metadata = json.loads(entry["payload_json"])
+        if (role not in {"user", "assistant"} or entry["task_id"] or set(metadata) - {"attachments"}
+                or metadata.get("attachments") or not entry["dedupe_key"].startswith(f"message:workspace:{role}:")):
+            return
+        text = public_mirror_text(entry["text"])
+        if not text or text != entry["text"]:
+            return
+        binding = mirror_binding(db, subject, instance, ownership)
+        if not binding or binding["endpoint_id"] != source:
+            return
+        if role == "assistant":
+            # A final text can follow a card, trial, attachment or explicit continuation. Require
+            # this very dispatch's admitted plain question and exclude a run that presented a card.
+            run_id = entry["dedupe_key"].removeprefix("message:workspace:assistant:")
+            original = db.execute("""SELECT u.entry_id FROM agent_host_dispatches d JOIN user_timeline u
+                ON u.user_subject=d.user_subject AND u.dedupe_key='message:'||d.message_key
+                AND u.source_endpoint_id=d.origin_endpoint_id AND u.role='user'
+                WHERE d.user_subject=? AND d.origin_endpoint_id=? AND d.agent_host='nanobot'
+                AND d.accepted_run_id=? AND NOT EXISTS (SELECT 1 FROM agent_host_dispatch_events e
+                  WHERE e.dispatch_id=d.dispatch_id AND e.event_name='host_progress'
+                  AND json_extract(e.payload_json,'$.kind')='private_interaction')""",
+                (subject, source, run_id)).fetchone()
+            if not original:
+                return
+        payload = {"mirrorKind": NANOBOT_WORKSPACE_MIRROR, "entryId": entry["entry_id"],
+            "sequence": entry["sequence"], "role": role, "text": text, "createdAt": entry["created_at"],
+            "source": {"endpointId": source, "clientType": "web"}}
+        for endpoint_id, proof in mirror_destinations(db, self, subject, binding):
+            if role == "assistant" and not db.execute("""SELECT 1 FROM notification_outbox
+                WHERE event_id=? AND endpoint_id=? AND user_subject=? AND payload_type='timeline_message'
+                AND json_extract(payload_json,'$.mirrorKind')=? AND json_extract(payload_json,'$.pairProof')=?""",
+                (original[0], endpoint_id, subject, NANOBOT_WORKSPACE_MIRROR, proof)).fetchone():
+                continue
+            db.execute("""INSERT OR IGNORE INTO notification_outbox
+                (delivery_id,event_id,task_id,endpoint_id,user_subject,payload_type,payload_json,state,
+                 attempt_count,next_attempt_at,created_at,updated_at)
+                VALUES (?,?,'',?,?,'timeline_message',?,'pending',0,?,?,?)""",
+                (str(uuid4()), entry["entry_id"], endpoint_id, subject, _canonical_json({**payload, "pairProof": proof}),
+                 entry["created_at"], entry["created_at"], entry["created_at"]))
 
     def _select_owned_batch_for_task(
         self,

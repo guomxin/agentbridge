@@ -285,6 +285,8 @@ class Host:
                     "capabilities":["chat", "attachments", *(["credential_card"] if self.card_origins else []), *(["skill_trial"] if self.skill_trials else []), *(["skills","skill_model"] if self.skills else [])]}
         if action == "telegram-enroll":
             return {"confirmed":await self.enrollment.confirm(body["botId"],body["senderId"],body["code"])}
+        if action == "telegram-mirror-peers":
+            return await self.telegram_routes.mirror_peers(body)
         if action in {"telegram-route","telegram-present"}:
             if action == "telegram-route" and body.get("botId") == self.telegram_routes.bot:
                 await self.enrollment.web_record(body.get("senderId"))
@@ -303,7 +305,10 @@ class Host:
             return await complete_for_binding(self, record, body["system"], body["prompt"])
         if action=="prepare-command":
             return await self.commands.accept(record,body)
-        if action in {"telegram-notifications","telegram-notification-receipt"}:
+        if action == "telegram-timeline":
+            from .telegram_timeline import publish_timeline
+            return await publish_timeline(self, record, body)
+        if action in {"telegram-notifications","telegram-notification-receipt","telegram-chat-validate","telegram-chat-receipt"}:
             from .notifications import notifications
             return await notifications(self,record,action,body)
         if action == "telegram-binding":
@@ -411,7 +416,7 @@ class Host:
 def create_app(spec: dict) -> web.Application:
     host = Host(spec)
     app = web.Application(client_max_size=18 * 1024 * 1024)
-    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|telegram-binding|telegram-route|telegram-present|telegram-enroll|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt}", host.handle)
+    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-mirror-peers}", host.handle)
 
     if host.coordinator:
         from .recovery import recover

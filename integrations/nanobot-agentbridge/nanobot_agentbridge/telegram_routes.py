@@ -70,6 +70,38 @@ class TelegramRoutes:
             return None
         return self.known.get(key)
 
+    async def mirror_peers(self, body):
+        from aiohttp import web
+        from .server import identity_denial
+        from .worker import authenticated_session
+
+        if not self.bot or self.bot != body.get("botId"):
+            raise web.HTTPForbidden()
+        senders = set()
+        duplicates = set()
+        records = {**self.host.enrollment.identities, **self.web}
+        for subject, record in records.items():
+            try:
+                async with authenticated_session(self.host.worker_payload(record, None)) as (session, meta, level):
+                    if level != "L3":
+                        continue
+                    result = await session.call_tool("agentbridge_host_telegram_mirror_peers", {"bot_id": self.bot}, meta=meta)
+                if result.isError:
+                    continue
+                peers = (result.structuredContent or {}).get("senderIds")
+                if not isinstance(peers, list):
+                    continue
+                for sender in peers:
+                    if not isinstance(sender, str) or not re.fullmatch(r"[1-9][0-9]{0,15}", sender) or int(sender) >= 2**53:
+                        continue
+                    if sender in senders:
+                        duplicates.add(sender)
+                    senders.add(sender)
+            except Exception as error:
+                if not identity_denial(error):
+                    raise
+        return {"senderIds": sorted(senders - duplicates)}
+
     async def action(self, action, body):
         from aiohttp import web
 

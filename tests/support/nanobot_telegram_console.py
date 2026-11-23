@@ -48,6 +48,7 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
     origin = {}
     sequence = 0
     last = {501: 0, 502: 0}
+    last_text = {}
     deliveries_lost = set()
     notification_losses = set()
     by_sender = dict(zip(("501", "502"), bindings, strict=True))
@@ -81,7 +82,7 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
                         item["text"]
                         for item in state["deliveries"]
                         if item["chat_id"] == uid
-                        and item["reply_parameters"]["message_id"] == row["message"]
+                        and (item.get("reply_parameters") or {}).get("message_id") == row["message"]
                     ),
                     None,
                 )
@@ -94,7 +95,7 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
                         "answer": reply,
                         "sendCalls": sum(
                             item["chat_id"] == uid
-                            and item["reply_parameters"]["message_id"] == row["message"]
+                            and (item.get("reply_parameters") or {}).get("message_id") == row["message"]
                             for item in state["deliveries"]
                         ),
                     }
@@ -109,7 +110,10 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
                 last[uid] += 1
             sequence += 1
             number = last[uid]
-            state["updates"] = [update(sequence,uid,number,text="/start "+code if code else question)]
+            if operation != "replay":
+                text = {"chat": "合成电报问答", "long-chat": "合成长文私聊"}.get(operation, question)
+                last_text[uid] = "/start " + code if code else text
+            state["updates"] = [update(sequence, uid, number, text=last_text.get(uid, question))]
             fault.next = (
                 operation if operation in {"admission-unknown", "lost-accept"} else ""
             )
@@ -120,12 +124,15 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
             pilot.poll_once()
 
         def lose_for(body):
-            key=(body["chat_id"],body["reply_parameters"]["message_id"])
+            message = (body.get("reply_parameters") or {}).get("message_id")
+            if message is None:
+                return False
+            key=(body["chat_id"],message)
             if key in notification_losses and body.get("text","").startswith("原任务"):
                 return True
             return (
                 body["chat_id"],
-                body["reply_parameters"]["message_id"],
+                message,
             ) in deliveries_lost
 
         state["lost_delivery_filter"] = lose_for
@@ -184,6 +191,8 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
                             local[number].update(business=match[1],centralDelivery=match[3],centralAttempts=match[4])
             return {
                 "notifications":notifications, "rows": rows,
+                "mirrors": [item["text"] for item in state["deliveries"]
+                            if item["chat_id"] == uid and not item.get("reply_parameters")],
                 "hostRuns": count,
                 "modelTurns": scenarios[0 if uid == 501 else 1].tool_requested,
             }
@@ -241,6 +250,8 @@ async def run_console(home, gateway, bindings, question, scenarios, *, pairing=F
                 async with async_lock:
                     if command in {
                         "send",
+                        "chat",
+                        "long-chat",
                         "replay",
                         "lost-accept",
                         "admission-unknown",

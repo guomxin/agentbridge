@@ -21,6 +21,7 @@ def seed(fixture):
         endpoint_key="test-original-telegram-501",
         client_type="telegram",
         external_subject="501",
+        capabilities=["timeline_message", "direct_status"],
         conversation_ref="agent:main:telegram:direct:501",
         route={"channel": "telegram", "to": "501", "accountId": "default"},
     )

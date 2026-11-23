@@ -160,6 +160,12 @@ class RunCoordinator:
             (request_key, subject, endpoint, conversation)).fetchone()
         return self._public(row) if row else None
 
+    def matches_message(self, run_id: str, message: str) -> bool:
+        from hashlib import sha256
+        digest = sha256(message.encode()).hexdigest()
+        return self._db.execute("SELECT 1 FROM runs WHERE run_id=? AND payload_digest=?",
+                                (run_id, digest)).fetchone() is not None
+
     def snapshot(self, run_id: str, *, subject: str, endpoint: str, conversation: str) -> dict:
         row = self._db.execute("""SELECT run_id,state,answer FROM runs
             WHERE run_id=? AND subject=? AND endpoint=? AND conversation=?""",
