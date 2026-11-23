@@ -79,6 +79,22 @@ def active_claimants(db, sender):
     return {row["user_subject"] for row in rows}
 
 
+def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
+    # Conservatively reject two active owners even if one older row is malformed.
+    claimed = active_claimants(db, sender)
+    if claimed:
+        return claimed == {subject} and (subject, sender) in old_peers(
+            db, sender=sender
+        )
+    if not allow_new_pair or old_peers(db, subject=subject):
+        return False
+    return bool(
+        db.execute(
+            "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND owner=? AND sender=?",
+            (instance, bot, subject, sender),
+        ).fetchone()
+    )
+
 def initialize_telegram_pilot_links(connection):
     connection.executescript("""
                 CREATE TABLE IF NOT EXISTS workspace_telegram_pilot_links(
@@ -299,22 +315,8 @@ class TelegramPilotLinks:
     def _verified(self, db, subject, instance, bot, sender):
         if not eligible(self.service, db, subject, instance):
             return False
-        # Conservatively reject two active owners even if one older row is malformed.
-        claimed = active_claimants(db, sender)
-        if claimed:
-            return claimed == {subject} and (subject, sender) in old_peers(
-                db, sender=sender
-            )
-        if not eligible(
-            self.service, db, subject, instance, new_link=True
-        ) or old_peers(db, subject=subject):
-            return False
-        return bool(
-            db.execute(
-                "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND owner=? AND sender=?",
-                (instance, bot, subject, sender),
-            ).fetchone()
-        )
+        return verified_pair(db, subject, instance, bot, sender,
+                             allow_new_pair=eligible(self.service, db, subject, instance, new_link=True))
 
     def ensure_endpoint(self, subject, token_id, instance, bot_id, sender_id):
         from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs

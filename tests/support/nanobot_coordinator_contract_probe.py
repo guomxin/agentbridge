@@ -31,6 +31,12 @@ async def checks(fixture, binding, instance, python):
         token_provider=lambda: (base / "personal.token").read_text().strip(),
         private_transport=True,
     )
+    directory = fixture.service.workspace.hosts
+    directory.save_instance(instance, host_type="nanobot", display_name="隔离协调实例", route_ref=instance,
+                            adapter_version="0.3.0", state="enabled", subjects=[OWNER],
+                            expected_revision=0, actor="fixture", reason="验证原实例的已绑定端点")
+    directory.bind(fixture.account["account_id"], instance, endpoint_id=binding["endpoint_id"],
+                   credential_ref=binding["credential_ref"])
     foreign = instance + "-other"
     for host in (instance, foreign):
         r = await client.call_tool(
@@ -94,6 +100,10 @@ async def checks(fixture, binding, instance, python):
         role="assistant",
         text="核验时间线排序",
     )
+    # A second registration shares the subject and token, but does not own this Web endpoint.
+    wrong_endpoint = await client.call_tool("agentbridge_host_timeline_append",
+        {key: value for key, value in one.items() if key != "task_id"}, meta=foreign_meta)
+    assert wrong_endpoint.is_error
     for args in (
         one,
         one,

@@ -64,6 +64,100 @@ RETRY_OPEN = "重新开通发布事务自动撤回的试点"
 RETRY_CLOSE = "发布验收失败，撤回本次重新开通"
 
 
+RENAME = "发布已审核的宿主显示名变更"
+RESTORE_NAME = "撤回本次发布的宿主显示名变更"
+NAME_SCOPE = ("instance_id", "host_type", "route_ref", "adapter_version", "state", "subjects")
+
+
+def name_audit(event, instance):
+    before = json.loads(event["before_json"] or "{}")
+    after = json.loads(event["after_json"] or "{}")
+    if (event["actor_username"], event["actor_role"], event["actor_account_id"],
+            event["request_ip"], event["result"]) != ("native-publish", "admin", None, "local-release", "succeeded"):
+        raise ValueError("Unrecognized display-name authority")
+    if (event["action"] != "workspace.host.rename" or event["reason"] not in (RENAME, RESTORE_NAME)
+            or set(before) != {*NAME_SCOPE, "revision", "display_name"}
+            or set(after) != {*before, "candidate", "attempt"}
+            or before["instance_id"] != instance or before["state"] != "enabled"
+            or any(before[k] != after[k] for k in NAME_SCOPE)
+            or before["display_name"] == after["display_name"] or before["revision"] + 1 != after["revision"]
+            or not re.fullmatch(r"[a-f0-9]{12}", after["candidate"])
+            or not re.fullmatch(r"[a-f0-9]{32}", after["attempt"])):
+        raise ValueError("Invalid display-only administrator audit")
+    return before, after
+
+
+def display_name_action(db, spec, action, proof, audit=None):
+    from agentbridge.workspace.host_instances import WorkspaceHostInstances
+
+    instance = spec["instanceId"]
+    current = WorkspaceHostInstances._admin_row(db, instance)
+    migration = spec["displayNameChange"]
+    source, target = migration["from"], spec["displayName"]
+    if action == "name_restore" and not db.execute(
+        "SELECT 1 FROM admin_audit_events WHERE target_type='workspace_host' AND target_id=? "
+        "AND action='workspace.host.rename' AND json_extract(after_json,'$.attempt')=?",
+        (instance, proof["attempt"]),
+    ).fetchone():
+        return {"changed": False}
+    if (current["subjects"], current["route_ref"], current["adapter_version"], current["host_type"], current["state"]) != (
+            sorted(spec["subjects"]), spec["routeRef"], spec["adapterVersion"], "nanobot", "enabled"):
+        raise ValueError("Display-name change has no authority over host assignments")
+    revision = current["revision"]
+    if action == "name_check":
+        if current["display_name"] == target:
+            return {"matches": True, "revision": revision}
+        if current["display_name"] != source or revision < migration["expectedRevision"]:
+            raise ValueError("The previous approved host display name or revision differs")
+        # A retried upgrade may follow our own successful name compensation. Any
+        # other intervening administrative edit needs a newly reviewed profile.
+        changes = db.execute("SELECT * FROM admin_audit_events WHERE target_type='workspace_host' AND target_id=? "
+                             "AND action='workspace.host.rename'", (instance,)).fetchall()
+        names = {end["revision"]: (event["reason"], begin["display_name"], end["display_name"])
+                 for event in changes for begin, end in (name_audit(event, instance),)}
+        previous = source
+        for number in range(migration["expectedRevision"] + 1, revision + 1):
+            reason, was, now = names.get(number, (None, None, None))
+            if was != previous or (reason, was, now) not in ((RENAME, source, target), (RESTORE_NAME, target, source)):
+                raise ValueError("Intervening administrator edit prevents display-name retry")
+            previous = now
+        if previous != source:
+            raise ValueError("Original approved name not restored")
+        return {"matches": False, "revision": revision}
+    if (not re.fullmatch(r"[a-f0-9]{12}", proof["candidate"]) or not re.fullmatch(r"[a-f0-9]{32}", proof["attempt"])
+            or type(proof["revision"]) is not int or proof["revision"] < migration["expectedRevision"]):
+        raise ValueError("Invalid display-name release proof")
+    events = db.execute("SELECT * FROM admin_audit_events WHERE target_type='workspace_host' AND target_id=? "
+                        "AND action='workspace.host.rename' AND json_extract(after_json,'$.attempt')=? ORDER BY rowid",
+                        (instance, proof["attempt"])).fetchall()
+    for event in events:
+        begin, end = name_audit(event, instance)
+        if end["candidate"] != proof["candidate"] or begin["revision"] < proof["revision"]:
+            raise ValueError("Different release owns the display-name receipt")
+    reverse = action == "name_restore"
+    if not reverse and action != "name_apply":
+        raise ValueError("Invalid display-name release action")
+    if events and events[-1]["reason"] == (RESTORE_NAME if reverse else RENAME):
+        end = name_audit(events[-1], instance)[1]
+        if revision == end["revision"] and current["display_name"] == end["display_name"]:
+            return {"changed": True}
+        raise ValueError("A later administrator edit superseded the host display name")
+    old, new, reason = (target, source, RESTORE_NAME) if reverse else (source, target, RENAME)
+    if revision != proof["revision"] + int(reverse) or current["display_name"] != old:
+        raise ValueError("Administrator changed the reviewed name or revision")
+    if db.execute("UPDATE workspace_host_instances SET display_name=?, revision=revision+1 WHERE instance_id=? "
+                  "AND revision=? AND display_name=?", (new, instance, revision, old)).rowcount != 1:
+        raise ValueError("Display-name update lost the expected revision")
+    db.execute("INSERT INTO workspace_host_directory_audit(instance_id,revision,actor,reason) VALUES(?,?,?,?)",
+               (instance, revision + 1, "native-publish", reason))
+    before = {k: current[k] for k in (*NAME_SCOPE, "display_name", "revision")}
+    audit.append(actor={"username":"native-publish","role":"admin"}, request_ip="local-release",
+                 action="workspace.host.rename", target_type="workspace_host", target_id=instance, result="succeeded",
+                 reason=reason, before=before, connection=db, after={**before, "display_name":new,
+                     "revision":revision + 1, "candidate":proof["candidate"], "attempt":proof["attempt"]})
+    return {"changed": True}
+
+
 def recovery_history(db, spec, current):
     """Match directory revisions to their independent immutable administrator audit."""
     instance = spec["instanceId"]
@@ -72,6 +166,7 @@ def recovery_history(db, spec, current):
         (instance,),
     ).fetchall()
     revisions = {}
+    names = {}
     bindings = {}
     for event in audit:
         if (
@@ -87,6 +182,11 @@ def recovery_history(db, spec, current):
             bindings.setdefault(detail.get("user_subject"), set()).add(
                 detail.get("endpoint_id")
             )
+        elif event["action"] == "workspace.host.rename":
+            _, rename = name_audit(event, instance)
+            if rename["revision"] in names:
+                raise ValueError("Duplicate native name audit")
+            names[rename["revision"]] = event["reason"]
         elif event["action"] == "workspace.host.configure":
             revision = detail["revision"]
             if revision in revisions:
@@ -100,14 +200,21 @@ def recovery_history(db, spec, current):
     ).fetchall()
     expected = list(range(1, current["revision"] + 1))
     if (
-        sorted(revisions) != expected
+        sorted([*revisions, *names]) != expected
         or [r["revision"] for r in rows] != expected
         or len(rows) < 2
     ):
         raise ValueError("Incomplete native rollback history")
+    authority = {}
     for row in rows:
-        revision = row["revision"]
-        reason, detail, _ = revisions[revision]
+        physical = row["revision"]
+        if physical in names:
+            if (row["actor"], row["reason"]) != ("native-publish", names[physical]):
+                raise ValueError("Display-only audit differs from directory history")
+            continue
+        revision = len(authority) + 1
+        authority[revision] = revisions[physical]
+        reason, detail, _ = authority[revision]
         enabled = revision % 2 == 1
         required = (
             (FIRST_OPEN if enabled else FIRST_CLOSE)
@@ -125,9 +232,9 @@ def recovery_history(db, spec, current):
             detail.get("attempt") and detail.get("candidate") and detail.get("tokenIds")
         ):
             raise ValueError("Missing native transaction receipt")
-    if current["state"] != revisions[current["revision"]][1]["state"]:
+    if len(authority) < 2 or current["state"] != authority[len(authority)][1]["state"]:
         raise ValueError("Pilot state differs from recorded revision")
-    return revisions, bindings
+    return authority, bindings
 
 
 def credential_file(path, uid):
@@ -156,7 +263,7 @@ def recovery_personal(
     ref,
 ):
     revisions, bound = history
-    revision = current["revision"]
+    revision = len(revisions)
     instance = spec["instanceId"]
     supplied = proof["subjects"][subject]
     binding = provision.directory._binding(
@@ -277,7 +384,6 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
     try:
         with store_transaction(provision.service.tasks) as db:
             current = provision.directory._admin_row(db, instance)
-            revision = current["revision"]
             if (
                 current["subjects"],
                 current["route_ref"],
@@ -295,6 +401,7 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
                     "The rolled-back scope differs from the reviewed profile"
                 )
             revisions, bound = recovery_history(db, spec, current)
+            revision = len(revisions)
             latest = revisions[revision][1]
             own = (
                 latest.get("attempt") == proof["attempt"]
@@ -408,7 +515,7 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
                     adapter_version=current["adapter_version"],
                     state=state,
                     subjects=current["subjects"],
-                    expected_revision=revision,
+                    expected_revision=current["revision"],
                     actor=actor["username"],
                     reason=reason,
                     connection=db,
@@ -491,6 +598,20 @@ def execute(request):
     routes = config / "routes.json"
     if action in ("tunnel_enable", "tunnel_disable"):
         return restricted_tunnel(spec, action.removeprefix("tunnel_"))
+    if action == "name_check":
+        with closing(sqlite3.connect(encoded, uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            return display_name_action(db, spec, action, {})
+    if action in ("name_apply", "name_restore"):
+        from agentbridge.admin.stores import AdminAuditStore
+        with closing(sqlite3.connect(db_path, timeout=30)) as db:
+            db.row_factory = sqlite3.Row
+            audit = AdminAuditStore(db_path)
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                return display_name_action(db, spec, action, request["nameProof"], audit)
     if action == "observe":
         ports = {spec["remotePort"]}
         occupied = any(

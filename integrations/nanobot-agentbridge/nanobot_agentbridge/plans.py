@@ -71,6 +71,7 @@ class PlanTool(Tool):
                 return "任务计划只接受中央能力和已登记转换。"
         req = self.request
         read_only_sql = Path(req["userDir"]) / "plans.sqlite3"
+        self.context.delegated = True
         meta = await self.context.get()
         if selected:
             meta = {**meta, "agentbridge/skill": {"bindingId": self.scope.binding}}

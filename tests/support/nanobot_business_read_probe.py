@@ -144,6 +144,7 @@ def exercise(*, fixture, binding, instance, gateway, model):
                     }
 
                 model.reply = reply
+                before = {t["task_id"] for t in service.tasks.list_tasks(user_subject=subject_binding["user_subject"])}
                 try:
                     events = list(
                         gateway.send_dispatch(
@@ -164,6 +165,27 @@ def exercise(*, fixture, binding, instance, gateway, model):
                     model.failures,
                 )
                 result[tag] = verified[-1]
+                if group == "database":
+                    created = [t for t in service.tasks.list_tasks(user_subject=subject_binding["user_subject"])
+                               if t["task_id"] not in before]
+                    assert [t["status"] for t in created] == ["succeeded" if positive else "failed"], (
+                        tag, [t["status"] for t in created])
+        # The session-status endpoint has no central task or write workflow.
+        before = {t["task_id"] for t in service.tasks.list_tasks(user_subject=owner)}
+        observed = []
+        def status_reply(data):
+            tool = "mcp_ab_oa_session_status"
+            responses = [m for m in data["messages"] if m.get("tool_call_id") == "session-only-probe"]
+            if responses:
+                assert "userSubject" in str(responses[-1]["content"]) and owner in str(responses[-1]["content"])
+                observed.append(True)
+                return "会话状态已读取。", None
+            return None, {"id":"session-only-probe","type":"function","function":{"name":tool,"arguments":"{}"}}
+        model.reply = status_reply
+        events = list(gateway.send_dispatch({"idempotency_key":"session-status-only-check"}, binding,
+            "请查看我的办公会话状态。", [], None))
+        assert observed and events[-1].get("text") == "会话状态已读取。"
+        assert {t["task_id"] for t in service.tasks.list_tasks(user_subject=owner)} == before
         assert execute.call_count == 1
     assert not fixture.smartlight.data["writes"] and not fixture.transport.write_calls
     return {
@@ -171,6 +193,9 @@ def exercise(*, fixture, binding, instance, gateway, model):
         "source": "isolated synthetic downstreams",
         "matrix": result,
         "sqlReads": 1,
+        "databaseAllowedTask": "succeeded",
+        "databaseDeniedTask": "failed",
+        "sessionStatusTasksCreated": 0,
         "businessWrites": 0,
     }
 

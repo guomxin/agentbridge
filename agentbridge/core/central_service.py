@@ -1756,6 +1756,7 @@ class CentralCapabilityService:
         endpoint_key: str,
         limit: int = 10,
         lease_seconds: int = 30,
+        host_instance_id: str | None = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1767,6 +1768,7 @@ class CentralCapabilityService:
             endpoint_id=endpoint["endpoint_id"],
             limit=limit,
             lease_seconds=lease_seconds,
+            host_instance_id=host_instance_id,
         )
         notifications = []
         for delivery in deliveries:
@@ -1936,10 +1938,10 @@ class CentralCapabilityService:
             "status": "succeeded",
             "count": len(notifications),
             "endpoint": endpoint_response(endpoint),
-            "notifications": notifications,
+            "notifications": [{**item, "requiresRouteCheck": True} for item in notifications],
         }
 
-    def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count):
+    def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count,host_instance_id=None):
         endpoint=self.tasks.endpoint_for_key(user_subject=user_subject,agent_host=agent_host,endpoint_key=endpoint_key)
         delivery=self.tasks.get_delivery(delivery_id)
         if delivery['user_subject']!=user_subject or delivery['endpoint_id']!=endpoint['endpoint_id']:
@@ -1948,7 +1950,12 @@ class CentralCapabilityService:
             or delivery['attempt_count']!=attempt_count
             or datetime.fromisoformat(delivery['next_attempt_at'])<=datetime.now(timezone.utc)):
             return {'allowed':False,'stale':True}
-        from agentbridge.core.business_watch_notifications import validate_watch_delivery
+        if not self.tasks.notification_route_allowed(user_subject=user_subject,endpoint_id=endpoint["endpoint_id"],
+                                                    delivery_id=delivery_id,host_instance_id=host_instance_id):
+            return {"allowed":False,"stale":True}
+        from agentbridge.core.business_watch_notifications import validate_watch_delivery, WATCH_EVENT_TYPES
+        if delivery['payload'].get('eventType') not in WATCH_EVENT_TYPES:
+            return {"allowed": True}
         value=validate_watch_delivery(self,delivery)
         return {'allowed':False} if value is None else {'allowed':True,**value}
 
@@ -1963,6 +1970,7 @@ class CentralCapabilityService:
         retry_after_seconds: int = 5,
         defer_until_activity: bool = False,
         attempt_count: int | None = None,
+        host_instance_id: str | None = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1980,6 +1988,10 @@ class CentralCapabilityService:
         pending=self.tasks.get_delivery(delivery_id)
         if pending['user_subject']!=user_subject or pending['endpoint_id']!=endpoint['endpoint_id']:
             raise PermissionError('Notification does not belong to this endpoint')
+        if host_instance_id and not self.tasks.notification_route_allowed(
+                user_subject=user_subject, endpoint_id=endpoint["endpoint_id"], delivery_id=delivery_id,
+                host_instance_id=host_instance_id):
+            raise PermissionError("Notification does not belong to this host instance")
         from agentbridge.core.business_watch_notifications import WATCH_EVENT_TYPES, validate_watch_delivery
         watch_delivery=pending['payload'].get('eventType') in WATCH_EVENT_TYPES
         if watch_delivery:
@@ -2595,32 +2607,54 @@ class CentralCapabilityService:
         label: str | None = None,
         route: dict | None = None,
         task_id: str | None = None,
+        host_instance_id: str | None = None,
     ) -> dict:
-        endpoint, endpoint_reused = self.tasks.ensure_endpoint(
-            user_subject=user_subject,
-            token_id=token_id,
-            agent_host=agent_host,
-            endpoint_key=endpoint_key,
-            client_type=client_type,
-            external_subject=external_subject,
-            account_id=account_id,
-            conversation_ref=conversation_ref,
-            label=label,
-            route=route,
-            capabilities=(
-                ["workspace.timeline.read"]
-                if client_type in {"web", "webchat"}
-                else ["direct_status", "timeline_message"]
-            ),
-        )
-        entry, entry_reused = self.tasks.append_timeline_message(
-            user_subject=user_subject,
-            source_endpoint_id=endpoint["endpoint_id"],
-            message_key=message_key,
-            role=role,
-            text=text,
-            task_id=task_id,
-        )
+        from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
+        from agentbridge.core.store_transactions import store_transaction
+
+        with store_transaction(self.tasks) as db:
+            old = db.execute("SELECT * FROM client_endpoints WHERE agent_host=? AND endpoint_key=?",
+                             (agent_host, endpoint_key)).fetchone()
+            if host_instance_id:
+                wanted = instance_key(agent_host, host_instance_id)
+                if old and endpoint_instances(db, user_subject).get(old["endpoint_id"]) != wanted:
+                    raise PermissionError("Timeline source is outside the registered host instance")
+            if old and old["client_type"] in {"web", "webchat"}:
+                if (old["user_subject"] != user_subject or old["state"] != "active" or
+                        (client_type, external_subject, conversation_ref) !=
+                        (old["client_type"], old["external_subject"], old["conversation_ref"]) or
+                        account_id not in (None, old["account_id"])):
+                    raise PermissionError("Timeline source differs from the registered Workspace endpoint")
+                from agentbridge.core.task_projections import _endpoint_from_row
+                endpoint, endpoint_reused = _endpoint_from_row(old), True
+            else:
+                endpoint, endpoint_reused = self.tasks.ensure_endpoint(
+                    connection=db, user_subject=user_subject,
+                    token_id=token_id,
+                    agent_host=agent_host,
+                    endpoint_key=endpoint_key,
+                    client_type=client_type,
+                    external_subject=external_subject,
+                    account_id=account_id,
+                    conversation_ref=conversation_ref,
+                    label=label,
+                    route=route,
+                    capabilities=(
+                        ["workspace.timeline.read"]
+                        if client_type in {"web", "webchat"}
+                        else ["direct_status", "timeline_message"]
+                    ),
+                )
+            if host_instance_id and endpoint_instances(db, user_subject).get(endpoint["endpoint_id"]) != wanted:
+                raise PermissionError("Timeline source is outside the registered host instance")
+            entry, entry_reused = self.tasks._append_timeline_message_in_connection(db,
+                user_subject=user_subject,
+                source_endpoint_id=endpoint["endpoint_id"],
+                message_key=message_key,
+                role=role,
+                text=text,
+                task_id=task_id,
+            )
         if task_id:
             trace = self.runtime_governance.trace_for_task(
                 task_id,

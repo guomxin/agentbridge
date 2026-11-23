@@ -977,21 +977,26 @@ class WorkspaceStore:
             raise
 
     def _task_host(self, db, account_id: str, subject: str, task_id: str) -> dict:
-        task = db.execute("""SELECT t.agent_host, b.instance_id AS endpoint_instance,
-            l.host_instance_id AS coordinator FROM agent_tasks t
-            LEFT JOIN workspace_host_bindings b ON b.endpoint_id=t.origin_endpoint_id AND b.account_id=?
+        from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
+
+        task = db.execute("""SELECT t.agent_host,t.origin_endpoint_id,
+            l.host_instance_id AS coordinator,l.agent_host AS lease_host FROM agent_tasks t
             LEFT JOIN agent_task_coordinator_leases l ON l.task_id=t.task_id AND l.user_subject=t.user_subject
-            WHERE t.task_id=? AND t.user_subject=?""", (account_id, task_id, subject)).fetchone()
+            WHERE t.task_id=? AND t.user_subject=?""", (task_id, subject)).fetchone()
         if not task:
             raise KeyError("未找到原任务")
-        instance_id = task["endpoint_instance"] or task["coordinator"]
-        if task["agent_host"] == "openclaw" and not task["endpoint_instance"]:
-            # Historical Gateway registrations predate the Workspace directory.
-            if not instance_id or not db.execute("SELECT 1 FROM workspace_host_instances WHERE instance_id=?",
-                                                  (instance_id,)).fetchone():
-                instance_id = LEGACY_INSTANCE_ID
-        if not instance_id:
-            raise PermissionError("原任务的协调实例尚未绑定。")
+        origin = endpoint_instances(db, subject).get(task["origin_endpoint_id"])
+        if not origin or origin[0] != task["agent_host"]:
+            raise PermissionError("原任务与该账号的端点绑定不符。")
+        _, instance_id = origin
+        coordinator = task["coordinator"]
+        if coordinator and (
+            task["lease_host"] != task["agent_host"] or
+            (instance_key(task["lease_host"], coordinator) != origin and
+             (task["agent_host"] != "openclaw" or instance_id != LEGACY_INSTANCE_ID or
+              db.execute("SELECT 1 FROM workspace_host_instances WHERE instance_id=?", (coordinator,)).fetchone()))
+        ):
+            raise PermissionError("原任务的协调实例与端点不符。")
         host = self.hosts.resolve(db, account_id, instance_id=instance_id, existing=True)
         if host["host_type"] != task["agent_host"] or host["user_subject"] != subject:
             raise PermissionError("原任务与该账号的宿主绑定不符。")
@@ -1007,6 +1012,55 @@ class WorkspaceStore:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             return hosts.resolve(db, account_id)
+
+    def view_host(self, account: dict) -> dict:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            binding = self._view_host(db, account)
+            if binding is None:
+                raise PermissionError("当前工作台宿主不可用。")
+            return binding
+
+    def _view_host(self, db, account: dict) -> dict | None:
+        current = db.execute("SELECT instance_id FROM workspace_host_preferences WHERE account_id=?",
+                             (account["account_id"],)).fetchone()
+        if "_workspace_view_instance" in account:
+            instance = account["_workspace_view_instance"]
+        elif current is None:
+            # Older single-host accounts may not yet have materialized a preference.
+            owned = self.hosts._account(db, account["account_id"])
+            eligible = [row["instance_id"] for row in self.hosts._visible(db, owned)
+                        if row["state"] == "enabled" and self.hosts._binding(db, owned, row)]
+            instance = eligible[0] if len(eligible) == 1 else None
+        else:
+            instance = current["instance_id"]
+        if not instance:
+            return None
+        try:
+            selected = self.hosts.resolve(db, account["account_id"], instance_id=instance, existing=True)
+        except PermissionError:
+            return None
+        return selected if selected["user_subject"] == account["user_subject"] else None
+
+    def _view_instance_id(self, db, account: dict) -> str | None:
+        binding = self._view_host(db, account)
+        return binding["instance_id"] if binding else None
+
+    def view_instance_id(self, account: dict) -> str | None:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            return self._view_instance_id(db, account)
+
+    def view_task_scope(self, account: dict) -> tuple[str | None, list[str]]:
+        from agentbridge.core.endpoint_instances import endpoint_instances
+
+        with self._connect() as db:
+            db.execute("BEGIN")
+            instance = self._view_instance_id(db, account)
+            if not instance:
+                return None, []
+            endpoints = endpoint_instances(db, account["user_subject"])
+            return instance, [key for key, origin in endpoints.items() if origin[1] == instance]
 
     def endpoint_host_names(self, account_id: str) -> dict:
         with self._connect() as db:
@@ -1037,25 +1091,9 @@ class WorkspaceStore:
                 (account["account_id"], LEGACY_INSTANCE_ID, account["user_subject"], *task_ids)).fetchall()
         return {row["task_id"]: row["display_name"] for row in rows if row["display_name"]}
 
-    def visible_chat_endpoints(self, account: dict) -> list[str] | None:
-        with self._connect() as db:
-            db.execute("BEGIN")
-            if not db.execute("SELECT 1 FROM workspace_host_bindings WHERE account_id=? LIMIT 1",
-                              (account["account_id"],)).fetchone():
-                return None
-            preference = db.execute("SELECT instance_id FROM workspace_host_preferences WHERE account_id=?",
-                                    (account["account_id"],)).fetchone()
-            if not preference:
-                return []
-            if preference["instance_id"] == LEGACY_INSTANCE_ID:
-                return [row[0] for row in db.execute("""SELECT endpoint_id FROM client_endpoints e
-                    WHERE e.user_subject=? AND e.agent_host='openclaw' AND NOT EXISTS (
-                    SELECT 1 FROM workspace_host_bindings b WHERE b.endpoint_id=e.endpoint_id)""",
-                    (account["user_subject"],))]
-            return [row[0] for row in db.execute("""SELECT b.endpoint_id FROM workspace_host_bindings b
-                JOIN client_endpoints e ON e.endpoint_id=b.endpoint_id AND e.user_subject=?
-                WHERE b.account_id=? AND b.instance_id=?""",
-                (account["user_subject"], account["account_id"], preference["instance_id"]))]
+    def visible_chat_endpoints(self, account: dict) -> list[str]:
+        _, endpoint_ids = self.view_task_scope(account)
+        return list(endpoint_ids)
 
     def host_chat_history(self, binding: dict, *, limit: int) -> dict:
         with self._connect() as db:
@@ -1347,48 +1385,32 @@ class WorkspaceStore:
         user_subject: str,
         active_only: bool = False,
         limit: int = 100,
+        instance_id: str | None = None,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 500)
-        with self._connect() as connection:
-            if active_only:
-                placeholders = ",".join(
-                    "?" for _ in _HOST_DISPATCH_ACTIVE_STATES
-                )
-                rows = connection.execute(
-                    f"""
-                    SELECT d.*, (
-                        SELECT CASE WHEN json_extract(e.payload_json,'$.status')='closed' THEN NULL
-                            ELSE COALESCE(json_extract(e.payload_json,'$.cardRevision'),0) END
-                        FROM agent_host_dispatch_events e WHERE e.dispatch_id=d.dispatch_id
-                        AND e.event_name='host_progress' AND json_extract(e.payload_json,'$.kind')='private_interaction'
-                        ORDER BY e.sequence DESC LIMIT 1
-                    ) AS private_card_revision FROM agent_host_dispatches d
-                    WHERE user_subject = ? AND state IN ({placeholders})
-                    ORDER BY created_at
-                    LIMIT ?
-                    """,
-                    (
-                        user_subject,
-                        *sorted(_HOST_DISPATCH_ACTIVE_STATES),
-                        limit,
-                    ),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT d.*, (
-                        SELECT CASE WHEN json_extract(e.payload_json,'$.status')='closed' THEN NULL
-                            ELSE COALESCE(json_extract(e.payload_json,'$.cardRevision'),0) END
-                        FROM agent_host_dispatch_events e WHERE e.dispatch_id=d.dispatch_id
-                        AND e.event_name='host_progress' AND json_extract(e.payload_json,'$.kind')='private_interaction'
-                        ORDER BY e.sequence DESC LIMIT 1
-                    ) AS private_card_revision FROM agent_host_dispatches d
-                    WHERE user_subject = ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                    """,
-                    (user_subject, limit),
-                ).fetchall()
+        clauses = ["d.user_subject = ?"]
+        parameters = [user_subject]
+        if instance_id is not None:
+            clauses.append("d.instance_id = ?")
+            parameters.append(instance_id)
+        direction = "DESC"
+        if active_only:
+            states = sorted(_HOST_DISPATCH_ACTIVE_STATES)
+            clauses.append("d.state IN (" + ",".join("?" for _ in states) + ")")
+            parameters.extend(states)
+            direction = "ASC"
+        with self._connect() as db:
+            rows = db.execute(f"""
+                SELECT d.*, (
+                    SELECT CASE WHEN json_extract(e.payload_json,'$.status')='closed' THEN NULL
+                        ELSE COALESCE(json_extract(e.payload_json,'$.cardRevision'),0) END
+                    FROM agent_host_dispatch_events e WHERE e.dispatch_id=d.dispatch_id
+                    AND e.event_name='host_progress' AND json_extract(e.payload_json,'$.kind')='private_interaction'
+                    ORDER BY e.sequence DESC LIMIT 1
+                ) AS private_card_revision FROM agent_host_dispatches d
+                WHERE {" AND ".join(clauses)}
+                ORDER BY d.created_at {direction} LIMIT ?
+                """, (*parameters, limit)).fetchall()
         return [_host_dispatch_from_row(row) for row in rows]
 
     def list_host_dispatch_events(

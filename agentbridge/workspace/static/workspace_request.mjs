@@ -1,7 +1,19 @@
 import { cancellationError, abortableDelay } from "./workspace_lifecycle.mjs";
 import { skillTrialBinding } from "./workspace_skill_trial.mjs";
 
-export function createWorkspaceRequests({ fetch = globalThis.fetch, document, getScope, addLiveProgress, timers = globalThis }) {
+const hostViews = new Set([
+  "/api/current", "/api/history", "/api/tasks", "/api/tasks/history", "/api/tasks/projections",
+  "/api/artifacts/history", "/api/events", "/api/events/stream", "/api/timeline", "/api/timeline/stream",
+  "/api/chat/dispatches", "/api/chat/history", "/api/gateway", "/api/credential-health",
+]);
+
+export function workspaceViewPath(path, instanceId) {
+  if (!instanceId || !hostViews.has(path.split("?", 1)[0])) return path;
+  return path + (path.includes("?") ? "&" : "?") + "view_instance=" + encodeURIComponent(instanceId);
+}
+
+export function createWorkspaceRequests({ fetch = globalThis.fetch, document, getScope, getViewInstance = () => null,
+  addLiveProgress, timers = globalThis }) {
   async function api(path, options = {}) {
     const scope = options.scope || getScope();
     const { controller, release } = scope.controller();
@@ -22,7 +34,8 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
       );
     }
     const receive = (async () => {
-    const response = await fetch(path, {
+    const target = (options.method || "GET") === "GET" ? workspaceViewPath(path, getViewInstance()) : path;
+    const response = await fetch(target, {
       method: options.method || "GET",
       headers,
       credentials: "same-origin",

@@ -189,6 +189,22 @@ function notificationHarness(validation, { pauseAdapter = false } = {}) {
       controller.signal, endpoint, value); } };
 }
 
+test('an already claimed Workspace mirror rechecks its original host immediately before Telegram send', async () => {
+  const h = notificationHarness({allowed: true}, {pauseAdapter: true});
+  const notification = {...h.notification, deliveryMode: 'timeline_message', requiresRouteCheck: true,
+    task: null, event: null, message: 'synthetic private mirror'};
+  const run = h.run(notification);
+  try {
+    await h.adapterEntered;
+    h.setValidation({allowed: false, stale: true});
+    h.releaseAdapter();
+    await run;
+    assert.equal(h.sent.length, 0);
+    assert.equal(h.calls.filter(item => item.name === 'agentbridge_host_notification_validate').length, 2);
+    assert.equal(h.calls.some(item => item.name === 'agentbridge_host_notification_ack'), false);
+  } finally { h.releaseAdapter(); await run.catch(() => {}); h.coordinator.stopAll(); }
+});
+
 test('real Coordinator validates the current attempt and sends only freshly authorized watch content', async () => {
   const message = '业务关注更新：合成事项\n当前节点：当前核对节点';
   const h = notificationHarness({ allowed: true, message });

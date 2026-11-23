@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createLifecycle, isCancellation } from "../agentbridge/workspace/static/workspace_lifecycle.mjs";
-import { createWorkspaceRequests } from "../agentbridge/workspace/static/workspace_request.mjs";
+import { createWorkspaceRequests, workspaceViewPath } from "../agentbridge/workspace/static/workspace_request.mjs";
 import { createChatStream } from "../agentbridge/workspace/static/workspace_stream.mjs";
 
 const deferred = () => {
@@ -265,4 +265,19 @@ test('bounded selection requests timeout during JSON decoding without replay and
   await Promise.resolve(); const failed=assert.rejects(result,error=>error.code==='WORKSPACE_REQUEST_TIMEOUT');
   [...callbacks.values()][0](); await failed; pending.resolve({taskId:'late'});
   assert.equal(calls,1); assert.equal(signal.aborted,true); assert.equal(callbacks.size,0);scope.dispose();
+});
+
+test("each tab pins host reads and event streams while explicit resources retain their original IDs", async () => {
+  assert.equal(workspaceViewPath("/api/timeline/stream?after=8", "office"), "/api/timeline/stream?after=8&view_instance=office");
+  assert.equal(workspaceViewPath("/api/chat/dispatches/id/private-card", "office"), "/api/chat/dispatches/id/private-card");
+  const requests = [];
+  let instance = "openclaw-default";
+  const { api } = createWorkspaceRequests({ document, getScope: () => createLifecycle().scope(),
+    getViewInstance: () => instance, fetch: async path => { requests.push(path); return response({}); } });
+  await api("/api/current");
+  instance = "office";
+  await api("/api/chat/dispatches?active_only=true");
+  await api("/api/hosts/default", {method:"POST"});
+  assert.deepEqual(requests, ["/api/current?view_instance=openclaw-default",
+    "/api/chat/dispatches?active_only=true&view_instance=office", "/api/hosts/default"]);
 });

@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "e53eec2a63d8"
+    "1ace31474938"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "The central e53eec2a63d8 release completed the reviewed Workspace schema transition. This patch repairs managed NanoBot startup and readmission after a publication-owned rollback. The four central database schemas do not change."
+  "reason": "Scope Workspace projections and Telegram delivery by originating host instance. Central database schemas remain unchanged."
 }

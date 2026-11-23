@@ -50,12 +50,21 @@ def test_retry_joins_original_after_default_change_and_history_is_scoped(workspa
     send("new", "office message", "office", new["revision"])
     dispatches = app.list_chat_dispatches(account)
     assert {item["idempotencyKey"]: item["instanceId"] for item in dispatches} == {
-        "already-saved": LEGACY_INSTANCE_ID, "new": "office"}
+        "new": "office"}
+    original_rows = app.store.list_host_dispatches(user_subject=account["user_subject"], instance_id=LEGACY_INSTANCE_ID)
+    assert len(original_rows) == 1 and original_rows[0]["idempotency_key"] == "already-saved"
     timeline = app.history_page(account)["timeline"]["items"]
     assert [entry["text"] for entry in timeline] == ["office message"]
     assert timeline[0]["source"]["is_origin"]
     app.hosts.set_default(account_id, LEGACY_INSTANCE_ID, expected_revision=new["revision"])
     assert [entry["text"] for entry in app.list_timeline(account, entry_type="chat_message")] == ["old message"]
+    pinned = {**account, "_workspace_view_instance": "office"}
+    assert [row["text"] for row in app.history_page(pinned)["timeline"]["items"]] == ["office message"]
+    assert [row["instanceId"] for row in app.list_chat_dispatches(pinned)] == ["office"]
+    assert app.chat_history(pinned)["source"] == "workspace_timeline"
+    unknown = {**account, "_workspace_view_instance": "unknown"}
+    assert app.list_chat_dispatches(unknown) == []
+    assert app.chat_history(unknown)["messages"] == []
 
 
 def test_original_task_binding_and_private_card_are_independent_of_default(workspace):
@@ -70,7 +79,8 @@ def test_original_task_binding_and_private_card_are_independent_of_default(works
     followup = app.continue_task(account, task["task_id"])
     app.send_chat_stream(account, message=followup["message"], idempotency_key="original-task",
                          continuation_task_id=task["task_id"])
-    dispatch = app.list_chat_dispatches(account)[0]
+    assert app.list_chat_dispatches(account) == []
+    dispatch = app.list_chat_dispatches({**account, "_workspace_view_instance":"office"})[0]
     assert dispatch["instanceId"] == "office"
     with pytest.raises(KeyError):
         app.private_card_url({**account, "user_subject":"another-user"}, dispatch["dispatchId"])

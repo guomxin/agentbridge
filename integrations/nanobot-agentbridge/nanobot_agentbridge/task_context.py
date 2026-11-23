@@ -12,6 +12,9 @@ class TaskContext:
         self.session = session
         self.request = request
         self.host_meta = host_meta
+        self.meta = None
+        self.read_outcome = None
+        self.delegated = False
         self.db = Path(request["userDir"]) / "coordinated-runs.sqlite3"
         with sqlite3.connect(self.db) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS tasks (
@@ -95,7 +98,7 @@ class TaskContext:
             or int(lease.get("version", 0)) != version
         ):
             raise PermissionError("Original coordinator lease is unavailable")
-        return {
+        self.meta = {
             **self.host_meta,
             "io.agentbridge/task": {
                 "taskId": task_id,
@@ -105,3 +108,32 @@ class TaskContext:
                 "hostRunId": req["runId"],
             },
         }
+        return self.meta
+
+    def observe_read(self, tool, result):
+        """Only explicit central read receipts can close an otherwise unowned run."""
+        if result is None or result.isError or result.meta:
+            self.delegated = True
+            return
+        data = result.structuredContent or {}
+        if data.get("interaction") or data.get("operationId"):
+            self.delegated = True
+        elif tool == "database_execute" and (data.get("status") == "succeeded" or
+                (data.get("status") == "rejected" and data.get("code") == "DATABASE_CAPABILITY_DENIED")):
+            outcome = "succeeded" if data["status"] == "succeeded" else "failed"
+            if self.read_outcome and self.read_outcome != outcome:
+                self.delegated = True
+            self.read_outcome = outcome
+        elif data.get("status") in {"failed", "rejected", "unknown", "requires_user_action", "partial"}:
+            self.delegated = True
+
+    async def finish_confirmed_read(self):
+        if not self.meta or self.delegated or self.read_outcome is None:
+            return
+        task = self.meta["io.agentbridge/task"]
+        result = await self.session.call_tool("agentbridge_host_task_finish", {
+            "agent_host": "nanobot", "task_id": task["taskId"], "outcome": self.read_outcome,
+            "reason": "confirmed_read_receipt", "causation_ref": self.request["runId"],
+        }, meta=self.meta)
+        if result.isError:
+            raise PermissionError("Central completion of the read could not be confirmed")

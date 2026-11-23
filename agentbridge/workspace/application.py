@@ -260,10 +260,20 @@ class WorkspaceApplication:
         active_only: bool = False,
         limit: int = 100,
     ) -> list[dict]:
-        tasks = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=active_only, limit=limit)
+        tasks = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=active_only, limit=limit,
+                                             task_scope=self.store.view_task_scope(account))
         return self._public_tasks(account, tasks)
 
+    def require_task_origin(self, account: dict, task_id: str) -> dict:
+        # Explicit links may follow an existing task across a default switch, after
+        # checking the original instance and endpoint remain available to this account.
+        try:
+            return self.store.task_host(account, task_id)
+        except (KeyError, PermissionError):
+            raise TaskNotFound("未找到可访问的原任务") from None
+
     def task_detail(self, account: dict, task_id: str) -> dict:
+        self.require_task_origin(account, task_id)
         return self._task_projection(account, task_id, include_history=True)
 
     def task_page(self, account: dict, *, q: str | None = None, system_id: str | None = None,
@@ -319,7 +329,8 @@ class WorkspaceApplication:
             upper = datetime.combine(dates[1] + timedelta(days=1), datetime.min.time(), shanghai).astimezone(timezone.utc).isoformat() if dates[1] else None
         except (ValueError, OverflowError) as exc:
             raise ValueError("日期超出可查询范围。") from exc
-        scope = {"account": account["account_id"], "subject": account["user_subject"], "q": q,
+        task_scope = self.store.view_task_scope(account)
+        scope = {"instance": task_scope[0], "account": account["account_id"], "subject": account["user_subject"], "q": q,
                  "system": system_id, "status": status, "from": lower, "before": upper}
         context = b"agentbridge.workspace-task-search.v1\x00" + json.dumps(scope, sort_keys=True, ensure_ascii=False).encode()
         boundary = None
@@ -340,7 +351,7 @@ class WorkspaceApplication:
         if before_updated_at is not None or before_task_id is not None:
             if boundary is None or [before_updated_at, before_task_id] != boundary:
                 raise ValueError("翻页信息与当前查询不一致。")
-        page = self.service.tasks.list_task_page(user_subject=account["user_subject"],
+        page = self.service.tasks.list_task_page(user_subject=account["user_subject"], task_scope=task_scope,
             title_query=q, statuses=status_filters[status], updated_from=lower, updated_before=upper,
             system_id=system_id, known_systems=known_systems,
             before_updated_at=boundary[0] if boundary else None,
@@ -370,7 +381,8 @@ class WorkspaceApplication:
                 raise ValueError("task cursor id must be a canonical UUID")
         limit = min(max(int(limit), 1), 32)
         tasks = self.service.tasks.list_tasks(user_subject=account["user_subject"],
-            before_updated_at=before_updated_at, before_task_id=before_task_id, limit=limit + 1)
+            before_updated_at=before_updated_at, before_task_id=before_task_id, limit=limit + 1,
+            task_scope=self.store.view_task_scope(account))
         has_more = len(tasks) > limit
         items = tasks[:limit]
         return {"items": self._public_tasks(account, items), "hasMore": has_more,
@@ -673,8 +685,13 @@ class WorkspaceApplication:
                 raise ValueError("task id must be a UUID")
             if canonical not in normalized:
                 normalized.append(canonical)
+        visible = self.service.tasks.workspace_task_ids(user_subject=account["user_subject"], task_ids=normalized,
+                                                       task_scope=self.store.view_task_scope(account))
         items, unavailable = [], []
         for task_id in normalized:
+            if task_id not in visible:
+                unavailable.append(task_id)
+                continue
             try:
                 # Version hints never bypass live access, presentation expiry,
                 # actionable source TTL or a freshly signed active interaction.
@@ -708,7 +725,8 @@ class WorkspaceApplication:
         rows = self.service.tasks.list_workspace_history(
             user_subject=account["user_subject"], before_created_at=before_created_at,
             before_kind=before_kind, before_id=before_id, limit=limit + 1,
-            message_max_sequence=message_max_sequence, chat_endpoints=self.store.visible_chat_endpoints(account))
+            message_max_sequence=message_max_sequence, chat_endpoints=self.store.visible_chat_endpoints(account),
+            task_scope=self.store.view_task_scope(account))
         has_more, selected = len(rows) > limit, rows[:limit]
         # Rows descend from newest to oldest. Avoid opening a normal history
         # page with a prior turn's answer/card but without its user message.
@@ -745,10 +763,11 @@ class WorkspaceApplication:
         timeline_cursor = self.timeline_cursor(account)
         event_cursor = self.event_cursor(account)
         history_limit = min(max(int(history_limit), 0), 32)
+        task_scope = self.store.view_task_scope(account)
         if history_limit:
             history = self.history_page(account, limit=history_limit, message_max_sequence=timeline_cursor)
             active = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=True,
-                                                   limit=active_limit + 1)
+                                                   limit=active_limit + 1, task_scope=task_scope)
             known = {card["task"]["task_id"] for card in history["cards"]} | set(history["unavailableTaskIds"])
             extra_ids = [task["task_id"] for task in active[:active_limit] if task["task_id"] not in known]
             extra = self.task_projections(account, extra_ids) if extra_ids else {"items": [], "unavailableTaskIds": []}
@@ -764,9 +783,9 @@ class WorkspaceApplication:
                     "cursors": {"timeline": timeline_cursor, "event": event_cursor},
                     "hasMoreActive": len(active) > active_limit, "hasMoreRecent": history["hasMore"]}
         active = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=True,
-                                               limit=active_limit + 1)
+                                               limit=active_limit + 1, task_scope=task_scope)
         recent = self.service.tasks.list_tasks(user_subject=account["user_subject"], terminal_only=True,
-                                               limit=recent_limit + 1) if recent_limit else []
+                                               limit=recent_limit + 1, task_scope=task_scope) if recent_limit else []
         selected = active[:active_limit] + recent[:recent_limit]
         projections = self.task_projections(account, [task["task_id"] for task in selected]) if selected else {
             "items": [], "unavailableTaskIds": []}
@@ -789,10 +808,12 @@ class WorkspaceApplication:
         return list_actionable_results(self.service, account["user_subject"], task_id, include_partial=True)
 
     def next_oa_history_page(self, account: dict, task_id: str, body: dict) -> dict:
+        self.require_task_origin(account, task_id)
         from agentbridge.workspace.oa_history import next_page
         return next_page(self.service, account, task_id, body)
 
     def prepare_selected_results(self, account: dict, task_id: str, body: dict) -> dict:
+        self.require_task_origin(account, task_id)
         from agentbridge.core.actionable_results import queue_preparation
         with self._time_business_action(account, "selection", body, task_id) as timing:
             result = queue_preparation(self.service, account, task_id, body)
@@ -801,22 +822,24 @@ class WorkspaceApplication:
 
     def probe_oa_pending_recovery(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.oa_pending_recovery import probe_unknown_pending
+        original = self.require_task_origin(account, task_id)
         self._validate_oa_recovery_body(body, prepare=False)
         self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
         with self._time_business_action(account, "recovery_probe", body, task_id):
             result = probe_unknown_pending(self.service, subject=account["user_subject"], task_id=task_id,
-                request_key=body["requestKey"], endpoint_id=account["endpoint_id"])
+                request_key=body["requestKey"], endpoint_id=original["endpoint_id"])
             return self._public_oa_recovery(result)
 
     def prepare_oa_pending_recovery(self, account: dict, task_id: str, body: dict) -> dict:
         from agentbridge.core.oa_pending_recovery import prepare_recovery_attempt
+        original = self.require_task_origin(account, task_id)
         self._validate_oa_recovery_body(body, prepare=True)
         self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
         with self._time_business_action(account, "recovery_prepare", body, task_id) as timing:
             result = prepare_recovery_attempt(self.service, subject=account["user_subject"], task_id=task_id,
                 assessment_id=body["assessmentId"], assessment_hash=body["assessmentHash"],
                 expected_revision=body["expectedRevision"], request_key=body["requestKey"],
-                acknowledgement=body["acknowledgement"], endpoint_id=account["endpoint_id"])
+                acknowledgement=body["acknowledgement"], endpoint_id=original["endpoint_id"])
             timing["task_id"] = result.get("taskId", task_id)
             return self._public_oa_recovery(result)
 
@@ -875,6 +898,7 @@ class WorkspaceApplication:
             return response
 
     def query_oa_batch_remaining(self, account: dict, task_id: str, body: dict) -> dict:
+        self.require_task_origin(account, task_id)
         from agentbridge.core.oa_batch_remaining import queue_remaining_query
         with self._time_business_action(account, "query", body) as timing:
             queued = queue_remaining_query(self.service, account, task_id, body)
@@ -950,6 +974,7 @@ class WorkspaceApplication:
         return {'feedback': {'available': False, 'receipt': receipt}}
 
     def task_feedback(self, account: dict, task_id: str, body: dict) -> dict:
+        self.require_task_origin(account, task_id)
         if not isinstance(body, dict) or set(body) != {"rating", "comment", "requestKey"}:
             raise ValueError("原任务反馈只能包含评价、补充说明和请求标识。")
         receipt = self.service.skill_authoring.workbench.record_task_feedback(account["user_subject"], task_id,
@@ -959,7 +984,7 @@ class WorkspaceApplication:
     def artifact_history(self, account: dict, *, limit: int = 20) -> list[dict]:
         limit = min(max(int(limit), 1), 50)
         artifacts = self.service.tasks.list_user_artifacts(
-            user_subject=account["user_subject"],
+            user_subject=account["user_subject"], task_scope=self.store.view_task_scope(account),
             limit=min(max(limit * 10, 100), 500),
         )
         artifacts.sort(
@@ -1073,6 +1098,7 @@ class WorkspaceApplication:
         task_id: str,
         artifact_id: str,
     ) -> dict:
+        self.require_task_origin(account, task_id)
         self.service.require_task_result_access(user_subject=account["user_subject"], task_id=task_id)
         artifact = self.service.tasks.get_artifact(task_id=task_id, artifact_id=artifact_id,
             user_subject=account["user_subject"])
@@ -1122,12 +1148,12 @@ class WorkspaceApplication:
         return self.task_detail(account, task_id)
 
     def continue_task(self, account: dict, task_id: str) -> dict:
+        binding = self.require_task_origin(account, task_id)
         task = self.service.tasks.get_task(task_id, user_subject=account["user_subject"])
         if task.get("status") == "outcome_unknown":
             # A conversational continuation can choose a write path. Unknown
             # outcomes only expose the separate, closed read-only query action.
             raise ValueError("原提交结果仍待核对，请使用只读查询或到业务系统核对；不要重复提交。")
-        binding = self.store.task_host(account, task_id)
         response = self.service.resolve_host_task_continuation(
             user_subject=account["user_subject"],
             agent_host=binding["host_type"],
@@ -1162,18 +1188,18 @@ class WorkspaceApplication:
             for event in self.service.tasks.list_user_events(
                 user_subject=account["user_subject"],
                 after_event_id=after_event_id,
-                limit=limit,
+                task_scope=self.store.view_task_scope(account), limit=limit,
             )
         ]
 
     def latest_event_id(self, account: dict) -> str | None:
         return self.service.tasks.latest_user_event_id(
-            user_subject=account["user_subject"],
+            user_subject=account["user_subject"], task_scope=self.store.view_task_scope(account),
         )
 
     def event_cursor(self, account: dict) -> str:
         return self.service.tasks.current_user_event_cursor(
-            user_subject=account["user_subject"],
+            user_subject=account["user_subject"], task_scope=self.store.view_task_scope(account),
         )
 
     def list_timeline(
@@ -1187,7 +1213,7 @@ class WorkspaceApplication:
     ) -> list[dict]:
         entries = self.service.tasks.list_timeline(user_subject=account["user_subject"],
             after_sequence=after_sequence, before_sequence=before_sequence, entry_type=entry_type, limit=limit,
-            chat_endpoints=self.store.visible_chat_endpoints(account))
+            chat_endpoints=self.store.visible_chat_endpoints(account), task_scope=self.store.view_task_scope(account))
         return self._project_timeline_entries(account, entries)
 
     def _project_timeline_entries(self, account: dict, entries: list[dict]) -> list[dict]:
@@ -1310,7 +1336,7 @@ class WorkspaceApplication:
     def credential_health(self, account: dict) -> dict:
         from agentbridge.workspace.credential_health import credential_health
         try:
-            host = self.store.current_host(account["account_id"])
+            host = self.store.view_host(account)
         except PermissionError:
             return {"state": "unknown", "blocked": False}
         return credential_health(self.service, account["user_subject"], host_type=host["host_type"],
@@ -1319,7 +1345,7 @@ class WorkspaceApplication:
     def gateway_status(self, account: dict | None = None) -> dict:
         if account is not None:
             try:
-                binding = self.store.current_host(account["account_id"])
+                binding = self.store.view_host(account)
             except PermissionError:
                 return {"available": False, "code": "HOST_SELECTION_UNAVAILABLE"}
             if binding["instance_id"] != LEGACY_INSTANCE_ID:
@@ -1352,7 +1378,7 @@ class WorkspaceApplication:
 
     def chat_history(self, account: dict, *, limit: int = 100) -> dict:
         try:
-            binding = self.store.current_host(account["account_id"])
+            binding = self.store.view_host(account)
         except PermissionError:
             # Local account-scoped history still works when its original host is suspended.
             return {"messages": [], "sessionId": None, "source": "workspace_timeline"}
@@ -1383,7 +1409,7 @@ class WorkspaceApplication:
         *,
         timeout_seconds: float = 25,
     ) -> Iterator[dict[str, Any]]:
-        binding = self.store.current_host(account["account_id"])
+        binding = self.store.view_host(account)
         if binding["instance_id"] != LEGACY_INSTANCE_ID:
             return iter(())
         return self._gateway().stream(
@@ -1443,8 +1469,12 @@ class WorkspaceApplication:
         limit: int = 20,
     ) -> list[dict]:
         items = []
+        instance_id = self.store.view_instance_id(account)
+        if instance_id is None:
+            return []
         for dispatch in self.store.list_host_dispatches(
             user_subject=account["user_subject"],
+            instance_id=instance_id,
             active_only=active_only,
             limit=limit,
         ):

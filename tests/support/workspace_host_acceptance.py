@@ -85,6 +85,7 @@ def main():
     options.add_argument("--fixture-card-cert", type=Path, help="Optional isolated Chrome-trusted TLS certificate for localhost")
     options.add_argument("--fixture-card-key", type=Path, help="Matching isolated TLS key")
     options.add_argument("--b4",action="store_true",help="Seed skill, Telegram and file acceptance data")
+    options.add_argument("--host-isolation", action="store_true", help="Show an active task and a message in each host")
     args = options.parse_args()
     if args.resume and args.credential_nanobot_python:
         options.error("Start a fresh credential acceptance fixture")
@@ -135,7 +136,7 @@ def main():
         private_file(credential,json.dumps([admin_name,admin_password]).encode())
     if not old:
         control.configure_workspace_host(actor=actor, request_ip="127.0.0.1", action="save", body={
-            "instance_id":alias, "route_ref":alias, "display_name":"办公 NanoBot", "state":"enabled",
+            "instance_id":alias, "route_ref":alias, "display_name":"NanoBot", "state":"enabled",
             "subjects":list(mcp.subjects.values()), "expected_revision":0, "reason":"隔离验收配置"})
         bindings = []
         for label,subject in mcp.subjects.items():
@@ -146,6 +147,16 @@ def main():
             binding = control.configure_workspace_host(actor=actor, request_ip="127.0.0.1", action="bind", body={
                 "instance_id":alias, "account_id":account["account_id"], "expected_revision":1, "reason":"合成主体开通"})
             bindings.append({k:v for k,v in binding.items() if k != "instance_id"})
+            if args.host_isolation:
+                for host_type, endpoint, session in (
+                    ("openclaw", account["endpoint_id"], account["openclaw_session_key"]),
+                    ("nanobot", binding["endpoint_id"], binding["session_key"]),
+                ):
+                    title = f"{host_type} 独立验收任务 {label}"
+                    mcp.service.tasks.ensure_task(user_subject=subject, agent_host=host_type, host_task_key=title,
+                        origin_endpoint_id=endpoint, active_conversation_ref=session, title=title)
+                    mcp.service.tasks.append_timeline_message(user_subject=subject, source_endpoint_id=endpoint,
+                        message_key=f"accept-{host_type}-{label}", role="user", text=f"{host_type} 独立验收消息 {label}")
             if label == "b" or credential_fixture or args.b4:
                 control.workspace_hosts.directory.set_default(account["account_id"], alias, expected_revision=1)
         private_file(root / "bindings.json", json.dumps(bindings).encode())

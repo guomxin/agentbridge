@@ -461,34 +461,28 @@ class WorkspaceHostInstances:
         return binding
 
 def context_endpoint_ids(service, subject, host_type, instance, endpoints):
-    """Select active endpoints eligible to contribute model context for this registration."""
+    """Select endpoints that belong to the caller's registered instance."""
+    from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
+
+    scope = instance_key(host_type, instance or (LEGACY_INSTANCE_ID if host_type == "openclaw" else None))
     with service.workspace._connect() as db:
-        rows = db.execute("""SELECT b.endpoint_id, b.instance_id, h.route_ref, b.account_id
-            FROM workspace_host_bindings b JOIN workspace_accounts a USING(account_id)
-            JOIN workspace_host_instances h USING(instance_id) WHERE a.user_subject=? AND a.state='active'""",
-            (subject,)).fetchall()
-        bindings = {row["endpoint_id"]: row for row in rows}
-        owned = {key for key, e in endpoints.items() if e["agent_host"] == host_type and e["state"] == "active"}
-        managed = [row for row in rows if row["instance_id"] == instance]
-        if not managed:
-            return set() if host_type == "nanobot" else owned.difference(bindings)
         db.execute("BEGIN")
-        original = service.workspace.hosts.resolve(db, managed[0]["account_id"], instance_id=instance, existing=True)
-    allowed = owned.intersection({original["endpoint_id"]})
-    if host_type == "nanobot":
-        from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
-        from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks, telegram_conversation_ref
-        spec = load_nanobot_route_specs().get(original["route_ref"]) or {}
-        bot = str((spec.get("telegram") or {}).get("botId", ""))
-        if spec.get("instanceId") != instance or not bot.isdigit():
+        scopes = endpoint_instances(db, subject)
+        allowed = {key for key in endpoints if scopes.get(key) == scope}
+        if host_type != "nanobot" or not allowed:
             return allowed
-        links = TelegramPilotLinks(service)
-        for key in owned:
-            e = endpoints[key]
-            sender = e["external_subject"]
-            if e["client_type"] != "telegram" or str(e["account_id"]) != bot or not sender.isdigit():
-                continue
-            if (e["conversation_ref"] == telegram_conversation_ref(instance, subject, original["endpoint_id"], bot, sender)
-                    and links.verified(subject, instance, bot, sender)):
-                allowed.add(key)
-    return allowed
+        row = db.execute("""SELECT a.account_id FROM workspace_host_bindings b
+            JOIN workspace_accounts a USING(account_id) WHERE a.user_subject=? AND b.instance_id=?""",
+            (subject, instance)).fetchone()
+        if not row:
+            return set()
+        binding = service.workspace.hosts.resolve(db, row[0], instance_id=instance, existing=True)
+    from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
+    spec = load_nanobot_route_specs().get(binding["route_ref"]) or {}
+    web_id = binding["endpoint_id"]
+    if (spec.get("instanceId") != instance or
+            (spec.get("subjects") or {}).get(subject) != binding["credential_ref"]):
+        return allowed.intersection({web_id})
+    bot = str((spec.get("telegram") or {}).get("botId", ""))
+    return {key for key in allowed if key == web_id or
+            (endpoints[key]["client_type"] == "telegram" and str(endpoints[key]["account_id"]) == bot)}

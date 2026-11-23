@@ -63,3 +63,10 @@ BUSINESS_READS = frozenset({
     "yuque_public_books_list",
     "yuque_session_status",
 })
+
+# These central methods authenticate the subject directly and create no task,
+# business operation, or artifact. An ordinary lookup needs no coordinator.
+CONTEXT_FREE_READS = frozenset({
+    "oa_session_status", "smartlight_session_status", "taihua_session_status", "yuque_session_status",
+    "agentbridge_business_watch_get", "agentbridge_business_watch_list", "database_capabilities",
+})

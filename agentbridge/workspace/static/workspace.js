@@ -2,7 +2,7 @@ import { loadTelegramLinks } from "./workspace_telegram.mjs";
 import { historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages } from "./workspace_history.mjs";
 import { createHistoryAutoload, restoreHistoryAnchor } from "./workspace_history_autoload.mjs";
 import { createLifecycle, isCancellation } from "./workspace_lifecycle.mjs";
-import { createWorkspaceRequests } from "./workspace_request.mjs";
+import { createWorkspaceRequests, workspaceViewPath } from "./workspace_request.mjs";
 import { createResultView, formatTime, parseTimestampMilliseconds, textHash, historyMessageKey, endpointType } from "./workspace_results.mjs";
 import { createTaskCards } from "./workspace_cards.mjs";
 import { createChatProgress } from "./workspace_progress.mjs";
@@ -97,7 +97,7 @@ const preparationHandoff = createPreparationHandoff({getScope:() => sessionScope
   openResult:async taskId => { if (await switchView('tasks') !== false) await loadTaskDetail(taskId); },
 });
 const { api, fetchChatStreamResponse } = createWorkspaceRequests({
-  document, getScope: () => sessionScope,
+  document, getScope: () => sessionScope, getViewInstance: () => state.hostChoices?.default_instance_id,
   addLiveProgress: (...args) => addLiveProgress(...args),
 });
 const { renderMarkdown, groupQueryCards, restoreHistoryCardState, resetHistoryGroups, renderTaskPlan, appendArtifactList } =
@@ -484,26 +484,36 @@ async function changeDefaultHost() {
   const select = $("#workspace-host");
   select.disabled = true;
   try {
-    const choices = await scopedApi(scope)("/api/hosts/default", {method:"POST", csrf:true,
+    await scopedApi(scope)("/api/hosts/default", {method:"POST", csrf:true,
       body:{instanceId:select.value, expectedRevision:state.hostChoices.revision}});
     scope.assertCurrent();
-    showHostChoices(choices);
-    const draft = $("#chat-form textarea[name='message']").value;
-    const attachments = [...state.composerAttachments];
-    const trial = state.composerSkillTrial;
-    const currentAccount = state.account;
-    await enterWorkspace(currentAccount);
-    if (state.account !== currentAccount) return;
-    if (trial) beginComposerTrial(trial);
-    state.composerAttachments = attachments;
-    renderComposerAttachments();
-    $("#chat-form textarea[name='message']").value = draft;
-    toast("默认宿主已保存，新消息将发往所选实例。");
+    if (await reloadHostWorkspace()) toast("默认宿主已保存，新消息将发往所选实例。");
   } catch (error) {
     if (!scope.current()) return;
+    if (error.code === "HOST_REVISION_CONFLICT") {
+      if (!await reloadHostWorkspace()) return;
+    } else {
+      showHostChoices(state.hostChoices);
+    }
     toast(friendlyError(error), true, "host-default");
-    await loadHostChoices(scope);
   }
+}
+
+async function reloadHostWorkspace({message, attachments, skillTrial} = {}) {
+  const input = $("#chat-form textarea[name='message']");
+  const draft = input.value || message || "";
+  const images = attachments ?? [...state.composerAttachments];
+  const trial = skillTrial ?? state.composerSkillTrial;
+  const account = state.account;
+  const reload = enterWorkspace(account);
+  const scope = sessionScope;
+  await reload;
+  if (!scope.current() || state.account !== account) return false;
+  if (trial) beginComposerTrial(trial);
+  state.composerAttachments = images;
+  renderComposerAttachments();
+  input.value = draft;
+  return true;
 }
 
 async function enterWorkspace(account) {
@@ -1155,10 +1165,9 @@ async function executeChatMessage(
   } catch (error) {
     if (isCancellation(error)) return;
     if (error.code === "HOST_REVISION_CONFLICT") {
-      await loadHostChoices(scope);
-      if (!scope.current()) return;
-      const input = form.querySelector("textarea[name='message']");
-      if (input && !input.value) input.value = message;
+      if (await reloadHostWorkspace({message, attachments, skillTrial}))
+        toast(friendlyError(error), true, "host-default");
+      return;
     }
     if (!error.rendered) {
       const text = friendlyError(error);
@@ -1809,7 +1818,7 @@ function openTimelineStream() {
   const query = state.currentLoaded || state.timelineCursor
     ? `?after=${encodeURIComponent(state.timelineCursor)}`
     : "";
-  const source = new EventSource(`/api/timeline/stream${query}`);
+  const source = new EventSource(workspaceViewPath(`/api/timeline/stream${query}`, state.hostChoices?.default_instance_id));
   scope.defer(() => source.close());
   source.addEventListener("cursor", (event) => {
     if (!scope.current() || state.eventSource !== source) return;

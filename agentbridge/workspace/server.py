@@ -287,6 +287,11 @@ def create_workspace_http_server(
                 return
             query = parse_qs(route.query)
             try:
+                if "view_instance" in query:
+                    values = query["view_instance"]
+                    if len(values) != 1 or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", values[0]):
+                        raise ValueError("工作台宿主标识无效。")
+                    account = {**account, "_workspace_view_instance": values[0]}
                 original_match = re.fullmatch(r'/api/database/logs/([a-z][a-z0-9_-]{0,63})/([0-9]{1,19})', route.path)
                 if route.path == "/api/skill-drafts":
                     authoring = application.service.skill_authoring
@@ -867,6 +872,9 @@ def create_workspace_http_server(
             if current is None or any(current.get(key) != original.get(key) for key in
                     ("account_id", "user_subject", "endpoint_id", "endpoint_key", "openclaw_session_key")):
                 return False
+            pinned = original.get("_workspace_view_instance")
+            if pinned:
+                return application.store.view_instance_id({**current, "_workspace_view_instance": pinned}) == pinned
             endpoint_id = current.get("endpoint_id")
             if endpoint_id:
                 try:

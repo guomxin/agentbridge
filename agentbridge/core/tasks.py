@@ -1,5 +1,6 @@
 from __future__ import annotations
 from agentbridge.core.store_transactions import store_transaction
+from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
 from agentbridge.core.commit_notifications import (
     track_transaction, mark_transaction_change, transaction_committed, transaction_closed,
 )
@@ -65,6 +66,27 @@ TIMELINE_TEXT_MAX_CHARACTERS = 50_000
 WORKSPACE_RESPONSE_MAX_CHARACTERS = 200_000
 
 
+def _workspace_task_scope(scope):
+    """Resolve in SQL before limiting, counting or projecting events for a Workspace view."""
+    if scope is None:
+        return "", []
+    instance, endpoints = scope
+    if not instance or not endpoints:
+        return " AND 0", []
+    # The origin is necessary even with a lease. It prevents a revoked Telegram
+    # pairing or a re-owned endpoint from regaining access via a historical lease.
+    return """ AND agent_tasks.origin_endpoint_id IN (SELECT value FROM json_each(?))
+        AND EXISTS (SELECT 1 FROM client_endpoints e WHERE e.endpoint_id=agent_tasks.origin_endpoint_id
+                    AND e.agent_host=agent_tasks.agent_host AND e.user_subject=agent_tasks.user_subject
+                    AND e.state='active')
+        AND NOT EXISTS (SELECT 1 FROM agent_task_coordinator_leases l WHERE l.task_id=agent_tasks.task_id
+            AND (l.user_subject<>agent_tasks.user_subject OR l.agent_host<>agent_tasks.agent_host
+                 OR (l.host_instance_id<>? AND (agent_tasks.agent_host<>'openclaw' OR ?<>'openclaw-default' OR
+                     EXISTS(SELECT 1 FROM workspace_host_instances h WHERE h.instance_id=l.host_instance_id)))))""", [
+        json.dumps(endpoints), instance, instance
+    ]
+
+
 class TaskNotFound(KeyError):
     pass
 
@@ -75,6 +97,29 @@ class TaskIntegrityError(RuntimeError):
 
 def _is_pull_based_endpoint(endpoint: sqlite3.Row | dict[str, Any]) -> bool:
     return str(endpoint["client_type"] or "").lower() in PULL_BASED_CLIENT_TYPES
+
+
+def _delivery_scope(ownership, endpoint):
+    destination = ownership.get(endpoint["endpoint_id"])
+    source_ids = [key for key, scope in ownership.items() if scope == destination]
+    if endpoint["agent_host"] == "nanobot":
+        # The pilot consumes only the terminal status of its own private run.
+        return """d.payload_type='task_event' AND EXISTS (
+            SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
+              AND t.agent_host='nanobot' AND t.origin_endpoint_id=d.endpoint_id) AND ?""", (bool(destination),)
+    marks = ",".join("?" for _ in source_ids) or "NULL"
+    # Digest-only rows carry an explicit destination binding and have no public
+    # timeline entry. The digest sender separately revalidates that binding.
+    predicate = f"""
+        (d.payload_type='task_event' AND EXISTS (
+            SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
+              AND t.agent_host=? AND t.origin_endpoint_id IN ({marks})))
+        OR (d.payload_type='timeline_message' AND json_extract(d.payload_json,'$.source.endpointId') IN ({marks})
+            AND (EXISTS (SELECT 1 FROM user_timeline u WHERE u.entry_id=d.event_id AND u.user_subject=d.user_subject
+                AND u.source_endpoint_id=json_extract(d.payload_json,'$.source.endpointId'))
+                OR json_type(d.payload_json,'$.targetEndpointBinding')='text'))
+    """
+    return predicate, (endpoint["agent_host"], *source_ids, *source_ids)
 
 
 class TaskHubStore:
@@ -2512,6 +2557,54 @@ class TaskHubStore:
             ).fetchone()
         return _artifact_from_row(refreshed, include_source_ref=True)
 
+    def finish_nanobot_read(self, *, user_subject, task_id, context, outcome):
+        """Close an untouched read task under the original run's still-active lease."""
+        with store_transaction(self) as db:
+            task = self._select_owned_task(db, task_id, user_subject)
+            run_id = context.get("hostRunId")
+            lease = db.execute("SELECT * FROM agent_task_coordinator_leases WHERE task_id=? AND user_subject=?",
+                               (task_id, user_subject)).fetchone()
+            origin = endpoint_instances(db, user_subject).get(task["origin_endpoint_id"])
+            if (not lease or not run_id or task["host_task_key"] != run_id
+                    or task["agent_host"] != "nanobot" or lease["agent_host"] != "nanobot"
+                    or origin != ("nanobot", context.get("hostInstanceId"))
+                    or lease["host_instance_id"] != context.get("hostInstanceId")
+                    or task["origin_endpoint_id"] != context.get("endpointId")
+                    or str(lease["version"]) != context.get("coordinatorLeaseVersion")
+                    or lease["state"] != "active" or lease["expires_at"] <= _utc_now()):
+                raise TaskIntegrityError("Original read run or lease no longer active")
+            if (task["status"] != "active" or task["current_operation_id"] or task["current_interaction_id"]
+                    or json.loads(task["summary_json"]) or not db.execute(
+                        "SELECT 1 FROM client_endpoints WHERE endpoint_id=? AND conversation_ref=?",
+                        (task["origin_endpoint_id"], task["active_conversation_ref"])).fetchone()):
+                return _task_from_row(task)
+            linked = db.execute("""SELECT EXISTS(SELECT 1 FROM task_operations WHERE task_id=:id)
+                OR EXISTS(SELECT 1 FROM task_interactions WHERE task_id=:id)
+                OR EXISTS(SELECT 1 FROM task_plans WHERE parent_task_id=:id)
+                OR EXISTS(SELECT 1 FROM task_batches WHERE parent_task_id=:id)
+                OR EXISTS(SELECT 1 FROM business_drafts WHERE task_id=:id)
+                OR EXISTS(SELECT 1 FROM task_events WHERE task_id=:id AND event_type NOT IN ('task.created','task.artifact.ready'))""",
+                                {"id":task_id}).fetchone()[0]
+            if linked:
+                return _task_from_row(task)
+            skill = db.execute("""SELECT b.user_subject,b.revoked,b.profile,v.payload_json FROM skill_task_bindings s
+                LEFT JOIN skill_bindings b USING(binding_id) LEFT JOIN skill_versions v
+                ON v.skill_id=b.skill_id AND v.version=b.version WHERE s.task_id=?""", (task_id,)).fetchone()
+            if skill:
+                if skill["user_subject"] != user_subject or skill["revoked"] or not skill["payload_json"]:
+                    return _task_from_row(task)
+                from agentbridge.core.skill_execution import effective_skill_execution
+                snapshot = {"snapshot":json.loads(skill["payload_json"]), "profile":skill["profile"]}
+                if effective_skill_execution(snapshot)["effects"] != ["read"]:
+                    return _task_from_row(task)
+            if outcome == "failed":
+                return self.fail_task(task_id=task_id, user_subject=user_subject, error_code="DATABASE_CAPABILITY_DENIED",
+                    message="中央已确认该账号没有本次查询权限。", causation_ref=run_id, connection=db)
+            if outcome != "succeeded":
+                raise ValueError("Unknown read receipt outcome")
+            return self.complete_task(task_id=task_id, user_subject=user_subject, reason="confirmed_read_receipt",
+                                      causation_ref=run_id, connection=db)
+
     def complete_task(
         self,
         *,
@@ -2762,6 +2855,7 @@ class TaskHubStore:
         *,
         user_subject: str,
         limit: int = 100,
+        task_scope=None,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 500)
         now = _utc_now()
@@ -2775,14 +2869,17 @@ class TaskHubStore:
                 """,
                 (now, user_subject, now),
             )
+            scope_sql, args = _workspace_task_scope(task_scope)
+            visible = (" AND EXISTS (SELECT 1 FROM agent_tasks WHERE agent_tasks.task_id=task_artifacts.task_id "
+                       "AND agent_tasks.user_subject=task_artifacts.user_subject" + scope_sql + ")") if task_scope is not None else ""
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM task_artifacts
-                WHERE user_subject = ?
+                WHERE user_subject = ?{visible}
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (user_subject, limit),
+                (user_subject, *args, limit),
             ).fetchall()
         return [_artifact_from_row(row) for row in rows]
 
@@ -2972,6 +3069,7 @@ class TaskHubStore:
         entry_type: str | None = None,
         limit: int = 200,
         chat_endpoints: list[str] | None = None,
+        task_scope=None,
     ) -> list[dict]:
         if after_sequence is not None and before_sequence is not None:
             raise ValueError("after_sequence and before_sequence are mutually exclusive")
@@ -2986,6 +3084,12 @@ class TaskHubStore:
         if chat_endpoints is not None:
             clauses.append("(entry_type <> 'chat_message' OR source_endpoint_id IN (SELECT value FROM json_each(?)))")
             parameters.append(json.dumps(chat_endpoints))
+        if task_scope is not None and entry_type != "chat_message":
+            task_filter, args = _workspace_task_scope(task_scope)
+            clauses.append("(entry_type <> 'task_event' OR EXISTS (SELECT 1 FROM agent_tasks "
+                           "WHERE agent_tasks.task_id=user_timeline.task_id AND agent_tasks.user_subject=user_timeline.user_subject"
+                           + task_filter + "))")
+            parameters.extend(args)
         if after_sequence is not None:
             clauses.append("sequence > ?")
             parameters.append(max(int(after_sequence), 0))
@@ -3011,6 +3115,7 @@ class TaskHubStore:
         limit: int = 32,
         message_max_sequence: int | None = None,
         chat_endpoints: list[str] | None = None,
+        task_scope=None,
     ) -> list[dict]:
         """Read one bounded creation-ordered page across messages and tasks.
 
@@ -3046,7 +3151,8 @@ class TaskHubStore:
         if chat_endpoints is not None:
             endpoint_bound = " AND source_endpoint_id IN (SELECT value FROM json_each(?))"
             parameters.append(json.dumps(chat_endpoints))
-        parameters.extend((limit, user_subject, *task_parameters, limit, limit))
+        task_filter, args = _workspace_task_scope(task_scope)
+        parameters.extend((limit, user_subject, *task_parameters, *args, limit, limit))
         with self._connect() as connection:
             connection.execute("BEGIN")
             rows = connection.execute(
@@ -3059,7 +3165,7 @@ class TaskHubStore:
                 ), tasks AS (
                     SELECT created_at, 'task' AS kind, task_id AS id
                     FROM agent_tasks
-                    WHERE user_subject = ?{task_bound}
+                    WHERE user_subject = ?{task_bound}{task_filter}
                     ORDER BY created_at DESC, task_id DESC LIMIT ?
                 ), combined AS (
                     SELECT * FROM messages UNION ALL SELECT * FROM tasks
@@ -3223,6 +3329,7 @@ class TaskHubStore:
         *,
         user_subject: str,
         endpoint_id: str | None = None,
+        task_scope=None,
         active_only: bool = False,
         terminal_only: bool = False,
         before_updated_at: str | None = None,
@@ -3239,6 +3346,9 @@ class TaskHubStore:
         limit = min(max(int(limit), 1), 500)
         query = "SELECT * FROM agent_tasks WHERE user_subject = ?"
         parameters: list[Any] = [user_subject]
+        scope_sql, args = _workspace_task_scope(task_scope)
+        query += scope_sql
+        parameters.extend(args)
         if endpoint_id:
             query += " AND origin_endpoint_id = ?"
             parameters.append(endpoint_id)
@@ -3307,14 +3417,22 @@ class TaskHubStore:
             rows = connection.execute(query, parameters).fetchall()
         return [_task_from_row(row) for row in rows]
 
+    def workspace_task_ids(self, *, user_subject: str, task_ids, task_scope) -> set[str]:
+        scope_sql, args = _workspace_task_scope(task_scope)
+        with self._connect() as db:
+            return {row[0] for row in db.execute("SELECT task_id FROM agent_tasks WHERE user_subject=? "
+                    "AND task_id IN (SELECT value FROM json_each(?))" + scope_sql,
+                    (user_subject, json.dumps(task_ids), *args))}
+
     def list_task_page(self, *, user_subject: str, **filters) -> dict:
         # Listing already performs orphan maintenance. Keep that maintenance,
         # the page and the unfiltered active badge on one consistent snapshot.
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = self.list_tasks(user_subject=user_subject, connection=connection, **filters)
+            scope_sql, args = _workspace_task_scope(filters.get("task_scope"))
             active_count = connection.execute("SELECT count(*) FROM agent_tasks WHERE user_subject = ? "
-                "AND status IN ('active', 'waiting_user', 'running')", (user_subject,)).fetchone()[0]
+                "AND status IN ('active', 'waiting_user', 'running')" + scope_sql, (user_subject, *args)).fetchone()[0]
         return {"items": rows, "activeCount": active_count}
 
     def continuation_candidates(
@@ -4208,12 +4326,18 @@ class TaskHubStore:
         *,
         user_subject: str,
         after_event_id: str | None = None,
+        task_scope=None,
         limit: int = 100,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 500)
         with self._connect() as connection:
             parameters: list[Any] = [user_subject]
             query = "SELECT * FROM task_events WHERE user_subject = ?"
+            if task_scope is not None:
+                task_filter, args = _workspace_task_scope(task_scope)
+                query += (" AND EXISTS (SELECT 1 FROM agent_tasks WHERE agent_tasks.task_id=task_events.task_id "
+                          "AND agent_tasks.user_subject=task_events.user_subject" + task_filter + ")")
+                parameters.extend(args)
             if after_event_id:
                 if after_event_id.startswith("time:"):
                     cursor_time = after_event_id.removeprefix("time:")
@@ -4257,22 +4381,25 @@ class TaskHubStore:
             rows = connection.execute(query, parameters).fetchall()
         return [_event_from_row(row) for row in rows]
 
-    def latest_user_event_id(self, *, user_subject: str) -> str | None:
+    def latest_user_event_id(self, *, user_subject: str, task_scope=None) -> str | None:
+        task_filter, args = _workspace_task_scope(task_scope)
+        visible = (" AND EXISTS (SELECT 1 FROM agent_tasks WHERE agent_tasks.task_id=task_events.task_id "
+                   "AND agent_tasks.user_subject=task_events.user_subject" + task_filter + ")") if task_scope is not None else ""
         with self._connect() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT event_id FROM task_events
-                WHERE user_subject = ?
+                WHERE user_subject = ?{visible}
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
-                (user_subject,),
+                (user_subject, *args),
             ).fetchone()
         return str(row["event_id"]) if row is not None else None
 
-    def current_user_event_cursor(self, *, user_subject: str) -> str:
+    def current_user_event_cursor(self, *, user_subject: str, task_scope=None) -> str:
         return (
-            self.latest_user_event_id(user_subject=user_subject)
+            self.latest_user_event_id(user_subject=user_subject, task_scope=task_scope)
             or f"time:{_utc_now()}"
         )
 
@@ -4329,6 +4456,7 @@ class TaskHubStore:
         endpoint_id: str,
         limit: int = 10,
         lease_seconds: int = 30,
+        host_instance_id: str | None = None,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 100)
         lease_seconds = min(max(int(lease_seconds), 5), 300)
@@ -4341,6 +4469,9 @@ class TaskHubStore:
                 or endpoint["state"] != "active"
             ):
                 raise TaskNotFound("client endpoint not found")
+            if host_instance_id and endpoint_instances(connection, user_subject).get(endpoint_id) != instance_key(
+                    endpoint["agent_host"], host_instance_id):
+                raise TaskNotFound("client endpoint does not belong to this host instance")
             candidate = connection.execute(
                 """
                 SELECT 1 FROM notification_outbox
@@ -4373,6 +4504,16 @@ class TaskHubStore:
                 or endpoint["state"] != "active"
             ):
                 raise TaskNotFound("client endpoint not found")
+            ownership = endpoint_instances(connection, user_subject)
+            destination = ownership.get(endpoint_id)
+            if host_instance_id and destination != instance_key(endpoint["agent_host"], host_instance_id):
+                raise TaskNotFound("client endpoint does not belong to this host instance")
+            predicate, parameters = _delivery_scope(ownership, endpoint)
+            connection.execute(f"""
+                UPDATE notification_outbox AS d SET state='failed', updated_at=?
+                WHERE d.user_subject=? AND d.endpoint_id=? AND d.state IN ('pending','deferred','delivering')
+                    AND NOT (({predicate}) IS TRUE)
+                """, (now, user_subject, endpoint_id, *parameters))
             connection.execute(
                 """
                 UPDATE notification_outbox
@@ -4426,6 +4567,19 @@ class TaskHubStore:
                         ).fetchone()
                     )
         return [_outbox_from_row(row) for row in claimed]
+
+    def notification_route_allowed(self, *, user_subject, endpoint_id, delivery_id, host_instance_id=None):
+        with self._connect() as db:
+            db.execute("BEGIN")
+            endpoint = self._select_endpoint(db, endpoint_id)
+            ownership = endpoint_instances(db, user_subject)
+            if (endpoint["state"] != "active" or endpoint["user_subject"] != user_subject or
+                    (host_instance_id and ownership.get(endpoint_id) != instance_key(endpoint["agent_host"], host_instance_id))):
+                return False
+            predicate, parameters = _delivery_scope(ownership, endpoint)
+            return db.execute(f"""SELECT 1 FROM notification_outbox d
+                WHERE delivery_id=? AND user_subject=? AND endpoint_id=? AND ({predicate})""",
+                (delivery_id, user_subject, endpoint_id, *parameters)).fetchone() is not None
 
     def acknowledge_outbox(
         self,
@@ -4659,16 +4813,20 @@ class TaskHubStore:
     ) -> None:
         endpoints = connection.execute(
             """
-            SELECT e.endpoint_id, e.client_type, e.capabilities_json
+            SELECT e.endpoint_id, e.client_type, e.capabilities_json, t.origin_endpoint_id
             FROM client_endpoints e JOIN agent_tasks t ON t.user_subject = e.user_subject
             WHERE t.task_id = ? AND t.user_subject = ? AND e.state = 'active'
-              AND t.agent_host <> 'nanobot' AND e.agent_host <> 'nanobot'
+              AND t.agent_host = e.agent_host AND t.agent_host <> 'nanobot'
             """,
             # A parallel NanoBot instance has independent endpoints. Only its
             # original push endpoint or an explicit subscription is authorized.
             (task_id, user_subject),
         ).fetchall()
+        ownership = endpoint_instances(connection, user_subject) if endpoints else {}
         for endpoint in endpoints:
+            scope = ownership.get(endpoint["origin_endpoint_id"])
+            if scope is None or ownership.get(endpoint["endpoint_id"]) != scope:
+                continue
             if _is_pull_based_endpoint(endpoint):
                 continue
             capabilities = set(json.loads(endpoint["capabilities_json"]))
@@ -4787,7 +4945,17 @@ class TaskHubStore:
             """,
             (task_id, user_subject),
         ).fetchall()
+        ownership = endpoint_instances(connection, user_subject) if subscriptions else {}
+        task_source = connection.execute(
+            "SELECT origin_endpoint_id,agent_host FROM agent_tasks WHERE task_id=? AND user_subject=?",
+            (task_id, user_subject),
+        ).fetchone()
+        origin_scope = ownership.get(task_source[0]) if task_source else None
         for subscription in subscriptions:
+            if (not origin_scope or origin_scope[0] != task_source[1]
+                    or ownership.get(subscription["endpoint_id"]) != origin_scope
+                    or (origin_scope[0] == "nanobot" and subscription["endpoint_id"] != task_source[0])):
+                continue
             filters = json.loads(subscription["event_filters_json"])
             if "*" not in filters and event_type not in filters:
                 continue
@@ -4882,7 +5050,13 @@ class TaskHubStore:
                 },
             }
         )
+        ownership = endpoint_instances(connection, entry["user_subject"]) if endpoints else {}
+        origin_scope = ownership.get(source_endpoint_id)
+        if origin_scope is None or origin_scope[0] == "nanobot":
+            return
         for endpoint in endpoints:
+            if ownership.get(endpoint["endpoint_id"]) != origin_scope:
+                continue
             capabilities = set(json.loads(endpoint["capabilities_json"]))
             if endpoint["client_type"] in {"web", "webchat"}:
                 continue

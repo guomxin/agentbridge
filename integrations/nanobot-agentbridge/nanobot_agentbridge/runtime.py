@@ -17,7 +17,7 @@ from nanobot.config.schema import Config
 from .coordinated_tools import CoordinatorTool
 from .provider import CheckedProvider
 from .plans import PLAN,PlanTool
-from .business_reads import BUSINESS_READS
+from .business_reads import BUSINESS_READS, CONTEXT_FREE_READS
 
 
 READ_TOOLS = frozenset(
@@ -160,6 +160,8 @@ class CentralReadTool(Tool):
         return self.definition.inputSchema
 
     async def execute(self, **kwargs) -> str:
+        tracker = self.registry.read_task
+        receipt = None
         try:
             skill = self.registry.skill_run
             if (self.definition.name=="oa_workflow_pending_list" and self.deliver_private is not None
@@ -171,23 +173,25 @@ class CentralReadTool(Tool):
                     return ToolResult.error("无法确认办公系统会话归属。")
                 if observed.get("status") in {"expired","not_found","login_required"}:
                     login=await self.session.call_tool("oa_session_login",{})
-                    receipt=await project_result(login,self.binding,self.deliver_private,self.trusted_origins)
-                    if receipt!="凭证卡已由中央核验并续办。":
-                        return receipt
+                    login_outcome=await project_result(login,self.binding,self.deliver_private,self.trusted_origins)
+                    if login_outcome!="凭证卡已由中央核验并续办。":
+                        return login_outcome
                 self.registry.oa_checked=True
             if skill is not None and (skill.selection or self.definition.name == "agentbridge_skill_get"):
                 result = await skill.call(self.definition.name, kwargs)
-            elif self.registry.business_context and self.definition.name in BUSINESS_READS:
+            elif self.registry.business_context and self.definition.name in BUSINESS_READS - CONTEXT_FREE_READS:
                 meta = await self.registry.business_context()
                 result = await self.session.call_tool(self.definition.name, arguments=kwargs, meta=meta)
             else:
                 result=await self.session.call_tool(self.definition.name,arguments=kwargs)
+            receipt = result
             if self.definition.name == "database_execute" and kwargs.get("capability") == "database.report.download":
-                receipt = (result.structuredContent or {}).get("result") or {}
-                if result.isError or not receipt.get("artifact_id"):
+                file_receipt = (result.structuredContent or {}).get("result") or {}
+                if result.isError or not file_receipt.get("artifact_id"):
+                    receipt = None
                     return ToolResult.error("中央未确认原任务的文件交付。")
                 return json.dumps({"status": "succeeded", "file": {
-                    k: receipt[k] for k in ("filename", "byte_size", "download_expires_at") if k in receipt
+                    k: file_receipt[k] for k in ("filename", "byte_size", "download_expires_at") if k in file_receipt
                 }}, ensure_ascii=False)
             accessible = None
             if self.definition.name == "agentbridge_server_profile":
@@ -198,17 +202,22 @@ class CentralReadTool(Tool):
         except Exception:
             # The SDK records tool errors in model history. Transport details
             # and presenter exceptions can include private data.
+            receipt = None
             return ToolResult.error("无法确认此次查询的结果。请在原任务中核对。")
+        finally:
+            if tracker is not None:
+                tracker.observe_read(self.definition.name, receipt)
 
 
 class CentralTools(ToolRegistry):
     """NanoBot also attempts to register built-in file, shell and agent tools."""
 
-    def __init__(self, skill_run=None, business_context=None):
+    def __init__(self, skill_run=None, business_context=None, read_task=None):
         super().__init__()
         self.skill_run=skill_run
         self.oa_checked=False
         self.business_context = business_context
+        self.read_task = read_task
 
     def get_definitions(self):
         definitions=super().get_definitions()
@@ -263,7 +272,8 @@ async def run_readonly(
     if business_context is not None:
         candidates = candidates | BUSINESS_READS
     projected = candidates.intersection(allowed) | {"agentbridge_server_profile"}
-    tools = CentralTools(skill_run, business_context)
+    read_task = coordinator_tool[1] if coordinator_tool else None
+    tools = CentralTools(skill_run, business_context, read_task)
     governed = {}
     if coordinator_tool is not None:
         host_request, task_context = coordinator_tool
@@ -306,7 +316,11 @@ async def run_readonly(
                     await observe(event.type)
                 if event.type == "text.delta" and event.delta and not provider.failed:
                     await emit(event.delta)
-            return provider.result(await run.wait())
+            answer = provider.result(await run.wait())
+            if read_task is not None and (skill_run is None or not skill_run.selection
+                                          or (not skill_run.pending and skill_run.effects == {"read"})):
+                await read_task.finish_confirmed_read()
+            return answer
         finally:
             if not run.done:
                 await run.cancel()

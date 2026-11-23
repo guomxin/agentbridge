@@ -65,12 +65,20 @@ def checked_profile(path, environment, host_profile, units, remote_root):
         "tunnelPublicKey",
     }
     if (
-        set(spec) - {"telegram", "coordinatorPython", "requiredLevel"} != flags
+        set(spec) - {"telegram", "coordinatorPython", "requiredLevel", "displayNameChange"} != flags
         or spec["schema"] != "agentbridge.nanobot-mac-pilot.v1"
     ):
         raise ValueError("Unexpected NanoBot pilot configuration fields")
     if not ALIAS.fullmatch(spec["instanceId"]) or not ALIAS.fullmatch(spec["routeRef"]):
         raise ValueError("Invalid pilot identifiers")
+    migration = spec.get("displayNameChange")
+    if migration is not None:
+        if (not isinstance(migration, dict) or set(migration) != {"from", "expectedRevision", "fromRelease"}
+                or not all(isinstance(v, str) and 0 < len(v) <= 100 and v == v.strip() and v.isprintable()
+                           for v in (migration["from"], spec["displayName"]))
+                or migration["from"] == spec["displayName"] or type(migration["expectedRevision"]) is not int
+                or migration["expectedRevision"] < 1 or not re.fullmatch(r"[a-f0-9]{12}", migration["fromRelease"])):
+            raise ValueError("Invalid private host display-name transition")
     subjects = spec["subjects"]
     if (
         not isinstance(subjects, dict)
@@ -231,6 +239,8 @@ def metadata(spec):
             "tunnelPublicKey",
         )
     }
+    if "displayNameChange" in spec:
+        result["displayNameChange"] = spec["displayNameChange"]
     result["requiredLevel"] = spec.get("requiredLevel", "L2")
     if spec.get("telegram"):
         result["telegram"] = {k: spec["telegram"][k] for k in ("botId", "username")}
@@ -269,7 +279,7 @@ def remote(pub, spec, action, **extra):
         + (ROOT / "scripts/native/nanobot_remote.py").read_text()
     )
     runner = "import base64,sys;exec(compile(base64.b64decode(sys.stdin.readline()),'<reviewed-nanobot-release>','exec'))"
-    if action in ("bind", "probe", "rollback_scope", "recovery_check"):
+    if action in ("bind", "probe", "rollback_scope", "recovery_check", "name_check", "name_apply", "name_restore"):
         args = [
             "sudo",
             "-u",
@@ -317,6 +327,8 @@ def observability(pub, spec, *, offline):
         "subjects": len(spec["subjects"]),
         "adapterVersion": spec["adapterVersion"],
         "remote": None if offline else remote(pub, spec, "observe"),
+        **({"displayNameCheck": remote(pub, spec, "name_check")}
+           if not offline and "displayNameChange" in spec else {}),
     }
 
 
@@ -813,6 +825,8 @@ def _admit(pub, spec, mac, artifact):
             raise ValueError(
                 "The dedicated forwarding identity is no longer authorized"
             )
+        if "displayNameChange" in spec and not remote(pub, spec, "name_check")["matches"]:
+            raise ValueError("Current host display name differs from the confirmed release")
         return remote(pub, spec, "probe")
     if last.get("stage") in {"switching", "restoring"}:
         raise ValueError(
@@ -821,6 +835,17 @@ def _admit(pub, spec, mac, artifact):
     archive = archive_bridge(pub, spec, artifact)
     prior = remote(pub, spec, "observe")
     recovery = retry_proof(pub, spec, root, old, last, definitions, prior)
+    name_proof = None
+    if "displayNameChange" in spec:
+        checked = remote(pub, spec, "name_check")
+        if not checked["matches"]:
+            recorded_predecessor = (last.get("candidate") if last.get("stage") == "confirmed" else
+                                    last.get("previous") if last.get("stage") == "rolled_back" else None)
+            if (not old or old == archive or old.name != recorded_predecessor
+                    or old.name != spec["displayNameChange"]["fromRelease"] or not prior["scopePresent"]
+                    or recovery or not all(item[2] for item in definitions.values())):
+                raise ValueError("Host name change requires its reviewed running predecessor")
+            name_proof = {"revision": checked["revision"], "candidate": pub.release, "attempt": uuid.uuid4().hex}
     domain = f"gui/{os.getuid()}"
     record = {
         "candidate": pub.release,
@@ -833,6 +858,8 @@ def _admit(pub, spec, mac, artifact):
             for label, (path, _, loaded) in definitions.items()
         },
     }
+    if name_proof:
+        record["displayNameChange"] = name_proof
     if recovery:
         record["recovery"] = recovery
     if old == archive and all(v[2] for v in definitions.values()):
@@ -871,9 +898,13 @@ def _admit(pub, spec, mac, artifact):
                 raise RuntimeError("NanoBot supervisor did not retain the new job")
         outcome = wait_for_route(pub, spec)
         wait_for_running_jobs(definitions, spec)
+        if name_proof:
+            remote(pub, spec, "name_apply", nameProof=name_proof)
+        if "displayNameChange" in spec and not remote(pub, spec, "name_check")["matches"]:
+            raise ValueError("Published display name differs from the approved profile")
         record["stage"] = "confirmed"
         save(release_state, record)
-        return {**outcome, **identities}
+        return {**outcome, **identities, **({"displayNameVerified": True} if "displayNameChange" in spec else {})}
     except Exception:
         restore(pub, spec, mac, record)
         raise
@@ -964,6 +995,8 @@ def restore(pub, spec, mac, record=None):
         remote(pub, spec, "rollback_scope")
     elif old:
         wait_for_route(pub, spec)
+    if record.get("displayNameChange"):
+        remote(pub, spec, "name_restore", nameProof=record["displayNameChange"])
     record["stage"] = "rolled_back"
     save(state_file, record)
     return {"status": "nanobot_host_rolled_back", "previous": previous}

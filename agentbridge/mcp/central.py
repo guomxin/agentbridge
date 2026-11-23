@@ -6057,7 +6057,7 @@ def create_central_mcp_server(
         task_id: Annotated[str | None, Field(max_length=128)] = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(
+        host, _ = await _require_registered_host_call(
             ctx,
             service=service,
             identity=identity,
@@ -6081,6 +6081,7 @@ def create_central_mcp_server(
             account_id=account_id,
             label=label,
             route=route,
+            host_instance_id=host["hostInstanceId"],
             task_id=task_id,
         )
 
@@ -6209,6 +6210,13 @@ def create_central_mcp_server(
             task_id=task_id,
             require_coordinator_lease=True,
         )
+        if agent_host == "nanobot" and reason == "confirmed_read_receipt":
+            context = _request_runtime_context(ctx)
+            if not causation_ref or causation_ref != context.get("hostRunId"):
+                raise HostContractError("Read receipt must refer to its original host run")
+            task = await asyncio.to_thread(service.tasks.finish_nanobot_read,
+                user_subject=identity["user_subject"], task_id=task_id, context=context, outcome=outcome)
+            return {"status": "succeeded", "task": {"taskId": task_id, "status": task["status"]}}
         return await _run_host_control(
             "agentbridge_host_task_finish",
             service.finish_host_task,
@@ -6475,7 +6483,7 @@ def create_central_mcp_server(
         wait_seconds: Annotated[float, Field(ge=0, le=20)] = 0,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(
+        host, _ = await _require_registered_host_call(
             ctx,
             service=service,
             identity=identity,
@@ -6489,10 +6497,11 @@ def create_central_mcp_server(
             limit=limit,
             lease_seconds=lease_seconds,
             wait_seconds=wait_seconds,
+            host_instance_id=host["hostInstanceId"],
         )
 
-    @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Watch Delivery Before Sending',
-        description='Host-private fresh authorization of one claimed watch notification immediately before sending.',
+    @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Endpoint Delivery Before Sending',
+        description='Host-private fresh authorization of one claimed notification immediately before sending.',
         annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False),
         structured_output=True)
     async def agentbridge_host_notification_validate(ctx:Context,
@@ -6501,10 +6510,10 @@ def create_central_mcp_server(
         delivery_id:Annotated[str,Field(min_length=16,max_length=128)],
         attempt_count:Annotated[int,Field(ge=1,le=5)]) -> dict[str,Any]:
         identity=_request_identity(identity_store)
-        await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
+        host, _ = await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
         return await _run_host_control('agentbridge_host_notification_validate',service.validate_host_notification,
             user_subject=identity['user_subject'],agent_host=agent_host,endpoint_key=endpoint_key,
-            delivery_id=delivery_id,attempt_count=attempt_count)
+            delivery_id=delivery_id,attempt_count=attempt_count,host_instance_id=host["hostInstanceId"])
 
     @mcp.tool(
         name="agentbridge_host_notification_ack",
@@ -6532,7 +6541,7 @@ def create_central_mcp_server(
         attempt_count: Annotated[int | None, Field(ge=1, le=5)] = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(
+        host, _ = await _require_registered_host_call(
             ctx,
             service=service,
             identity=identity,
@@ -6549,6 +6558,7 @@ def create_central_mcp_server(
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
             attempt_count=attempt_count,
+            host_instance_id=host["hostInstanceId"],
         )
 
     @mcp.tool(

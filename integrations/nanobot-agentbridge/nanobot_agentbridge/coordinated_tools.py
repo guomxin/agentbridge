@@ -49,6 +49,7 @@ class CoordinatorTool(Tool):
         if not set(kwargs)<=set(self.schema["properties"]):
             return "业务参数不属于此受控工具。"
         try:
+            self.context.delegated = True
             meta = await self.context.get()
             request = self.request
             payload = {

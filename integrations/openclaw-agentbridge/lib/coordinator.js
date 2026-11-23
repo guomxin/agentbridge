@@ -1557,27 +1557,31 @@ export class InteractionCoordinator {
 
   async processEndpointNotification(identityRouter, binding, client, signal, endpoint, notification) {
       const watchNotification = notification?.deliveryMode === 'business_watch';
-      let staleWatch = false;
-      const validateWatch = async () => {
+      let staleDelivery = false;
+      const validateDelivery = async () => {
         const validation = await client.callTool('agentbridge_host_notification_validate', {
           agent_host:'openclaw', endpoint_key:binding.key, delivery_id:notification.deliveryId,
           attempt_count:notification.attemptCount,
         }, {signal,meta:hostContextMeta()});
         if (signal.aborted || validation?.stale === true) {
-          staleWatch = true;
+          staleDelivery = true;
           return null;
         }
         if (validation?.allowed !== true && validation?.allowed !== false) {
           throw new Error('Watch notification authorization is temporarily unavailable');
         }
-        if (validation.allowed && typeof validation.message !== 'string') {
+        if (watchNotification && validation.allowed && typeof validation.message !== 'string') {
           throw new Error('Watch notification content is unavailable');
         }
         return validation;
       };
+      const protectPayload = !watchNotification && notification.requiresRouteCheck === true
+        ? async payload => (await validateDelivery())?.allowed === true ? payload : null
+        : null;
+      if (protectPayload && !(await protectPayload(true))) return;
       if (watchNotification) {
-        const validation = await validateWatch();
-        if (staleWatch) return;
+        const validation = await validateDelivery();
+        if (staleDelivery) return;
         notification = {...notification,deliveryMode:validation.allowed ? 'status' : 'no_op',
           message:validation.allowed ? validation.message : null};
       }
@@ -1664,6 +1668,7 @@ export class InteractionCoordinator {
             sessionKey,
             notification.message,
             notification.attachments,
+            protectPayload,
           );
         } else if (
           ["status", "timeline_message", "plan_result"].includes(
@@ -1674,13 +1679,13 @@ export class InteractionCoordinator {
           delivered = watchNotification
             ? await this.sendRoutePayload(sessionKey, this.sessionRoutes.get(sessionKey),
                 {text:notification.message}, null, null, async () => {
-                  const current = await validateWatch();
+                  const current = await validateDelivery();
                   return current?.allowed === true ? {text:current.message} : null;
                 })
-            : await this.deliverTextDirect(sessionKey, notification.message);
+            : await this.deliverTextDirect(sessionKey, notification.message, protectPayload);
         }
       }
-      if (staleWatch) return;
+      if (staleDelivery) return;
       try {
         const deferUntilActivity =
           !delivered && recovered !== false &&
@@ -2561,7 +2566,7 @@ export class InteractionCoordinator {
     }
   }
 
-  async deliverTimelineMessageDirect(sessionKey, text, attachments) {
+  async deliverTimelineMessageDirect(sessionKey, text, attachments, protectPayload = null) {
     const route = this.sessionRoutes.get(sessionKey);
     if (!route) {
       this.api.logger.warn(
@@ -2574,7 +2579,7 @@ export class InteractionCoordinator {
       this.config.allowedCardOrigins,
     );
     if (files.length === 0) {
-      return this.deliverTextDirect(sessionKey, text);
+      return this.deliverTextDirect(sessionKey, text, protectPayload);
     }
 
     let adapter;
@@ -2588,7 +2593,7 @@ export class InteractionCoordinator {
       );
     }
     if (!adapter?.sendPayload) {
-      return this.deliverTimelineAttachmentLinks(sessionKey, text, files);
+      return this.deliverTimelineAttachmentLinks(sessionKey, text, files, protectPayload);
     }
 
     let materialized;
@@ -2603,7 +2608,7 @@ export class InteractionCoordinator {
       this.api.logger.warn(
         `AgentBridge timeline media materialization failed: ${safeErrorCode(error)}`,
       );
-      return this.deliverTimelineAttachmentLinks(sessionKey, text, files);
+      return this.deliverTimelineAttachmentLinks(sessionKey, text, files, protectPayload);
     }
 
     for (const [index, file] of materialized.entries()) {
@@ -2614,7 +2619,7 @@ export class InteractionCoordinator {
               ? text
               : `附加图片 ${index + 1}/${materialized.length}：${file.filename}`,
           mediaUrl: file.localMediaPath,
-        });
+        }, null, null, protectPayload);
         if (delivered) {
           continue;
         }
@@ -2623,7 +2628,7 @@ export class InteractionCoordinator {
           `AgentBridge timeline media upload failed: ${safeErrorCode(error)}`,
         );
       }
-      return this.deliverTimelineAttachmentLinks(sessionKey, text, files);
+      return this.deliverTimelineAttachmentLinks(sessionKey, text, files, protectPayload);
     }
     this.api.logger.info(
       `AgentBridge timeline media delivered directly (channel=${route.channel}, count=${materialized.length})`,
@@ -2631,7 +2636,7 @@ export class InteractionCoordinator {
     return true;
   }
 
-  async deliverTimelineAttachmentLinks(sessionKey, text, files) {
+  async deliverTimelineAttachmentLinks(sessionKey, text, files, protectPayload = null) {
     const fallback = [
       text,
       "附加图片：",
@@ -2641,7 +2646,7 @@ export class InteractionCoordinator {
       ),
     ].join("\n");
     try {
-      return await this.deliverTextDirect(sessionKey, fallback);
+      return await this.deliverTextDirect(sessionKey, fallback, protectPayload);
     } catch (error) {
       this.api.logger.warn(
         `AgentBridge timeline media fallback failed: ${safeErrorCode(error)}`,
@@ -2650,7 +2655,7 @@ export class InteractionCoordinator {
     }
   }
 
-  async deliverTextDirect(sessionKey, text) {
+  async deliverTextDirect(sessionKey, text, protectPayload = null) {
     const route = this.sessionRoutes.get(sessionKey);
     if (!route) {
       this.api.logger.warn(
@@ -2659,7 +2664,7 @@ export class InteractionCoordinator {
       return false;
     }
     try {
-      if (!(await this.sendRoutePayload(sessionKey, route, { text }))) {
+      if (!(await this.sendRoutePayload(sessionKey, route, { text }, null, null, protectPayload))) {
         return false;
       }
       return true;
