@@ -78,7 +78,7 @@
           <strong>Agent Workspace</strong>
         </div>
         <div class="topbar-actions">
-          <span id="gateway-state" class="gateway-state"><span class="status-dot"></span>OpenClaw</span>
+          <span id="gateway-state" class="gateway-state"><span class="status-dot"></span><span id="host-name">智能体</span></span>
           <span id="account-name" class="account-name"></span>
           <button id="logout-button" class="icon-command" type="button" title="退出登录" aria-label="退出登录">退出</button>
         </div>
@@ -99,6 +99,9 @@
               <p class="eyebrow">当前会话</p>
               <h2>与智能体协作</h2>
             </div>
+            <label class="workspace-host-setting">默认宿主
+              <select id="workspace-host" aria-label="默认宿主" title="选择处理新消息的宿主；已有任务由原宿主继续" disabled></select>
+            </label>
             <button id="refresh-chat" class="secondary" type="button" title="刷新对话">刷新</button>
           </header>
           <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
@@ -224,6 +227,7 @@
             </div>
             <button id="refresh-endpoints" class="secondary" type="button">刷新</button>
           </header>
+          <div id="telegram-links" aria-live="polite"></div>
           <div class="table-wrap">
             <table>
               <thead>

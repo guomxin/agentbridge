@@ -1801,6 +1801,39 @@ class CentralMcpTests(unittest.TestCase):
         self.assertEqual("L1", result["negotiation"]["acceptedLevel"])
         self.assertEqual("undeclared", result["negotiation"]["compatibilityStatus"])
 
+    def test_pilot_registration_tools_require_a_matching_host_in_both_profile_lists(self):
+        pilot_tools = {
+            "agentbridge_host_telegram_pair_present",
+            "agentbridge_host_telegram_endpoint",
+            "agentbridge_host_enrolled_workspace_binding",
+        }
+        profile = json.loads(
+            (Path(__file__).parents[1] / "schemas/agent-host/v1/test-vectors.json").read_text()
+        )["profiles"][0]["value"]
+        profile["implementation"] = {"name": "nanobot", "version": "0.3.0"}
+        context = {"version": "1", "agentHost": "nanobot", "hostVersion": "0.3.0",
+                   "hostInstanceId": profile["hostInstanceId"]}
+        with self._server() as (service, _store, token, client):
+            service.negotiate_host.return_value = {"implementation": profile["implementation"]}
+            for meta, registered, visible in (
+                ({}, False, False),
+                ({"io.agentbridge/host-profile": profile}, True, True),
+                ({"io.agentbridge/host-context": context}, True, True),
+                ({"io.agentbridge/host-context": context}, False, False),
+                ({"io.agentbridge/host-context": {**context, "agentHost": "reference-host"},
+                  "io.agentbridge/host-profile": profile}, False, False),
+            ):
+                with self.subTest(meta=list(meta), registered=registered, visible=visible):
+                    service.require_host_registration.side_effect = None if registered else PermissionError()
+                    reply = self._request(client, "tools/call", request_id=6103, token=token, params={
+                        "name": "agentbridge_server_profile", "arguments": {}, "_meta": meta,
+                    }).json()["result"]["structuredContent"]
+                    planes = reply["toolPlanes"]
+                    expected_tools = pilot_tools if visible else set()
+                    self.assertEqual(expected_tools, pilot_tools.intersection(planes["hostControl"]["toolNames"]))
+                    self.assertEqual(expected_tools, pilot_tools.intersection(planes["hostControl"]["levels"]["L1"]))
+                    self.assertTrue(pilot_tools.isdisjoint(planes["model"]["toolNames"]))
+
     def test_host_runtime_lease_and_snapshot_controls_use_registered_identity(self):
         host_meta = {
             "io.agentbridge/host-context": {

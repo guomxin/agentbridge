@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import json
 
 
-def credential_health(service, subject, *, now=None):
+def credential_health(service, subject, *, host_type="openclaw", instance_id=None, now=None):
     now = now or datetime.now(timezone.utc)
     with service.tasks._connect() as db:
         # Some standalone/test deployments do not enable MCP identities.
@@ -12,7 +12,8 @@ def credential_health(service, subject, *, now=None):
         rows = db.execute(
             "SELECT t.state,t.expires_at FROM agent_host_registrations r "
             "LEFT JOIN mcp_identity_tokens t ON t.token_id=r.token_id AND t.user_subject=r.user_subject "
-            "WHERE r.user_subject=? AND r.agent_host='openclaw'", (subject,)).fetchall()
+            "WHERE r.user_subject=? AND r.agent_host=? AND (? IS NULL OR r.host_instance_id=?)",
+            (subject, host_type, instance_id, instance_id)).fetchall()
     if not rows:
         return {"state": "unknown", "blocked": False}
     valid, invalid = [], 0

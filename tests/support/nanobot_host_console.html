@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NanoBot 双身份验收</title>
+  <style>
+    :root{font:16px/1.5 system-ui;color:#19242b;background:#f5f7f8}
+    main{max-width:58rem;margin:2rem auto;padding:0 1rem}h1{font-size:1.65rem}
+    fieldset,section{margin:1rem 0;padding:1rem;background:white;border:1px solid #bbc7cf;border-radius:5px}
+    button,select{font:inherit;padding:.42rem .7rem;margin:.2rem .25rem .2rem 0}
+    output{display:block;margin:.65rem 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+    .row{display:flex;align-items:center;flex-wrap:wrap;gap:.5rem}label{margin-right:.6rem}
+  </style>
+</head>
+<body><main>
+  <h1>NanoBot 双身份验收</h1>
+  <p>使用真实 SDK 和本机中央 MCP 查询合成待办，模型响应由隔离夹具生成。</p>
+  <fieldset><legend>测试身份</legend>
+    <button id="alice">切换为甲用户</button><button id="bob">切换为乙用户</button>
+    <output id="account">尚未选择</output>
+  </fieldset>
+  <fieldset><legend>查询与恢复</legend>
+    <div><label><input id="drop" type="checkbox">模拟受理回执丢失</label>
+    <label><input id="hold" type="checkbox">SDK 返回后暂停登记终态</label></div>
+    <div><button id="start">发起新查询</button><button id="retry">重试原请求</button>
+    <button id="observe">暂停观察</button><button id="restart">重启测试协调器</button></div>
+    <label>查看运行 <input id="lookup" size="39" autocomplete="off"></label><button id="find">查询运行</button>
+    <output id="notice" role="status">请选择测试身份。</output>
+  </fieldset>
+  <section><h2>公开响应</h2><pre id="answer" aria-live="polite"></pre></section>
+  <section><h2>运行记录</h2><pre id="evidence"></pre></section>
+</main>
+<script>
+const byId = id => document.getElementById(id);
+let account = '', observing = true, current = {}, generation = 0, timer, rendered = [];
+const display = message => { byId('notice').textContent = message; };
+const info = (id, text) => { byId(id).textContent = text; };
+const updateControls = () => {
+  for (const id of ['start','restart','find','hold','drop']) byId(id).disabled = !account;
+  byId('retry').disabled = !current.requestKey;
+  byId('observe').disabled = !current.runId;
+  info('observe', observing ? '暂停观察' : '恢复观察');
+};
+const save = () => { if(account) sessionStorage.setItem('fixture.run.'+account,JSON.stringify(current)); };
+async function api(path, method='GET', data) {
+  const response = await fetch(path,{method,cache:'no-store',...(data ? {headers:{'Content-Type':'application/json'},body:JSON.stringify(data)} : {})});
+  const value = await response.json();
+  if (!response.ok) throw new Error(response.status+' '+(value.error||'请求失败'));
+  return value;
+}
+function resetWatch() {
+  generation++; clearTimeout(timer); rendered=[];
+  info('answer',''); info('evidence','');
+}
+async function inspect() {
+  if (!observing || !current.runId) return;
+  const gen = generation, id = current.runId;
+  try {
+    const latest = await api('/run?id='+encodeURIComponent(id)+'&after='+(rendered.at(-1)?.sequence||0));
+    if (gen!==generation) return;
+    rendered.push(...latest.events);
+    info('answer',latest.answer ?? rendered.filter(item=>item.kind==='delta').map(item=>item.text).join(''));
+    info('evidence',JSON.stringify({run:latest.run_id,state:latest.state,sdkStarts:latest.sdkStarts,
+      subjectPendingOperations:latest.subjectPendingOperations,evidence:latest.sdkEvidence,events:rendered.map(event=>[event.sequence,event.kind])},null,2));
+    display('运行状态 '+latest.state);
+    if(latest.state==='accepted') timer=setTimeout(inspect,300);
+  } catch(error){ if(gen===generation) display(error.message); }
+}
+async function loadIdentity(id) {
+  resetWatch(); account=id; observing=true;
+  current=JSON.parse(sessionStorage.getItem('fixture.run.'+id)||'{}');
+  info('account',id==='a'?'甲用户（已授权待办查询）':'乙用户（无待办查询权限）');
+  byId('lookup').value=current.runId || ''; updateControls();
+  display(current.requestKey?'已载入该账号的原请求。':'可发起查询。');
+  await inspect();
+}
+async function login(id) {
+  await api('/login','POST',{account:id}); await loadIdentity(id);
+}
+async function send(fresh) {
+  resetWatch(); observing=true;
+  if(fresh) {
+    current={requestKey:crypto.randomUUID(),hold:byId('hold').checked}; save();
+    byId('lookup').value='';
+  }
+  updateControls();
+  try {
+    const run=await api('/run','POST',{requestKey:current.requestKey,hold:current.hold,dropReceipt:fresh&&byId('drop').checked});
+    current.runId=run.run_id; save(); byId('lookup').value=run.run_id; updateControls();
+    await inspect();
+  } catch(error){ display(error.message+'。可重试原请求。'); }
+}
+function on(id, fn){ byId(id).onclick=()=>Promise.resolve(fn()).catch(error=>display(error.message)); }
+on('alice',()=>login('a')); on('bob',()=>login('b')); on('start',()=>send(true)); on('retry',()=>send(false));
+on('observe',()=>{ observing=!observing; generation++;clearTimeout(timer);updateControls();
+  if(observing) return inspect(); display('已暂停观察，宿主继续处理。'); });
+on('restart',async()=>{ await api('/restart','POST',{});resetWatch();observing=true;updateControls();
+  display('已重启测试协调器。');await inspect(); });
+on('find',async()=>{ const id=byId('lookup').value.trim();resetWatch();
+  const run=await api('/run?id='+encodeURIComponent(id));current={runId:run.run_id};observing=true;
+  updateControls(); await inspect(); });
+updateControls();api('/me').then(value=>loadIdentity(value.account)).catch(()=>{});
+</script></body></html>

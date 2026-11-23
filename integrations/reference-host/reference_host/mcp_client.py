@@ -67,11 +67,13 @@ class AgentBridgeMcpClient:
         token_provider: Callable[[], str],
         ca_bundle: str | None = None,
         allow_insecure_tls: bool = False,
+        private_transport: bool = False,
         request_timeout_seconds: float = 150,
     ) -> None:
         self.mcp_url = _http_url(mcp_url)
         self.token_provider = token_provider
         self.ca_bundle = ca_bundle
+        self.private_transport = private_transport
         self.allow_insecure_tls = bool(allow_insecure_tls)
         self.request_timeout_seconds = max(
             5.0,
@@ -215,7 +217,8 @@ class AgentBridgeMcpClient:
                 timeout=timeout or httpx.Timeout(self.request_timeout_seconds),
                 auth=auth,
                 verify=verify,
-                follow_redirects=True,
+                follow_redirects=not self.private_transport,
+                trust_env=not self.private_transport,
             )
 
         return create_client

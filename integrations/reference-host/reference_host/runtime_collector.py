@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .host_profile import host_context_meta
 
 
 class ReferenceHostRuntimeCollector:
@@ -35,7 +34,7 @@ class ReferenceHostRuntimeCollector:
                 result = await self.task_driver.client(identity.label).call_tool(
                     "agentbridge_host_runtime_snapshot",
                     {"snapshot": self.task_driver.runtime_snapshot(identity.label)},
-                    meta=host_context_meta(instance_id=self.task_driver.instance_id),
+                    meta=self.task_driver.host_context(),
                     recovery_class="prepare",
                 )
                 payload = result.payload()

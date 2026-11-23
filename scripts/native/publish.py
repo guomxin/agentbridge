@@ -10,6 +10,7 @@ import sys
 import uuid
 from common import ROOT, external, private_file, read, run, save, sha, timestamp
 from validation import validate, test_run
+import nanobot_release
 
 
 def git(*args):
@@ -78,6 +79,7 @@ class Publisher:
                 or '..' in args.remote_root):
             raise ValueError('Invalid explicit deployment target')
         self.units = environment(args.profile, args.host, args.remote_root)
+        self.nanobot = nanobot_release.profile_for(self)
         self.policy = read(ROOT / 'deploy/release-policy.json')
         self.commit = git('rev-parse', 'HEAD')
         if not re.fullmatch(r'[0-9a-f]{40}', self.commit):
@@ -109,7 +111,10 @@ class Publisher:
         branch_ok = branch == 'main' or (branch == 'HEAD' and main == self.commit)
         current = None if offline else self.ssh("sed -n 's/^AGENTBRIDGE_RELEASE_ID=//p' " + shlex.quote(self.args.remote_root + '/config/release.env'))
         preflight = 'not_checked_offline' if offline else compatibility(current, self.release, self.policy, self.args.resume)
+        pilot = getattr(self, 'nanobot', None)
+        pilot_plan = nanobot_release.observability(self, pilot, offline=offline) if pilot else None
         return {'status': 'planned', 'commit': self.commit, 'branch': branch, 'remoteUrl': remote,
+                'nanoBotPilot': pilot_plan,
                 'trackedFilesClean': clean, 'releaseBranchAllowed': branch_ok,
                 'releasePreflight': preflight, 'currentRelease': current,
                 'unitHashes': {n: sha(v) for n, v in self.units.items()},
@@ -119,6 +124,7 @@ class Publisher:
                     'gateway-runtime', 'conditional-restart', 'pending-warmup', 'identity-isolation'],
                 'blockers': ([] if branch_ok else ['candidate must be integrated into main']) +
                             ([] if clean else ['commit tracked changes']) +
+                            (['NanoBot runtime level is not approved for this candidate'] if pilot_plan and not pilot_plan['compatibility']['approved'] else []) +
                             (['remote predecessor unverified'] if offline else [])}
 
     def deploy(self, artifact):
@@ -182,6 +188,14 @@ class Publisher:
             raise ValueError('Isolation requires two distinct identities and expected endpoints')
         if any(not re.fullmatch(r'[A-Za-z0-9_.@-]+=[A-Za-z0-9_.-]+', e) for e in self.args.expect_endpoint):
             raise ValueError('Invalid endpoint expectation')
+        if getattr(self.args,"rollback_nanobot",False):
+            if not self.nanobot or self.args.resume:
+                raise ValueError("Pilot rollback requires its reviewed configuration and cannot be resumed as a deployment")
+            candidate_artifact(require_receipt=True)
+            if self.plan()["blockers"] or nanobot_release.profile_for(self) != self.nanobot:
+                raise ValueError("Pilot rollback inputs changed during validation")
+            with nanobot_release.pilot_lock(self.nanobot):
+                return nanobot_release.restore(self,self.nanobot,host)
         before = lifecycle.fingerprint(host)
         artifact, validation_mode = candidate_artifact(require_receipt=self.args.reuse_validation or self.args.resume)
         test_run([sys.executable, '-m', 'unittest', 'tests.test_runtime_governance', 'tests.test_runtime_backup'])
@@ -195,6 +209,18 @@ class Publisher:
         if (reviewed_host.get('profileSha256') != host.get('profileSha256')
                 or lifecycle.fingerprint(reviewed_host) != before):
             raise ValueError('Host configuration changed during validation')
+        pilot = getattr(self, 'nanobot', None)
+        if pilot:
+            if nanobot_release.profile_for(self) != pilot:
+                raise ValueError('NanoBot pilot configuration changed during validation')
+            if not self.args.resume:
+                nanobot_release.verify_bot(pilot)
+                remote_state = nanobot_release.remote(self,pilot,'observe')
+                if remote_state['portOccupied'] and not remote_state['routeInstalled']:
+                    raise ValueError('Remote pilot listener has no matching reviewed route')
+                # The new central unit reads this file on startup. It contains references only.
+                nanobot_release.remote(self,pilot,'stage',
+                                       serviceSecret=private_file(pilot['serviceTokenFile']).read_text())
         self.deploy(artifact)
         if lifecycle.fingerprint(host) != before:
             raise ValueError('Host inputs changed during deployment')
@@ -211,6 +237,8 @@ class Publisher:
             lifecycle.manage(host, 'restart', 'gateway', self.args.authorization)
         warmup(host)
         result = acceptance(self, host, self.args.identity_label, self.args.expect_endpoint)
+        if pilot:
+            result['nanoBotPilot'] = nanobot_release.admission(self,pilot,host,artifact)
         # Push is the last step; no push on any failed acceptance or changed candidate.
         run([sys.executable, ROOT / 'scripts/agentbridge_artifact.py', 'verify', '--root', ROOT])
         if git('rev-parse', 'HEAD') != self.commit:

@@ -2,7 +2,7 @@ import { cancellationError } from "./workspace_lifecycle.mjs";
 import { markWorkspaceTiming } from "./workspace_performance.mjs";
 
 export function createChatStream({ state, getScope, fetchChatStreamResponse, adoptLiveMessage, addLiveProgress, ensureLiveMessage, handleChatProgress, handleChatDelta, attachDispatchCancel, agentFailureMessage, renderRunFailure }) {
-  async function consumeChatStream({ message, idempotencyKey, attachments = [], skillTrial, onAccepted, onCanceled }) {
+  async function consumeChatStream({ message, idempotencyKey, attachments = [], skillTrial, hostSelection, onAccepted, onCanceled }) {
     const scope = getScope().child();
     const { controller } = scope.controller();
     const activeStream = {
@@ -34,6 +34,7 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
         idempotencyKey,
         attachments,
         skillTrial: activeStream.requestSkillTrial,
+        hostSelection,
         activeStream,
       });
       scope.assertCurrent();

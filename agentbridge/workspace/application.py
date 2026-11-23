@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 from uuid import UUID, uuid4
+from urllib.parse import urlsplit
 
 from agentbridge.core.central_service import CentralCapabilityService
 from agentbridge.core.user_grants import UserGrantConflict
@@ -29,6 +30,7 @@ from agentbridge.core.timeline_attachments import (
 )
 from agentbridge.workspace.gateway import GatewayRequestError, OpenClawGatewayClient
 from agentbridge.workspace.stores import normalize_skill_trial
+from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID
 from agentbridge.workspace.performance import WorkspacePerformance
 
 
@@ -102,9 +104,11 @@ class WorkspaceApplication:
         *,
         service: CentralCapabilityService,
         gateway: OpenClawGatewayClient | None = None,
+        host_routes: dict | None = None,
     ) -> None:
         self.service = service
         self.store = service.workspace
+        self.host_routes = dict(host_routes or {})
         self.gateway = gateway
         self.performance = WorkspacePerformance(service.runtime_governance)
         self._dispatch_instance_id = f"workspace-{uuid4()}"
@@ -115,16 +119,28 @@ class WorkspaceApplication:
         self._preparation_queue: dict[str, tuple[dict, dict]] = {}
         self._readiness_lock = threading.Lock()
         self._readiness_cache: tuple[float, dict] | None = None
-        if gateway is not None:
+        if gateway is not None or self.host_routes:
             for account_id in self.store.recover_host_dispatches():
                 self._ensure_dispatch_worker(account_id)
 
+    @property
+    def hosts(self):
+        return self.store.hosts
+
     def start_workbench(self):
-        if self.gateway is not None:
-            self.service.skill_authoring.workbench.start(self._skill_completion, self._capture_skill_method)
+        if self.gateway is not None or self.host_routes:
+            self.service.skill_authoring.workbench.start(
+                self._skill_completion, self._capture_skill_method, bound_completion=self._bound_skill_completion)
 
     def _skill_completion(self, system: str, prompt: str) -> dict:
         return self._gateway().call('agentbridge.skills.complete', {'system': system, 'prompt': prompt}, timeout_seconds=100)
+
+    def _bound_skill_completion(self, owner, recorded, system, prompt):
+        from agentbridge.workspace.skill_model_route import checked_binding
+        binding = checked_binding(self.store, owner, recorded)
+        if binding is None or binding["instance_id"] == LEGACY_INSTANCE_ID:
+            return self._skill_completion(system, prompt)
+        return self._bound_client(binding).skill_completion(binding, system, prompt)
 
     def skill_authoring_catalog(self):
         from agentbridge.core.skill_catalog import authoring_catalog
@@ -141,7 +157,7 @@ class WorkspaceApplication:
                 self.service.skill_authoring.workbench.generate(account['user_subject'],
                     material=('用户：' + material + '\n助手：' + capture['assistant_text'])[:16000],
                     request_key='workspace:' + dispatch['dispatch_id'], automatic=True,
-                    scope='workspace:' + account['account_id'])
+                    scope='workspace:' + account['account_id'], source_dispatch=dispatch['dispatch_id'])
         except (PermissionError, ValueError, KeyError, UserGrantConflict):
             return  # Opt-out, unavailable material and quota cannot affect a completed task.
 
@@ -163,14 +179,24 @@ class WorkspaceApplication:
             username=username,
             password=password,
         )
-        registered = self.service.register_workspace_endpoint(
-            account_id=account["account_id"],
-        )
+        # Native-only assignments can activate with the OpenClaw runtime absent.
+        if any(item["instance_id"] == LEGACY_INSTANCE_ID
+               for item in self.hosts.choices(account["account_id"])["items"]):
+            account = self.service.register_workspace_endpoint(account_id=account["account_id"])["account"]
+        self._bind_enrolled_hosts(account)
         session = self.store.create_session(account["account_id"])
         return {
-            "account": _public_account(registered["account"]),
+            "account": _public_account(account),
             "session": session,
         }
+
+    def _bind_enrolled_hosts(self, account: dict) -> None:
+        if not self.host_routes:
+            return
+        from agentbridge.admin.stores import AdminAuditStore
+        from agentbridge.workspace.host_provision import WorkspaceHostProvision
+        WorkspaceHostProvision(self.service, AdminAuditStore(self.service.db_path),
+                               self.gateway).bind_enrolled_account(account)
 
     def login(self, *, username: str, password: str) -> dict | None:
         account = self.store.authenticate(
@@ -179,6 +205,12 @@ class WorkspaceApplication:
         )
         if account is None:
             return None
+        if self.host_routes:
+            try:
+                self._bind_enrolled_hosts(account)
+            except (PermissionError, ValueError):
+                # Existing accounts retain access when an administrator must repair a new instance.
+                _LOG.warning("Workspace enrollment binding needs administrator review")
         account = self.store.record_login(account["account_id"])
         session = self.store.create_session(account["account_id"])
         return {
@@ -217,6 +249,11 @@ class WorkspaceApplication:
     def logout(self, session_token: str | None) -> None:
         self.store.revoke_session(session_token)
 
+    def _public_tasks(self, account: dict, tasks: list[dict]) -> list[dict]:
+        origins = self.store.task_origin_names(account, [t["task_id"] for t in tasks]) if self.host_routes else {}
+        return [{**_public_task(t), **({"host_name": origins[t["task_id"]]} if t["task_id"] in origins else {})}
+                for t in tasks]
+
     def list_tasks(
         self,
         account: dict,
@@ -224,14 +261,8 @@ class WorkspaceApplication:
         active_only: bool = False,
         limit: int = 100,
     ) -> list[dict]:
-        return [
-            _public_task(task)
-            for task in self.service.tasks.list_tasks(
-                user_subject=account["user_subject"],
-                active_only=active_only,
-                limit=limit,
-            )
-        ]
+        tasks = self.service.tasks.list_tasks(user_subject=account["user_subject"], active_only=active_only, limit=limit)
+        return self._public_tasks(account, tasks)
 
     def task_detail(self, account: dict, task_id: str) -> dict:
         return self._task_projection(account, task_id, include_history=True)
@@ -324,7 +355,7 @@ class WorkspaceApplication:
             value = json.dumps([last["updated_at"], last["task_id"]]).encode()
             opaque = base64.urlsafe_b64encode(self.service.session_states.protector.protect(value, context=context)).decode()
             next_cursor = {"updatedAt": last["updated_at"], "taskId": last["task_id"], "cursor": opaque}
-        return {"items": [_public_task(row) for row in rows], "hasMore": has_more,
+        return {"items": self._public_tasks(account, rows), "hasMore": has_more,
                 "nextCursor": next_cursor, "timeZone": "Asia/Shanghai", "activeCount": page["activeCount"]}
 
     def task_history(self, account: dict, *, before_updated_at: str | None = None,
@@ -343,7 +374,7 @@ class WorkspaceApplication:
             before_updated_at=before_updated_at, before_task_id=before_task_id, limit=limit + 1)
         has_more = len(tasks) > limit
         items = tasks[:limit]
-        return {"items": [_public_task(task) for task in items], "hasMore": has_more,
+        return {"items": self._public_tasks(account, items), "hasMore": has_more,
                 "nextCursor": {"updatedAt": items[-1]["updated_at"], "taskId": items[-1]["task_id"]}
                 if has_more else None}
 
@@ -400,10 +431,11 @@ class WorkspaceApplication:
                 )
                 interaction = response["interaction"]
                 if interaction.get("state") in {"pending", "processing"}:
+                    binding = self.store.task_host(account, task_id)
                     response = self.service.present_interaction(
                         user_subject=account["user_subject"],
-                        agent_host="openclaw",
-                        endpoint_key=account["endpoint_key"],
+                        agent_host=binding["host_type"],
+                        endpoint_key=binding["endpoint_key"],
                         interaction_id=linked["interaction_id"],
                         continuous_flow=True,
                     )
@@ -415,7 +447,7 @@ class WorkspaceApplication:
                         "lastObservedAt": linked["last_observed_at"],
                     }
                 )
-            except (KeyError, RuntimeError):
+            except (KeyError, PermissionError, RuntimeError):
                 continue
         interaction = next(
             (
@@ -445,7 +477,7 @@ class WorkspaceApplication:
         history_query = history_presentation(self.service, account["user_subject"], task_id)
         grouping = history_grouping(self.service, account["user_subject"], task, history_query, plan=plan, batch=batch)
         return {
-            "task": _public_task(task),
+            "task": self._public_tasks(account, [task])[0],
             "oaHistoryQuery": history_query,
             **({"oaHistoryGrouping": grouping} if grouping is not None else {}),
             "actionableResults": self.actionable_results(account, task_id),
@@ -677,7 +709,7 @@ class WorkspaceApplication:
         rows = self.service.tasks.list_workspace_history(
             user_subject=account["user_subject"], before_created_at=before_created_at,
             before_kind=before_kind, before_id=before_id, limit=limit + 1,
-            message_max_sequence=message_max_sequence)
+            message_max_sequence=message_max_sequence, chat_endpoints=self.store.visible_chat_endpoints(account))
         has_more, selected = len(rows) > limit, rows[:limit]
         # Rows descend from newest to oldest. Avoid opening a normal history
         # page with a prior turn's answer/card but without its user message.
@@ -839,7 +871,7 @@ class WorkspaceApplication:
             response = self._queued_command(account, result)
             if message_key:
                 entry = self.service.tasks.get_timeline_message(user_subject=account["user_subject"], message_key=message_key)
-                endpoint = self.service.tasks.get_endpoint(account["endpoint_id"], user_subject=account["user_subject"])
+                endpoint = self.service.tasks.get_endpoint(entry["source_endpoint_id"], user_subject=account["user_subject"])
                 response["userMessage"] = _public_timeline_entry(entry, source=endpoint, is_origin=True)
             return response
 
@@ -856,8 +888,8 @@ class WorkspaceApplication:
             requested_at = queued_task["summary"]["command"]["requestedAt"]
             governance = self.service.runtime_governance
             trace, _ = governance.ensure_trace(user_subject=account["user_subject"], task_id=result["taskId"],
-                request_id=result["commandKey"], origin_endpoint_id=account["endpoint_id"],
-                host_type="openclaw", request_kind="interaction", lock_timeout=.02)
+                request_id=result["commandKey"], origin_endpoint_id=queued_task["origin_endpoint_id"],
+                host_type=queued_task["agent_host"], request_kind="interaction", lock_timeout=.02)
             governance.record_timing(trace_id=trace["trace_id"], stage="workspace.preparation.queued",
                 started_at=requested_at, finished_at=requested_at, duration_ms=0,
                 metadata={"clockSource": "central.wall", "measurementKind": "event", "requestId": result["commandKey"]},
@@ -866,7 +898,7 @@ class WorkspaceApplication:
             _LOG.debug("Workspace preparation timing unavailable: %s", type(exc).__name__)
         # The HTTP request records an intent. Only the original host obtains a
         # coordinator lease and prepares the fixed, source-bound business action.
-        if self.gateway is not None and queued_task["summary"]["command"]["state"] == "pending":
+        if (self.gateway is not None or self.host_routes) and queued_task["summary"]["command"]["state"] == "pending":
             with self._dispatch_workers_lock:
                 if result["taskId"] not in self._preparation_workers and len(self._preparation_queue) < 32:
                     self._preparation_queue[result["taskId"]] = (dict(account), dict(result))
@@ -883,11 +915,15 @@ class WorkspaceApplication:
 
     def _wake_preparation(self, account: dict, command: dict) -> None:
         try:
-            grant = self.store.issue_gateway_grant(account["account_id"])
-            self._gateway().call("agentbridge.task.wake", {
-                "sessionKey": grant["session_key"], "endpointKey": grant["endpoint_key"],
-                "grant": grant["grant"], "taskId": command["taskId"], "commandKey": command["commandKey"],
-            }, timeout_seconds=60)
+            host = self.store.task_host(account, command["taskId"])
+            if host["instance_id"] == LEGACY_INSTANCE_ID:
+                grant = self.store.issue_gateway_grant(account["account_id"])
+                self._gateway().call("agentbridge.task.wake", {
+                    "sessionKey": grant["session_key"], "endpointKey": grant["endpoint_key"],
+                    "grant": grant["grant"], "taskId": command["taskId"], "commandKey": command["commandKey"],
+                }, timeout_seconds=60)
+            else:
+                self._bound_client(host).prepare_command(host, command["taskId"], command["commandKey"])
             self._record_preparation_delivery(account, command, "accepted")
         except Exception as exc:
             code = exc.code if isinstance(exc, GatewayRequestError) else "unavailable"
@@ -951,7 +987,7 @@ class WorkspaceApplication:
             )
             items.append(
                 {
-                    "task": _public_task(task),
+                    "task": self._public_tasks(account, [task])[0],
                     "plan": None,
                     "events": [],
                     "artifacts": [
@@ -1050,6 +1086,20 @@ class WorkspaceApplication:
             except DatabaseRejected as exc:
                 raise WorkspaceArtifactError("DATABASE_REPORT_UNAVAILABLE", "原报告已过期或访问权限已变化，请重新查询导出。") from exc
             return self.task_detail(account, task_id)
+        task = self.service.tasks.get_task(task_id, user_subject=account["user_subject"])
+        if task["agent_host"] == "nanobot":
+            dispatch = self.store.dispatch_for_result(task, account)
+            if dispatch is not None:
+                binding = self.store.dispatch_binding(dispatch)
+                try:
+                    renewed = self._bound_client(binding).reissue_artifact(binding, dispatch, task_id, artifact_id)
+                except GatewayRequestError:
+                    renewed = "unavailable"
+                if renewed == "renewed":
+                    return self.task_detail(account, task_id)
+                if renewed != "owner_required":
+                    raise WorkspaceArtifactError("ARTIFACT_REISSUE_UNAVAILABLE", "原宿主暂未确认下载入口已更新，请刷新文件状态。")
+                # The live signed-in owner can independently request the retained file.
         result = self.service.reissue_document_download(
             user_subject=account["user_subject"],
             task_id=task_id,
@@ -1078,10 +1128,11 @@ class WorkspaceApplication:
             # A conversational continuation can choose a write path. Unknown
             # outcomes only expose the separate, closed read-only query action.
             raise ValueError("原提交结果仍待核对，请使用只读查询或到业务系统核对；不要重复提交。")
+        binding = self.store.task_host(account, task_id)
         response = self.service.resolve_host_task_continuation(
             user_subject=account["user_subject"],
-            agent_host="openclaw",
-            endpoint_key=account["endpoint_key"],
+            agent_host=binding["host_type"],
+            endpoint_key=binding["endpoint_key"],
             task_id=task_id,
             reuse_selected=False,
             allow_follow_up=False,
@@ -1136,7 +1187,8 @@ class WorkspaceApplication:
         limit: int = 200,
     ) -> list[dict]:
         entries = self.service.tasks.list_timeline(user_subject=account["user_subject"],
-            after_sequence=after_sequence, before_sequence=before_sequence, entry_type=entry_type, limit=limit)
+            after_sequence=after_sequence, before_sequence=before_sequence, entry_type=entry_type, limit=limit,
+            chat_endpoints=self.store.visible_chat_endpoints(account))
         return self._project_timeline_entries(account, entries)
 
     def _project_timeline_entries(self, account: dict, entries: list[dict]) -> list[dict]:
@@ -1148,6 +1200,7 @@ class WorkspaceApplication:
                 limit=100,
             )
         }
+        hosts = self.store.endpoint_host_names(account["account_id"])
         attachment_ids = [item.get("attachmentId") for entry in entries
             for item in _timeline_attachments(entry)]
         media = self.service.timeline_attachments.public_metadata(user_subject=account["user_subject"],
@@ -1159,8 +1212,13 @@ class WorkspaceApplication:
                     media.get(item.get("attachmentId"), {"type":"image", "attachmentId":item.get("attachmentId"),
                         "fileName":item.get("fileName", "附加图片"), "state":"unavailable", "mediaUrl":None})
                     for item in _timeline_attachments(entry)]}}
-            projected.append(_public_timeline_entry(entry, source=endpoints.get(entry.get("source_endpoint_id")),
-                is_origin=entry.get("source_endpoint_id") == account.get("endpoint_id")))
+            source = endpoints.get(entry.get("source_endpoint_id")) or {}
+            own_web = source.get("client_type") in {"web", "webchat"} and source.get("account_id") == account["account_id"]
+            public = _public_timeline_entry(entry, source=source,
+                is_origin=own_web or entry.get("source_endpoint_id") == account.get("endpoint_id"))
+            if entry.get("source_endpoint_id") in hosts:
+                public["source"]["host"] = hosts[entry["source_endpoint_id"]]
+            projected.append(public)
         return projected
 
     def timeline_cursor(self, account: dict) -> int:
@@ -1202,11 +1260,73 @@ class WorkspaceApplication:
             )
         ]
 
+    def telegram_hosts(self, account: dict) -> dict:
+        from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
+        if not self.host_routes:
+            return {}
+        allowed = {item["instance_id"]: item for item in self.hosts.choices(account["account_id"])["items"]
+                   if item["selectable"] and item["host_type"] == "nanobot"}
+        result = {}
+        for alias, spec in load_nanobot_route_specs().items():
+            item = allowed.get(spec.get("instanceId"))
+            public = spec.get("telegram")
+            if not item or alias not in self.host_routes or not isinstance(public, dict):
+                continue
+            username = public.get("username")
+            bot_id = str(public.get("botId", ""))
+            if isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) and re.fullmatch(r"[1-9][0-9]{1,19}", bot_id):
+                result[item["instance_id"]] = {"display_name": item["display_name"], "username": username, "bot_id": bot_id}
+        return result
+
+    def telegram_links(self, account: dict) -> list[dict]:
+        items = []
+        hosts = self.telegram_hosts(account)
+        if hosts:
+            from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
+            links = TelegramPilotLinks(self.service)
+            for instance_id, bot in hosts.items():
+                items.append({"instance_id": instance_id, "display_name": bot["display_name"], "username": bot["username"],
+                              **links.status(account["account_id"], instance_id, bot["bot_id"])})
+        return items
+
+    def telegram_link_action(self, account: dict, action: str, body: dict) -> dict:
+        from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
+        fields = {"instance_id", "challenge_id", "confirmation_code"} if action == "confirm" else {"instance_id"}
+        if set(body) != fields or not isinstance(body["instance_id"], str):
+            raise ValueError("Telegram 绑定请求字段无效。")
+        instance_id = body["instance_id"]
+        bot = self.telegram_hosts(account).get(instance_id)
+        if not bot:
+            raise PermissionError("该实例未开放 Telegram。")
+        links = TelegramPilotLinks(self.service)
+        identity = (account["account_id"], instance_id, bot["bot_id"])
+        if action == "confirm":
+            return links.confirm(*identity, body["challenge_id"], body["confirmation_code"])
+        if action == "begin":
+            return links.begin(*identity)
+        if action == "revoke":
+            return links.revoke(*identity)
+        raise ValueError("未知的 Telegram 绑定操作。")
+
     def credential_health(self, account: dict) -> dict:
         from agentbridge.workspace.credential_health import credential_health
-        return credential_health(self.service, account["user_subject"])
+        try:
+            host = self.store.current_host(account["account_id"])
+        except PermissionError:
+            return {"state": "unknown", "blocked": False}
+        return credential_health(self.service, account["user_subject"], host_type=host["host_type"],
+                                 instance_id=None if host["instance_id"] == LEGACY_INSTANCE_ID else host["instance_id"])
 
-    def gateway_status(self) -> dict:
+    def gateway_status(self, account: dict | None = None) -> dict:
+        if account is not None:
+            try:
+                binding = self.store.current_host(account["account_id"])
+            except PermissionError:
+                return {"available": False, "code": "HOST_SELECTION_UNAVAILABLE"}
+            if binding["instance_id"] != LEGACY_INSTANCE_ID:
+                client = self.host_routes.get(binding["route_ref"])
+                status = client.readiness() if client else {"available": False, "code": "HOST_NOT_CONFIGURED"}
+                return {**status, "instanceId": binding["instance_id"]}
         if self.gateway is None:
             return {
                 "available": False,
@@ -1232,6 +1352,13 @@ class WorkspaceApplication:
         }
 
     def chat_history(self, account: dict, *, limit: int = 100) -> dict:
+        try:
+            binding = self.store.current_host(account["account_id"])
+        except PermissionError:
+            # Local account-scoped history still works when its original host is suspended.
+            return {"messages": [], "sessionId": None, "source": "workspace_timeline"}
+        if binding["instance_id"] != LEGACY_INSTANCE_ID:
+            return {**self.store.host_chat_history(binding, limit=limit), "source": "workspace_timeline"}
         gateway = self._gateway()
         result = gateway.call(
             "chat.history",
@@ -1257,8 +1384,11 @@ class WorkspaceApplication:
         *,
         timeout_seconds: float = 25,
     ) -> Iterator[dict[str, Any]]:
+        binding = self.store.current_host(account["account_id"])
+        if binding["instance_id"] != LEGACY_INSTANCE_ID:
+            return iter(())
         return self._gateway().stream(
-            session_key=account["openclaw_session_key"],
+            session_key=binding["session_key"],
             timeout_seconds=timeout_seconds,
         )
 
@@ -1270,8 +1400,12 @@ class WorkspaceApplication:
         idempotency_key: str | None = None,
         attachments: list[dict] | None = None,
         skill_trial: dict | None = None,
+        instance_id: str | None = None,
+        expected_revision: int | None = None,
+        continuation_task_id: str | None = None,
     ) -> Iterator[dict[str, Any]]:
-        self._gateway()
+        if self.gateway is None and not self.host_routes:
+            self._gateway()
         message = str(message or "").strip()
         normalized_attachments = _validated_chat_attachments(attachments)
         skill_trial = normalize_skill_trial(skill_trial)
@@ -1291,6 +1425,7 @@ class WorkspaceApplication:
             tasks=self.service.tasks,
             attachment_store=self.service.timeline_attachments,
             media_base_url=self.service.trusted_card_base_url,
+            instance_id=instance_id, expected_revision=expected_revision, continuation_task_id=continuation_task_id,
             skill_trial=skill_trial,
             validate_skill_trial=lambda db, trial: self.service.skill_authoring.validate_workspace_trial(
                 db, account['user_subject'], trial),
@@ -1324,6 +1459,9 @@ class WorkspaceApplication:
             items.append(
                 {
                     "dispatchId": dispatch["dispatch_id"],
+                    "instanceId": dispatch["instance_id"],
+                    "hasPrivateCard": dispatch["has_private_card"] and dispatch["state"] == "accepted",
+                    "cardRevision": dispatch.get("card_revision"),
                     "state": dispatch["state"],
                     "runId": dispatch["accepted_run_id"],
                     "idempotencyKey": dispatch["idempotency_key"],
@@ -1338,6 +1476,24 @@ class WorkspaceApplication:
             )
         return items
 
+    def private_card_url(self, account: dict, dispatch_id: str, *, expected_revision: int | None = None) -> str:
+        dispatch = self.store.get_host_dispatch(dispatch_id, user_subject=account["user_subject"])
+        if (dispatch["account_id"] != account["account_id"] or not dispatch["accepted_run_id"]
+                or dispatch["state"] != "accepted" or dispatch["instance_id"] == LEGACY_INSTANCE_ID):
+            raise KeyError("该请求当前没有待办可信卡。")
+        binding = self.store.dispatch_binding(dispatch)
+        result = self._bound_client(binding).private_card(dispatch, binding, dispatch["accepted_run_id"])
+        if not result.get("available"):
+            raise KeyError("该请求当前没有待办可信卡。")
+        if expected_revision is not None and result.get("cardRevision") != expected_revision:
+            raise KeyError("可信卡已更新，请回到原任务打开当前卡。")
+        target = urlsplit(result["url"])
+        trusted = urlsplit(self.service.trusted_card_base_url or "")
+        if (target.scheme != "https" or target.hostname != trusted.hostname or (target.port or 443) != (trusted.port or 443)
+                or target.username or target.password or target.fragment):
+            raise PermissionError("可信卡签发地址与中央服务不符。")
+        return result["url"]
+
     def cancel_chat_dispatch(
         self,
         account: dict,
@@ -1348,7 +1504,7 @@ class WorkspaceApplication:
             user_subject=account["user_subject"],
         )
         self._append_workspace_failure(
-            account,
+            self._dispatch_account(dispatch),
             effective_key=dispatch["idempotency_key"],
             text="已取消等待，本次请求未进入业务系统。",
         )
@@ -1367,7 +1523,7 @@ class WorkspaceApplication:
             worker.join(timeout=2)
 
     def _ensure_dispatch_worker(self, account_id: str) -> None:
-        if self.gateway is None or self._dispatch_stop.is_set():
+        if (self.gateway is None and not self.host_routes) or self._dispatch_stop.is_set():
             return
         with self._dispatch_workers_lock:
             existing = self._dispatch_workers.get(account_id)
@@ -1410,13 +1566,33 @@ class WorkspaceApplication:
                 if self._dispatch_workers.get(account_id) is current:
                     self._dispatch_workers.pop(account_id, None)
 
+    def _dispatch_account(self, dispatch: dict) -> dict:
+        account = self.store.get_account(dispatch["account_id"])
+        return {**account, "endpoint_id": dispatch["origin_endpoint_id"]}
+
+    def _bound_client(self, binding: dict):
+        client = self.host_routes.get(binding["route_ref"])
+        if not client:
+            raise GatewayRequestError("HOST_NOT_CONFIGURED", "原宿主实例尚未配置连接。")
+        return client
+
+    def _run_evidence(self, dispatch: dict, run_ref: str) -> dict:
+        try:
+            binding = self.store.dispatch_binding(dispatch)
+        except PermissionError as exc:
+            raise GatewayRequestError("HOST_BINDING_UNAVAILABLE", "原实例的绑定已失效。") from exc
+        if binding["instance_id"] != LEGACY_INSTANCE_ID:
+            return self._bound_client(binding).dispatch_evidence(dispatch, binding, run_ref)
+        return self._gateway().run_history_evidence(session_key=dispatch["conversation_ref"],
+                                                    run_ref=run_ref, timeout_seconds=8)
+
     def _process_host_dispatch(self, dispatch: dict) -> None:
         self.performance.record(dispatch, "workspace.dispatch.claimed")
         if dispatch["state"] == "accepted":
             self._observe_accepted_dispatch(dispatch)
             return
         if self.store.host_dispatch_deadline_passed(dispatch):
-            account = self.store.get_account(dispatch["account_id"])
+            account = self._dispatch_account(dispatch)
             if dispatch.get("request_sent_at"):
                 self._finish_acceptance_unknown(dispatch, account)
             else:
@@ -1426,9 +1602,14 @@ class WorkspaceApplication:
             self._reconcile_host_acceptance(dispatch)
             return
 
-        account = self.store.get_account(dispatch["account_id"])
+        account = self._dispatch_account(dispatch)
         readiness_started = time.perf_counter()
-        ready = self._host_readiness()
+        try:
+            binding = self.store.dispatch_binding(dispatch)
+            ready = (self._host_readiness() if binding["instance_id"] == LEGACY_INSTANCE_ID
+                     else self._bound_client(binding).readiness())
+        except (PermissionError, GatewayRequestError):
+            ready = {"available": False, "recoverable": False, "code": "HOST_BINDING_UNAVAILABLE"}
         self.performance.record(dispatch, "workspace.gateway.readiness", started=readiness_started,
                                 status="succeeded" if ready["available"] else "failed")
         if not ready["available"]:
@@ -1469,22 +1650,26 @@ class WorkspaceApplication:
         run_id = ""
         source = None
         try:
-            grant = self.store.issue_gateway_grant(account["account_id"])
-            source = self._gateway().send_stream(
-                session_key=grant["session_key"],
-                endpoint_key=grant["endpoint_key"],
-                grant=grant["grant"],
-                binding_grant_provider=lambda: self.store.issue_gateway_grant(
-                    account["account_id"]
-                )["grant"],
-                message=message,
-                idempotency_key=dispatch["idempotency_key"],
-                attachments=attachments,
-                timeout_seconds=300,
-                retry_before_accept=False,
-                abort_accepted_on_close=False,
-                **({'require_trial_binding': True} if trial else {}),
-            )
+            binding = self.store.dispatch_binding(dispatch)
+            if binding["instance_id"] == LEGACY_INSTANCE_ID:
+                grant = self.store.issue_gateway_grant(account["account_id"])
+                source = self._gateway().send_stream(
+                    session_key=grant["session_key"],
+                    endpoint_key=grant["endpoint_key"],
+                    grant=grant["grant"],
+                    binding_grant_provider=lambda: self.store.issue_gateway_grant(
+                        account["account_id"]
+                    )["grant"],
+                    message=message,
+                    idempotency_key=dispatch["idempotency_key"],
+                    attachments=attachments,
+                    timeout_seconds=300,
+                    retry_before_accept=False,
+                    abort_accepted_on_close=False,
+                    **({'require_trial_binding': True} if trial else {}),
+                )
+            else:
+                source = self._bound_client(binding).send_dispatch(dispatch, binding, message, attachments, trial)
             for item in source:
                 item_type = item.get("type")
                 if item_type == "accepted":
@@ -1550,6 +1735,9 @@ class WorkspaceApplication:
                 return
             if not accepted:
                 self._reconcile_host_acceptance(dispatch)
+        except PermissionError:
+            self._fail_dispatch_before_accept(dispatch, account, code="HOST_BINDING_UNAVAILABLE",
+                                              text="原实例的授权或账号绑定已变更，请核对设置。")
         except GatewayRequestError as exc:
             _LOG.warning(
                 "Workspace durable Gateway failure dispatch_id=%s run_id=%s "
@@ -1643,7 +1831,7 @@ class WorkspaceApplication:
             delay_seconds=delay,
         )
         if updated["state"] == "expired":
-            account = self.store.get_account(updated["account_id"])
+            account = self._dispatch_account(updated)
             self._append_workspace_failure(
                 account,
                 effective_key=updated["idempotency_key"],
@@ -1653,13 +1841,9 @@ class WorkspaceApplication:
             )
 
     def _reconcile_host_acceptance(self, dispatch: dict) -> None:
-        account = self.store.get_account(dispatch["account_id"])
+        account = self._dispatch_account(dispatch)
         try:
-            evidence = self._gateway().run_history_evidence(
-                session_key=dispatch["conversation_ref"],
-                run_ref=dispatch["idempotency_key"],
-                timeout_seconds=8,
-            )
+            evidence = self._run_evidence(dispatch, dispatch["idempotency_key"])
         except AttributeError:
             self._finish_acceptance_unknown(dispatch, account)
             return
@@ -1751,15 +1935,13 @@ class WorkspaceApplication:
         self.performance.record(dispatch, "workspace.host.terminal", status="unknown", terminal=True)
 
     def _observe_accepted_dispatch(self, dispatch: dict) -> None:
-        account = self.store.get_account(dispatch["account_id"])
+        account = self._dispatch_account(dispatch)
         run_id = dispatch["accepted_run_id"] or dispatch["idempotency_key"]
         evidence = None
         if self._dispatch_stop.is_set():
             return
         try:
-            evidence = self._gateway().run_history_evidence(
-                session_key=dispatch["conversation_ref"], run_ref=run_id, timeout_seconds=8,
-            )
+            evidence = self._run_evidence(dispatch, run_id)
         except (AttributeError, GatewayRequestError):
             pass
         if evidence and evidence.get("final_text"):
@@ -1769,7 +1951,7 @@ class WorkspaceApplication:
                  "text": evidence["final_text"], "recovered": True},
             )
             return
-        if not self.store.host_dispatch_result_deadline_passed(dispatch):
+        if not (evidence and evidence.get("state") == "unknown") and not self.store.host_dispatch_result_deadline_passed(dispatch):
             self.store.defer_host_dispatch_result(
                 dispatch["dispatch_id"], claim_token=dispatch["claim_token"],
                 had_tool_activity=bool(evidence and evidence.get("had_tool_activity")),
@@ -1960,7 +2142,7 @@ class WorkspaceApplication:
                     current["dispatch_id"], claim_token=current["claim_token"],
                 )
                 return
-            account = self.store.get_account(current["account_id"])
+            account = self._dispatch_account(current)
             if current.get("request_sent_at"):
                 self._finish_acceptance_unknown(current, account)
                 return
@@ -2066,6 +2248,9 @@ class WorkspaceApplication:
         idempotency_key: str | None = None,
         attachments: list[dict] | None = None,
         skill_trial: dict | None = None,
+        instance_id: str | None = None,
+        expected_revision: int | None = None,
+        continuation_task_id: str | None = None,
     ) -> WorkspaceChatResult:
         run_id = ""
         status = "completed"
@@ -2075,6 +2260,7 @@ class WorkspaceApplication:
             idempotency_key=idempotency_key,
             attachments=attachments,
             skill_trial=skill_trial,
+            instance_id=instance_id, expected_revision=expected_revision, continuation_task_id=continuation_task_id,
         ):
             if item.get("type") != "accepted":
                 continue
@@ -2228,6 +2414,8 @@ def _validated_chat_attachments(values: list[dict] | None) -> list[dict]:
 def _workspace_gateway_failure_text(error: GatewayRequestError) -> str:
     code = str(error.code or "GATEWAY_REQUEST_FAILED")
     details = error.details if isinstance(error.details, dict) else {}
+    if code == "NANOBOT_CAPABILITY_UNAVAILABLE":
+        return "此宿主尚未开放该输入能力，请检查实例支持的附件或技能试用范围。"
     if code == "WORKSPACE_RUN_IN_PROGRESS":
         return "\u4e0a\u4e00\u6761\u7f51\u9875\u4efb\u52a1\u4ecd\u5728\u5904\u7406\uff0c\u672c\u6b21\u8bf7\u6c42\u6ca1\u6709\u6392\u961f\u3002"
     if code == "GATEWAY_RUN_TIMEOUT_ABORTED":

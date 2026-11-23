@@ -29,7 +29,9 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
       });
     }
     // A response timeout is uncertain: another send restores this same read.
-    const request = quickQueryRequest ||= {requestKey: crypto.randomUUID(), userMessage: message};
+    const choice = state.hostChoices;
+    const request = quickQueryRequest ||= {requestKey: crypto.randomUUID(), userMessage: message,
+      ...(choice ? {instanceId:choice.default_instance_id, expectedRevision:choice.revision} : {})};
     const textarea = form.elements.message;
     const controls = [textarea, ...Array.from(form.querySelectorAll?.('button[type="submit"]') || [])];
     const disabled = controls.map(control => Boolean(control.disabled));
@@ -41,6 +43,7 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
       if (textarea.value.trim() === request.userMessage) textarea.value = "";
       else toast("已恢复上次查询，当前修改的文字尚未发送。", false, "plain-oa-query-recovered");
     } catch (error) {
+      if (error.code === "HOST_REVISION_CONFLICT") quickQueryRequest = null;
       if (!isCancellation(error) && scope.current()) {
         toast(error.message || "查询暂未确认，重新发送可恢复本次查询。", true, "plain-oa-query");
       }
@@ -78,6 +81,10 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
     renderComposerTrial();
   }
   function beginComposerTrial(trial) {
+    if (state.hostCapabilities && !state.hostCapabilities.includes("skill_trial")) {
+      toast("当前宿主尚未开放技能试用。", true);
+      return;
+    }
     const scope = getScope();
     scope.assertCurrent();
     if (trialScope !== scope) {
@@ -128,6 +135,10 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
   }
 
   async function addComposerFiles(fileList) {
+    if (state.hostCapabilities && !state.hostCapabilities.includes("attachments")) {
+      toast("当前宿主尚未开放图片输入。", true);
+      return;
+    }
     if (state.composerSkillTrial) {
       toast("短试用仅支持合成文字，请取消试用后再添加图片。", true, "trial-text-only");
       return;
@@ -293,7 +304,8 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
       }, () => clearComposerTrial(trial));
       return;
     }
-    if (queryOaPending && !attachments.length && isCurrentOwnOaPendingQuery(message)) {
+    const useGatewayShortcut = !state.hostChoices || state.hostChoices.default_instance_id === "openclaw-default";
+    if (queryOaPending && (quickQueryRequest || useGatewayShortcut) && !attachments.length && isCurrentOwnOaPendingQuery(message)) {
       await sendPendingQuery(message, form);
       return;
     }

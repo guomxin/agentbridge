@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 from typing import Any, Mapping
 
@@ -27,6 +28,17 @@ HOST_CAPABILITY_NAMES = (
 )
 
 
+@dataclass(frozen=True)
+class CoordinatorImplementation:
+    """Identify the implementation that owns this coordinator and its task leases."""
+    name: str = HOST_TYPE
+    version: str = HOST_VERSION
+    endpoint_types: tuple[str, ...] = ("web_private",)
+
+
+DEFAULT_IMPLEMENTATION = CoordinatorImplementation()
+
+
 def host_instance_id() -> str:
     value = os.environ.get(
         "AGENTBRIDGE_REFERENCE_HOST_INSTANCE_ID",
@@ -37,13 +49,13 @@ def host_instance_id() -> str:
     return value
 
 
-def build_host_profile(*, instance_id: str | None = None) -> dict[str, Any]:
+def build_host_profile(*, instance_id: str | None = None, implementation: CoordinatorImplementation = DEFAULT_IMPLEMENTATION) -> dict[str, Any]:
     return {
         "schema": HOST_CONTRACT_SCHEMA,
         "hostInstanceId": instance_id or host_instance_id(),
         "implementation": {
-            "name": HOST_TYPE,
-            "version": HOST_VERSION,
+            "name": implementation.name,
+            "version": implementation.version,
         },
         "levels": ["L1", "L2", "L3"],
         "capabilities": {
@@ -61,25 +73,25 @@ def build_host_profile(*, instance_id: str | None = None) -> dict[str, Any]:
             "runtimeSignals": True,
             "boundedTransportRecovery": True,
         },
-        "endpointTypes": ["web_private"],
+        "endpointTypes": list(implementation.endpoint_types),
     }
 
 
-def host_context_meta(*, instance_id: str | None = None) -> dict[str, Any]:
+def host_context_meta(*, instance_id: str | None = None, implementation: CoordinatorImplementation = DEFAULT_IMPLEMENTATION) -> dict[str, Any]:
     return {
         HOST_CONTEXT_META_KEY: {
             "version": "1",
-            "agentHost": HOST_TYPE,
+            "agentHost": implementation.name,
             "hostInstanceId": instance_id or host_instance_id(),
-            "hostVersion": HOST_VERSION,
+            "hostVersion": implementation.version,
         }
     }
 
 
-def registration_meta(*, instance_id: str | None = None) -> dict[str, Any]:
+def registration_meta(*, instance_id: str | None = None, implementation: CoordinatorImplementation = DEFAULT_IMPLEMENTATION) -> dict[str, Any]:
     return {
-        **host_context_meta(instance_id=instance_id),
-        HOST_PROFILE_META_KEY: build_host_profile(instance_id=instance_id),
+        **host_context_meta(instance_id=instance_id, implementation=implementation),
+        HOST_PROFILE_META_KEY: build_host_profile(instance_id=instance_id, implementation=implementation),
     }
 
 
@@ -92,6 +104,7 @@ def task_call_meta(
     endpoint_id: str | None = None,
     conversation_ref: str | None = None,
     instance_id: str | None = None,
+    implementation: CoordinatorImplementation = DEFAULT_IMPLEMENTATION,
 ) -> dict[str, Any]:
     task_context = {
         "taskId": _text(task_id, "taskId", 128),
@@ -110,7 +123,7 @@ def task_call_meta(
             raise ValueError("coordinator lease version is invalid")
         task_context["coordinatorLeaseVersion"] = str(int(lease_version))
     return {
-        **host_context_meta(instance_id=instance_id),
+        **host_context_meta(instance_id=instance_id, implementation=implementation),
         TASK_CONTEXT_META_KEY: task_context,
     }
 

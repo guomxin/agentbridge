@@ -8,7 +8,8 @@ from uuid import uuid4
 
 from .artifact_driver import ArtifactDriver
 from .host_profile import (
-    HOST_TYPE,
+    DEFAULT_IMPLEMENTATION,
+    CoordinatorImplementation,
     PRIVATE_INTERACTION_META_KEY,
     host_context_meta,
     host_instance_id,
@@ -43,19 +44,24 @@ class ReferenceTaskDriver:
         state: ReferenceHostState,
         mcp_url: str,
         ca_bundle: str | None = None,
+        implementation: CoordinatorImplementation = DEFAULT_IMPLEMENTATION,
+        instance_id: str | None = None,
         allow_insecure_tls: bool = False,
+        private_transport: bool = False,
         poll_interval_seconds: float = 2.0,
         maximum_interaction_wait_seconds: float = 900.0,
     ) -> None:
         self.identities = identities
         self.state = state
-        self.instance_id = host_instance_id()
+        self.instance_id = instance_id or host_instance_id()
+        self.implementation = implementation
         self._clients = {
             identity.label: AgentBridgeMcpClient(
                 mcp_url=mcp_url,
                 token_provider=identity.token,
                 ca_bundle=ca_bundle,
                 allow_insecure_tls=allow_insecure_tls,
+                private_transport=private_transport,
             )
             for identity in identities.list()
         }
@@ -75,6 +81,9 @@ class ReferenceTaskDriver:
             maximum_wait_seconds=maximum_interaction_wait_seconds,
         )
         self.artifacts = ArtifactDriver(self)
+
+    def host_context(self) -> dict[str, Any]:
+        return host_context_meta(instance_id=self.instance_id, implementation=self.implementation)
 
     async def initialize(self) -> dict[str, Any]:
         ready = []
@@ -112,18 +121,22 @@ class ReferenceTaskDriver:
             profile_result = await client.call_tool(
                 "agentbridge_server_profile",
                 {},
-                meta=registration_meta(instance_id=self.instance_id),
+                meta=registration_meta(instance_id=self.instance_id, implementation=self.implementation),
                 recovery_class="read",
             )
             profile = profile_result.payload()
             require_accepted_level(profile.get("negotiation") or {}, "L3")
             identity_result = await client.call_tool(
                 "agentbridge_host_identity_profile",
-                {"agent_host": HOST_TYPE},
-                meta=host_context_meta(instance_id=self.instance_id),
+                {"agent_host": self.implementation.name},
+                meta=self.host_context(),
                 recovery_class="read",
             )
             identity_profile = identity_result.payload()
+            configured = self.identities.get(identity_label)
+            if (configured.expected_subject is not None and
+                (identity_profile.get("identity") or {}).get("userSubject") != configured.expected_subject):
+                raise PermissionError("Central credential does not belong to the configured subject")
             require_accepted_level(identity_profile.get("host") or {}, "L3")
             identity_profile["planning"] = profile.get("planning")
             listed_tools = await client.list_tools()
@@ -229,7 +242,7 @@ class ReferenceTaskDriver:
                 and "idempotency_key" not in normalized_arguments
             ):
                 normalized_arguments["idempotency_key"] = (
-                    f"reference-host:{local_task_id}"
+                    f"{self.implementation.name}:{local_task_id}"
                 )
         self._plans[local_task_id] = (tool_name, normalized_arguments)
         return local_task_id, normalized_arguments
@@ -248,26 +261,27 @@ class ReferenceTaskDriver:
             central = await self.client(task["identity_label"]).call_tool(
                 "agentbridge_host_task_ensure",
                 {
-                    "agent_host": HOST_TYPE,
+                    "agent_host": self.implementation.name,
                     "host_task_key": (
                         f"{identity.conversation_ref}|{local_task_id}"
                     ),
                     "endpoint_key": identity.endpoint_key,
                     "client_type": "web",
                     "external_subject": identity.external_subject,
+                    **({"account_id": identity.account_id} if identity.account_id else {}),
                     "conversation_ref": identity.conversation_ref,
                     "title": task["title"],
-                    "label": f"Reference Host - {identity.label}",
+                    "label": f"{self.implementation.name} - {identity.label}",
                     "route": {},
                     "capabilities": [
-                        "reference_host",
+                        self.implementation.name.replace("-","_"),
                         "trusted_interaction",
                         "task_timeline",
                         "artifact_delivery",
                     ],
                     "task_scope": "independent",
                 },
-                meta=host_context_meta(instance_id=self.instance_id),
+                meta=self.host_context(),
                 recovery_class="prepare",
             )
             payload = central.payload()
@@ -277,6 +291,8 @@ class ReferenceTaskDriver:
             task_id = str(central_task.get("taskId") or "").strip()
             endpoint_id = str(endpoint.get("endpointId") or "").strip()
             lease_version = int(lease.get("version") or 0)
+            if identity.expected_endpoint is not None and endpoint_id != identity.expected_endpoint:
+                raise PermissionError("Central task belongs to a different endpoint")
             if not task_id or not endpoint_id or lease_version < 1:
                 raise RuntimeError(
                     "AgentBridge did not return a complete host task binding"
@@ -343,6 +359,7 @@ class ReferenceTaskDriver:
             tool_name,
             dict(arguments),
             meta=task_call_meta(
+                implementation=self.implementation,
                 task_id=task["task_id"],
                 lease_version=lease_version,
                 host_run_id=host_run_id,
@@ -367,7 +384,7 @@ class ReferenceTaskDriver:
                 "takeover": False,
                 "expected_version": task.get("lease_version"),
             },
-            meta=host_context_meta(instance_id=self.instance_id),
+            meta=self.host_context(),
             recovery_class="unsafe",
         )
         lease = result.payload().get("coordinatorLease") or {}
@@ -406,7 +423,7 @@ class ReferenceTaskDriver:
                 local_task_id,
                 "agentbridge_host_task_observe",
                 {
-                    "agent_host": HOST_TYPE,
+                    "agent_host": self.implementation.name,
                     "task_id": task["task_id"],
                     "operation_ids": operation_ids,
                     "interaction_ids": interaction_ids,
@@ -504,13 +521,13 @@ class ReferenceTaskDriver:
         result = await self.client(task["identity_label"]).call_tool(
             "agentbridge_host_interaction_present",
             {
-                "agent_host": HOST_TYPE,
+                "agent_host": self.implementation.name,
                 "endpoint_key": self.identities.get(
                     task["identity_label"]
                 ).endpoint_key,
                 "interaction_id": interaction_id,
             },
-            meta=host_context_meta(instance_id=self.instance_id),
+            meta=self.host_context(),
             recovery_class="read",
         )
         interaction = result.payload().get("interaction") or {}
@@ -547,7 +564,7 @@ class ReferenceTaskDriver:
         result = await self.client(task["identity_label"]).call_tool(
             "agentbridge_interaction_get",
             {"interaction_id": interaction_id},
-            meta=host_context_meta(instance_id=self.instance_id),
+            meta=self.host_context(),
             recovery_class="read",
         )
         interaction = result.private_meta.get(PRIVATE_INTERACTION_META_KEY)
@@ -583,7 +600,7 @@ class ReferenceTaskDriver:
             "agentbridge_interaction_resume",
             {
                 "interaction_id": interaction_id,
-                "idempotency_key": f"reference-host:{interaction_id}",
+                "idempotency_key": f"{self.implementation.name}:{interaction_id}",
             },
             lease=lease,
             recovery_class="unsafe",
@@ -689,13 +706,13 @@ class ReferenceTaskDriver:
         result = await self.client(task["identity_label"]).call_tool(
             "agentbridge_host_task_snapshot",
             {
-                "agent_host": HOST_TYPE,
+                "agent_host": self.implementation.name,
                 "endpoint_key": identity.endpoint_key,
                 "task_id": task["task_id"],
                 "event_limit": 200,
                 "artifact_limit": 50,
             },
-            meta=host_context_meta(instance_id=self.instance_id),
+            meta=self.host_context(),
             recovery_class="read",
         )
         snapshot = result.payload()
@@ -734,7 +751,7 @@ class ReferenceTaskDriver:
             local_task_id,
             "agentbridge_host_task_finish",
             {
-                "agent_host": HOST_TYPE,
+                "agent_host": self.implementation.name,
                 "task_id": task["task_id"],
                 "outcome": outcome,
                 "reason": "reference_host_tool_completed",

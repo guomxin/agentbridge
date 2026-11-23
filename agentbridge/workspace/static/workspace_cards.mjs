@@ -494,7 +494,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       text(view.title, historyQuery.title); text(view.status, historyQuery.label); text(view.description, historyQuery.message);
     }
     const current = active[0] || result.interaction;
-    updateFacts(view.facts, [["系统", current?.display?.systemName], ["影响", current?.display?.effect],
+    updateFacts(view.facts, [["宿主", task.host_name], ["系统", current?.display?.systemName], ["影响", current?.display?.effect],
       ["办理阶段", recovered?.label || execution?.phase], ["最近核验", recovered?.observedAt ? formatTime(recovered.observedAt) : execution?.observedAt ? formatTime(execution.observedAt) : null],
       ["计划进度", result.plan ? taskPlanProgress(result.plan) : null]]);
     renderInteractions(view.active, result);
@@ -536,7 +536,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       const bar = element("span", `task-status-bar ${escapeClass(task.status)}`), copy = element("span");
       const title = element("span", "task-title"), meta = element("span", "task-meta");
       const status = element("span"), time = element("span");
-      text(title, displayTaskTitle(task.title)); text(status, statusLabel(task.status)); text(time, formatTime(task.updated_at));
+      text(title, displayTaskTitle(task.title)); text(status, statusLabel(task.status)); text(time, [task.host_name, formatTime(task.updated_at)].filter(Boolean).join(" · "));
       meta.append(status, time); copy.append(title, meta); button.append(bar, copy);
       taskListRows.set(task.task_id, {bar, status});
       const history = state.oaHistoryQueries?.get(task.task_id);
@@ -671,7 +671,7 @@ export function createTaskCards({ document, state = {}, $, renderChatTimeline, s
       text(view.title, historyQuery.title); text(view.status, historyQuery.label); text(view.outcomeNotice, historyQuery.message);
       view.queryAction.hidden = true;
     }
-    updateFacts(view.facts, [["来源", task.agent_host], ["创建时间", formatTime(task.created_at)],
+    updateFacts(view.facts, [["来源", task.host_name || task.agent_host], ["创建时间", formatTime(task.created_at)],
       ["更新时间", formatTime(task.updated_at)], ["业务助手", result.skill
         ? `${result.skill.name} · ${skillProfileLabel(result.skill.profile)} · ${result.skill.version}${result.skill.revoked ? "（已撤销）" : ""}` : "未关联 Skill"],
       ["任务编号", task.task_id], ["办理阶段", recovered?.label || execution?.phase], ["提交观察", recovered?.completed || recovered?.recoveryTaskId ? null : execution?.submission],

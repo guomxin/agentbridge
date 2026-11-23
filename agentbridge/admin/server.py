@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from agentbridge.admin.application import AdminControlPlane
+from agentbridge.workspace.host_instances import HostInstanceConflict
 from agentbridge.auth.server import validate_auth_server_config
 from agentbridge.core.mcp_identities import TokenEditConflict
 from agentbridge.core.user_grants import UserGrantConflict
@@ -170,6 +171,8 @@ def create_admin_http_server(
                     self._json(200, {"items": control_plane.list_admin_accounts()})
                 elif route.path == "/api/overview":
                     self._json(200, control_plane.overview())
+                elif route.path == "/api/workspace-hosts":
+                    self._json(200, control_plane.workspace_host_catalog(actor))
                 elif route.path == "/api/runtime":
                     self._json(200, control_plane.runtime())
                 elif route.path == "/api/governance":
@@ -346,6 +349,12 @@ def create_admin_http_server(
                         reason=_required_string(body, "reason"),
                     )
                     self._json(201, account)
+                    return
+                host_action = {"/api/workspace-hosts": "save", "/api/workspace-hosts/bind": "bind",
+                               "/api/workspace-hosts/probe": "probe"}.get(route.path)
+                if host_action:
+                    self._json(200, control_plane.configure_workspace_host(
+                        actor=actor, request_ip=self.client_address[0], body=body, action=host_action))
                     return
                 if route.path == "/api/database-sources":
                     self._json(200,control_plane.save_database_source(actor=actor,request_ip=self.client_address[0],body=body))
@@ -694,6 +703,8 @@ def create_admin_http_server(
         def _handle_error(self, exc: Exception) -> None:
             if isinstance(exc, TokenEditConflict):
                 status, code = 409, "TOKEN_EDIT_CONFLICT"
+            elif isinstance(exc, HostInstanceConflict):
+                status, code = 409, "HOST_INSTANCE_CONFLICT"
             elif isinstance(exc, UserGrantConflict):
                 status, code = 409, "USER_GRANT_CONFLICT"
             elif isinstance(exc, (DatabaseGrantConflict, SourceConflict)):

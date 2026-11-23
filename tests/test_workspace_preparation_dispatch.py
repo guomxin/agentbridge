@@ -3,6 +3,7 @@ import threading
 import unittest
 
 from agentbridge.workspace.application import WorkspaceApplication
+from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID
 
 
 class PreparationDispatchTests(unittest.TestCase):
@@ -29,7 +30,8 @@ class PreparationDispatchTests(unittest.TestCase):
                     raise RuntimeError("Synthetic lost wake response")
                 return {"status": "accepted"}
 
-        store = SimpleNamespace(recover_host_dispatches=lambda: [], issue_gateway_grant=lambda account: {
+        store = SimpleNamespace(recover_host_dispatches=lambda: [],
+            task_host=lambda account, task_id: {"instance_id": LEGACY_INSTANCE_ID}, issue_gateway_grant=lambda account: {
             "session_key": "synthetic-session", "endpoint_key": "synthetic-endpoint", "grant": "synthetic-grant"})
         service = SimpleNamespace(workspace=store, runtime_governance=None,
             skill_authoring=SimpleNamespace(workbench=SimpleNamespace(close=lambda: None)))

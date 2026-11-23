@@ -40,8 +40,31 @@ export function createChatProgress({ document, state, $, scrollChat, scheduleCha
     return previous;
   }
 
+  function showPrivateCard(live, dispatchId, revision) {
+    if (!/^[0-9a-f-]{36}$/.test(dispatchId)) return;
+    const card = document.createElement("a");
+    card.className = "secondary";
+    card.textContent = "打开可信卡";
+    card.href = "/api/chat/dispatches/" + encodeURIComponent(dispatchId) + "/private-card" +
+      (Number.isSafeInteger(revision) && revision > 0 ? "?revision=" + revision : "");
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    live.actions.replaceChildren(card);
+  }
+
   function handleChatProgress(payload) {
     if (!payload.runId) return;
+    if (payload.kind === "private_interaction") {
+      const live = ensureLiveMessage(payload.runId);
+      if (payload.status === "closed") {
+        live.actions.replaceChildren();
+        addLiveProgress(payload.runId, "正在核对办理结果", "active");
+      } else {
+        showPrivateCard(live, payload.dispatchId, payload.cardRevision);
+        addLiveProgress(payload.runId, "等待在可信页完成办理", "active");
+      }
+      return;
+    }
     if (payload.kind === "preamble" && payload.text) {
       const live = ensureLiveMessage(payload.runId);
       if (!live.progressDetails) {
@@ -150,6 +173,8 @@ export function createChatProgress({ document, state, $, scrollChat, scheduleCha
       );
       if (["queued", "waiting_host"].includes(dispatch.state)) {
         attachDispatchCancel(key, dispatch.dispatchId);
+      } else if (dispatch.hasPrivateCard) {
+        showPrivateCard(live, dispatch.dispatchId, dispatch.cardRevision);
       } else {
         live.actions.replaceChildren();
       }

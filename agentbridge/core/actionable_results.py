@@ -723,13 +723,24 @@ def _telegram_endpoint(connection, subject, endpoint_id):
     return endpoint
 
 
+def workspace_for_task(service, connection, account, task_id):
+    subject = account["user_subject"]
+    source = _owned_task(connection, subject, task_id)
+    if source["agent_host"] == "openclaw":
+        return dict(_account(connection, account))
+    host = service.workspace._task_host(connection, account["account_id"], subject, task_id)
+    return {"account_id": account["account_id"], "endpoint_id": host["endpoint_id"],
+            "endpoint_key": host["endpoint_key"], "openclaw_session_key": host["session_key"],
+            "agent_host": host["host_type"], "instance_id": host["instance_id"]}
+
+
 def queue_preparation(service, account, source_task_id, body):
     """Atomically persist an intent, task and Skill binding; perform no invoke."""
     _body(body)
     subject = account.get("user_subject")
     with store_transaction(service.tasks) as connection:
-        workspace = _account(connection, account)
-        return _queue_preparation(service, subject, source_task_id, body, dict(workspace), connection)
+        workspace = workspace_for_task(service, connection, account, source_task_id)
+        return _queue_preparation(service, subject, source_task_id, body, workspace, connection)
 
 
 def queue_endpoint_preparation(service, subject, endpoint_id, source_task_id, body, *, binding_hash, view_hash, source_hash):
@@ -756,6 +767,7 @@ def queue_endpoint_preparation(service, subject, endpoint_id, source_task_id, bo
 
 
 def _queue_preparation(service, subject, source_task_id, body, workspace, connection):
+    host_type = workspace.get("agent_host", "openclaw")
     request_identity = {"sourceTaskId": source_task_id, "operationId": body["operationId"], "targetKeys": body["targetKeys"]}
     scope = workspace.get("_request_scope") or workspace["account_id"]
     request_hash = _hash({("endpointId" if workspace.get("_telegram") else "accountId"): scope, "requestKey": body["requestKey"]})
@@ -771,7 +783,7 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
     # when each generated a different browser request key.
     host_key = f"{'telegram-prepare' if workspace.get('_telegram') else 'workspace-prepare'}:{scope}:{identity_hash}"
     existing = connection.execute(
-        "SELECT task_id FROM agent_tasks WHERE user_subject=? AND agent_host='openclaw' AND host_task_key=?", (subject, host_key),
+        "SELECT task_id FROM agent_tasks WHERE user_subject=? AND agent_host=? AND host_task_key=?", (subject, host_type, host_key),
     ).fetchone()
     if existing:
         row = _owned_task(connection, subject, existing[0])
@@ -788,9 +800,9 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
         return {"taskId": existing[0], "commandKey": command["commandKey"], "status": "existing"}
     pending_count = connection.execute(
         "SELECT COUNT(*) FROM agent_tasks WHERE user_subject=? AND origin_endpoint_id=? "
-        "AND agent_host='openclaw' AND status IN ('active','running','waiting_user') "
+        "AND agent_host=? AND status IN ('active','running','waiting_user') "
         "AND json_extract(summary_json,'$.command.kind')=? AND json_extract(summary_json,'$.command.state')='pending'",
-        (subject, workspace["endpoint_id"], COMMAND_KIND),
+        (subject, workspace["endpoint_id"], host_type, COMMAND_KIND),
     ).fetchone()[0]
     if pending_count >= 32:
         _fail("ACTION_PREPARATION_BUSY", "当前会话已有32个待准备请求，请稍候恢复本次准备。")
@@ -843,11 +855,14 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
     if workspace.get("_telegram"):
         command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"])
     command["intentHash"] = _hash(_intent(command))
-    task, _ = service.tasks.ensure_task(user_subject=subject, agent_host="openclaw", host_task_key=host_key,
+    task, _ = service.tasks.ensure_task(user_subject=subject, agent_host=host_type, host_task_key=host_key,
         origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],
         title=(f"核对并办理{len(selected)}项OA待办" if profile == "batch" else
                "核对并办理：" + str(selected[0]["display_summary"]["title"])[:450]),
         summary={"command": command}, connection=connection)
+    if workspace.get("instance_id"):
+        service.host_contract.acquire_coordinator_lease(task_id=task["task_id"], user_subject=subject,
+            host_instance_id=workspace["instance_id"], agent_host=host_type, connection=connection)
     service.skills.attach(subject, task["task_id"], binding_id, connection=connection)
     if workspace.get("_telegram"):
         subscription = connection.execute("SELECT subscription_id,event_filters_json FROM task_subscriptions "
@@ -971,31 +986,53 @@ def execute_preparation(service, subject, task_id, command_key, *, runtime_conte
             return response
 
 
-def pending_preparations(service, subject, limit=16):
+def pending_preparations(service, subject, limit=16, *, registration=None):
     """Bounded owned intents only; the host revalidates the exact Workspace."""
     limit = min(max(int(limit), 1), 64)
     with service.tasks._connect() as connection:
-        rows = connection.execute(
-            "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "
-            "JOIN workspace_accounts a ON a.endpoint_id=t.origin_endpoint_id AND a.user_subject=t.user_subject "
-            "AND a.openclaw_session_key=t.active_conversation_ref AND a.state='active' "
-            "JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject "
-            "AND e.conversation_ref=t.active_conversation_ref AND e.endpoint_key=a.endpoint_key "
-            "AND e.agent_host='openclaw' AND e.client_type IN ('web','webchat') AND e.state='active' "
-            "WHERE t.user_subject=? AND t.agent_host='openclaw' "
-            "AND t.status IN ('active','running','waiting_user') "
-            "AND json_extract(t.summary_json,'$.command.kind') IN (?,?) AND json_extract(t.summary_json,'$.command.state')='pending' "
-            "ORDER BY t.created_at,t.rowid LIMIT ?", (subject, COMMAND_KIND, "oa_pending_query", limit),
-        ).fetchall()
-        telegram_rows = connection.execute(
-            "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "
-            "JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject "
-            "AND e.conversation_ref=t.active_conversation_ref AND e.agent_host='openclaw' "
-            "AND e.client_type='telegram' AND e.state='active' WHERE t.user_subject=? AND t.agent_host='openclaw' "
-            "AND t.status IN ('active','running','waiting_user') "
-            "AND json_extract(t.summary_json,'$.command.kind') IN (?,?) AND json_extract(t.summary_json,'$.command.state')='pending' "
-            "AND json_extract(t.summary_json,'$.command.originKind')='telegram' ORDER BY t.created_at,t.rowid LIMIT ?",
-            (subject, COMMAND_KIND, "oa_pending_query", limit)).fetchall()
+        if registration and registration["agentHost"] != "openclaw":
+            rows = connection.execute(
+                """SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t
+                   JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject
+                       AND e.agent_host=t.agent_host AND e.conversation_ref=t.active_conversation_ref
+                       AND e.client_type='web' AND e.state='active'
+                   JOIN workspace_host_bindings b ON b.endpoint_id=e.endpoint_id AND b.session_key=e.conversation_ref
+                       AND b.endpoint_key=e.endpoint_key
+                   JOIN workspace_accounts a ON a.account_id=b.account_id AND a.user_subject=t.user_subject AND a.state='active'
+                   JOIN workspace_host_instances h ON h.instance_id=b.instance_id AND h.host_type=t.agent_host
+                       AND h.state IN ('enabled','draining')
+                   WHERE t.user_subject=? AND t.agent_host=? AND b.instance_id=?
+                       AND (h.all_subjects=1 OR EXISTS(SELECT 1 FROM workspace_host_visibility v
+                           WHERE v.instance_id=h.instance_id AND v.user_subject=t.user_subject))
+                       AND t.status IN ('active','running','waiting_user')
+                       AND json_extract(t.summary_json,'$.command.kind') IN (?,?)
+                       AND json_extract(t.summary_json,'$.command.state')='pending'
+                   ORDER BY t.created_at,t.rowid LIMIT ?""",
+                (subject, registration["agentHost"], registration["hostInstanceId"], COMMAND_KIND, "oa_pending_query", limit)
+            ).fetchall()
+            telegram_rows = []
+        else:
+            rows = connection.execute(
+                "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "
+                "JOIN workspace_accounts a ON a.endpoint_id=t.origin_endpoint_id AND a.user_subject=t.user_subject "
+                "AND a.openclaw_session_key=t.active_conversation_ref AND a.state='active' "
+                "JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject "
+                "AND e.conversation_ref=t.active_conversation_ref AND e.endpoint_key=a.endpoint_key "
+                "AND e.agent_host='openclaw' AND e.client_type IN ('web','webchat') AND e.state='active' "
+                "WHERE t.user_subject=? AND t.agent_host='openclaw' "
+                "AND t.status IN ('active','running','waiting_user') "
+                "AND json_extract(t.summary_json,'$.command.kind') IN (?,?) AND json_extract(t.summary_json,'$.command.state')='pending' "
+                "ORDER BY t.created_at,t.rowid LIMIT ?", (subject, COMMAND_KIND, "oa_pending_query", limit),
+            ).fetchall()
+            telegram_rows = connection.execute(
+                "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "
+                "JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject "
+                "AND e.conversation_ref=t.active_conversation_ref AND e.agent_host='openclaw' "
+                "AND e.client_type='telegram' AND e.state='active' WHERE t.user_subject=? AND t.agent_host='openclaw' "
+                "AND t.status IN ('active','running','waiting_user') "
+                "AND json_extract(t.summary_json,'$.command.kind') IN (?,?) AND json_extract(t.summary_json,'$.command.state')='pending' "
+                "AND json_extract(t.summary_json,'$.command.originKind')='telegram' ORDER BY t.created_at,t.rowid LIMIT ?",
+                (subject, COMMAND_KIND, "oa_pending_query", limit)).fetchall()
         rows = sorted([*rows, *telegram_rows], key=lambda row: (row["created_at"], row["task_id"]))[:limit]
         result = []
         for row in rows:

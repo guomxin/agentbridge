@@ -1158,6 +1158,12 @@ def handle_mcp(args: argparse.Namespace) -> int:
     insecure_private_http = (
         mcp_config.insecure_private_http or auth_config.insecure_private_http
     )
+    from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
+    try:
+        workspace_host_routes = NanoBotGatewayClient.from_environment() if workspace_config else {}
+    except (OSError, ValueError, KeyError, TypeError):
+        print_json(_central_cli_error("WORKSPACE_HOST_CONFIG_INVALID", "工作台宿主路由配置不可用。"))
+        return 2
     startup = {
         "protocolVersion": "0.1",
         "status": "serving",
@@ -1169,6 +1175,7 @@ def handle_mcp(args: argparse.Namespace) -> int:
             workspace_config.public_base_url if workspace_config else None
         ),
         "workspaceGatewayConfigured": workspace_gateway is not None,
+        "workspaceAdditionalHostCount": len(workspace_host_routes),
         "transport": "streamable_http",
         "stateless": True,
         "authentication": "bearer_identity_token",
@@ -1193,6 +1200,7 @@ def handle_mcp(args: argparse.Namespace) -> int:
             admin_config=admin_config,
             workspace_config=workspace_config,
             workspace_gateway=workspace_gateway,
+            workspace_host_routes=workspace_host_routes,
             login_timeout_seconds=args.login_timeout,
             keepalive_interval_seconds=args.session_keepalive_interval,
             keepalive_activity_lease_seconds=args.session_keepalive_lease,

@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "a3187973e03e"
+    "49ca5384b580"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Reviewed against deployed a3187973e03e on 2026-11-12. OA background keepalive uses the existing session transitions and deferred events. No persisted schema or data contract changes."
+  "dataCompatibility": "reviewed-schema-transition",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "f5c356c16499a488d7fd5aac6d46696860c2079005a3e0aa437e86b664fa8084",
+      "afterSha256": "19d726100ca3c94f279b1898c10637b067a42aa68ed2bb12d20a7ce44a41a8f0"
+    }
+  },
+  "reason": "Schema-only rehearsal against deployed 49ca5384b580. Workspace adds an instance directory, subject visibility, endpoint bindings, default preferences, configuration audit, original-dispatch ownership, and Telegram pilot links and challenges. The catalog, grants and reports database schemas remain compatible. Preserve user data and apply the documented manual recovery procedure following a schema change."
 }

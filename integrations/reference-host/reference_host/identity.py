@@ -13,6 +13,9 @@ class IdentityConfig:
     endpoint_key: str
     external_subject: str
     conversation_ref: str
+    expected_subject: str | None = None
+    expected_endpoint: str | None = None
+    account_id: str | None = None
 
     def token(self) -> str:
         value = os.environ.get(self.token_env, "").strip()

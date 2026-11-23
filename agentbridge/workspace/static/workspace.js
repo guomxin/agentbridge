@@ -1,3 +1,4 @@
+import { loadTelegramLinks } from "./workspace_telegram.mjs";
 import { historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages } from "./workspace_history.mjs";
 import { createHistoryAutoload, restoreHistoryAnchor } from "./workspace_history_autoload.mjs";
 import { createLifecycle, isCancellation } from "./workspace_lifecycle.mjs";
@@ -137,7 +138,7 @@ const businessWatches = createBusinessWatches({document, $, getScope:() => viewS
 const dailyDigestSettings = createDailyDigestSettings({document, $, getScope:() => viewScope,
   request:(path,scope,options) => scopedApi(scope)(path,options)});
 const { handleComposerPaste, handleComposerDragOver, handleComposerDragLeave,
-  handleComposerDrop, addComposerFiles, clearComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
+  handleComposerDrop, addComposerFiles, clearComposerAttachments, renderComposerAttachments, beginComposerTrial, clearComposerTrial, renderComposerTrial, sendChat } = createComposer({
   document, state, $, toast, getScope: () => sessionScope, executeChatMessage, queryOaPending,
 });
 const { loadSkillDrafts, addSkillFeedback, canLeaveSkillEditor, canAutoReloadSkillEditor } = createSkillForms({
@@ -190,6 +191,11 @@ function scopedApi(scope) {
 }
 
 function resetWorkspaceState() {
+  state.hostChoices = null;
+  state.hostCapabilities = null;
+  $("#workspace-host").disabled = true;
+  $("#workspace-host").replaceChildren();
+  $("#host-name").textContent = "智能体";
   businessWatches.reset();
   dailyDigestSettings.reset();
   selectTaskPanel('records', {load:false});
@@ -230,7 +236,7 @@ function resetWorkspaceState() {
   state.taskHistoryLoading = false;
   state.gatewayStatusCheckActive = false;
   for (const selector of ["#chat-messages", "#task-list", "#task-detail", "#endpoint-list",
-    "#skill-list", "#skill-authoring", "#composer-attachments", "#toast-region"]) $(selector).replaceChildren();
+    "#skill-list", "#skill-authoring", "#telegram-links", "#composer-attachments", "#toast-region"]) $(selector).replaceChildren();
   $("#chat-form textarea[name='message']").value = "";
   $("#composer-attachments").hidden = true;
   setBusy($("#chat-form"), false);
@@ -262,7 +268,11 @@ function bindActions() {
   $("#enroll-complete").addEventListener("submit", completeEnrollment);
   $("#logout-button").addEventListener("click", logout);
   $("#chat-form").addEventListener("submit", sendChat);
+  $("#workspace-host").addEventListener("change", changeDefaultHost);
   $("#attach-image").addEventListener("click", () => {
+    if (state.hostCapabilities && !state.hostCapabilities.includes("attachments")) {
+      return toast("当前宿主尚未开放图片输入。", true);
+    }
     $("#image-input").click();
   });
   $("#image-input").addEventListener("change", async (event) => {
@@ -443,6 +453,59 @@ async function completeEnrollment(event) {
   }
 }
 
+function showHostChoices(choices) {
+  if (state.hostChoices?.default_instance_id !== choices.default_instance_id) state.hostCapabilities = null;
+  state.hostChoices = choices;
+  const select = $("#workspace-host");
+  select.replaceChildren();
+  if (!choices.default_instance_id) select.add(new Option("请选择宿主", "", true, true));
+  for (const item of choices.items) {
+    const option = new Option(item.display_name, item.instance_id);
+    option.disabled = !item.selectable;
+    select.add(option);
+  }
+  select.value = choices.default_instance_id || "";
+  select.disabled = !choices.items.some(item => item.selectable);
+  $("#host-name").textContent = select.selectedOptions[0]?.textContent || "暂无宿主";
+}
+
+async function loadHostChoices(scope = sessionScope) {
+  try {
+    const choices = await scopedApi(scope)("/api/hosts");
+    scope.assertCurrent();
+    showHostChoices(choices);
+  } catch (error) {
+    if (scope.current()) toast(friendlyError(error), true, "host-options");
+  }
+}
+
+async function changeDefaultHost() {
+  const scope = sessionScope;
+  const select = $("#workspace-host");
+  select.disabled = true;
+  try {
+    const choices = await scopedApi(scope)("/api/hosts/default", {method:"POST", csrf:true,
+      body:{instanceId:select.value, expectedRevision:state.hostChoices.revision}});
+    scope.assertCurrent();
+    showHostChoices(choices);
+    const draft = $("#chat-form textarea[name='message']").value;
+    const attachments = [...state.composerAttachments];
+    const trial = state.composerSkillTrial;
+    const currentAccount = state.account;
+    await enterWorkspace(currentAccount);
+    if (state.account !== currentAccount) return;
+    if (trial) beginComposerTrial(trial);
+    state.composerAttachments = attachments;
+    renderComposerAttachments();
+    $("#chat-form textarea[name='message']").value = draft;
+    toast("默认宿主已保存，新消息将发往所选实例。");
+  } catch (error) {
+    if (!scope.current()) return;
+    toast(friendlyError(error), true, "host-default");
+    await loadHostChoices(scope);
+  }
+}
+
 async function enterWorkspace(account) {
   stopWorkspaceObservers();
   sessionScope.dispose();
@@ -462,6 +525,8 @@ async function enterWorkspace(account) {
   $("#auth-view").hidden = true;
   $("#app-view").hidden = false;
   $("#account-name").textContent = account.username;
+  await loadHostChoices(accountScope);
+  if (!accountScope.current()) return;
   if (await switchView("chat") === false || !accountScope.current()) return;
   loadTasks();
   loadChat().finally(() => {
@@ -626,6 +691,12 @@ async function loadGatewayStatus() {
     const [result, credential] = await Promise.all([api("/api/gateway").catch(() => ({available:false,code:"连接状态读取失败"})), api("/api/credential-health")]);
     scope.assertCurrent();
     available = Boolean(result.available) && !credential.blocked;
+    const capabilities = result.instanceId === state.hostChoices?.default_instance_id && Array.isArray(result.capabilities)
+      ? result.capabilities : null;
+    state.hostCapabilities = capabilities;
+    const attach = $("#attach-image");
+    attach.setAttribute("aria-disabled", String(Boolean(capabilities && !capabilities.includes("attachments"))));
+    attach.title = capabilities && !capabilities.includes("attachments") ? "当前宿主尚未开放图片输入" : "添加图片";
     const notice = $("#credential-notice");
     notice.textContent = credential.message || "";
     notice.hidden = !credential.message;
@@ -634,8 +705,8 @@ async function loadGatewayStatus() {
     for (const card of pending.slice(0,32)) projectionQueue.enqueue(card.dataset.taskId);
     dot.className = `status-dot ${available ? "online" : "offline"}`;
     element.title = available
-      ? `OpenClaw ${result.version || "已连接"}`
-      : `OpenClaw 不可用：${result.code}`;
+      ? `${$("#host-name").textContent} ${result.adapterVersion || result.version || "已连接"}`
+      : `${$("#host-name").textContent} 不可用：${result.code}`;
   } catch {
     if (!scope.current()) return;
     dot.className = "status-dot offline";
@@ -944,7 +1015,8 @@ async function loadLegacyHistory() {
   try {
     const history = await scopedApi(scope)("/api/chat/history?limit=120");
     scope.assertCurrent();
-    for (const [index, message] of (history.messages || []).entries()) {
+    const legacyMessages = history.source === "workspace_timeline" ? [] : history.messages || [];
+    for (const [index, message] of legacyMessages.entries()) {
       const key = historyMessageKey(message, index), hash = textHash(message.text);
       const timestamp = parseTimestampMilliseconds(message.timestamp);
       const alreadySynced = [...state.syncedMessages.values()].some(item =>
@@ -1042,6 +1114,7 @@ async function executeChatMessage(
   skillTrial,
   onAccepted,
   onCanceled,
+  continuationTaskId,
 ) {
   const scope = sessionScope;
   const api = scopedApi(scope);
@@ -1068,11 +1141,25 @@ async function executeChatMessage(
   renderSkillTrialStatus(document, live, skillTrial, true);
   addLiveProgress(idempotencyKey, "正在连接智能体", "active");
   try {
-    await consumeChatStream({ message, idempotencyKey, attachments, skillTrial, onAccepted, onCanceled });
+    const choices = state.hostChoices;
+    if (state.hostCapabilities && ((attachments.length && !state.hostCapabilities.includes("attachments"))
+        || (skillTrial && !state.hostCapabilities.includes("skill_trial")))) {
+      throw new Error("当前宿主尚未开放该输入，请选择支持图片或技能试用的宿主。");
+    }
+    if (!continuationTaskId && (!choices?.default_instance_id || choices.default_unavailable)) throw new Error("请先选择可用的默认宿主。");
+    const hostSelection = continuationTaskId ? {continuationTaskId}
+      : {instanceId:choices.default_instance_id, expectedRevision:choices.revision};
+    await consumeChatStream({ message, idempotencyKey, attachments, skillTrial, hostSelection, onAccepted, onCanceled });
     scope.assertCurrent();
     scheduleChatRefresh(500, 1);
   } catch (error) {
     if (isCancellation(error)) return;
+    if (error.code === "HOST_REVISION_CONFLICT") {
+      await loadHostChoices(scope);
+      if (!scope.current()) return;
+      const input = form.querySelector("textarea[name='message']");
+      if (input && !input.value) input.value = message;
+    }
     if (!error.rendered) {
       const text = friendlyError(error);
       renderRunFailure(
@@ -1125,6 +1212,7 @@ function reconcileOriginChatMessage(entry, render = true) {
         text: entry.text,
         images,
         timestamp: entry.created_at,
+        sourceLabel: entry.source?.host?.display_name,
       });
       state.syncedMessages.set(entry.entry_id, item);
     }
@@ -1184,6 +1272,7 @@ function reconcileOriginChatMessage(entry, render = true) {
       role: "assistant",
       text: entry.text,
       timestamp: entry.created_at,
+        sourceLabel: entry.source?.host?.display_name,
     });
     state.syncedMessages.set(entry.entry_id, item);
     renderSkillTrialStatus(document, {item}, entry.payload?.skillTrial);
@@ -1582,7 +1671,7 @@ async function continueTask(task, button) {
     );
     scope.assertCurrent();
     if (await switchView("chat") === false) return;
-    await executeChatMessage(result.message);
+    await executeChatMessage(result.message, $("#chat-form"), [], undefined, undefined, undefined, task.task_id);
   } catch (error) {
     if (isCancellation(error)) return;
     toast(friendlyError(error), true, `task:${task.task_id}:continue`);
@@ -1595,6 +1684,8 @@ async function loadEndpoints() {
   const scope = viewScope.replace("endpoints");
   const api = scopedApi(scope);
   const body = $("#endpoint-list");
+  void loadTelegramLinks({container:$("#telegram-links"), api, scope, document,
+    onError:error => { if (scope.current()) toast(friendlyError(error),true); }});
   try {
     const result = await api("/api/endpoints");
     scope.assertCurrent();

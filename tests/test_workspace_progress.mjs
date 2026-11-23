@@ -147,3 +147,18 @@ test("refresh restores accepted result recovery without offering resend or cance
   assert.equal(f.state.liveMessages.get("r").progressRow.lastElementChild.textContent, "请求已接收，正在恢复结果；不会重复执行");
   assert.equal(f.state.liveMessages.get("r").actions.children.length, 0);
 });
+
+test("a second trusted card replaces the original action and closure removes it", () => {
+  const f = fixture();
+  const dispatchId = "6eca74aa-a051-45bb-a43a-c1552870c543";
+  const event = {runId: "sample", dispatchId, kind: "private_interaction", status: "waiting_private"};
+  f.handleChatProgress({...event, cardRevision: 1});
+  const live = f.state.liveMessages.get("sample");
+  const first = live.actions.children[0];
+  assert.equal(first.href, `/api/chat/dispatches/${dispatchId}/private-card?revision=1`);
+  f.handleChatProgress({...event, cardRevision: 2});
+  assert.equal(live.actions.children.length, 1);
+  assert.equal(live.actions.children[0].href, `/api/chat/dispatches/${dispatchId}/private-card?revision=2`);
+  f.handleChatProgress({...event, status: "closed", cardRevision: 2});
+  assert.equal(live.actions.children.length, 0);
+});

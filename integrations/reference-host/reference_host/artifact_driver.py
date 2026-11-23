@@ -77,7 +77,7 @@ class ArtifactDriver:
             local_task_id,
             "agentbridge_host_artifact_reissue",
             {
-                "agent_host": "reference-host",
+                "agent_host": self.task_driver.implementation.name,
                 "task_id": task["task_id"],
                 "artifact_id": artifact_id,
             },

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 import hashlib
 import hmac
 import json
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Callable, Iterator
 from uuid import uuid4
 
 from agentbridge.core.timeline_attachments import public_attachment
+from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID, WorkspaceHostInstances
 
 if TYPE_CHECKING:
     from agentbridge.core.tasks import TaskHubStore
@@ -79,6 +81,13 @@ class WorkspaceStore:
             raise ValueError("invalid workspace challenge lifetime")
         self._initialize()
 
+    def initialize_host_directory(self) -> None:
+        self.hosts = WorkspaceHostInstances(self.db_path)
+
+    @cached_property
+    def hosts(self) -> WorkspaceHostInstances:
+        return WorkspaceHostInstances(self.db_path)
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=30)
@@ -95,6 +104,8 @@ class WorkspaceStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            from agentbridge.workspace.telegram_pilot_links import initialize_telegram_pilot_links
+            initialize_telegram_pilot_links(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS workspace_accounts (
@@ -225,6 +236,11 @@ class WorkspaceStore:
                     "PRAGMA table_info(agent_host_dispatches)"
                 )
             }
+            if "instance_id" not in dispatch_columns:
+                connection.execute("ALTER TABLE agent_host_dispatches ADD COLUMN instance_id TEXT "
+                                   "NOT NULL DEFAULT 'openclaw-default'")
+            connection.execute("CREATE INDEX IF NOT EXISTS workspace_dispatch_request "
+                               "ON agent_host_dispatches(user_subject, idempotency_key)")
             if "retry_count" not in dispatch_columns:
                 connection.execute(
                     "ALTER TABLE agent_host_dispatches "
@@ -306,6 +322,7 @@ class WorkspaceStore:
         link_code: str,
         user_subject: str,
         approver_endpoint_id: str,
+        connection: sqlite3.Connection | None = None,
     ) -> dict:
         code = str(link_code or "").strip().upper().replace("-", "")
         if not _LINK_CODE_RE.fullmatch(code):
@@ -317,8 +334,8 @@ class WorkspaceStore:
             128,
         )
         now = self._now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        from agentbridge.core.store_transactions import store_transaction
+        with store_transaction(self, connection) as connection:
             row = connection.execute(
                 """
                 SELECT * FROM workspace_link_challenges
@@ -847,6 +864,9 @@ class WorkspaceStore:
         attachment_store: TimelineAttachmentStore,
         media_base_url: str,
         skill_trial: dict | None = None,
+        expected_revision: int | None = None,
+        instance_id: str | None = None,
+        continuation_task_id: str | None = None,
         validate_skill_trial: Callable[[sqlite3.Connection, dict], dict] | None = None,
     ) -> tuple[dict, bool]:
         """Atomically accept the message, media references, outbox and dispatch.
@@ -860,6 +880,7 @@ class WorkspaceStore:
             for store in (tasks, attachment_store)
         ):
             raise ValueError("workspace acceptance stores must share one database")
+        hosts = self.hosts
         message_key = f"workspace:user:{idempotency_key}"
         created_paths: list[Path] = []
         try:
@@ -874,6 +895,30 @@ class WorkspaceStore:
                 ).fetchone()
                 if account is None:
                     raise WorkspaceLinkError("workspace dispatch identity is not active")
+                previous = connection.execute(
+                    "SELECT * FROM agent_host_dispatches WHERE user_subject=? AND idempotency_key=? LIMIT 2",
+                    (user_subject, idempotency_key),
+                ).fetchall()
+                if len(previous) > 1 or previous and previous[0]["account_id"] != account_id:
+                    raise WorkspaceConflictError("IDEMPOTENCY_PAYLOAD_MISMATCH")
+                if previous:
+                    original = previous[0]
+                    host = dict(instance_id=original["instance_id"], host_type=original["agent_host"],
+                                endpoint_id=original["origin_endpoint_id"], endpoint_key=original["host_binding_ref"],
+                                session_key=original["conversation_ref"])
+                elif continuation_task_id:
+                    host = self._task_host(connection, account_id, user_subject, continuation_task_id)
+                    selected = connection.execute("""SELECT c.expires_at, t.title, t.status FROM task_continuations c
+                        JOIN agent_tasks t ON t.task_id=c.selected_task_id AND t.user_subject=c.user_subject
+                        WHERE c.endpoint_id=? AND c.user_subject=? AND c.state='selected' AND c.selected_task_id=?""",
+                        (host["endpoint_id"], user_subject, continuation_task_id)).fetchone()
+                    if (not selected or _parse_time(selected["expires_at"]) <= self._now()
+                            or selected["status"] == "outcome_unknown" or attachments or skill_trial
+                            or message != f"继续刚才选择的“{selected['title']}”任务。"):
+                        raise WorkspaceConflictError("原任务的继续操作已变更，请重新选择。")
+                else:
+                    host = hosts.resolve(connection, account_id, expected_revision=expected_revision,
+                                              instance_id=instance_id)
                 stored_attachments = attachment_store._create_many_in_connection(
                     connection,
                     user_subject=user_subject,
@@ -886,12 +931,13 @@ class WorkspaceStore:
                     connection,
                     account_id=account_id,
                     user_subject=user_subject,
-                    agent_host="openclaw",
-                    host_binding_ref=account["endpoint_key"],
-                    origin_endpoint_id=account["endpoint_id"],
-                    conversation_ref=account["openclaw_session_key"],
+                    agent_host=host["host_type"],
+                    instance_id=host["instance_id"],
+                    host_binding_ref=host["endpoint_key"],
+                    origin_endpoint_id=host["endpoint_id"],
+                    conversation_ref=host["session_key"],
                     message_key=message_key,
-                    payload_hash=_host_dispatch_payload_hash(message, stored_attachments, skill_trial),
+                    payload_hash=_host_dispatch_payload_hash(message, stored_attachments, skill_trial, continuation_task_id),
                     idempotency_key=idempotency_key,
                     attachment_refs=[item["attachment_id"] for item in stored_attachments],
                     deadline_seconds=60,
@@ -909,7 +955,7 @@ class WorkspaceStore:
                 entry, _ = tasks._append_timeline_message_in_connection(
                     connection,
                     user_subject=user_subject,
-                    source_endpoint_id=account["endpoint_id"],
+                    source_endpoint_id=host["endpoint_id"],
                     message_key=message_key,
                     role="user",
                     text=message,
@@ -930,12 +976,113 @@ class WorkspaceStore:
             attachment_store._discard_created_files(created_paths)
             raise
 
+    def _task_host(self, db, account_id: str, subject: str, task_id: str) -> dict:
+        task = db.execute("""SELECT t.agent_host, b.instance_id AS endpoint_instance,
+            l.host_instance_id AS coordinator FROM agent_tasks t
+            LEFT JOIN workspace_host_bindings b ON b.endpoint_id=t.origin_endpoint_id AND b.account_id=?
+            LEFT JOIN agent_task_coordinator_leases l ON l.task_id=t.task_id AND l.user_subject=t.user_subject
+            WHERE t.task_id=? AND t.user_subject=?""", (account_id, task_id, subject)).fetchone()
+        if not task:
+            raise KeyError("未找到原任务")
+        instance_id = task["endpoint_instance"] or task["coordinator"]
+        if task["agent_host"] == "openclaw" and not task["endpoint_instance"]:
+            # Historical Gateway registrations predate the Workspace directory.
+            if not instance_id or not db.execute("SELECT 1 FROM workspace_host_instances WHERE instance_id=?",
+                                                  (instance_id,)).fetchone():
+                instance_id = LEGACY_INSTANCE_ID
+        if not instance_id:
+            raise PermissionError("原任务的协调实例尚未绑定。")
+        host = self.hosts.resolve(db, account_id, instance_id=instance_id, existing=True)
+        if host["host_type"] != task["agent_host"] or host["user_subject"] != subject:
+            raise PermissionError("原任务与该账号的宿主绑定不符。")
+        return host
+
+    def task_host(self, account: dict, task_id: str) -> dict:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            return self._task_host(db, account["account_id"], account["user_subject"], task_id)
+
+    def current_host(self, account_id: str) -> dict:
+        hosts = self.hosts
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return hosts.resolve(db, account_id)
+
+    def endpoint_host_names(self, account_id: str) -> dict:
+        with self._connect() as db:
+            rows = db.execute("""SELECT b.endpoint_id, i.instance_id, i.display_name
+                FROM workspace_host_bindings b JOIN workspace_host_instances i USING(instance_id)
+                WHERE b.account_id=?""", (account_id,)).fetchall()
+            if not rows:
+                return {}
+            legacy = db.execute("""SELECT a.endpoint_id,i.instance_id,i.display_name FROM workspace_accounts a
+                JOIN workspace_host_instances i ON i.instance_id=? WHERE a.account_id=?""",
+                (LEGACY_INSTANCE_ID, account_id)).fetchone()
+        return {row["endpoint_id"]: {"instance_id": row["instance_id"], "display_name": row["display_name"]}
+                for row in [*rows, legacy] if row and row["endpoint_id"]}
+
+    def task_origin_names(self, account: dict, task_ids: list[str]) -> dict:
+        if not task_ids:
+            return {}
+        placeholders = ",".join("?" for _ in task_ids)
+        with self._connect() as db:
+            rows = db.execute(f"""SELECT t.task_id, COALESCE(h.display_name, legacy.display_name) AS display_name
+                FROM agent_tasks t LEFT JOIN workspace_host_bindings b
+                    ON b.endpoint_id=t.origin_endpoint_id AND b.account_id=?
+                LEFT JOIN agent_task_coordinator_leases l ON l.task_id=t.task_id AND l.user_subject=t.user_subject
+                LEFT JOIN workspace_host_instances h
+                    ON h.instance_id=COALESCE(b.instance_id,l.host_instance_id) AND h.host_type=t.agent_host
+                LEFT JOIN workspace_host_instances legacy ON legacy.instance_id=? AND t.agent_host='openclaw'
+                WHERE t.user_subject=? AND t.task_id IN ({placeholders})""",
+                (account["account_id"], LEGACY_INSTANCE_ID, account["user_subject"], *task_ids)).fetchall()
+        return {row["task_id"]: row["display_name"] for row in rows if row["display_name"]}
+
+    def visible_chat_endpoints(self, account: dict) -> list[str] | None:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            if not db.execute("SELECT 1 FROM workspace_host_bindings WHERE account_id=? LIMIT 1",
+                              (account["account_id"],)).fetchone():
+                return None
+            preference = db.execute("SELECT instance_id FROM workspace_host_preferences WHERE account_id=?",
+                                    (account["account_id"],)).fetchone()
+            if not preference:
+                return []
+            if preference["instance_id"] == LEGACY_INSTANCE_ID:
+                return [row[0] for row in db.execute("""SELECT endpoint_id FROM client_endpoints e
+                    WHERE e.user_subject=? AND e.agent_host='openclaw' AND NOT EXISTS (
+                    SELECT 1 FROM workspace_host_bindings b WHERE b.endpoint_id=e.endpoint_id)""",
+                    (account["user_subject"],))]
+            return [row[0] for row in db.execute("""SELECT b.endpoint_id FROM workspace_host_bindings b
+                JOIN client_endpoints e ON e.endpoint_id=b.endpoint_id AND e.user_subject=?
+                WHERE b.account_id=? AND b.instance_id=?""",
+                (account["user_subject"], account["account_id"], preference["instance_id"]))]
+
+    def host_chat_history(self, binding: dict, *, limit: int) -> dict:
+        with self._connect() as db:
+            rows = db.execute("""SELECT entry_id AS id, role, text, created_at AS timestamp
+                FROM user_timeline WHERE user_subject=? AND source_endpoint_id=? AND entry_type='chat_message'
+                AND role IN ('assistant', 'user') ORDER BY sequence DESC LIMIT ?""",
+                (binding["user_subject"], binding["endpoint_id"], min(max(int(limit), 1), 200))).fetchall()
+        return {"messages": [dict(row) for row in reversed(rows)], "sessionId": None}
+
+    def dispatch_binding(self, dispatch: dict) -> dict:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            binding = self.hosts.resolve(db, dispatch["account_id"], instance_id=dispatch["instance_id"],
+                                         existing=True)
+        if any(binding[key] != dispatch[field] for key, field in (
+                ("host_type", "agent_host"), ("user_subject", "user_subject"), ("endpoint_key", "host_binding_ref"),
+                ("endpoint_id", "origin_endpoint_id"), ("session_key", "conversation_ref"))):
+            raise PermissionError("原请求的宿主绑定已变更。")
+        return binding
+
     def create_host_dispatch(
         self,
         *,
         account_id: str,
         user_subject: str,
         agent_host: str,
+        instance_id: str = LEGACY_INSTANCE_ID,
         host_binding_ref: str,
         origin_endpoint_id: str,
         conversation_ref: str,
@@ -952,6 +1099,7 @@ class WorkspaceStore:
                 account_id=account_id,
                 user_subject=user_subject,
                 agent_host=agent_host,
+                instance_id=instance_id,
                 host_binding_ref=host_binding_ref,
                 origin_endpoint_id=origin_endpoint_id,
                 conversation_ref=conversation_ref,
@@ -969,6 +1117,7 @@ class WorkspaceStore:
         account_id: str,
         user_subject: str,
         agent_host: str,
+        instance_id: str = LEGACY_INSTANCE_ID,
         host_binding_ref: str,
         origin_endpoint_id: str,
         conversation_ref: str,
@@ -1078,13 +1227,13 @@ class WorkspaceStore:
             """
             INSERT INTO agent_host_dispatches (
                 dispatch_id, account_id, user_subject, agent_host,
-                host_binding_ref, origin_endpoint_id, conversation_ref,
+                instance_id, host_binding_ref, origin_endpoint_id, conversation_ref,
                 message_key, payload_hash, idempotency_key,
                 attachment_refs_json, state, attempt_count,
                 retry_count, next_attempt_at, deadline_at,
                 had_tool_activity,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0,
                       ?, ?, 0, ?, ?)
             """,
             (
@@ -1092,6 +1241,7 @@ class WorkspaceStore:
                 account_id,
                 user_subject,
                 agent_host,
+                instance_id,
                 host_binding_ref,
                 origin_endpoint_id,
                 conversation_ref,
@@ -1123,6 +1273,18 @@ class WorkspaceStore:
             (dispatch_id,),
         ).fetchone()
         return _host_dispatch_from_row(row), False
+
+    def dispatch_for_result(self, task, account):
+        """Find the original accepted chat run for one signed-in account and result."""
+        with self._connect() as db:
+            rows = db.execute("""SELECT * FROM agent_host_dispatches
+                WHERE account_id=? AND user_subject=? AND agent_host=? AND accepted_run_id=?
+                AND origin_endpoint_id=? AND conversation_ref=? LIMIT 2""",
+                (account["account_id"],account["user_subject"],task["agent_host"],task["host_task_key"],
+                 task["origin_endpoint_id"],task["active_conversation_ref"])).fetchall()
+        if len(rows) > 1:
+            raise PermissionError("任务来源存在歧义。")
+        return _host_dispatch_from_row(rows[0]) if rows else None
 
     def get_host_dispatch(
         self,
@@ -1194,7 +1356,13 @@ class WorkspaceStore:
                 )
                 rows = connection.execute(
                     f"""
-                    SELECT * FROM agent_host_dispatches
+                    SELECT d.*, (
+                        SELECT CASE WHEN json_extract(e.payload_json,'$.status')='closed' THEN NULL
+                            ELSE COALESCE(json_extract(e.payload_json,'$.cardRevision'),0) END
+                        FROM agent_host_dispatch_events e WHERE e.dispatch_id=d.dispatch_id
+                        AND e.event_name='host_progress' AND json_extract(e.payload_json,'$.kind')='private_interaction'
+                        ORDER BY e.sequence DESC LIMIT 1
+                    ) AS private_card_revision FROM agent_host_dispatches d
                     WHERE user_subject = ? AND state IN ({placeholders})
                     ORDER BY created_at
                     LIMIT ?
@@ -1208,7 +1376,13 @@ class WorkspaceStore:
             else:
                 rows = connection.execute(
                     """
-                    SELECT * FROM agent_host_dispatches
+                    SELECT d.*, (
+                        SELECT CASE WHEN json_extract(e.payload_json,'$.status')='closed' THEN NULL
+                            ELSE COALESCE(json_extract(e.payload_json,'$.cardRevision'),0) END
+                        FROM agent_host_dispatch_events e WHERE e.dispatch_id=d.dispatch_id
+                        AND e.event_name='host_progress' AND json_extract(e.payload_json,'$.kind')='private_interaction'
+                        ORDER BY e.sequence DESC LIMIT 1
+                    ) AS private_card_revision FROM agent_host_dispatches d
                     WHERE user_subject = ?
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -1975,6 +2149,9 @@ def _host_dispatch_from_row(row: sqlite3.Row) -> dict:
         "account_id": row["account_id"],
         "user_subject": row["user_subject"],
         "agent_host": row["agent_host"],
+        "instance_id": row["instance_id"],
+        "has_private_card": "private_card_revision" in row.keys() and row["private_card_revision"] is not None,
+        "card_revision": row["private_card_revision"] if "private_card_revision" in row.keys() else None,
         "host_binding_ref": row["host_binding_ref"],
         "origin_endpoint_id": row["origin_endpoint_id"],
         "conversation_ref": row["conversation_ref"],
@@ -2102,6 +2279,7 @@ def _host_dispatch_payload_hash(
     message: str,
     attachments: list[dict],
     skill_trial: dict | None = None,
+    continuation_task_id: str | None = None,
 ) -> str:
     canonical = {
         "message": message,
@@ -2115,6 +2293,8 @@ def _host_dispatch_payload_hash(
             for item in attachments
         ],
     }
+    if continuation_task_id:
+        canonical['continuationTaskId'] = continuation_task_id
     if skill_trial is not None:
         canonical['skillTrial'] = skill_trial
     encoded = json.dumps(

@@ -370,6 +370,12 @@ HOST_REGISTRATION_TOOL_NAMES = (
     "agentbridge_host_identity_profile",
 )
 
+NANOBOT_REGISTRATION_TOOL_NAMES = (
+    "agentbridge_host_telegram_pair_present",
+    "agentbridge_host_telegram_endpoint",
+    "agentbridge_host_enrolled_workspace_binding",
+)
+
 HOST_PRESENTATION_TOOL_NAMES = (
     "agentbridge_host_interaction_present",
 )
@@ -1068,7 +1074,7 @@ def create_central_mcp_server(
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False), structured_output=True)
     async def agentbridge_skill_authoring(ctx: Context, action: SkillActionName, data: SkillAuthoringData) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
+        host_context,_registration = await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
         arguments = data.model_dump(exclude_unset=True, exclude_none=True)
         # Preserve explicit null only when it is an action precondition or command.
         if action == "set_regression" and "job_id" in data.model_fields_set:
@@ -1079,6 +1085,10 @@ def create_central_mcp_server(
         if trial is not None:
             if not isinstance(trial, Mapping) or set(trial) != {'dispatchId'} or not isinstance(trial['dispatchId'], str):
                 raise PermissionError('短试用绑定无效')
+            if host_context.get("agentHost") == "nanobot":
+                from agentbridge.workspace.skill_trial_origin import verify_skill_origin
+                await asyncio.to_thread(verify_skill_origin,service,identity["user_subject"],host_context["hostInstanceId"],
+                                        trial["dispatchId"],_request_meta(ctx).get("io.agentbridge/skill-origin"))
             await asyncio.to_thread(service.skill_authoring.guard_workspace_trial,
                                     identity['user_subject'], trial['dispatchId'], action, arguments)
         return await asyncio.to_thread(service.skill_authoring.dispatch, identity["user_subject"], action, arguments)
@@ -1091,10 +1101,20 @@ def create_central_mcp_server(
         from agentbridge.core.business_skills import SkillRejected, dependency_state, META_KEY, skill_bundle, validate_binding
         from agentbridge.core.skill_execution import effective_skill_execution
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
+        host,_ = await _require_registered_host_call(ctx, service=service, identity=identity, minimum_level="L1")
+        pinned_task = _request_task_id(ctx) if host["agentHost"]=="nanobot" else None
+        if pinned_task:
+            await _require_registered_host_call(ctx,service=service,identity=identity,minimum_level="L3",
+                                                task_id=pinned_task,require_coordinator_lease=True)
         def load():
             try:
                 current = _request_meta(ctx).get(META_KEY)
+                if pinned_task:
+                    existing=service.skills.for_task(identity["user_subject"],pinned_task)
+                    if existing:
+                        if current and current.get("bindingId")!=existing["binding_id"]:
+                            raise SkillRejected("SKILL_TASK_CONFLICT","原任务已绑定另一助手")
+                        current={"bindingId":existing["binding_id"]}
                 if current:
                     binding = service.skills.binding(identity["user_subject"], current.get("bindingId"))
                     if binding["skill_id"] != skill_id or binding["profile"] != profile or (source_id and source_id != binding["settings"]["source_id"]):
@@ -1114,6 +1134,8 @@ def create_central_mcp_server(
                 if expected_version and expected_version != binding["version"]:
                     raise SkillRejected("SKILL_VERSION_CHANGED", "当前任务版本与请求不一致，请沿用任务原版本")
                 validate_binding(service, identity["user_subject"], binding)
+                if pinned_task:
+                    service.skills.attach(identity["user_subject"],pinned_task,binding_id)
                 return {"status": "succeeded", "skill_id": skill_id, "version": binding["version"],
                     "content_hash": snapshot["content_hash"], "binding_id": binding_id,
                     "settings": binding["settings"], "profile": profile,
@@ -1561,7 +1583,8 @@ def create_central_mcp_server(
     async def agentbridge_server_profile(ctx: Context) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         response = dict(profile)
-        declared_profile = _request_meta(ctx).get(HOST_PROFILE_META_KEY)
+        meta = _request_meta(ctx)
+        declared_profile = meta.get(HOST_PROFILE_META_KEY)
         if isinstance(declared_profile, Mapping):
             negotiation = await asyncio.to_thread(
                 service.negotiate_host,
@@ -1579,6 +1602,20 @@ def create_central_mcp_server(
                 "mustReregisterOnVersionChange": True,
             }
         response["negotiation"] = negotiation
+        private_registration_tools = ()
+        host_context = meta.get(HOST_CONTEXT_META_KEY, meta.get(LEGACY_HOST_CONTEXT_META_KEY))
+        negotiated_name = negotiation.get("implementation", {}).get("name")
+        if host_context is None and negotiated_name == "nanobot":
+            private_registration_tools = NANOBOT_REGISTRATION_TOOL_NAMES
+        elif (isinstance(host_context, Mapping) and host_context.get("agentHost") == "nanobot"
+              and negotiated_name in (None, "nanobot")):
+            try:
+                await _registered_host_context(ctx, service=service, identity=identity,
+                                               agent_host="nanobot", minimum_level="L1")
+            except PermissionError:
+                pass
+            else:
+                private_registration_tools = NANOBOT_REGISTRATION_TOOL_NAMES
         allowed_tools = user_grants.available_tools(
             identity["user_subject"]
         )
@@ -1599,9 +1636,9 @@ def create_central_mcp_server(
             },
             "hostControl": {
                 "visibility": "host_private",
-                "toolNames": list(HOST_CONTROL_TOOL_NAMES),
+                "toolNames": [*HOST_CONTROL_TOOL_NAMES, *private_registration_tools],
                 "levels": {
-                    "L1": list(HOST_REGISTRATION_TOOL_NAMES),
+                    "L1": [*HOST_REGISTRATION_TOOL_NAMES, *private_registration_tools],
                     "L2": list(HOST_PRESENTATION_TOOL_NAMES),
                     "L3": list(HOST_COORDINATION_TOOL_NAMES),
                 },
@@ -3658,6 +3695,16 @@ def create_central_mcp_server(
             system_id="yuque",
         )
 
+    async def prerequisite_options(ctx,identity):
+        if _request_meta(ctx).get("io.agentbridge/continue-after-login") is not True:
+            return {}
+        task_id=_request_task_id(ctx)
+        if not task_id:
+            raise HostContractError("A credential prerequisite requires the original task")
+        await _require_registered_host_call(ctx,service=service,identity=identity,agent_host="nanobot",
+            minimum_level="L3",task_id=task_id,require_coordinator_lease=True)
+        return {"continue_after_login":True}
+
     @mcp.tool(
         name="yuque_session_login",
         title="Ensure Yuque Session Login",
@@ -3687,6 +3734,7 @@ def create_central_mcp_server(
             ttl_seconds=challenge_ttl_seconds,
             system_id="yuque",
             task_id=_request_task_id(ctx),
+            **(await prerequisite_options(ctx,identity)),
         )
         return package_interaction_result(response)
 
@@ -4021,6 +4069,7 @@ def create_central_mcp_server(
             ttl_seconds=challenge_ttl_seconds,
             system_id="taihua",
             task_id=_request_task_id(ctx),
+            **(await prerequisite_options(ctx,identity)),
         )
         return package_interaction_result(response)
 
@@ -5375,6 +5424,7 @@ def create_central_mcp_server(
             ttl_seconds=challenge_ttl_seconds,
             system_id="smartlight",
             task_id=_request_task_id(ctx),
+            **(await prerequisite_options(ctx,identity)),
         )
         return package_interaction_result(response)
 
@@ -5432,6 +5482,7 @@ def create_central_mcp_server(
             card_base_url=auth_card_base_url,
             ttl_seconds=challenge_ttl_seconds,
             task_id=_request_task_id(ctx),
+            **(await prerequisite_options(ctx,identity)),
         )
         return package_interaction_result(response)
 
@@ -5499,6 +5550,10 @@ def create_central_mcp_server(
         )
         if not isinstance(task_id, str) or not task_id.strip():
             task_id = None
+        if _request_meta(ctx).get("io.agentbridge/session-ready-only") is True:
+            record = await asyncio.to_thread(service.interactions.get, interaction_id, user_subject=identity["user_subject"])
+            if task_id or record["interaction_type"] != "credential" or record["resume_spec"].get("kind") != "session_ready":
+                raise PermissionError("A session-ready-only continuation cannot execute a business capability")
         if task_id:
             requested_task_id = _request_task_id(ctx)
             if requested_task_id and requested_task_id != task_id:
@@ -5746,6 +5801,43 @@ def create_central_mcp_server(
         )
         return {"status": "succeeded", "coordinatorLease": lease}
 
+    @mcp.tool(name="agentbridge_host_enrolled_workspace_binding", title="Resolve the newly enrolled Workspace endpoint",
+              description="Host-private. Return the authenticated subject's administrator-assigned Web binding after first login.",
+              annotations=read_annotations)
+    async def agentbridge_host_enrolled_workspace_binding(ctx: Context, bot_id: str, sender_id: str) -> CallToolResult:
+        from agentbridge.workspace.host_enrollment import enrolled_workspace_binding
+        identity = _request_identity(identity_store)
+        host, _ = await _registered_host_context(ctx, service=service, identity=identity,
+                                                agent_host="nanobot", minimum_level="L1")
+        binding = await asyncio.to_thread(enrolled_workspace_binding, service, identity["user_subject"],
+                                          host["hostInstanceId"], bot_id, sender_id)
+        return CallToolResult(content=[TextContent(type="text", text="Workspace binding checked")],
+                              _meta={"io.agentbridge/workspace-binding": binding})
+
+    @mcp.tool(name="agentbridge_host_telegram_endpoint", title="Resolve the paired private Telegram endpoint",
+              description="Host-private. Resolve the authenticated user's exact deployed Telegram and Workspace endpoints.",
+              annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False),
+              structured_output=True)
+    async def agentbridge_host_telegram_endpoint(ctx: Context, bot_id: str, sender_id: str) -> dict[str, Any]:
+        from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
+        identity = _request_identity(identity_store)
+        host,_ = await _registered_host_context(ctx,service=service,identity=identity,agent_host="nanobot",minimum_level="L1")
+        return await asyncio.to_thread(TelegramPilotLinks(service).ensure_endpoint,
+            identity["user_subject"],identity["token_id"],host["hostInstanceId"],bot_id,sender_id)
+
+    @mcp.tool(name="agentbridge_host_telegram_pair_present", title="Present private Telegram pairing challenge",
+              description="Host-private. Register a numeric private sender against this user's pending Workspace challenge.",
+              annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=False,openWorldHint=False))
+    async def agentbridge_host_telegram_pair_present(ctx: Context, bot_id: str, sender_id: str, code: str) -> CallToolResult:
+        from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
+        identity = _request_identity(identity_store)
+        host,_ = await _registered_host_context(ctx,service=service,identity=identity,agent_host="nanobot",minimum_level="L1")
+        def present():
+            return TelegramPilotLinks(service).present(identity["user_subject"],host["hostInstanceId"],bot_id,sender_id,code)
+        confirmation = await asyncio.to_thread(present)
+        return CallToolResult(content=[TextContent(type="text",text="Pairing checked")],
+                              _meta={"io.agentbridge/telegram-confirmation":confirmation} if confirmation else {})
+
     @mcp.tool(
         name="agentbridge_host_identity_profile",
         title="Resolve Host Identity Tool Access",
@@ -5777,8 +5869,22 @@ def create_central_mcp_server(
             identity["user_subject"]
         )
         stamps = await asyncio.to_thread(service.skill_catalog_stamps, identity["user_subject"])
+        telegram_profile = {}
+        evidence = _request_meta(ctx).get("io.agentbridge/telegram-identity")
+        if agent_host == "nanobot" and evidence is not None:
+            from agentbridge.workspace.telegram_pilot_identity import verified_sender
+            telegram_profile["telegramIdentityVerified"] = await asyncio.to_thread(
+                verified_sender, service, subject=identity["user_subject"],
+                instance=host_context["hostInstanceId"], evidence=evidence,
+            )
+        governed_prepares = {}
+        if agent_host == "nanobot" and registration["acceptedLevel"] == "L3":
+            from agentbridge.core.write_catalog import host_prepare_contracts
+            governed_prepares["controlledPrepares"] = host_prepare_contracts(allowed_tools)
         return {
             **stamps,
+            **governed_prepares,
+            **telegram_profile,
             "schemaVersion": "agentbridge.host-identity-profile.v1",
             "status": "succeeded",
             "identity": {
@@ -6291,7 +6397,7 @@ def create_central_mcp_server(
         limit: Annotated[int, Field(ge=1, le=20)] = 12,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(
+        _, registration = await _require_registered_host_call(
             ctx,
             service=service,
             identity=identity,
@@ -6303,6 +6409,7 @@ def create_central_mcp_server(
             user_subject=identity["user_subject"],
             agent_host=agent_host,
             endpoint_key=endpoint_key,
+            host_instance_id=registration["hostInstanceId"],
             max_age_minutes=max_age_minutes,
             limit=limit,
         )
@@ -6555,6 +6662,15 @@ def create_central_mcp_server(
         route: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
+        if agent_host == "nanobot":
+            from agentbridge.workspace.host_enrollment import confirm_new_user
+            host, _ = await _registered_host_context(
+                ctx, service=service, identity=identity, agent_host="nanobot", minimum_level="L1")
+            if (client_type != "telegram" or not account_id
+                    or endpoint_key != f"telegram:{account_id}:{external_subject}"):
+                raise PermissionError("首次开通须使用管理员预先核验的本人私聊。")
+            return await asyncio.to_thread(confirm_new_user, service, identity, host["hostInstanceId"],
+                                          bot_id=account_id, sender_id=external_subject, code=link_code)
         await _require_registered_host_call(
             ctx,
             service=service,
@@ -6662,6 +6778,7 @@ def serve_central_mcp(
     admin_config: AdminServerConfig | None = None,
     workspace_config: WorkspaceServerConfig | None = None,
     workspace_gateway: OpenClawGatewayClient | None = None,
+    workspace_host_routes: dict | None = None,
     login_timeout_seconds: float = 45,
     keepalive_interval_seconds: float = 0,
     keepalive_activity_lease_seconds: float = 604_800,
@@ -6757,8 +6874,11 @@ def serve_central_mcp(
     workspace_thread = None
     workspace_application = None
     if workspace_config is not None:
+        from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
         workspace_application = WorkspaceApplication(
             service=service,
+            host_routes=(workspace_host_routes if workspace_host_routes is not None
+                         else NanoBotGatewayClient.from_environment()),
             gateway=workspace_gateway,
         )
         workspace_server = create_workspace_http_server(

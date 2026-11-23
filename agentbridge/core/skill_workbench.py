@@ -39,6 +39,7 @@ class SkillWorkbench:
         self._wake = threading.Event()
         self._thread = None
         self._complete = None
+        self._bound_completion = None
         self._capture = None
         with closing(self.store.connect()) as db, db:
             db.executescript('''
@@ -95,8 +96,16 @@ class SkillWorkbench:
             now=lambda: datetime.now(timezone.utc),
         )
 
-    def _enqueue(self, owner, kind, payload, request_key):
-        return self._job_queue().enqueue(owner, kind, payload, request_key)
+    def _enqueue(self, owner, kind, payload, request_key, *, source_dispatch=None):
+        from agentbridge.workspace.skill_model_route import snapshot
+
+        def prepare(db, previous):
+            value = payload(db, previous)
+            route = (previous.get('model_route') if previous is not None else
+                     snapshot(self.authoring.service.workspace, db, owner, source_dispatch=source_dispatch))
+            return {**value, 'model_route': route} if route else value
+
+        return self._job_queue().enqueue(owner, kind, prepare, request_key)
 
     @staticmethod
     def _public(row):
@@ -189,7 +198,7 @@ class SkillWorkbench:
         return SkillJobQueue.auto_allowed(db, owner, scope)
 
     def generate(self, owner, *, material, request_key, draft_id=None, expected_revision=None,
-                 scope='manual', automatic=False, task_ids=None):
+                 scope='manual', automatic=False, task_ids=None, source_dispatch=None):
         from agentbridge.core.skill_authoring import text
         text(material, '提炼材料', 16000)
         text(scope, '会话范围', 256)
@@ -210,7 +219,7 @@ class SkillWorkbench:
                     raise UserGrantConflict('请求标识已用于其他后台任务')
             return {**target, 'material': material, 'prior': prior, 'scope': scope,
                     'automatic': automatic, 'provenance': source}
-        return self._enqueue(owner, 'generation', prepare, request_key)
+        return self._enqueue(owner, 'generation', prepare, request_key, source_dispatch=source_dispatch)
 
     def evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1):
         if type(repeats) is not int or not 1 <= repeats <= 3: raise ValueError('重复次数为 1 至 3')
@@ -634,8 +643,9 @@ class SkillWorkbench:
         return {'steps': result, 'available': all(s['dependencies']['available'] for s in result),
                 'execution': '现有持久计划执行；每步加载并重新校验版本和权限，此预检不创建业务授权或执行任务'}
 
-    def start(self, complete, capture=None):
+    def start(self, complete, capture=None, *, bound_completion=None):
         self._complete = complete
+        self._bound_completion = bound_completion
         self._capture = capture
         if self._thread and self._thread.is_alive(): return
         self._stop.clear()
@@ -691,7 +701,7 @@ class SkillWorkbench:
         ))
 
     def run_once(self, complete):
-        return self._job_executor().run_once(complete)
+        return self._job_executor().run_once(complete, bound_completion=self._bound_completion)
 
     @staticmethod
     def _call(complete, system, prompt):

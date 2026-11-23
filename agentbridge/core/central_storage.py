@@ -81,6 +81,8 @@ class CentralRuntimeStores:
         transforms = build_transform_registry()
         host_contract = HostContractStore(db_path)
         workspace = WorkspaceStore(db_path)
+        # Migrate preferences before the first new enrollment or history read.
+        workspace.initialize_host_directory()
         governance_policies = GovernancePolicyStore(db_path)
         runtime_governance = RuntimeGovernanceStore(db_path, release_id=release_id)
         return cls(

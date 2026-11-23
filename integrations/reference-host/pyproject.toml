@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 agentbridge-reference-host = "reference_host.app:main"
+agentbridge-nanobot-coordinator = "reference_host.bound_coordinator:main"
 
 [tool.setuptools.packages.find]
 include = ["reference_host*"]

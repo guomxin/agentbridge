@@ -237,8 +237,9 @@ def create_workspace_http_server(
                     **readiness,
                     "service": "agentbridge_workspace",
                     "gatewayConfigured": application.gateway is not None,
+                    "configuredHostCount": int(application.gateway is not None) + len(application.host_routes),
                 }
-                ready = readiness["status"] == "ready" and application.gateway is not None
+                ready = readiness["status"] == "ready" and payload["configuredHostCount"] > 0
                 payload["status"] = "ready" if ready else "not_ready"
                 self._json(200 if ready else 503, payload)
                 return
@@ -512,8 +513,28 @@ def create_workspace_http_server(
                 if route.path == "/api/credential-health":
                     self._json(200, application.credential_health(account))
                     return
+                if route.path == "/api/hosts/telegram":
+                    self._json(200, {"items": application.telegram_links(account)})
+                    return
+                if route.path == "/api/hosts":
+                    self._json(200, application.hosts.choices(account["account_id"]))
+                    return
                 if route.path == "/api/gateway":
-                    self._json(200, application.gateway_status())
+                    self._json(200, application.gateway_status(account))
+                    return
+                private_card = re.fullmatch(r"/api/chat/dispatches/([0-9a-f-]{36})/private-card", route.path)
+                if private_card:
+                    revision = query.get("revision")
+                    if revision is not None and (len(revision) != 1 or not re.fullmatch(r"[1-9][0-9]{0,15}", revision[0])):
+                        raise ValueError("可信卡版本无效。")
+                    target = application.private_card_url(account, private_card.group(1),
+                        expected_revision=int(revision[0]) if revision else None)
+                    self.send_response(303)
+                    self.send_header("Location", target)
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", "0")
+                    self._security_headers()
+                    self.end_headers()
                     return
                 if route.path == "/api/chat/dispatches":
                     self._json(
@@ -596,6 +617,16 @@ def create_workspace_http_server(
                         else MAX_BODY_BYTES
                     )
                 )
+                telegram_link = re.fullmatch(r"/api/hosts/telegram/(begin|confirm|revoke)", route.path)
+                if telegram_link:
+                    self._json(200, application.telegram_link_action(account, telegram_link.group(1), body))
+                    return
+                if route.path == "/api/hosts/default":
+                    if set(body) != {"instanceId", "expectedRevision"}:
+                        raise ValueError("请选择实例，并提供当前设置版本。")
+                    self._json(200, application.hosts.set_default(account["account_id"],
+                               _required_string(body, "instanceId"), expected_revision=body["expectedRevision"]))
+                    return
                 if route.path == "/api/oa-daily-digest":
                     self._json(200, application.update_daily_digest_settings(account, body))
                     return
@@ -710,6 +741,7 @@ def create_workspace_http_server(
                             "idempotencyKey",
                         ),
                         attachments=body.get("attachments"),
+                        **_chat_host_selection(body),
                     )
                     self._json(
                         202,
@@ -940,6 +972,7 @@ def create_workspace_http_server(
                 idempotency_key=idempotency_key,
                 attachments=body.get("attachments"),
                 skill_trial=body.get("skillTrial"),
+                **_chat_host_selection(body),
             )
             try:
                 self.close_connection = True
@@ -1214,6 +1247,10 @@ def create_workspace_http_server(
                     payload["feedback"] = exc.feedback
                 self._json(409, payload)
                 return
+            from agentbridge.workspace.host_instances import HostInstanceConflict
+            if isinstance(exc, HostInstanceConflict):
+                self._json(409, {"error": {"code": "HOST_REVISION_CONFLICT", "message": str(exc)}})
+                return
             if isinstance(exc, UserGrantConflict):
                 self._json(409, {"error": {"code": "REVISION_CONFLICT", "message": str(exc)}})
                 return
@@ -1355,6 +1392,21 @@ def _public_gateway_stream_error(error: GatewayRequestError) -> dict[str, Any]:
         "safeToRetry": safe_to_retry,
         **({"details": details} if details else {}),
     }
+
+
+def _chat_host_selection(body: dict) -> dict:
+    if "continuationTaskId" in body:
+        key = _required_string(body, "continuationTaskId")
+        if not re.fullmatch(r"[0-9a-f-]{36}", key) or {"instanceId", "expectedRevision"} & body.keys():
+            raise ValueError("原任务标识无效。")
+        return {"continuation_task_id": key}
+    if not ({"instanceId", "expectedRevision"} & body.keys()):
+        return {}
+    instance_id = _required_string(body, "instanceId")
+    revision = body.get("expectedRevision")
+    if type(revision) is not int or revision < 0:
+        raise ValueError("请选择实例，并提供当前设置版本。")
+    return {"instance_id": instance_id, "expected_revision": revision}
 
 
 def _required_string(body: dict, name: str) -> str:

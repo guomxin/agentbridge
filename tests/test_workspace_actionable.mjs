@@ -80,7 +80,7 @@ test('partial results show nine of eleven as read-only and retain only the query
   await flush();assert.deepEqual(calls,[]);
   assert.equal(find(root,'button','重新查询待办').disabled,false);
   find(root,'button','重新查询待办').events.click();await flush();
-  assert.deepEqual(refreshes,[{requestKey:'partial-refresh'}]);
+  assert.deepEqual(refreshes,[{requestKey:'partial-refresh',sourceTaskId:"source"}]);
 });
 
 test('partial to complete refresh restores choices without retaining stale selected-only filters', () => {
@@ -164,7 +164,7 @@ test("expired sources lock fresh selection but query recovery preserves its orig
   assert.ok(rows(root).every(row=>find(row,"input").disabled));
   find(root,"button","重新查询待办").events.click(); await flush();
   find(root,"button","恢复本次查询").events.click(); await flush();
-  assert.deepEqual(calls,[{requestKey:"refresh-fixed"},{requestKey:"refresh-fixed"}]);
+  assert.deepEqual(calls,[{requestKey:"refresh-fixed",sourceTaskId:"source"},{requestKey:"refresh-fixed",sourceTaskId:"source"}]);
 });
 
 test("an open query expires into timestamped read-only history without hiding selected-only rows", () => {
@@ -206,7 +206,7 @@ test("a lost refresh remains recoverable when its original source disappears bef
   assert.equal(find(root,"button","恢复本次查询").disabled,false);
   assert.ok(rows(root).every(row=>find(row,"input").disabled));
   find(root,"button","恢复本次查询").events.click();await flush();
-  assert.deepEqual(calls,[{requestKey:"refresh-frozen"},{requestKey:"refresh-frozen"}]);
+  assert.deepEqual(calls,[{requestKey:"refresh-frozen",sourceTaskId:"source"},{requestKey:"refresh-frozen",sourceTaskId:"source"}]);
   ui.render(root,[]);assert.equal(root.hidden,true);assert.equal(state.actionableGroups.size,0);
 });
 

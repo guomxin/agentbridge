@@ -1948,3 +1948,11 @@ td {
 .oa-history-steps > summary { cursor:pointer; padding:8px 0; color:var(--muted); }
 .oa-history-steps > ol { margin:0; padding-left:20px; }
 .oa-history-steps li { padding:4px 0; }
+
+.workspace-host-setting { display: flex; align-items: center; gap: .4rem; margin-inline-start: auto;
+  font-size: .875rem; color: var(--muted); }
+.workspace-host-setting select { max-width: min(15rem, 30vw); min-height: 2rem; font: inherit; }
+.telegram-host-binding { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem;
+  padding: .75rem 0; }
+.telegram-host-binding h3 { flex-basis: 100%; margin: 0; }
+.telegram-host-binding p { flex-basis: 100%; margin: 0; }

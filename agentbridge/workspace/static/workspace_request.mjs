@@ -79,6 +79,7 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
     attachments,
     skillTrial,
     activeStream,
+    hostSelection,
   }) {
     const request = {
       method: "POST",
@@ -92,6 +93,7 @@ export function createWorkspaceRequests({ fetch = globalThis.fetch, document, ge
       body: JSON.stringify({
         message,
         idempotencyKey,
+        ...hostSelection,
         ...(skillTrial ? {skillTrial: skillTrialBinding(skillTrial)} : {}),
         attachments: attachments.map((item) => ({
           type: "image",

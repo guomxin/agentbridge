@@ -323,7 +323,21 @@ class CentralCapabilityService:
                     or endpoint["endpoint_key"] != endpoint_key or endpoint["agent_host"] != registration["agentHost"]):
                 raise TaskIntegrityError("prepare command does not match its original Telegram private endpoint")
         else:
-            account = self.workspace.resolve_gateway_session(user_subject=user_subject, session_key=session_key)
+            if registration["agentHost"] == "openclaw":
+                account = self.workspace.resolve_gateway_session(user_subject=user_subject, session_key=session_key)
+            else:
+                with self.workspace._connect() as db:
+                    db.execute("BEGIN")
+                    row = db.execute("""SELECT a.account_id FROM workspace_host_bindings b
+                        JOIN workspace_accounts a USING(account_id) WHERE b.endpoint_id=? AND b.instance_id=?
+                        AND a.user_subject=? AND a.state='active'""",
+                        (endpoint["endpoint_id"], registration["hostInstanceId"], user_subject)).fetchone()
+                    if row is None:
+                        raise TaskIntegrityError("Original Workspace host binding is unavailable")
+                    account = self.workspace.hosts.resolve(db, row["account_id"],
+                        instance_id=registration["hostInstanceId"], existing=True)
+                    if account["session_key"] != session_key:
+                        raise TaskIntegrityError("Request does not match the bound Workspace conversation")
             if (task["active_conversation_ref"] != session_key or endpoint["endpoint_key"] != endpoint_key
                     or endpoint["client_type"] != "web" or endpoint["state"] != "active"
                     or account["endpoint_id"] != endpoint["endpoint_id"] or account["endpoint_key"] != endpoint_key
@@ -1230,6 +1244,7 @@ class CentralCapabilityService:
         ttl_seconds: int = 300,
         system_id: str = "oa",
         task_id: str | None = None,
+        continue_after_login: bool = False,
     ) -> dict:
         if task_id:
             self.tasks.get_task(task_id, user_subject=user_subject)
@@ -1273,6 +1288,7 @@ class CentralCapabilityService:
             card_base_url=card_base_url,
             ttl_seconds=ttl_seconds,
             task_id=task_id,
+            continue_after_login=continue_after_login,
         )
 
     def _reuse_active_session(
@@ -1534,6 +1550,7 @@ class CentralCapabilityService:
         card_base_url: str,
         ttl_seconds: int,
         task_id: str | None = None,
+        continue_after_login: bool = False,
     ) -> dict:
         adapter = self.adapter_for_system(session["system_id"])
         contract = adapter.authentication_contract()
@@ -1555,7 +1572,7 @@ class CentralCapabilityService:
                 else "legacy_form_login"
             ),
         )
-        interaction = self._credential_interaction(challenge, task_id=task_id)
+        interaction = self._credential_interaction(challenge, task_id=task_id,continue_after_login=continue_after_login)
         return {
             "protocolVersion": "0.1",
             "status": "requires_user_action",
@@ -1977,7 +1994,7 @@ class CentralCapabilityService:
             succeeded=succeeded,
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
-            expected_attempt_count=attempt_count if watch_delivery else None,
+            expected_attempt_count=attempt_count if watch_delivery or agent_host=="nanobot" else None,
         )
         if delivery.get("task_id"):
             trace = self.runtime_governance.trace_for_task(
@@ -2116,37 +2133,25 @@ class CentralCapabilityService:
             raise ValueError("task_scope is invalid")
         if planning_repair_source_task_id and (tool_name != "agentbridge_task_plan_prepare" or task_scope != "independent"):
             raise TaskIntegrityError("planning repair source requires an independent plan preparation")
-        try:
-            endpoint = self.tasks.endpoint_for_key(
-                user_subject=user_subject,
-                agent_host=agent_host,
-                endpoint_key=endpoint_key,
-            )
-        except TaskNotFound:
-            endpoint, endpoint_reused = self.tasks.ensure_endpoint(
-                user_subject=user_subject,
-                token_id=token_id,
-                agent_host=agent_host,
-                endpoint_key=endpoint_key,
-                client_type=client_type,
-                external_subject=external_subject,
-                account_id=account_id,
-                conversation_ref=conversation_ref,
-                label=label,
-                route=route,
-                capabilities=capabilities,
-            )
-        else:
+        if agent_host == "nanobot" and (client_type == "telegram" or endpoint_key.startswith("telegram:")):
+            from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
+            parts = endpoint_key.split(":")
+            if (len(parts) != 3 or parts[0] != "telegram" or client_type != "telegram"
+                    or parts[1] != account_id or parts[2] != external_subject or not host_instance_id):
+                raise TaskIntegrityError("Telegram task requires the original private endpoint")
+            paired = TelegramPilotLinks(self).ensure_endpoint(user_subject,token_id,host_instance_id,parts[1],parts[2])
+            if paired["conversationRef"] != conversation_ref:
+                raise TaskIntegrityError("Telegram task conversation has changed")
+            endpoint = self.tasks.get_endpoint(paired["endpointId"],user_subject=user_subject)
             endpoint_reused = True
-            if endpoint["client_type"] == "web":
-                if (
-                    client_type != "web"
-                    or endpoint["conversation_ref"] != conversation_ref
-                ):
-                    raise TaskIntegrityError(
-                        "workspace task context does not match its registered endpoint"
-                    )
-            else:
+        else:
+            try:
+                endpoint = self.tasks.endpoint_for_key(
+                    user_subject=user_subject,
+                    agent_host=agent_host,
+                    endpoint_key=endpoint_key,
+                )
+            except TaskNotFound:
                 endpoint, endpoint_reused = self.tasks.ensure_endpoint(
                     user_subject=user_subject,
                     token_id=token_id,
@@ -2160,6 +2165,30 @@ class CentralCapabilityService:
                     route=route,
                     capabilities=capabilities,
                 )
+            else:
+                endpoint_reused = True
+                if endpoint["client_type"] == "web":
+                    if (
+                        client_type != "web"
+                        or endpoint["conversation_ref"] != conversation_ref
+                    ):
+                        raise TaskIntegrityError(
+                            "workspace task context does not match its registered endpoint"
+                        )
+                else:
+                    endpoint, endpoint_reused = self.tasks.ensure_endpoint(
+                        user_subject=user_subject,
+                        token_id=token_id,
+                        agent_host=agent_host,
+                        endpoint_key=endpoint_key,
+                        client_type=client_type,
+                        external_subject=external_subject,
+                        account_id=account_id,
+                        conversation_ref=conversation_ref,
+                        label=label,
+                        route=route,
+                        capabilities=capabilities,
+                    )
         workspace_query_group = None
         if endpoint["client_type"] == "web":
             turn = self.workspace.resolve_gateway_turn(
@@ -2352,7 +2381,7 @@ class CentralCapabilityService:
             result["timingEvents"] = self._record_host_timing_events(user_subject, registration, snapshot["timingEvents"])
         from agentbridge.core.actionable_results import pending_preparations
         result.update(self.skill_catalog_stamps(user_subject))
-        result["pendingCommands"] = pending_preparations(self, user_subject, limit=16)
+        result["pendingCommands"] = pending_preparations(self, user_subject, limit=16, registration=registration)
         return result
 
     def _record_host_timing_events(self, user_subject, registration, events):
@@ -2953,6 +2982,8 @@ class CentralCapabilityService:
             "protocolVersion": "0.1",
             "schemaVersion": "agentbridge.host-task-snapshot.v1",
             "status": "succeeded",
+            **({"batchVerification": self._host_batch_verification(user_subject, task_id)}
+               if (task.get("summary") or {}).get("batch") else {}),
             "task": task_response(task),
             "plan": task_plan_response(plan) if plan is not None else None,
             "endpoint": endpoint_response(endpoint),
@@ -2987,6 +3018,27 @@ class CentralCapabilityService:
                 for artifact in artifacts
             ],
         }
+
+    def _host_batch_verification(self, subject: str, task_id: str) -> dict | None:
+        batch=self.tasks.get_batch_for_task(parent_task_id=task_id,user_subject=subject)
+        if batch is None:
+            return None
+        # Each entry is frozen by the central executor with the exact commit operation,
+        # ordinal and its authoritative adapter readback when it completes that item.
+        items=batch["items"]
+        count=batch["total_count"]
+        checked=set()
+        if batch["state"]=="succeeded" and len(items)==count:
+            for item in items:
+                evidence=(item.get("result_summary") or {}).get("verification") or {}
+                operation=item.get("operation_id")
+                if (operation and item["state"]=="succeeded" and
+                    (evidence.get("matched") is True or evidence.get("confirmed") is True)):
+                    checked.add(operation)
+        return {"taskId":task_id,"batchId":batch["batch_id"],"state":batch["state"],
+                "totalCount":count,"verifiedCount":len(checked),
+                "allVerified":bool(count and count==batch["succeeded_count"]==len(checked)
+                                   and not batch["failed_count"] and not batch["skipped_count"])}
 
     def resolve_host_task_continuation(
         self,
@@ -3282,6 +3334,7 @@ class CentralCapabilityService:
         user_subject: str,
         agent_host: str,
         endpoint_key: str,
+        host_instance_id: str | None = None,
         max_age_minutes: int = 360,
         limit: int = 12,
     ) -> dict:
@@ -3301,16 +3354,21 @@ class CentralCapabilityService:
                 limit=500,
             )
         }
+        from agentbridge.workspace.host_instances import context_endpoint_ids
+        allowed = context_endpoint_ids(self, user_subject, agent_host, host_instance_id, endpoints)
+        if endpoint["endpoint_id"] not in allowed:
+            raise PermissionError("Conversation does not belong to the registered host instance")
         selected = []
         for entry in reversed(
             self.tasks.list_timeline(
                 user_subject=user_subject,
                 limit=min(500, max(limit * 10, 100)),
+                chat_endpoints=list(allowed), entry_type="chat_message",
             )
         ):
             if entry.get("entry_type") != "chat_message":
                 continue
-            if entry.get("source_endpoint_id") == endpoint["endpoint_id"]:
+            if entry.get("source_endpoint_id") == endpoint["endpoint_id"] or entry.get("source_endpoint_id") not in allowed:
                 continue
             created_at = _parse_utc(entry.get("created_at"))
             if created_at is None or created_at < cutoff:
@@ -3360,6 +3418,7 @@ class CentralCapabilityService:
         account_id: str | None = None,
         label: str | None = None,
         route: dict | None = None,
+        connection=None,
     ) -> dict:
         endpoint, _reused = self.tasks.ensure_endpoint(
             user_subject=user_subject,
@@ -3373,11 +3432,13 @@ class CentralCapabilityService:
             label=label,
             route=route,
             capabilities=["workspace.link.confirm"],
+            connection=connection,
         )
         link = self.workspace.confirm_link(
             link_code=link_code,
             user_subject=user_subject,
             approver_endpoint_id=endpoint["endpoint_id"],
+            connection=connection,
         )
         return {
             "protocolVersion": "0.1",
@@ -3821,7 +3882,7 @@ class CentralCapabilityService:
         # new writers, so the next release has a compatible rollback target.
         return record["resume_spec"].get("challengeId") or record["resource_id"]
 
-    def _credential_interaction(self, challenge: dict, *, task_id: str | None = None) -> dict:
+    def _credential_interaction(self, challenge: dict, *, task_id: str | None = None,continue_after_login: bool=False) -> dict:
         record = self.interactions.register(
             interaction_type="credential",
             user_subject=challenge["user_subject"],
@@ -3838,6 +3899,7 @@ class CentralCapabilityService:
             resume_spec={
                 "kind": "session_ready",
                 "systemId": challenge["system_id"],
+                **({"continueAfterLogin":True} if task_id and continue_after_login else {}),
                 **({"challengeId": challenge["challenge_id"], "taskId": task_id} if task_id else {}),
             },
             created_at=challenge["created_at"],

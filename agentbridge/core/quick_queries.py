@@ -48,10 +48,33 @@ def _body(body, *, allow_user_message=False):
 
 
 def queue_query(service, account, body):
+    selection = None
+    if isinstance(body, dict) and ({"instanceId", "expectedRevision"} & body.keys()):
+        body = dict(body)
+        selection = {"instance_id": body.pop("instanceId", None), "expected_revision": body.pop("expectedRevision", None)}
+        if not isinstance(selection["instance_id"], str) or type(selection["expected_revision"]) is not int:
+            actions._fail("ACTION_REQUEST_INVALID", "缺少有效的默认宿主设置版本。")
+    origin_task = None
+    if isinstance(body, dict) and "sourceTaskId" in body:
+        body = dict(body)
+        origin_task = body.pop("sourceTaskId")
+        if (not isinstance(origin_task, str) or not re.fullmatch(r"[0-9a-f-]{36}", origin_task)
+                or selection or "userMessage" in body):
+            actions._fail("ACTION_REQUEST_INVALID", "重新查询需要原待办结果。")
     _body(body, allow_user_message=True)
+    directory = service.workspace.hosts
+    subject = account["user_subject"]
     with store_transaction(service.tasks) as connection:
+        if origin_task is not None:
+            workspace = actions.workspace_for_task(service, connection, account, origin_task)
+            if not connection.execute("""SELECT 1 FROM task_operations t JOIN operations o USING(operation_id)
+                    WHERE t.task_id=? AND t.user_subject=? AND o.capability_name=?""",
+                    (origin_task, subject, CAPABILITY)).fetchone():
+                actions._fail("ACTION_SOURCE_NOT_FOUND", "原任务没有可重新查询的待办。")
+            workspace["_source_task_id"] = origin_task
+            return _queue(service, subject, workspace, body, connection)
         workspace = dict(actions._account(connection, account))
-        return _queue(service, account["user_subject"], workspace, body, connection)
+        return _queue(service, subject, workspace, body, connection, directory=directory, selection=selection)
 
 
 def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, source_task_id, view_hash, remaining_context=None):
@@ -74,9 +97,22 @@ def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, s
         return _queue(service, subject, workspace, body, connection)
 
 
-def _queue(service, subject, workspace, body, connection):
+def _queue(service, subject, workspace, body, connection, *, directory=None, selection=None):
     service.user_grants.require_capability(subject, CAPABILITY)
     scope = workspace.get("_request_scope") or workspace["account_id"]
+    host_key = "quick-query:" + actions._hash({"scope": scope, "requestKey": body["requestKey"]})
+    existing = connection.execute("SELECT task_id FROM agent_tasks WHERE user_subject=? AND host_task_key=?",
+                                  (subject, host_key)).fetchone()
+    if directory is not None:
+        if existing:
+            workspace = actions.workspace_for_task(service, connection, workspace, existing[0])
+        else:
+            binding = directory.resolve(connection, workspace["account_id"], **(selection or {}))
+            from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID
+            if binding["instance_id"] != LEGACY_INSTANCE_ID:
+                workspace.update(endpoint_id=binding["endpoint_id"], endpoint_key=binding["endpoint_key"],
+                                 openclaw_session_key=binding["session_key"], agent_host=binding["host_type"],
+                                 instance_id=binding["instance_id"])
     identity = {"action": COMMAND_KIND, "endpointId": workspace["endpoint_id"],
         "sourceTaskId": workspace.get("_source_task_id"), "viewHash": workspace.get("_view_hash")}
     remaining = workspace.get("_remaining_context")
@@ -89,9 +125,6 @@ def _queue(service, subject, workspace, body, connection):
         identity["messageHash"] = actions._hash({"text": message})
     request_hash = actions._hash({"scope": scope, "requestKey": body["requestKey"]})
     identity_hash = actions._hash(identity)
-    host_key = "quick-query:" + actions._hash({"scope": scope, "requestKey": body["requestKey"]})
-    existing = connection.execute("SELECT task_id FROM agent_tasks WHERE user_subject=? AND agent_host='openclaw' AND host_task_key=?",
-        (subject, host_key)).fetchone()
     if existing:
         row = actions._owned_task(connection, subject, existing[0])
         old = json.loads(row["summary_json"]).get("command") or {}
@@ -123,10 +156,13 @@ def _queue(service, subject, workspace, body, connection):
         command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"],
             sourceTaskId=workspace["_source_task_id"], viewHash=workspace["_view_hash"])
     command["intentHash"] = actions._hash(actions._intent(command))
-    task, _ = service.tasks.ensure_task(user_subject=subject, agent_host="openclaw", host_task_key=host_key,
+    task, _ = service.tasks.ensure_task(user_subject=subject, agent_host=workspace.get("agent_host", "openclaw"), host_task_key=host_key,
         origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],
         title=f"重新查询原批次剩余{len(remaining['targets'])}项" if remaining else "查询 OA 待办",
         summary={"command": command}, connection=connection)
+    if workspace.get("instance_id"):
+        service.host_contract.acquire_coordinator_lease(task_id=task["task_id"], user_subject=subject,
+            host_instance_id=workspace["instance_id"], agent_host=workspace["agent_host"], connection=connection)
     if workspace.get("_telegram"):
         subscription = connection.execute("SELECT subscription_id,event_filters_json FROM task_subscriptions "
             "WHERE task_id=? AND endpoint_id=? AND user_subject=? AND state='active'",
@@ -172,6 +208,14 @@ def _origin(service, connection, subject, task, command):
         if endpoint["_binding_hash"] != command.get("endpointBindingHash") \
                 or endpoint["conversation_ref"] != task["active_conversation_ref"]:
             actions._fail("ACTION_ENDPOINT_INVALID", "原 Telegram 查询会话已变化。")
+    elif task["agent_host"] != "openclaw":
+        row = connection.execute("SELECT account_id FROM workspace_host_bindings WHERE endpoint_id=?",
+                                 (task["origin_endpoint_id"],)).fetchone()
+        if row is None:
+            actions._fail("ACTION_ENDPOINT_INVALID", "原 Workspace 端点已失效。")
+        host = service.workspace._task_host(connection, row["account_id"], subject, task["task_id"])
+        if host["endpoint_id"] != task["origin_endpoint_id"] or host["session_key"] != task["active_conversation_ref"]:
+            actions._fail("ACTION_ENDPOINT_INVALID", "原 Workspace 查询会话已变化。")
     else:
         account = connection.execute("SELECT * FROM workspace_accounts WHERE endpoint_id=? AND user_subject=?",
             (task["origin_endpoint_id"], subject)).fetchone()

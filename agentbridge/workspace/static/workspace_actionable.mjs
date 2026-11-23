@@ -77,7 +77,7 @@ export function createActionableResults({ document, state, prepareTargets,
   }
   async function refresh(model) {
     if (model.pending || model.request || typeof refreshQuery !== "function") return;
-    model.refreshRequest ||= {requestKey: makeRequestKey()};
+    model.refreshRequest ||= {requestKey: makeRequestKey(), sourceTaskId: model.group.sourceTaskId};
     model.pending = true; model.status = "正在重新查询最新待办；原办理任务会保留。"; update(model);
     try {
       const result = await refreshQuery({...model.refreshRequest});

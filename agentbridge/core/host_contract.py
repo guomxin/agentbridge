@@ -338,6 +338,8 @@ class HostContractStore:
     def _bootstrap_compatibility(connection: sqlite3.Connection) -> None:
         now = _utc_now()
         builtins = (
+            ("nanobot", "0.2.0", "L2", "nanobot-private-credential-poll-resume-v1"),
+            ("nanobot", "0.3.0", "L3", "sha256:9046f611fd05c7a8ebafb4a3af979c77cdf12019d1309ca2be0c0e6b6d8beb34"),
             ("openclaw", "0.4.71", "L3", "shared-contract-h01-h29-task-plan-v1"),
             (
                 "openclaw",

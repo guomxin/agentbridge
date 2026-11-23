@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .host_profile import HOST_TYPE, host_context_meta
 
 
 CENTRAL_TERMINAL_STATES = frozenset(
@@ -87,12 +86,12 @@ class ReferenceHostRecovery:
             remote = await self.task_driver.client(identity_label).call_tool(
                 "agentbridge_host_task_recovery_list",
                 {
-                    "agent_host": HOST_TYPE,
+                    "agent_host": self.task_driver.implementation.name,
                     "endpoint_key": identity.endpoint_key,
                     "limit": 100,
                     "include_user_endpoints": False,
                 },
-                meta=host_context_meta(instance_id=self.task_driver.instance_id),
+                meta=self.task_driver.host_context(),
                 recovery_class="read",
             )
         except Exception as exc:
@@ -151,7 +150,7 @@ class ReferenceHostRecovery:
         lease_result = await self.task_driver.client(task["identity_label"]).call_tool(
             "agentbridge_host_coordinator_lease_get",
             {"task_id": task["task_id"]},
-            meta=host_context_meta(instance_id=self.task_driver.instance_id),
+            meta=self.task_driver.host_context(),
             recovery_class="read",
         )
         lease = lease_result.payload().get("coordinatorLease")

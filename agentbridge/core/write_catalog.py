@@ -511,3 +511,14 @@ WRITE_FUNCTION_NAMES = frozenset(
     for key in ("prepare_function", "commit_function", "preflight_function", "field_schema_function")
     if key in definition
 )
+
+
+def host_prepare_contracts(allowed_tools) -> dict[str, dict[str,str]]:
+    """Project only governed prepare entries that this user's tool catalog already exposes."""
+    allowed=set(allowed_tools)
+    result={}
+    for capability,definition in _TRUSTED_WRITE_DEFINITIONS.items():
+        tool=capability.replace(".","_")
+        if tool in allowed:
+            result[tool]={"prepareCapability":capability,"commitCapability":definition["commit_capability"]}
+    return result

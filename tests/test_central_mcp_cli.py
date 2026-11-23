@@ -197,7 +197,12 @@ class CentralMcpCliTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             token_file = Path(tmp) / "gateway.token"
             token_file.write_text("gateway-token-value", encoding="utf-8")
+            routes = Path(tmp) / "routes.json"
+            routes.write_text(json.dumps({"routes": {"other": {"instanceId": "office", "url": "http://127.0.0.1:40001",
+                                                              "tokenFile": str(Path(tmp) / "private-route")}}}))
+            routes.chmod(0o600)
             with (
+                patch.dict("os.environ", {"AGENTBRIDGE_NANOBOT_ROUTES_FILE": str(routes)}),
                 patch("agentbridge.cli.main.serve_central_mcp") as serve,
                 redirect_stdout(io.StringIO()) as stdout,
             ):
@@ -225,6 +230,8 @@ class CentralMcpCliTests(unittest.TestCase):
             "http://127.0.0.1:8783",
         )
         self.assertTrue(payload["workspaceGatewayConfigured"])
+        self.assertEqual(payload["workspaceAdditionalHostCount"], 1)
+        self.assertEqual(serve.call_args.kwargs["workspace_host_routes"]["other"].instance_id, "office")
         self.assertIsNotNone(serve.call_args.kwargs["workspace_config"])
         self.assertIsNotNone(serve.call_args.kwargs["workspace_gateway"])
 

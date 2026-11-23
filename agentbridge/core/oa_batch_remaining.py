@@ -127,7 +127,7 @@ def queue_remaining_query(service, account, task_id, body):
     from agentbridge.core.quick_queries import _queue
     _request(body)
     with store_transaction(service.tasks) as connection:
-        workspace = dict(actions._account(connection, account))
+        workspace = actions.workspace_for_task(service, connection, account, task_id)
         context = _context(service, connection, account["user_subject"], task_id)
         if context["batchVersion"] != body["expectedBatchVersion"]:
             actions._fail("BATCH_REMAINING_CHANGED", "批次版本已变化，请刷新原任务。")

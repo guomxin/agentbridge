@@ -18,6 +18,7 @@ from agentbridge.core.user_grants import PERMISSIONS
 from agentbridge.core.runtime_diagnostics import HOST_CONTROL_DIAGNOSTICS
 from agentbridge.core.sessions import SessionPrincipalMismatch
 from agentbridge.workspace.gateway import OpenClawGatewayClient
+from agentbridge.workspace.host_provision import WorkspaceHostProvision
 from agentbridge.database.independent import DatabaseGrants, CAPABILITIES as DATABASE_CAPABILITIES
 
 
@@ -46,10 +47,25 @@ class AdminControlPlane:
         self.audit = AdminAuditStore(self.db_path)
         self.policies = service.governance_policies
         self.workspace_gateway = workspace_gateway
+        self.workspace_hosts = WorkspaceHostProvision(service, self.audit, workspace_gateway)
         self.started_at = started_at or _utc_now()
         self.release_id = os.environ.get("AGENTBRIDGE_RELEASE_ID") or "development"
         self.database_grants = DatabaseGrants(service.home / 'database' / 'grants.sqlite3')
         self.user_grants = service.user_grants
+
+    def workspace_host_catalog(self, actor):
+        _require_admin(actor)
+        return self.workspace_hosts.catalog()
+
+    def configure_workspace_host(self, *, actor, request_ip, body, action):
+        _require_admin(actor)
+        if action == "save":
+            return self.workspace_hosts.save(actor, request_ip, body)
+        if action == "bind":
+            return self.workspace_hosts.bind(actor, request_ip, body)
+        if action == "probe":
+            return self.workspace_hosts.probe(body)
+        raise ValueError("未知实例操作。")
 
     def list_admin_accounts(self) -> list[dict]:
         return self.accounts.list()

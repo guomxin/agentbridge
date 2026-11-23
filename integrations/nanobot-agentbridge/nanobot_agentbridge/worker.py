@@ -1,0 +1,127 @@
+"""An isolated SDK worker owns its subject's state and authenticated MCP session."""
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+import json
+from pathlib import Path
+import re
+import ssl
+import sys
+
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from nanobot.config.loader import set_config_path
+from nanobot.config.schema import Config
+
+from nanobot_agentbridge.cards import wait_for_credential
+from nanobot_agentbridge.private_files import private_text
+from nanobot_agentbridge.runtime import Conversation, run_readonly
+
+
+VERSION = "0.2.0"
+
+
+def channel_for(endpoint_key: str) -> str:
+    return "telegram" if re.fullmatch(r"telegram:[0-9]+:[0-9]+",endpoint_key) else "workspace"
+
+
+async def verify_subject(session, request) -> tuple[dict,str]:
+    instance = request["instance"]
+    coordinator = bool(request.get("coordinatorProgram"))
+    context = {"version":"1","agentHost":"nanobot","hostInstanceId":instance,"hostVersion":"0.3.0" if coordinator else VERSION}
+    names = ("mcpApps","privateResultMeta","interactionPollResume","taskTimeline","proactiveDelivery","artifactDelivery",
+             "restartRecovery","coordinatorLease","batchTaskTimeline","runtimeSignals","boundedTransportRecovery")
+    capabilities = dict.fromkeys(names,False)
+    levels = ["L1"]
+    if request.get("trustedCardOrigins"):
+        levels.append("L2")
+        capabilities.update(privateResultMeta=True,interactionPollResume=True)
+    if coordinator:
+        levels.append("L3")
+        capabilities.update(dict.fromkeys(names[3:],True))
+    profile = {"schema":"agentbridge.host.v1","hostInstanceId":instance,"levels":levels,
+               "implementation":{"name":"nanobot","version":context["hostVersion"]},
+               "endpointTypes":["web_private","telegram_private"],"capabilities":capabilities}
+    meta = {"io.agentbridge/host-context":context}
+    registration = await session.call_tool("agentbridge_host_register",{},meta={**meta,"io.agentbridge/host-profile":profile})
+    if registration.isError:
+        raise PermissionError("Central host registration failed")
+    result = await session.call_tool("agentbridge_host_identity_profile",{"agent_host":"nanobot"},meta=meta)
+    payload = result.structuredContent or {}
+    if result.isError or payload.get("identity",{}).get("userSubject") != request["subject"]:
+        raise PermissionError("Central token subject does not match the provisioned binding")
+    accepted = payload.get("host",{}).get("acceptedLevel")
+    request["controlledPrepares"] = payload.get("controlledPrepares",{}) if accepted=="L3" else {}
+    if accepted not in levels:
+        raise PermissionError("Unexpected central host compatibility level")
+    return meta,accepted
+
+
+@asynccontextmanager
+async def authenticated_session(request):
+    token = private_text(Path(request["tokenFile"])).strip()
+    tls = ssl.create_default_context(cafile=request.get("caFile"))
+    async with httpx.AsyncClient(headers={"Authorization":"Bearer "+token},trust_env=False,
+                                 verify=tls,follow_redirects=False,timeout=30) as http:
+        async with streamable_http_client(request["mcpUrl"],http_client=http) as (read,write,_):
+            async with ClientSession(read,write) as session:
+                await session.initialize()
+                meta,level = await verify_subject(session,request)
+                yield session,meta,level
+
+
+async def run(request: dict) -> None:
+    source = json.loads(private_text(Path(request["modelConfigFile"])))
+    directory = Path(request["userDir"])
+    config_path = directory/"config.json"
+    set_config_path(config_path)
+    config = Config.model_validate(source)
+    config.bind_source_path(config_path)
+    config.agents.defaults.workspace = str(directory/"workspace")
+    config.tools.restrict_to_workspace = True
+    binding = Conversation(request["subject"],request["endpoint"],request["conversation"])
+    channel = channel_for(request["endpointKey"])
+
+    async def emit(delta: str) -> None:
+        print(json.dumps({"kind":"delta","text":delta},ensure_ascii=False),flush=True)
+    async with authenticated_session(request) as (session,meta,level):
+        if channel=="telegram":
+            from nanobot_agentbridge.telegram_identity import verify_telegram_binding
+            if not await verify_telegram_binding(session,request["instance"],binding.subject,meta,request["endpointKey"]):
+                raise PermissionError("Telegram identity has no active central binding")
+        async def deliver(target, card):
+            if target!=binding:
+                raise PermissionError("Card binding unavailable")
+            return await wait_for_credential(session,request,meta,card)
+        can_present = level in {"L2","L3"} and channel=="workspace"
+        if request.get("trial") is not None:
+            if channel!="workspace":
+                raise PermissionError("Workspace trial binding required")
+            from .skills import run_workspace_trial
+            answer = await run_workspace_trial(config,session,binding,request,meta,emit)
+            print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
+            return
+        coordinator_tool = None
+        skill_args = {}
+        if level=="L3" and request.get("coordinatorProgram") and (channel=="workspace" or request.get("workspaceEndpointId")):
+            from .task_context import TaskContext
+            context = TaskContext(session,request,meta)
+            skill_args["business_context"] = context.get
+            coordinator_tool = (request,context)
+            if request.get("enableSkills") and channel=="workspace":
+                from .skills import SkillRun
+                skill_args["skill_run"] = SkillRun(session,context.get)
+        answer = await run_readonly(config,session,binding,request["message"],emit,
+                    channel=channel,media=request.get("media"),credential_login=can_present,coordinator_tool=coordinator_tool,deliver_private=deliver if can_present else None,
+                    trusted_origins=frozenset(request.get("trustedCardOrigins",[])),**skill_args)
+    print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
+
+
+if __name__=="__main__":
+    try:
+        asyncio.run(run(json.load(sys.stdin)))
+    except Exception:
+        # A provider exception can include tool results. It must not enter public logs.
+        raise SystemExit(1) from None

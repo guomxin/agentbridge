@@ -1,0 +1,26 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegram 私聊验收 · 用户 USER_NAME</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;color:#1a2834;background:#f4f7f8;max-width:920px;margin:40px auto;padding:0 18px}section{padding:18px;background:white;border:1px solid #ccd5db;border-radius:8px;margin:16px 0}button{font:inherit;padding:6px 12px;margin:3px 3px 3px 0;color:#15334a;border:1px solid #879ca9;background:#fff;border-radius:4px}button:focus{outline:3px solid #136e9d}li{border-bottom:1px solid #dde6ec;padding:9px}p{margin:5px 0}.state{font:14px monospace}button:disabled{opacity:.5}</style>
+<h1>Telegram 私聊 · 用户 USER_NAME</h1><p>Telegram、模型和 OA 待办数据使用本机模拟服务。中央身份校验、NanoBot SDK、宿主与消息账本运行实际代码。</p>
+<section PAIR_HIDDEN><h2>首次绑定</h2><label>本人 Workspace 配对指令或链接 <input id="challenge" type="password" autocomplete="off"></label>
+<button data-command="pair">向模拟 Bot 私聊发送配对指令</button><button id="copy-proof" type="button" disabled>复制本次私聊确认码</button></section>
+<section><h2>发起查询</h2><p>消息内容为“查询我的待办”。每次新查询生成一个消息编号，重送沿用最近一条的编号。</p>
+<button data-command="send">发送待办查询</button><button data-command="replay">重送同一消息</button><button data-command="peer">核验对方运行不可读</button></section>
+<section><h2>验证中断与恢复</h2><button data-command="lost-accept">新查询 · 丢弃受理回执</button><button data-command="admission-unknown">新查询 · 受理未知</button><button data-command="lost-delivery">新查询 · 丢弃送达回执</button><button data-command="restart">重启渠道并恢复</button></section>
+<section PAIR_HIDDEN><h2>原任务终态通知</h2><button data-command="lost-notification">新查询 · 丢弃后台终态通知送达回执</button><ol id="notifications"></ol></section>
+<section><h2>本人的回执</h2><p id="counters"></p><p role="status" id="status"></p><ol id="receipts"></ol></section>
+<script>
+const statusText=document.getElementById("status"), box=document.getElementById("receipts");
+let currentProof=""; document.getElementById("copy-proof").onclick=async()=>{if(currentProof)await navigator.clipboard.writeText(currentProof);};
+function show(d){document.getElementById('counters').textContent="实际宿主运行 "+d.hostRuns+" 次，合成模型发起业务查询 "+d.modelTurns+" 次。";
+  document.getElementById("notifications").replaceChildren(...(d.notifications||[]).map(entry=>{const li=document.createElement("li");li.textContent="原私聊消息 "+entry.message+" · "+entry.state+" · 终态通知发送 "+entry.attempts+" 次 · 中央业务 "+(entry.business||"待核对")+" · 中央送达 "+(entry.centralDelivery||"待核对")+"（收据核对 "+(entry.centralAttempts||0)+" 次）";return li;}));
+  box.replaceChildren(...d.rows.map(row=>{const item=document.createElement('li');const line=document.createElement('div');
+  line.textContent="消息 "+row.message+" · "+row.state+" · Bot API 发送 "+row.sendCalls+" 次"+(row.receipt?" · 回执 "+row.receipt:"");
+  const answer=document.createElement('p');const match=(row.answer||"").match(/本次确认码 ([0-9]{8})/);if(match){currentProof=match[1];document.getElementById("copy-proof").disabled=false;}answer.textContent=match?"已收到私聊确认码，可复制到本人 Workspace 完成确认。":row.answer||"尚无私聊答复。";item.append(line,answer);return item}));
+  if(d.check) statusText.textContent=d.check;}
+let busy=false; async function refresh(){if(busy)return;try{const r=await fetch('/state');if(r.ok) show(await r.json())}catch{}}
+document.querySelectorAll('button[data-command]').forEach(button=>button.onclick=async()=>{if(busy)return;busy=true;document.querySelectorAll('button[data-command]').forEach(b=>b.disabled=true);
+try{const value=document.getElementById('challenge').value.trim();const match=value.match(/(?:start[= ]|^)([A-Za-z0-9_-]{32})$/);const r=await fetch('/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:button.dataset.command,code:match?.[1]})});if(!r.ok)throw Error();show(await r.json());if(button.dataset.command==="pair")document.getElementById("challenge").value="";}
+catch{statusText.textContent="本次操作未取得收据。";}finally{busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);}});
+refresh();setInterval(refresh,650);
+</script></html>

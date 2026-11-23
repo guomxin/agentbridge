@@ -702,6 +702,7 @@ class TaskHubStore:
         label: str | None = None,
         capabilities: list[str] | None = None,
         route: dict[str, Any] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> tuple[dict, bool]:
         values = {
             "user_subject": _required_text(user_subject, "user_subject", 256),
@@ -733,8 +734,7 @@ class TaskHubStore:
         route_json = _canonical_json(_safe_object(route))
         now = _utc_now()
 
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with store_transaction(self, connection) as connection:
             existing = connection.execute(
                 """
                 SELECT * FROM client_endpoints
@@ -1998,6 +1998,7 @@ class TaskHubStore:
                 interaction_type=str(interaction.get("type") or ""),
                 newly_linked=linked is None,
                 previous_state=linked["last_state"] if linked is not None else None,
+                credential_prerequisite=(interaction_record.get("resume_spec") or {}).get("continueAfterLogin") is True,
             )
             task_status, event_type = decision.status, decision.event_type
             if linked is None:
@@ -2970,80 +2971,34 @@ class TaskHubStore:
         before_sequence: int | None = None,
         entry_type: str | None = None,
         limit: int = 200,
+        chat_endpoints: list[str] | None = None,
     ) -> list[dict]:
         if after_sequence is not None and before_sequence is not None:
             raise ValueError("after_sequence and before_sequence are mutually exclusive")
         if entry_type not in {None, "chat_message", "task_event"}:
             raise ValueError("entry_type must be chat_message or task_event")
         limit = min(max(int(limit), 1), 1000)
+        clauses = ["user_subject = ?"]
+        parameters = [user_subject]
+        if entry_type is not None:
+            clauses.append("entry_type = ?")
+            parameters.append(entry_type)
+        if chat_endpoints is not None:
+            clauses.append("(entry_type <> 'chat_message' OR source_endpoint_id IN (SELECT value FROM json_each(?)))")
+            parameters.append(json.dumps(chat_endpoints))
+        if after_sequence is not None:
+            clauses.append("sequence > ?")
+            parameters.append(max(int(after_sequence), 0))
+        if before_sequence is not None:
+            clauses.append("sequence < ?")
+            parameters.append(max(int(before_sequence), 1))
+        direction = "ASC" if after_sequence is not None else "DESC"
         with self._connect() as connection:
-            if after_sequence is not None:
-                after_sequence = max(int(after_sequence), 0)
-                if entry_type is None:
-                    rows = connection.execute(
-                        """
-                        SELECT * FROM user_timeline
-                        WHERE user_subject = ? AND sequence > ?
-                        ORDER BY sequence
-                        LIMIT ?
-                        """,
-                        (user_subject, after_sequence, limit),
-                    ).fetchall()
-                else:
-                    rows = connection.execute(
-                        """
-                        SELECT * FROM user_timeline
-                        WHERE user_subject = ? AND sequence > ? AND entry_type = ?
-                        ORDER BY sequence
-                        LIMIT ?
-                        """,
-                        (user_subject, after_sequence, entry_type, limit),
-                    ).fetchall()
-            elif before_sequence is not None:
-                before_sequence = max(int(before_sequence), 1)
-                if entry_type is None:
-                    rows = connection.execute(
-                        """
-                        SELECT * FROM user_timeline
-                        WHERE user_subject = ? AND sequence < ?
-                        ORDER BY sequence DESC
-                        LIMIT ?
-                        """,
-                        (user_subject, before_sequence, limit),
-                    ).fetchall()
-                else:
-                    rows = connection.execute(
-                        """
-                        SELECT * FROM user_timeline
-                        WHERE user_subject = ? AND sequence < ? AND entry_type = ?
-                        ORDER BY sequence DESC
-                        LIMIT ?
-                        """,
-                        (user_subject, before_sequence, entry_type, limit),
-                    ).fetchall()
-                rows = list(reversed(rows))
-            elif entry_type is None:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM user_timeline
-                    WHERE user_subject = ?
-                    ORDER BY sequence DESC
-                    LIMIT ?
-                    """,
-                    (user_subject, limit),
-                ).fetchall()
-                rows = list(reversed(rows))
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM user_timeline
-                    WHERE user_subject = ? AND entry_type = ?
-                    ORDER BY sequence DESC
-                    LIMIT ?
-                    """,
-                    (user_subject, entry_type, limit),
-                ).fetchall()
-                rows = list(reversed(rows))
+            rows = connection.execute(
+                f"SELECT * FROM user_timeline WHERE {' AND '.join(clauses)} ORDER BY sequence {direction} LIMIT ?",
+                (*parameters, limit)).fetchall()
+        if after_sequence is None:
+            rows.reverse()
         return [_timeline_from_row(row) for row in rows]
 
     def list_workspace_history(
@@ -3055,6 +3010,7 @@ class TaskHubStore:
         before_id: str | None = None,
         limit: int = 32,
         message_max_sequence: int | None = None,
+        chat_endpoints: list[str] | None = None,
     ) -> list[dict]:
         """Read one bounded creation-ordered page across messages and tasks.
 
@@ -3086,6 +3042,10 @@ class TaskHubStore:
         parameters = [user_subject, *message_parameters]
         if message_max_sequence is not None:
             parameters.append(max(int(message_max_sequence), 0))
+        endpoint_bound = ""
+        if chat_endpoints is not None:
+            endpoint_bound = " AND source_endpoint_id IN (SELECT value FROM json_each(?))"
+            parameters.append(json.dumps(chat_endpoints))
         parameters.extend((limit, user_subject, *task_parameters, limit, limit))
         with self._connect() as connection:
             connection.execute("BEGIN")
@@ -3094,7 +3054,7 @@ class TaskHubStore:
                 WITH messages AS (
                     SELECT created_at, 'message' AS kind, entry_id AS id
                     FROM user_timeline
-                    WHERE user_subject = ? AND entry_type = 'chat_message'{message_bound}{sequence_bound}
+                    WHERE user_subject = ? AND entry_type = 'chat_message'{message_bound}{sequence_bound}{endpoint_bound}
                     ORDER BY created_at DESC, entry_id DESC LIMIT ?
                 ), tasks AS (
                     SELECT created_at, 'task' AS kind, task_id AS id
@@ -4699,11 +4659,14 @@ class TaskHubStore:
     ) -> None:
         endpoints = connection.execute(
             """
-            SELECT endpoint_id, client_type, capabilities_json
-            FROM client_endpoints
-            WHERE user_subject = ? AND state = 'active'
+            SELECT e.endpoint_id, e.client_type, e.capabilities_json
+            FROM client_endpoints e JOIN agent_tasks t ON t.user_subject = e.user_subject
+            WHERE t.task_id = ? AND t.user_subject = ? AND e.state = 'active'
+              AND t.agent_host <> 'nanobot' AND e.agent_host <> 'nanobot'
             """,
-            (user_subject,),
+            # A parallel NanoBot instance has independent endpoints. Only its
+            # original push endpoint or an explicit subscription is authorized.
+            (task_id, user_subject),
         ).fetchall()
         for endpoint in endpoints:
             if _is_pull_based_endpoint(endpoint):

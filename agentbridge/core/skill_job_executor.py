@@ -6,6 +6,7 @@ Saving a generated draft completes its job in that same authoring transaction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import json
 import time
 from typing import Callable, Protocol
@@ -68,12 +69,14 @@ class SkillJobExecutor:
     def __init__(self, dependencies: SkillJobDependencies) -> None:
         self._dependencies = dependencies
 
-    def run_once(self, complete):
+    def run_once(self, complete, *, bound_completion=None):
         job = self._dependencies.claim()
         if not job: return False
         try:
             self._dependencies.active(job)
             payload = json.loads(job['payload_json'])
+            if bound_completion is not None:
+                complete = partial(bound_completion, job['owner_subject'], payload.get('model_route'))
             result = self._dependencies.generation(job, payload, complete) if job['kind'] == 'generation' else self._dependencies.evaluation(job, payload, complete)
             if job['kind'] != 'generation' or not result.get('saved'):
                 self._dependencies.active(job)

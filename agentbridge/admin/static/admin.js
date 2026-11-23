@@ -1,3 +1,4 @@
+import { createHostDirectoryView } from "./admin_hosts.mjs";
 import { renderSkillReviewList } from "./admin_skill_reviews.mjs";
 import { statusText, statusClass, escapeHtml, fmtTime, fmtBytes, fmtDuration, fmtMetric, boundaryLabel, shortId, badge, sessionStateBadge, empty, table, filterRow, filteredTable, scopeBadges, rowMenuButton, skillReviewQualityHtml } from "./admin_presentation.mjs";
 import { createViewScope, createTimerSlot } from "./admin_lifecycle.mjs";
@@ -6,6 +7,7 @@ import { createModalController, skillReviewDecision } from "./admin_forms.mjs";
 
 const state = { account: null, view: "overview", coordinationTab: "tasks", governanceTab: "events", incidents: [], selectedIncident: null, detailRevision: 0 };
 const titles = {
+  hosts: ["WORKSPACE", "工作台宿主"],
   overview: ["CONTROL PLANE", "运行总览"],
   skillReviews: ["SKILL PUBLICATION", "助手发布审批"],
   users: ["IDENTITY", "用户与令牌"],
@@ -30,6 +32,10 @@ const toastTimer = createTimerSlot();
 const modalController = createModalController({ modal, select: $ });
 const api = createAdminApi({ cookieText: () => document.cookie, readScope: viewScope, accountScope,
   submission: () => modalController.captureSubmission() });
+
+const hostDirectory = createHostDirectoryView({
+  api, content, openModal, closeModal, toast, reasonField, current: () => state.view === "hosts", refresh: () => loadView("hosts"),
+});
 
 function applyFilter(control) {
   const scope = control.closest("[data-filter-scope]");
@@ -130,6 +136,8 @@ function showLogin() {
 function showApp(account) {
   accountScope.invalidate();
   state.account = account;
+  document.querySelector('#nav [data-view="hosts"]').classList.toggle("hidden", account.role !== "admin");
+  if (state.view === "hosts" && account.role !== "admin") state.view = "overview";
   $("#login-view").classList.add("hidden");
   $("#app").classList.remove("hidden");
   $("#account-name").textContent = account.username;
@@ -166,7 +174,7 @@ async function loadView(view) {
   content.innerHTML = '<div class="loading">正在读取中心状态</div>';
   try {
     const renderers = {
-      skillReviews: renderSkillReviews, overview: renderOverview, databases: renderDatabases, users: renderUsers, sessions: renderSessions, capabilities: renderCapabilities,
+      hosts: hostDirectory.render, skillReviews: renderSkillReviews, overview: renderOverview, databases: renderDatabases, users: renderUsers, sessions: renderSessions, capabilities: renderCapabilities,
       operations: renderOperations, interactions: renderInteractions, traces: renderTraces,
       incidents: renderIncidents, coordination: renderCoordination, runtime: renderRuntime, audit: renderAudit,
     };
@@ -783,6 +791,7 @@ content.addEventListener("click", async event => {
   if (target.hasAttribute("data-row-actions")) { openRowActions(target); return; }
   if (target.closest("#row-action-menu")) closeRowActions();
   if (target.dataset.openView) loadView(target.dataset.openView);
+  else if (target.hasAttribute("data-host-action")) await hostDirectory.act(target);
   else if (target.dataset.incidentDetail) await selectIncident(target.dataset.incidentDetail);
   else if (target.dataset.traceDetail) await openTraceDetail(target.dataset.traceDetail);
   else if (target.dataset.incidentAction) openReasonAction({ title: `${target.textContent.trim()}运行事件`, submit: target.textContent.trim(), danger: target.dataset.incidentAction === "suppress", request: reason => api(`/api/incidents/${target.dataset.incidentId}/${target.dataset.incidentAction}`, { method: "POST", body: JSON.stringify({ reason }) }) });

@@ -149,12 +149,14 @@ def operation_observation(
 
 def interaction_observation(
     *, task: Mapping[str, Any], interaction_id: str, state: str,
-    interaction_type: str, newly_linked: bool, previous_state: str | None,
+    interaction_type: str, newly_linked: bool, previous_state: str | None, credential_prerequisite: bool = False,
 ) -> TaskObservationDecision:
     status = _task_status_for_interaction(
         state, interaction_type=interaction_type,
         has_current_operation=bool(task["current_operation_id"]),
     )
+    if credential_prerequisite and interaction_type=="credential" and state=="completed":
+        status="active"
     event_type = _event_type_for_interaction(state)
     changed = newly_linked or previous_state != state
     event_changed = newly_linked or _event_type_for_interaction(str(previous_state or "")) != event_type
