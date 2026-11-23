@@ -198,7 +198,16 @@ class SkillWorkbench:
         return SkillJobQueue.auto_allowed(db, owner, scope)
 
     def generate(self, owner, *, material, request_key, draft_id=None, expected_revision=None,
-                 scope='manual', automatic=False, task_ids=None, source_dispatch=None):
+                 scope='manual', automatic=False, task_ids=None):
+        return self._generate(owner, material=material, request_key=request_key, draft_id=draft_id,
+                              expected_revision=expected_revision, scope=scope, automatic=automatic, task_ids=task_ids)
+
+    def generate_from_dispatch(self, owner, *, material, account_id, dispatch_id):
+        return self._generate(owner, material=material, request_key='workspace:' + dispatch_id,
+                              scope='workspace:' + account_id, automatic=True, source_dispatch=dispatch_id)
+
+    def _generate(self, owner, *, material, request_key, draft_id=None, expected_revision=None,
+                  scope='manual', automatic=False, task_ids=None, source_dispatch=None):
         from agentbridge.core.skill_authoring import text
         text(material, '提炼材料', 16000)
         text(scope, '会话范围', 256)
@@ -666,7 +675,7 @@ class SkillWorkbench:
                         self._capture(dict(pending))
                         with closing(self.store.connect()) as db, db:
                             db.execute("UPDATE skill_auto_capture SET state='processed' WHERE dispatch_id=?", (pending['dispatch_id'],))
-                worked = self.run_once(self._complete)
+                worked = self.run_once(self._complete, bound_completion=self._bound_completion)
             except (sqlite3.Error, OSError):
                 if not Path(self.store.db_path).exists(): return
                 worked = False
@@ -700,8 +709,8 @@ class SkillWorkbench:
             yield_job=lambda job, rows: self._job_queue().yield_job(job, rows),
         ))
 
-    def run_once(self, complete):
-        return self._job_executor().run_once(complete, bound_completion=self._bound_completion)
+    def run_once(self, complete, *, bound_completion=None):
+        return self._job_executor().run_once(complete, bound_completion=bound_completion)
 
     @staticmethod
     def _call(complete, system, prompt):

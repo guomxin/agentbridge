@@ -154,10 +154,9 @@ class WorkspaceApplication:
             account = self.store.get_account(dispatch['account_id'])
             material, attachments = self._host_dispatch_payload(dispatch)
             if not attachments and not re.search(r'(创建|做个|发布|审批|评测|试用|沉淀).{0,10}(助手|skill|草稿)|草稿', material, re.I):
-                self.service.skill_authoring.workbench.generate(account['user_subject'],
+                self.service.skill_authoring.workbench.generate_from_dispatch(account['user_subject'],
                     material=('用户：' + material + '\n助手：' + capture['assistant_text'])[:16000],
-                    request_key='workspace:' + dispatch['dispatch_id'], automatic=True,
-                    scope='workspace:' + account['account_id'], source_dispatch=dispatch['dispatch_id'])
+                    account_id=account['account_id'], dispatch_id=dispatch['dispatch_id'])
         except (PermissionError, ValueError, KeyError, UserGrantConflict):
             return  # Opt-out, unavailable material and quota cannot affect a completed task.
 

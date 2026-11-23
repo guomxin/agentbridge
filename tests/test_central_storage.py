@@ -98,6 +98,14 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'oa_digest_settings'],
                     ['index', 'idx_oa_digest_settings_due'],
                     ['table', 'oa_digest_runs'],
+                    ['table', 'workspace_host_instances'],
+                    ['table', 'workspace_host_visibility'],
+                    ['table', 'workspace_host_preferences'],
+                    ['table', 'workspace_host_bindings'],
+                    ['table', 'workspace_host_directory_audit'],
+                    ['table', 'workspace_telegram_pilot_links'],
+                    ['table', 'workspace_telegram_pilot_challenges'],
+                    ['index', 'workspace_dispatch_request'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))
@@ -106,7 +114,20 @@ class CentralStorageTests(unittest.TestCase):
                                  'CREATE INDEX agent_tasks_subject_created ON agent_tasks (user_subject, created_at, task_id)')
                 self.assertEqual(index_sql['user_timeline_subject_type_created'],
                                  'CREATE INDEX user_timeline_subject_type_created ON user_timeline (user_subject, entry_type, created_at, entry_id)')
-                original_schema = [r for r in schema if r[1] not in {item[1] for item in additions}]
+                self.assertEqual(index_sql['workspace_dispatch_request'],
+                                 'CREATE INDEX workspace_dispatch_request ON agent_host_dispatches(user_subject, idempotency_key)')
+                # SQLite inserts an ALTER TABLE column before the original table constraints.
+                # Remove exactly the reviewed declaration, keeping every prior column and constraint in the frozen digest.
+                instance_column = ", instance_id TEXT NOT NULL DEFAULT 'openclaw-default'"
+                added_names = {name for _kind, name in additions}
+                original_schema = []
+                for object_type, name, table, sql in schema:
+                    if name in added_names:
+                        continue
+                    if name == 'agent_host_dispatches':
+                        self.assertEqual(sql.count(instance_column), 1)
+                        sql = sql.replace(instance_column, '', 1)
+                    original_schema.append((object_type, name, table, sql))
                 self.assertEqual(hashlib.sha256(json.dumps(original_schema, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest(), baseline['schemaSha256'])
                 self.assertEqual(type(instance.business_drafts).__name__, 'BusinessDraftStore')
                 self.assertEqual(instance.business_drafts.db_path, Path(home) / 'agentbridge.db')

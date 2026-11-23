@@ -135,6 +135,9 @@ class CommitNotificationTests(unittest.IsolatedAsyncioTestCase):
             for item in pending:
                 item.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+            # Cancelling a to_thread awaiter leaves its SQLite call running. Join
+            # this test loop's executor before unittest removes the temporary DB.
+            await asyncio.get_running_loop().shutdown_default_executor()
 
     def authorization(self):
         operation, _ = self.service.operations.create(user_subject="user-a", capability_name="oa.business_trip.prepare",

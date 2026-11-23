@@ -135,3 +135,12 @@ def test_original_dispatch_material_stays_on_original_host(workspace):
         assert snapshot(app.store, db, owner)["instance_id"] == "office"
         with pytest.raises(PermissionError):
             snapshot(app.store, db, owner, source_dispatch="absent")
+    workbench = app.service.skill_authoring.workbench
+    app.service.skill_authoring.preferences(owner, value={"auto_draft": True}, expected_revision=0)
+    workbench.scopes(owner, scope="workspace:" + account_id, enabled=True)
+    job = workbench.generate_from_dispatch(
+        owner, material="原工作记录", account_id=account_id, dispatch_id=original
+    )
+    with app.store._connect() as db:
+        row = db.execute("SELECT payload_json FROM skill_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
+    assert json.loads(row[0])["model_route"]["instance_id"] == LEGACY_INSTANCE_ID
