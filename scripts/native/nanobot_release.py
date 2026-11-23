@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -268,7 +269,7 @@ def remote(pub, spec, action, **extra):
         + (ROOT / "scripts/native/nanobot_remote.py").read_text()
     )
     runner = "import base64,sys;exec(compile(base64.b64decode(sys.stdin.readline()),'<reviewed-nanobot-release>','exec'))"
-    if action in ("bind", "probe", "rollback_scope"):
+    if action in ("bind", "probe", "rollback_scope", "recovery_check"):
         args = [
             "sudo",
             "-u",
@@ -352,7 +353,10 @@ def archive_bridge(pub, spec, artifact):
             ]
         )
     )["project"]["version"]
-    if Path("nanobot_agentbridge/server.py") not in expected or version != spec["adapterVersion"]:
+    if (
+        Path("nanobot_agentbridge/server.py") not in expected
+        or version != spec["adapterVersion"]
+    ):
         raise ValueError("Pilot adapter release/version mismatch")
     if spec.get("coordinatorPython"):
         program = (
@@ -574,10 +578,25 @@ def ensure_local_bindings(root, records):
         path = credentials / (ref + ".token")
         secret = record["personalCredential"]
         if path.exists():
-            if private_file(path).read_text() != secret:
-                raise ValueError(
-                    "The trusted local credential differs from central issuance"
-                )
+            previous = private_file(path).read_bytes()
+            if previous != secret.encode():
+                if record.get("retiredCredentialDigest") != sha(previous):
+                    raise ValueError(
+                        "The trusted local credential differs from central issuance"
+                    )
+                # Only replace a private file whose exact retired generation was verified
+                # by central in this admission. Keep an existing valid path for the worker.
+                fd, tmp = tempfile.mkstemp(dir=credentials)
+                try:
+                    with os.fdopen(fd, "w") as output:
+                        output.write(secret)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if private_file(path).read_bytes() != previous:
+                        raise ValueError("Personal file changed during admission")
+                    os.replace(tmp, path)
+                finally:
+                    Path(tmp).unlink(missing_ok=True)
         else:
             with os.fdopen(
                 os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600), "w"
@@ -629,8 +648,9 @@ def admission(pub, spec, mac, artifact):
         return _admit(pub, spec, mac, artifact)
 
 
-def configure_release(pub, spec, mac, root, archive):
-    records = remote(pub, spec, "bind")["bindings"]
+def configure_release(pub, spec, mac, root, archive, recovery=None):
+    extra = {"recovery": recovery} if recovery else {}
+    records = remote(pub, spec, "bind", **extra)["bindings"]
     bindings = ensure_local_bindings(root, records)
     for b in bindings:
         b["modelConfigFile"] = spec["modelConfigFile"]
@@ -677,6 +697,96 @@ def configure_release(pub, spec, mac, root, archive):
     save(archive / "host.json", config)
 
 
+def retry_proof(pub, spec, root, old, last, definitions, prior):
+    if (
+        last.get("stage") != "rolled_back"
+        or last.get("previousScopePresent") is not False
+    ):
+        return None
+    previous = last["candidate"]
+    if re.fullmatch(r"[0-9a-f]{12}", previous) and not prior.get("scopePresent"):
+        # A failure before the first bind leaves no pilot to reopen.
+        clean = not (root / "releases" / previous / "host.json").exists() and all(
+            not os.path.lexists(root / "credentials" / (ref + ".token"))
+            for ref in spec["subjects"].values()
+        )
+        if clean and not last.get("recovery"):
+            return None
+    if (
+        old is not None
+        or last.get("previous") is not None
+        or not prior.get("scopePresent")
+        or not re.fullmatch(r"[0-9a-f]{12}", previous)
+        or (previous != pub.release and previous not in pub.policy["compatibleFrom"])
+        or set(definitions) != set(last["jobs"])
+        or any(
+            loaded != last["jobs"][label]["loaded"]
+            or path.exists() != last["jobs"][label]["existed"]
+            for label, (path, _, loaded) in definitions.items()
+        )
+        or prior.get("tunnelAuthorized", False) != last["previousTunnelAuthorized"]
+    ):
+        raise ValueError("Earlier automatic pilot rollback does not match this release")
+    previous_proof = last.get("recovery", {})
+    anchor = previous_proof.get("archiveCandidate", previous)
+    if not re.fullmatch(r"[0-9a-f]{12}", anchor):
+        raise ValueError("Unknown original NanoBot release")
+    archive_path = root / "releases" / anchor / "host.json"
+    if archive_path.resolve() != archive_path:
+        raise ValueError("Original pilot archive path differs")
+    archive = read(private_file(archive_path))
+    if archive["instanceId"] != spec["instanceId"] or len(archive["bindings"]) != len(
+        spec["subjects"]
+    ):
+        raise ValueError("Original pilot host differs from the reviewed instance")
+    subjects = {}
+    for binding in archive["bindings"]:
+        subject = binding["user_subject"]
+        ref = spec["subjects"].get(subject)
+        if not ref or ref != binding["credential_ref"] or subject in subjects:
+            raise ValueError("Original pilot subject assignment differs")
+        path = root / "credentials" / (ref + ".token")
+        if binding["tokenFile"] != str(path) or path.resolve() != path:
+            raise ValueError("Original pilot personal credential path differs")
+        fields = (
+            "user_subject",
+            "endpoint_id",
+            "endpoint_key",
+            "session_key",
+            "credential_ref",
+        )
+        subjects[subject] = {
+            **{k: binding[k] for k in fields},
+            "fileDigest": sha(private_file(path).read_bytes()),
+        }
+    source = last.get("unmodifiedSource")
+    proof = {
+        "sourceCandidate": source or previous,
+        "previousAttempt": (
+            previous_proof.get("previousAttempt")
+            if source
+            else previous_proof.get("attempt")
+        ),
+        "candidate": pub.release,
+        "attempt": uuid.uuid4().hex,
+        "archiveCandidate": anchor,
+        "subjects": subjects,
+    }
+    proof["baseRevision"] = remote(pub, spec, "recovery_check", recovery=proof)[
+        "baseRevision"
+    ]
+    # Preserve the private original receipt before the new transaction takes its place.
+    history = owned_directory(root / "rollback-history")
+    digest = sha(json.dumps(last, sort_keys=True).encode())
+    path = history / (previous + "-" + digest + ".json")
+    if path.exists():
+        if read(private_file(path)) != last:
+            raise ValueError("Archived pilot rollback receipt differs")
+    else:
+        save(path, last)
+    return proof
+
+
 def _admit(pub, spec, mac, artifact):
     root = owned_directory(spec["runtimeDir"])
     definitions = managed_jobs(jobs(spec, mac))
@@ -710,11 +820,12 @@ def _admit(pub, spec, mac, artifact):
         )
     archive = archive_bridge(pub, spec, artifact)
     prior = remote(pub, spec, "observe")
+    recovery = retry_proof(pub, spec, root, old, last, definitions, prior)
     domain = f"gui/{os.getuid()}"
     record = {
         "candidate": pub.release,
         "previous": old.name if old else None,
-        "previousScopePresent": prior["scopePresent"],
+        "previousScopePresent": False if recovery else prior["scopePresent"],
         "previousTunnelAuthorized": prior.get("tunnelAuthorized", False),
         "stage": "switching",
         "jobs": {
@@ -722,6 +833,8 @@ def _admit(pub, spec, mac, artifact):
             for label, (path, _, loaded) in definitions.items()
         },
     }
+    if recovery:
+        record["recovery"] = recovery
     if old == archive and all(v[2] for v in definitions.values()):
         if not prior["tunnelAuthorized"]:
             raise ValueError(
@@ -731,7 +844,7 @@ def _admit(pub, spec, mac, artifact):
         return remote(pub, spec, "probe")
     save(release_state, record)
     try:
-        configure_release(pub, spec, mac, root, archive)
+        configure_release(pub, spec, mac, root, archive, recovery)
         identities = verify_subjects(spec, archive)
         remote(pub, spec, "tunnel_enable")
         for label, (_, _, running) in reversed(list(definitions.items())):
@@ -842,7 +955,12 @@ def restore(pub, spec, mac, record=None):
             ctl("bootstrap", domain, str(path))
     if not record["previousTunnelAuthorized"]:
         remote(pub, spec, "tunnel_disable")
-    if not record["previousScopePresent"]:
+    if record.get("recovery"):
+        proof = record["recovery"]
+        result = remote(pub, spec, "rollback_scope", recovery=proof)
+        if not result["reverted"]:
+            record["unmodifiedSource"] = proof["sourceCandidate"]
+    elif not record["previousScopePresent"]:
         remote(pub, spec, "rollback_scope")
     elif old:
         wait_for_route(pub, spec)

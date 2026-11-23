@@ -440,3 +440,7 @@ def main() -> None:
     os.umask(0o077)
     app = create_app(spec)
     web.run_app(app, host="127.0.0.1", port=int(spec["listenPort"]), access_log=None)
+
+
+if __name__ == "__main__":
+    main()

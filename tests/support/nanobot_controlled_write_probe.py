@@ -27,6 +27,7 @@ from tests.support.action_matrix_acceptance import ActionMatrixAcceptanceFixture
 from tests.support.business_draft_acceptance import OWNER
 from tests.support.interaction_acceptance import free_port
 from tests.support.nanobot_mcp_fixture import private_file
+from tests.support.nanobot_release_entrypoint import worker_argv
 from tests.support.nanobot_sdk_probe import MODEL, model_server
 from tests.test_action_matrix_acceptance import decide
 
@@ -235,19 +236,11 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
                 }
             ).encode(),
         )
-        command = "import sys;sys.path.insert(0,sys.argv.pop(1));from nanobot_agentbridge.server import main;main()"
+        command = worker_argv(root, python, instance, host_port, spec)
 
         def start_host():
             return subprocess.Popen(
-                [
-                    str(python),
-                    "-I",
-                    "-c",
-                    command,
-                    str(ROOT / "integrations/nanobot-agentbridge"),
-                    "--config",
-                    str(spec),
-                ],
+                command,
                 env={"HOME": str(root), "PATH": "/usr/bin:/bin", "TMPDIR": str(root)},
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
@@ -263,6 +256,7 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
         dispatch = {"idempotency_key": "controlled-fixture"}
         try:
             for i in range(160):
+                assert proc.poll() is None, "published_worker_exited_before_readiness"
                 if gateway.readiness()["available"]:
                     break
                 time.sleep(0.1)

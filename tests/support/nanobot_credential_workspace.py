@@ -118,7 +118,10 @@ class CredentialWorkspace:
                 }
             ).encode(),
         )
-        bootstrap = "import sys;sys.path.insert(0,sys.argv.pop(1));from nanobot_agentbridge.server import main;main()"
+        bootstrap = (
+            "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));"
+            "runpy.run_module('nanobot_agentbridge.server',run_name='__main__')"
+        )
         child = subprocess.Popen(
             [
                 str(self.python),

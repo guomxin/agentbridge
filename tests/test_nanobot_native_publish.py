@@ -71,9 +71,7 @@ def private(path, data):
     return path
 
 
-def test_remote_provision_issues_two_distinct_identities_preserves_defaults_and_rolls_back(
-    tmp_path, monkeypatch
-):
+def synthetic_admission(tmp_path, monkeypatch):
     root = tmp_path.resolve()
     home = root / "data"
     home.mkdir()
@@ -134,6 +132,13 @@ def test_remote_provision_issues_two_distinct_identities_preserves_defaults_and_
         ),
     )
     args = {"root": str(root), "spec": host.metadata(spec)}
+    return spec, args, ws, ids, actor_tokens, config
+
+
+def test_remote_provision_issues_two_distinct_identities_preserves_defaults_and_rolls_back(
+    tmp_path, monkeypatch
+):
+    spec, args, ws, ids, actor_tokens, config = synthetic_admission(tmp_path, monkeypatch)
     result = central.execute({**args, "action": "bind"})
     assert len(result["bindings"]) == 2
     tokens = [r["personalCredential"] for r in result["bindings"]]
