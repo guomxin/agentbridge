@@ -889,6 +889,8 @@ def _record_result(service, subject, task_id, command_key, response, *, connecti
             command["operationId"] = response["operationId"]
         if response.get("error"):
             command["error"] = response["error"]
+        elif command["state"] == "succeeded":
+            command.pop("error", None)
         summary["command"] = command
         connection.execute("UPDATE agent_tasks SET summary_json=?,version=version+1,updated_at=? WHERE task_id=?",
             (_json(summary), _now().isoformat(), task_id))
@@ -924,8 +926,12 @@ def execute_preparation(service, subject, task_id, command_key, *, runtime_conte
     from agentbridge.core.central_service import operation_response
     task = service.tasks.get_task(task_id, user_subject=subject)
     if (task.get("summary", {}).get("command") or {}).get("kind") == "oa_pending_query":
-        from agentbridge.core.quick_queries import execute_query
-        return execute_query(service, subject, task_id, command_key, runtime_context=runtime_context or {})
+        from agentbridge.core import quick_queries
+        response = quick_queries.execute_query(service, subject, task_id, command_key, runtime_context=runtime_context or {})
+        if response.get("status") in {"succeeded", "requires_user_action"}:
+            # A login card belongs to the frozen read even before a queryResult exists.
+            return {**response, "commandKind": quick_queries.COMMAND_KIND, "capability": quick_queries.CAPABILITY}
+        return response
     context = {**(runtime_context or {})}
     context["requestId"] = context.get("requestId") or command_key
     with service._task_call_lock(task_id):
@@ -974,6 +980,9 @@ def execute_preparation(service, subject, task_id, command_key, *, runtime_conte
                     host_instance_id=context.get("hostInstanceId"), host_run_id=context.get("hostRunId"),
                     origin_endpoint_id=context.get("endpointId"))
             _record_result(service, subject, task_id, command_key, response)
+            if response.get("status") in {"succeeded", "requires_user_action"}:
+                # Initial invocation and recovery expose the same validated command identity.
+                return {**response, "commandKind": COMMAND_KIND, "capability": command["capabilityName"]}
             return response
         except (ActionableResultError, SkillRejected, PermissionError) as exc:
             code = getattr(exc, "code", "ACTION_PERMISSION_DENIED")

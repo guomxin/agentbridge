@@ -180,6 +180,7 @@ async def recover(host):
                 *host.bindings.values(),
                 *host.telegram_routes.known.values(),
             ):
+                host.commands.recover_queries(record)
                 directory = Path(host.worker_payload(record, None)["userDir"])
                 for run, task, phase in recovery_rows(directory, record["endpoint_id"]):
                     existing = jobs.get(run)

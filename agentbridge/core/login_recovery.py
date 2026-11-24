@@ -2,6 +2,7 @@
 
 from agentbridge.core.tasks import ACTIVE_TASK_STATUSES
 from agentbridge.core.login_continuation import read_continuation_message
+from agentbridge.core import actionable_results, quick_queries
 
 
 def resume_login_read(self, *, user_subject: str, record: dict) -> dict | None:
@@ -40,19 +41,29 @@ def resume_login_read(self, *, user_subject: str, record: dict) -> dict | None:
             or (current_id != original["operation_id"] and current.get("idempotency_key") != key)
         ):
             return None
-        # The ledger holds exact read arguments, unlike redacted write inputs.
+        command = None
         try:
+            command = quick_queries.login_read_command(self, user_subject, task, original)
+            # The ledger holds exact read arguments, unlike redacted write inputs.
             response = self.invoke(
                 user_subject=user_subject, capability_name=spec.name,
                 arguments=original["input_summary"], idempotency_key=key,
                 task_id=task_id, host_type="interaction_resume",
                 host_run_id=record["interaction_id"],
             )
+        except actionable_results.ActionableResultError as exc:
+            response = {"status": "failed", "error": {"code": exc.code}}
+        except PermissionError:
+            response = {"status": "failed", "error": {"code": "ACTION_PERMISSION_DENIED"}}
         except (ValueError, KeyError):
             response = {"status": "failed", "error": {"code": "LOGIN_READ_INPUT_INVALID"}}
         if response["status"] in {"pending", "running"}:
             # A previous runtime may have stopped during the read. Never claim success.
             response = {**response, "status": "failed", "error": {"code": "LOGIN_READ_INTERRUPTED"}}
+        if command is not None and response["status"] != "succeeded":
+            # The credential was already used. Do not ask for another login
+            # within the same fixed command or report a resumable state.
+            response = {**response, "status": "failed"}
         message = read_continuation_message(
             self.challenges.get(self._credential_challenge_id(record))["system_name"], spec.name, response,
         )
@@ -63,6 +74,12 @@ def resume_login_read(self, *, user_subject: str, record: dict) -> dict | None:
             payload={"operationId": response.get("operationId"), "continuation": "login_read"},
             notify_source=True,
         )
+        if command is not None:
+            actionable_results._record_result(
+                self, user_subject, task_id, command["commandKey"], response,
+            )
+            if response["status"] == "succeeded":
+                response = quick_queries.query_receipt(task, response)
         if response.get("operationId"):
             self.observe_host_task(
                 user_subject=user_subject, task_id=task_id,

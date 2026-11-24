@@ -271,6 +271,8 @@ class ActionableResultsTests(unittest.TestCase):
         response = self.execute(queued)
         self.assertEqual(command["capabilityName"], "oa.workflow.pending.batch.prepare")
         self.assertEqual(response["status"], "requires_user_action")
+        self.assertEqual((response["commandKind"], response["capability"]),
+                         (actions.COMMAND_KIND, "oa.workflow.pending.batch.prepare"))
         batch = self.service.tasks.get_batch_for_task(parent_task_id=queued["taskId"], user_subject=OWNER, include_resource_refs=True)
         self.assertEqual([item["resource_ref"] for item in batch["items"]], command["affairIds"])
         self.assertEqual(self.service.skills.for_task(OWNER, queued["taskId"])["profile"], "batch")
@@ -289,6 +291,8 @@ class ActionableResultsTests(unittest.TestCase):
                 response = self.execute(queued)
                 self.assertEqual(response["status"], "requires_user_action")
                 self.assertEqual(response["interaction"]["type"], "business_input")
+                self.assertEqual((response["commandKind"], response["capability"]),
+                                 (actions.COMMAND_KIND, self.command(queued)["capabilityName"]))
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
     def test_unknown_row_is_retained_disabled_and_cannot_be_silently_selected(self):
@@ -507,6 +511,8 @@ class ActionableResultsTests(unittest.TestCase):
             response = self.execute(queued)
         self.assertEqual(response["status"], "failed")
         self.assertEqual(response["error"]["code"], "SKILL_DEPENDENCY_UNAVAILABLE")
+        self.assertNotIn("commandKind", response)
+        self.assertNotIn("capability", response)
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
     def test_revoked_binding_is_never_restored_by_reassignment(self):
@@ -597,6 +603,8 @@ class ActionableResultsTests(unittest.TestCase):
             response = self.execute(queued)
         self.assertEqual(response["status"], "requires_user_action")
         self.assertTrue(response["reused"])
+        self.assertEqual((response["commandKind"], response["capability"]),
+                         (actions.COMMAND_KIND, self.command(queued)["capabilityName"]))
         self.assertEqual(self.count("operations"), operations_before)
 
     def test_failed_and_unknown_existing_operations_are_returned_without_retry(self):

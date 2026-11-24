@@ -202,6 +202,42 @@ def _contract(service, command):
         actions._fail("ACTION_COMMAND_INVALID", "快捷查询合同已变化，请发起新的查询。")
 
 
+def login_read_command(service, subject, task, original):
+    """Identify the fixed quick query behind this credential continuation."""
+    candidate = (task.get("summary") or {}).get("command") or {}
+    if candidate.get("kind") != COMMAND_KIND:
+        return None
+    command_key = candidate["commandKey"]
+    with service.tasks._connect() as connection:
+        connection.execute("BEGIN")
+        owned, command = actions._load_command(connection, subject, task["task_id"], command_key)
+        _contract(service, command)
+        _origin(service, connection, subject, owned, command)
+    if (command.get("remainingContext") or original["capability_name"] != CAPABILITY
+            or original["capability_version"] != command["capabilityVersion"]
+            or original["input_hash"] != actions._hash(command["arguments"])
+            or original.get("idempotency_key") not in {
+                f"workspace-prepare:{task['task_id']}:{command_key}",
+                f"quick-query-session-ready:{task['task_id']}:{command_key}",
+            }):
+        actions._fail("ACTION_COMMAND_INVALID", "登录续查与原待办查询不一致。")
+    return command
+
+
+def query_receipt(task, response, *, remaining=None):
+    result = response.get("result") or {}
+    receipt = {
+        "kind": COMMAND_KIND,
+        "taskId": task["task_id"],
+        "endpointId": task["origin_endpoint_id"],
+        "count": len(result.get("items") or []),
+        "complete": (result.get("coverage") or {}).get("status") == "complete",
+    }
+    if remaining is not None:
+        receipt.update(remaining=remaining, count=remaining["matchedCount"])
+    return {**response, "queryResult": receipt}
+
+
 def _origin(service, connection, subject, task, command):
     if command.get("originKind") == "telegram":
         endpoint = actions._telegram_endpoint(connection, subject, task["origin_endpoint_id"])
@@ -303,6 +339,7 @@ def execute_query(service, subject, task_id, command_key, *, runtime_context):
     context = {**runtime_context, "requestId": runtime_context.get("requestId") or command_key}
     with service._task_call_lock(task_id):
         with service.tasks._connect() as connection:
+            connection.execute("BEGIN")
             task, command = actions._load_command(connection, subject, task_id, command_key)
             if context.get("endpointId") != task["origin_endpoint_id"]:
                 actions._fail("ACTION_ENDPOINT_INVALID", "快捷查询必须由原会话协调。")
@@ -363,10 +400,7 @@ def execute_query(service, subject, task_id, command_key, *, runtime_context):
                 if not command.get("remainingContext"):
                     service.finish_host_task(user_subject=subject, task_id=task_id, outcome="succeeded",
                         reason="explicit_oa_pending_query_completed", causation_ref=command_key)
-                response = {**response, "queryResult": {"kind": COMMAND_KIND, "taskId": task_id,
-                    "endpointId": task["origin_endpoint_id"], "count": len((response.get("result") or {}).get("items") or []),
-                    "complete": ((response.get("result") or {}).get("coverage") or {}).get("status") == "complete",
-                    **({"remaining":remaining_report, "count":remaining_report["matchedCount"]} if remaining_report else {})}}
+                response = query_receipt(task, response, remaining=remaining_report)
             return response
         except (actions.ActionableResultError, PermissionError) as exc:
             code = getattr(exc, "code", "ACTION_PERMISSION_DENIED")

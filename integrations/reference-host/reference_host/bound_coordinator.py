@@ -15,6 +15,7 @@ import sys
 from urllib.parse import urlsplit
 
 from .bound_skill import check_skill, pin_run
+from .bound_commands import PREPARE, QUERY, command_snapshot, finish_query, query_result
 from .host_profile import CoordinatorImplementation
 from .identity import IdentityConfig, IdentityRegistry
 from .runtime_collector import ReferenceHostRuntimeCollector
@@ -135,6 +136,7 @@ class BoundDriver(ReferenceTaskDriver):
             or card.get("interactionId") != interaction_id
             or card.get("type")
             not in {"business_input", "execution_authorization", "credential"}
+            or (self.req.get("commandKind") == QUERY and card.get("type") != "credential")
             or card.get("taskId") != self.req["task"]["taskId"]
             or view.get("owner") != "agentbridge"
             or view.get("modelMustNotCollectValues") is not True
@@ -147,6 +149,9 @@ class BoundDriver(ReferenceTaskDriver):
         ):
             raise PermissionError("Card does not belong to the bound endpoint")
         with self.journal:
+            if self.req.get("commandKind") == QUERY:
+                self.journal.execute("INSERT OR IGNORE INTO query_commands VALUES(?,?,?)",
+                                     (self.req["runId"], local_task_id, self.req["endpoint"]))
             self.journal.execute(
                 """INSERT INTO card_versions VALUES(?,?,1) ON CONFLICT(run) DO UPDATE SET
                    revision=card_versions.revision+1, interaction=excluded.interaction
@@ -162,20 +167,54 @@ class BoundDriver(ReferenceTaskDriver):
     async def resume_interaction(self, local_task_id, interaction_id):
         await self.check_telegram()
         await check_skill(self)
+        if self.req.get("commandKind") == QUERY:
+            task, command = await command_snapshot(self, local_task_id)
+            if task.get("status") in {"succeeded", "failed", "canceled", "expired"}:
+                if await finish_query(self, local_task_id, task, command):
+                    return
+                raise PermissionError("Completed query has no matching central read receipt")
+            recorded = self.journal.execute(
+                "SELECT interaction,kind,phase FROM coordinated WHERE run=?", (self.req["runId"],)).fetchone()
+            if (task.get("currentInteractionId") != interaction_id
+                    or recorded != (interaction_id, "credential", "waiting")):
+                raise PermissionError("Query credential is no longer bound to its original task")
         # Claim BEFORE issuing the non-replayable MCP call, including process death during commit.
         with self.journal:
             claimed = self.journal.execute(
                 "INSERT OR IGNORE INTO resumes VALUES(?)", (interaction_id,)
             ).rowcount
-            self.journal.execute(
-                "UPDATE coordinated SET phase='resuming' WHERE run=?",
-                (self.req["runId"],),
-            )
-        if not claimed:
-            return
-        await super().resume_interaction(local_task_id, interaction_id)
+            if not claimed:
+                return
+            self.journal.execute("UPDATE coordinated SET phase='resuming' WHERE run=?", (self.req["runId"],))
+        try:
+            await super().resume_interaction(local_task_id, interaction_id)
+        except Exception:
+            if self.req.get("commandKind") == QUERY:
+                with self.journal:
+                    self.journal.execute("UPDATE coordinated SET phase='query_observe' WHERE run=? AND phase='resuming'",
+                                         (self.req["runId"],))
+                task, command = await command_snapshot(self, local_task_id)
+                if await finish_query(self, local_task_id, task, command):
+                    return
+            raise
+
+    async def close_interaction(self, local_task_id, interaction):
+        if self.req.get("commandKind") != QUERY:
+            return await super().close_interaction(local_task_id, interaction)
+        task, command = await command_snapshot(self, local_task_id)
+        if (task.get("status") not in {"failed", "canceled", "expired", "succeeded"}
+                and interaction.get("state") in {"expired", "declined", "failed", "superseded"}
+                and task.get("currentInteractionId") == interaction.get("interactionId")):
+            await super().close_interaction(local_task_id, interaction)
+            task, command = await command_snapshot(self, local_task_id)
+        if not await finish_query(self, local_task_id, task, command):
+            raise RuntimeError("Query closure has no terminal central receipt")
 
     async def process_tool_result(self, local_task_id, result, *, resumed_from=None):
+        if self.req.get("commandKind") == QUERY:
+            if await query_result(self, local_task_id, result, resumed_from):
+                await super().process_tool_result(local_task_id, result)
+            return
         payload = result.payload()
         card = (
             result.private_meta.get("io.agentbridge/interaction")
@@ -306,6 +345,8 @@ async def run_locked(req):
     with journal:
         journal.execute("""CREATE TABLE IF NOT EXISTS coordinated (run TEXT PRIMARY KEY, endpoint TEXT NOT NULL,
             central_task TEXT NOT NULL, local_task TEXT, interaction TEXT, kind TEXT, phase TEXT NOT NULL)""")
+        journal.execute("""CREATE TABLE IF NOT EXISTS query_commands(
+            run TEXT PRIMARY KEY, local_task TEXT NOT NULL, endpoint TEXT NOT NULL)""")
         journal.execute("""CREATE TABLE IF NOT EXISTS write_scope (run TEXT PRIMARY KEY, prepare TEXT NOT NULL,
             expected_commit TEXT NOT NULL, argument_digest TEXT NOT NULL)""")
         journal.execute(
@@ -424,6 +465,11 @@ async def run_locked(req):
             await collector.collect_once()
             collector.start()
             if command:
+                central_task, original = await command_snapshot(driver, local_id)
+                if original.get("state") != "pending":
+                    if req["commandKind"] == QUERY and await finish_query(driver, local_id, central_task, original):
+                        return "verified" if central_task["status"] == "succeeded" else central_task["status"]
+                    return "unknown"
                 lease = await driver.renew_coordinator_lease(local_id)
                 result = await driver.call_for_task(
                     local_id,
@@ -437,23 +483,25 @@ async def run_locked(req):
                     lease=lease,
                     recovery_class="unsafe",
                 )
-                data = result.payload()
-                contract = next(
-                    (
-                        d
-                        for d in governed.values()
-                        if d["prepareCapability"] == data.get("capability")
-                    ),
-                    None,
-                )
-                if result.is_error or not contract:
+                data = result.structured
+                if not result.is_error and data.get("status") in {"failed", "canceled", "expired"}:
+                    terminal, original = await command_snapshot(driver, local_id)
+                    if terminal.get("status") in {"failed", "canceled", "expired"}:
+                        state.finish_task(local_id, status="canceled" if terminal["status"] == "expired" else terminal["status"])
+                        with journal:
+                            journal.execute("UPDATE coordinated SET phase=? WHERE run=?", (terminal["status"], run_id))
+                        return terminal["status"]
                     return "unknown"
-                req["expectedCommit"] = contract["commitCapability"]
-                with journal:
-                    journal.execute(
-                        "UPDATE write_scope SET expected_commit=? WHERE run=?",
-                        (req["expectedCommit"], run_id),
-                    )
+                if (result.is_error or data.get("commandKind") != req["commandKind"]
+                        or data.get("capability") != req["commandCapability"]):
+                    return "unknown"
+                if req["commandKind"] == PREPARE:
+                    contract = next((d for d in governed.values() if d["prepareCapability"] == req["commandCapability"]), None)
+                    if not contract:
+                        return "unknown"
+                    req["expectedCommit"] = contract["commitCapability"]
+                    with journal:
+                        journal.execute("UPDATE write_scope SET expected_commit=? WHERE run=?", (req["expectedCommit"], run_id))
                 await driver.process_tool_result(local_id, result)
             else:
                 await driver.begin_governed(local_id, req["tool"], arguments, governed)
@@ -462,12 +510,24 @@ async def run_locked(req):
                 "SELECT local_task,phase FROM coordinated WHERE run=? AND endpoint=? AND central_task=?",
                 (run_id, req["endpoint"], task["taskId"]),
             ).fetchone()
-            if not row or row[1] != "waiting" or not row[0]:
-                return row[1] if row and row[1] == "verified" else "unknown"
+            if not row or not row[0]:
+                return "unknown"
             local_id = row[0]
-            owns_run = True
             if command:
+                central_task, original = await command_snapshot(driver, local_id)
+                if req["commandKind"] == QUERY and await finish_query(driver, local_id, central_task, original):
+                    return "verified" if central_task["status"] == "succeeded" else central_task["status"]
+                if row[1] != "waiting" or central_task.get("currentInteractionId") != state.get_task(local_id).get("active_interaction_id"):
+                    return "unknown"
+                if req["commandKind"] == PREPARE and not any(
+                    d["prepareCapability"] == req["commandCapability"] and d["commitCapability"] == scope[1]
+                    for d in governed.values()
+                ):
+                    return "unknown"
                 req["expectedCommit"] = scope[1]
+            elif row[1] != "waiting":
+                return row[1] if row[1] == "verified" else "unknown"
+            owns_run = True
             item = state.get_task(local_id)
             interaction = item.get("active_interaction_id")
             if (
@@ -484,8 +544,10 @@ async def run_locked(req):
                 row = journal.execute(
                     "SELECT phase FROM coordinated WHERE run=?", (run_id,)
                 ).fetchone()
-                if row and row[0] == "verified":
-                    return "verified"
+                if row and row[0] in {"verified", "failed", "canceled", "expired"}:
+                    return row[0]
+                if row and row[0] == "query_observe":
+                    return "unknown"
                 state_value = state.get_task(local_id)["status"]
                 if state_value in {"failed", "canceled", "unknown", "observe_only"}:
                     return "closed" if state_value == "canceled" else "unknown"
@@ -494,13 +556,20 @@ async def run_locked(req):
                 ):
                     return "unknown"
                 await asyncio.sleep(0.25)
+    except TimeoutError:
+        row = journal.execute("SELECT phase FROM coordinated WHERE run=?", (run_id,)).fetchone()
+        if owns_run and command and row and row[0] == "waiting":
+            return "waiting"
+        return "unknown"
     finally:
         await collector.stop()
         await driver.close()
         if owns_run:
             with journal:
+                if req.get("commandKind") == QUERY:
+                    journal.execute("UPDATE coordinated SET phase='query_observe' WHERE run=? AND phase='resuming'", (run_id,))
                 journal.execute(
-                    "UPDATE coordinated SET phase='unknown' WHERE run=? AND phase NOT IN ('waiting','verified','closed')",
+                    "UPDATE coordinated SET phase='unknown' WHERE run=? AND phase NOT IN ('waiting','verified','closed','failed','canceled','expired','query_observe')",
                     (run_id,),
                 )
         journal.close()

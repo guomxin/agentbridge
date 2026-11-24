@@ -10,6 +10,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from agentbridge.core import actionable_results as actions, quick_queries as queries
+from agentbridge.core.capability_runtime import RequiresUserAction
 from agentbridge.core.tasks import TaskIntegrityError
 from tests.authorization_fixtures import grant_permissions
 from tests.support.latency_acceptance import LatencyAcceptanceFixture, LatencyContract, JsonHttpClient, OWNER
@@ -67,6 +68,8 @@ class QuickQueryTests(TestCase):
             repeated = self.execute(queued)
         self.assertTrue(repeated["reused"])
         self.assertEqual(repeated["operationId"], response["operationId"])
+        for receipt in (response, repeated):
+            self.assertEqual((receipt["commandKind"], receipt["capability"]), (queries.COMMAND_KIND, queries.CAPABILITY))
         self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
         self.assertEqual(self.fixture.audit()["decisionCount"], 0)
         self.assertEqual(self.fixture.audit()["authorizationStates"], {})
@@ -230,12 +233,30 @@ class QuickQueryTests(TestCase):
                 patch.object(self.service, "start_login", side_effect=AssertionError("reuse the original credential")):
             repeated = self.execute(queued)
         self.assertEqual(repeated["interaction"]["interactionId"], interaction_id)
+        from agentbridge.mcp.presentation import PRIVATE_INTERACTION_META_KEY, package_interaction_result
+
+        for receipt in (first, repeated):
+            envelope = package_interaction_result(receipt)
+            public = envelope.structuredContent
+            private = envelope.meta[PRIVATE_INTERACTION_META_KEY]
+            self.assertEqual((public["commandKind"], public["capability"]), (queries.COMMAND_KIND, queries.CAPABILITY))
+            self.assertNotIn("queryResult", public)
+            self.assertEqual((private["interactionId"], private["type"]), (interaction_id, "credential"))
+            self.assertNotIn(private["presentation"]["url"], json.dumps(public))
         self.complete_login(interaction_id)
         resumed = self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)
         self.assertEqual(resumed["status"], "succeeded")
         self.assertEqual(resumed["taskId"], queued["taskId"])
         self.assertEqual(resumed["nextAction"]["type"], "original_request_completed")
         self.assertEqual(resumed["taskStatus"], "succeeded")
+        self.assertEqual(resumed["queryResult"], {
+            "kind": queries.COMMAND_KIND, "taskId": queued["taskId"], "endpointId": self.context["endpointId"],
+            "count": 1, "complete": True,
+        })
+        resumed_command = self.service.tasks.get_task(queued["taskId"], user_subject=OWNER)["summary"]["command"]
+        self.assertEqual(resumed_command["state"], "succeeded")
+        self.assertEqual(resumed_command["operationId"], resumed["operationId"])
+        self.assertNotIn("error", resumed_command)
         with patch.object(self.service, "invoke", side_effect=AssertionError("completed query cannot replay")), \
                 patch.object(self.service, "start_login", side_effect=AssertionError("completed query needs no login")):
             final = self.execute(queued)
@@ -257,6 +278,32 @@ class QuickQueryTests(TestCase):
         self.assertEqual(recovered["taskId"], queued["taskId"])
         self.assertEqual(self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)["status"], "ignored")
         self.assertEqual(self.count("operations"), 2)
+
+    def test_nanobot_quick_query_resolves_original_binding_before_and_after_login(self):
+        directory = self.service.workspace.hosts
+        account_id = self.account["account_id"]
+        choices = directory.choices(account_id)
+        directory.save_instance("nano-query", host_type="nanobot", display_name="NanoBot",
+            route_ref="nano-query", adapter_version="0.3.0", state="enabled", subjects=[OWNER],
+            expected_revision=0, actor="fixture", reason="quick query regression")
+        endpoint, _ = self.service.tasks.ensure_endpoint(user_subject=OWNER, token_id="fixture",
+            agent_host="nanobot", endpoint_key=f"workspace:nano-query:{account_id}", client_type="web",
+            external_subject=account_id, account_id=account_id, conversation_ref="original-nano-query")
+        directory.bind(account_id, "nano-query", endpoint_id=endpoint["endpoint_id"], credential_ref="fixture")
+        directory.set_default(account_id, "nano-query", expected_revision=choices["revision"])
+        self.context = {"endpointId": endpoint["endpoint_id"], "hostType": "nanobot", "hostInstanceId": "nano-query"}
+        fresh = self.execute(self.queue())
+        self.assertEqual(fresh["queryResult"]["endpointId"], endpoint["endpoint_id"])
+        self.expire_session()
+        queued = self.queue()
+        awaiting = self.execute(queued)
+        interaction_id = awaiting["interaction"]["interactionId"]
+        self.complete_login(interaction_id)
+        resumed = self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)
+        self.assertEqual(resumed["queryResult"]["taskId"], queued["taskId"])
+        self.assertEqual(resumed["queryResult"]["endpointId"], endpoint["endpoint_id"])
+        self.assertEqual(resumed["taskStatus"], "succeeded")
+        self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
 
     def test_query_canceled_during_login_does_not_create_another_card_or_resume_read(self):
         self.expire_session(); queued = self.queue(); first = self.execute(queued)
@@ -305,6 +352,40 @@ class QuickQueryTests(TestCase):
         self.assertEqual(response["error"]["code"], "ACTION_PERMISSION_DENIED")
         self.assertEqual(self.count("operations"), 1)
         self.assertEqual(self.service.tasks.get_task(queued["taskId"], user_subject=OWNER)["status"], "failed")
+
+    def test_host_resume_after_read_grant_revocation_finishes_without_another_read_or_card(self):
+        self.expire_session()
+        queued = self.queue()
+        first = self.execute(queued)
+        interaction_id = first["interaction"]["interactionId"]
+        self.complete_login(interaction_id)
+        grant_permissions(self.service.user_grants, OWNER, [])
+        resumed = self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)
+        self.assertEqual(resumed["error"]["code"], "ACTION_PERMISSION_DENIED")
+        self.assertEqual(resumed["taskStatus"], "failed")
+        self.assertNotIn("queryResult", resumed)
+        self.assertEqual(self.count("operations"), 1)
+        self.assertEqual(self.count("interactions"), 1)
+        self.assertEqual(self.fixture.audit()["downstreamWriteCount"], 0)
+
+    def test_fixed_query_stops_if_oa_requires_login_again_after_credential_resume(self):
+        self.expire_session()
+        queued = self.queue()
+        first = self.execute(queued)
+        interaction_id = first["interaction"]["interactionId"]
+        self.complete_login(interaction_id)
+        with patch.object(self.service, "_invoke_adapter", side_effect=RequiresUserAction(
+                "LOGIN_REQUIRED", "test expired again", next_action={"type": "login"})) as read:
+            resumed = self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)
+            self.service.resume_interaction(user_subject=OWNER, interaction_id=interaction_id)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(resumed["error"]["code"], "LOGIN_REQUIRED")
+        self.assertEqual(resumed["status"], "failed")
+        self.assertEqual(resumed["taskStatus"], "failed")
+        self.assertIsNone(resumed["interaction"])
+        command = self.service.tasks.get_task(queued["taskId"], user_subject=OWNER)["summary"]["command"]
+        self.assertEqual(command["state"], "failed")
+        self.assertEqual(self.count("interactions"), 1)
 
     def test_expired_original_login_card_ends_query_without_another_login_or_read(self):
         self.expire_session(); queued = self.queue(); first = self.execute(queued)
