@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "53dfd96aa211"
+    "f0ff15b03798"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Resume fixed NanoBot Workspace approval commands and continue OA read queries through the original credential card. Existing central ledgers remain compatible. The local coordinator adds an independent read-recovery marker table."
+  "reason": "Allow new OA preparation after a confirmed single-item decision expired before submission, using the existing operation and authorization ledgers without rewriting historical decisions."
 }

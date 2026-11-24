@@ -280,7 +280,42 @@ def _proven_pre_submit_failure(operation, authorization):
     return operation["input_hash"] == _hash({"authorization_id": authorization["authorization_id"]})
 
 
-def _preparation_state(connection, task, command, selection, fields, authorizations):
+def _expired_without_submission(connection, task, command, selection, authorization, principal):
+    if (task["status"] != "expired" or command.get("kind") != COMMAND_KIND
+            or command.get("affairIds") != [selection["affairId"]]
+            or command.get("capabilityName") != selection["prepareCapability"]):
+        return False
+    if (authorization["state"] != "expired"
+            or not authorization["decided_at"]
+            or authorization["decided_endpoint_id"] != task["origin_endpoint_id"]
+            or authorization["consumed_at"] is not None
+            or authorization["commit_operation_id"] is not None
+            or authorization["plan"].get("prepare_capability") != selection["prepareCapability"]
+            or _principal(authorization["plan"].get("session_binding") or {}) != principal):
+        return False
+    decision = connection.execute(
+        "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=? "
+        "AND task_id=? AND endpoint_id=? AND prepare_operation_id=? AND plan_hash=? "
+        "AND NOT EXISTS (SELECT 1 FROM task_batches WHERE parent_task_id=business_draft_decisions.task_id) "
+        "AND NOT EXISTS (SELECT 1 FROM task_plans WHERE parent_task_id=business_draft_decisions.task_id)",
+        (authorization["authorization_id"], task["user_subject"], task["task_id"], task["origin_endpoint_id"],
+         authorization["prepare_operation_id"], authorization["plan_hash"]),
+    ).fetchone()
+    if decision is None:
+        return False
+    # An operation is recorded before it is linked to the task. Preserve the
+    # lock if older callers may have padded the authorization argument.
+    return connection.execute(
+        "SELECT 1 FROM operations WHERE user_subject=? AND capability_name=? "
+        "AND (input_hash=? OR (julianday(created_at)>=julianday(?) "
+        "AND COALESCE(json_extract(input_summary_json,'$.authorization_id.length'),-1)<>?)) LIMIT 1",
+        (task["user_subject"], selection["commitCapability"],
+         _hash({"authorization_id": authorization["authorization_id"]}), authorization["created_at"],
+         len(authorization["authorization_id"])),
+    ).fetchone() is None
+
+
+def _preparation_state(connection, task, command, selection, fields, authorizations, *, verified_principal):
     affair, commit = selection["affairId"], selection["commitCapability"]
     item = connection.execute(
         "SELECT i.state,i.ordinal,b.current_ordinal FROM task_batch_items i JOIN task_batches b ON b.batch_id=i.batch_id "
@@ -308,6 +343,9 @@ def _preparation_state(connection, task, command, selection, fields, authorizati
         return "succeeded", True
     if any(_proven_pre_submit_failure(operation, authorization) for operation in commits for authorization in related_auths):
         return "failed", True  # The old decision stays bound; this is not retry permission.
+    if (not commits and verified_principal and len(authorizations) == len(related_auths) == 1
+            and _expired_without_submission(connection, task, command, selection, related_auths[0], verified_principal)):
+        return None, False
     decided = any(a["state"] in {"approved", "consumed"} or connection.execute(
         "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=?",
         (a["authorization_id"], task["user_subject"]),
@@ -392,12 +430,16 @@ def oa_preparation_conflicts(service, *, user_subject, session, selections, excl
         recorded = _recorded_principal(connection, task, command, fields, authorizations)
         if principal and recorded and principal != recorded:
             continue
+        identity_verified = bool(principal and recorded and principal == recorded)
         for item in matching:
-            state, boundary = _preparation_state(connection, task, command, item, fields, authorizations)
+            state, boundary = _preparation_state(
+                connection, task, command, item, fields, authorizations,
+                verified_principal=principal if identity_verified else None,
+            )
             if state is None or task["task_id"] == exclude_task_id and not boundary:
                 continue
             conflicts.append({**item, "taskId": task["task_id"], "state": state,
-                              "identityVerified": bool(principal and recorded and principal == recorded)})
+                              "identityVerified": identity_verified})
     priority = {"outcome_unknown": 0, "running": 1, "succeeded": 2, "waiting_user": 3, "preparing": 4, "queued": 5}
     return sorted(conflicts, key=lambda item: priority.get(item["state"], 9))
 

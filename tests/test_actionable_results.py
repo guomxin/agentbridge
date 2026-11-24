@@ -798,6 +798,62 @@ class ActionableResultsTests(unittest.TestCase):
         self.assertEqual(self.conflicts(first, exclude=first["taskId"])[0]["state"], "outcome_unknown")
         self.assertEqual(self.fixture.oa.writes, [])
 
+    def expire_confirmed_pending_approval(self):
+        from agentbridge.core.business_drafts import BusinessDraftService
+        original = self.queue()
+        response = self.execute(original)
+        card = self.service.present_interaction(user_subject=OWNER, agent_host="openclaw",
+            endpoint_key=self.account["endpoint_key"], interaction_id=response["interaction"]["interactionId"])["interaction"]
+        drafts = BusinessDraftService(self.service)
+        submission = response["nextAction"]["inputSubmissionId"]
+        presentation = card["presentation"]["presentationId"]
+        opened = drafts.open(submission, presentation_id=presentation)
+        args = {"source_submission_id": submission, "presentation_id": presentation,
+                "csrf_token": opened["csrfToken"], "csrf_cookie": opened["csrfToken"]}
+        saved = drafts.save(**args, expected_revision=opened["state"]["revision"], values={"opinion": "合成核对意见"})
+        ready = drafts.preview(**args, expected_revision=saved["revision"])
+        receipt = drafts.approve(**args, expected_revision=ready["revision"],
+            preview_id=ready["preview"]["previewId"], request_key=uuid4().hex)["receipt"]
+        with patch.object(self.service.write_authorizations, "clock", return_value=actions._now() + timedelta(hours=1)):
+            expired = self.service.get_interaction(user_subject=OWNER, interaction_id=receipt["interactionId"])
+        self.assertEqual(expired["interaction"]["state"], "expired")
+        self.assertEqual(self.service.tasks.get_task(original["taskId"], user_subject=OWNER)["status"], "expired")
+        return original, receipt["authorizationId"]
+
+    def test_expired_unconsumed_approval_releases_only_the_fresh_query(self):
+        old_body = self.body()
+        with patch.object(self, "body", return_value=old_body):
+            first, authorization = self.expire_confirmed_pending_approval()
+        self.assertFalse(self.groups()[0]["targets"][0]["enabled"])
+        self.assertEqual(self.queue(old_body)["taskId"], first["taskId"])
+        fresh = self.fresh_query()
+        self.assertTrue(fresh["targets"][0]["enabled"])
+        self.assertIsNone(fresh["targets"][0]["preparation"])
+        new = self.queue()
+        self.assertNotEqual(new["taskId"], first["taskId"])
+        self.assertEqual(self.execute(new)["interaction"]["type"], "business_input")
+        old = self.service.write_authorizations.get(authorization)
+        self.assertEqual(old["state"], "expired")
+        self.assertIsNone(old["consumed_at"])
+        self.assertEqual(self.count("write_authorizations"), 1)
+        self.assertEqual(self.fixture.oa.writes, [])
+
+    def test_expired_approval_with_an_unattached_submit_attempt_remains_blocked(self):
+        first, authorization = self.expire_confirmed_pending_approval()
+        capability = self.command(first)["selectedItems"][0]["display_summary"]["commit_capability"]
+        for supplied in (authorization + " ", authorization):
+            with self.subTest(padded=supplied != authorization):
+                operation, _ = self.service.operations.create(user_subject=OWNER, capability_name=capability,
+                    capability_version=self.service.registry.get(capability).version,
+                    input_summary={"authorization_id": {"redacted": True, "length": len(supplied)}},
+                    input_identity={"authorization_id": supplied})
+                blocked = self.fresh_query()["targets"][0]
+                self.assertFalse(blocked["enabled"])
+                self.assertEqual(blocked["preparation"]["state"], "outcome_unknown")
+                with self.service.tasks._connect() as connection:
+                    connection.execute("DELETE FROM operations WHERE operation_id=?", (operation["operation_id"],))
+        self.assertEqual(self.fixture.oa.writes, [])
+
     def test_direct_prepare_resource_is_found_without_actionable_command(self):
         direct = self.fixture.add_pending_case("efficiency_data", case_key="direct-existing")
         self.fresh_query()
