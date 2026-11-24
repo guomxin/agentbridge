@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "7ac2c9272563"
+    "53dfd96aa211"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Deliver ordinary text between a verified NanoBot Workspace endpoint and its own Telegram private chat. Existing central ledger tables are reused."
+  "reason": "Resume fixed NanoBot Workspace approval commands and continue OA read queries through the original credential card. Existing central ledgers remain compatible. The local coordinator adds an independent read-recovery marker table."
 }
