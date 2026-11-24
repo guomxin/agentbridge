@@ -1,11 +1,20 @@
-"""Consume only original terminal events for a centrally verified Telegram private endpoint."""
+"""Consume centrally authorized Telegram notifications (cards, result views, commands, status, chat)."""
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 from typing import ClassVar
+
 from .chat_mirror import ChatMirrors, chat_claim, identifier, projected_chat
+from .telegram_presentation import (
+    interaction_can_open,
+    normalize_interaction,
+    normalize_result_view,
+    render_interaction_message,
+    render_result_view_message,
+    render_status_message,
+)
 
 TERMINAL = {
     "task.completed": "succeeded",
@@ -14,6 +23,59 @@ TERMINAL = {
     "task.failed": "failed",
     "task.canceled": "canceled",
 }
+
+QUIET_COMPANION_EVENTS = frozenset({
+    "task.created",
+    "task.operation.linked",
+    "task.operation.running",
+    "task.interaction.completed",
+})
+
+
+def _record_claim(path: Path, delivery: str, endpoint: str, run: str, attempt: int) -> None:
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS notification_claims (
+            delivery TEXT PRIMARY KEY, endpoint TEXT NOT NULL, run TEXT NOT NULL, attempt INTEGER NOT NULL)""")
+        db.execute(
+            """INSERT INTO notification_claims VALUES(?,?,?,?)
+                ON CONFLICT(delivery) DO UPDATE SET attempt=excluded.attempt
+                WHERE endpoint=excluded.endpoint AND run=excluded.run""",
+            (delivery, endpoint, run, attempt),
+        )
+
+
+async def _issue_task_result_view(session, req: dict, meta: dict, task_id: str, origins: frozenset[str]) -> dict | None:
+    lease_resp = await session.call_tool(
+        "agentbridge_host_coordinator_lease_get",
+        {"task_id": task_id},
+        meta=meta,
+    )
+    lease = (lease_resp.structuredContent or {}).get("coordinatorLease") or {}
+    if lease_resp.isError or lease.get("hostInstanceId") != req["instance"] or not lease.get("version"):
+        return None
+    task_meta = {
+        **meta,
+        "io.agentbridge/task": {
+            "taskId": task_id,
+            "coordinatorLeaseVersion": str(lease["version"]),
+            "endpointId": req["endpoint"],
+            "conversationRef": req["conversation"],
+            "hostRunId": task_id,
+        },
+    }
+    issued = await session.call_tool(
+        "agentbridge_result_view",
+        {"operation": "issue", "task_id": task_id},
+        meta=task_meta,
+    )
+    if issued.isError:
+        return None
+    return normalize_result_view(
+        (issued.structuredContent or {}).get("resultView"),
+        source_task_id=task_id,
+        endpoint_id=req["endpoint"],
+        allowed_origins=origins,
+    )
 
 
 async def notifications(host, record, action, body):
@@ -29,6 +91,7 @@ async def notifications(host, record, action, body):
             else {"recorded": False}
         )
     req = host.worker_payload(record, None)
+    origins = frozenset(getattr(host, "card_origins", None) or req.get("trustedCardOrigins") or ())
     async with authenticated_session(req) as (session, meta, level):
         if level != "L3" or not await verify_telegram_binding(
             session, req["instance"], req["subject"], meta, req["endpointKey"]
@@ -117,30 +180,149 @@ async def notifications(host, record, action, body):
             delivery, attempt = item.get("deliveryId"), item.get("attemptCount")
             if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
                 continue
-            if item.get("deliveryMode") == "timeline_message":
+            mode = item.get("deliveryMode")
+            if mode == "timeline_message":
                 message = projected_chat(item, req["workspaceEndpointId"])
                 if message and chat_claim(req["userDir"], req["endpoint"], delivery, attempt, register=True):
                     deliveries.append({"kind": "workspace_chat", "deliveryId": delivery, "attempt": attempt, **message})
                 continue
+            if mode == "no_op":
+                await ack(delivery, attempt, True)
+                continue
             task, event = item.get("task") or {}, item.get("event") or {}
+            if task.get("userSubject") != req["subject"] or task.get("agentHost") != "nanobot":
+                continue
+            if mode == "prepared_command":
+                command_key = (event.get("payload") or {}).get("commandKey")
+                commands = getattr(host, "commands", None)
+                if (
+                    commands is None
+                    or event.get("eventType") != "task.prepare.requested"
+                    or not isinstance(command_key, str)
+                    or task.get("originEndpointId") != req["endpoint"]
+                    or task.get("activeConversationRef") != req["conversation"]
+                ):
+                    continue
+                try:
+                    await commands.accept(record, {"taskId": task["taskId"], "commandKey": command_key})
+                except Exception:
+                    continue
+                await ack(delivery, attempt, True)
+                continue
+            if mode == "trusted_interaction":
+                card = normalize_interaction(item.get("interaction"), origins)
+                if not card or not interaction_can_open(card):
+                    await ack(delivery, attempt, True)
+                    continue
+                run_ref = f"interaction:{card['interactionId']}"
+                _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                deliveries.append({
+                    "kind": "trusted_interaction",
+                    "deliveryId": delivery,
+                    "attempt": attempt,
+                    "runId": run_ref,
+                    "interaction": card,
+                    "taskId": task.get("taskId"),
+                })
+                continue
+            if mode in {"status", "plan_result"}:
+                event_type = event.get("eventType")
+                if mode == "status" and event_type in QUIET_COMPANION_EVENTS:
+                    await ack(delivery, attempt, True)
+                    continue
+                text = item.get("message")
+                if not isinstance(text, str) or not text.strip():
+                    await ack(delivery, attempt, True)
+                    continue
+                unknown = event_type in {"task.operation.outcome_unknown", "plan.outcome_unknown"}
+                tone = (
+                    "warning" if unknown
+                    else ("danger" if event_type in {"task.failed", "task.operation.failed", "plan.step.failed", "task.interaction.expired", "task.interaction.failed"} else "info")
+                )
+                run_ref = f"status:{delivery}"
+                _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                deliveries.append({
+                    "kind": "status",
+                    "deliveryId": delivery,
+                    "attempt": attempt,
+                    "runId": run_ref,
+                    "text": text.strip(),
+                    "tone": tone,
+                    "unknown": unknown,
+                    "taskId": task.get("taskId"),
+                })
+                continue
             if (
-                item.get("deliveryMode") != "origin_handled"
-                or task.get("userSubject") != req["subject"]
-                or task.get("agentHost") != "nanobot"
+                mode != "origin_handled"
                 or task.get("activeConversationRef") != req["conversation"]
                 or task.get("originEndpointId") != req["endpoint"]
             ):
                 continue
-            if not path.exists():
+            local = None
+            if path.exists():
+                with sqlite3.connect(path) as db:
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'").fetchone():
+                        local = db.execute(
+                            "SELECT run_id FROM tasks WHERE endpoint=? AND task_id=?",
+                            (req["endpoint"], task["taskId"]),
+                        ).fetchone()
+            command = (task.get("summary") or {}).get("command") or {}
+            tg_command = command.get("originKind") == "telegram"
+            if not local and not tg_command:
                 continue
-            with sqlite3.connect(path) as db:
-                local = db.execute(
-                    "SELECT run_id FROM tasks WHERE endpoint=? AND task_id=?",
-                    (req["endpoint"], task["taskId"]),
-                ).fetchone()
-            if not local:
-                continue
+            local_run = local[0] if local else None
             kind = event.get("eventType")
+            if kind == "task.interaction.waiting":
+                interaction_id = (event.get("payload") or {}).get("interactionId")
+                if not isinstance(interaction_id, str) or not origins:
+                    await ack(delivery, attempt, True)
+                    continue
+                presented = await session.call_tool(
+                    "agentbridge_host_interaction_present",
+                    {
+                        "agent_host": "nanobot",
+                        "endpoint_key": req["endpointKey"],
+                        "interaction_id": interaction_id,
+                    },
+                    meta=meta,
+                )
+                pres_payload = presented.structuredContent or {}
+                card = (
+                    normalize_interaction(pres_payload.get("interaction"), origins)
+                    if not presented.isError
+                    and (pres_payload.get("endpoint") or {}).get("endpointId") == req["endpoint"]
+                    else None
+                )
+                if not card or not interaction_can_open(card):
+                    await ack(delivery, attempt, True)
+                    continue
+                run_ref = f"interaction:{card['interactionId']}"
+                _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                deliveries.append({
+                    "kind": "trusted_interaction",
+                    "deliveryId": delivery,
+                    "attempt": attempt,
+                    "runId": run_ref,
+                    "replyRunId": local_run,
+                    "interaction": card,
+                    "taskId": task.get("taskId"),
+                })
+                continue
+            if kind == "task.operation.outcome_unknown":
+                run_ref = f"status:{delivery}"
+                _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                deliveries.append({
+                    "kind": "status",
+                    "deliveryId": delivery,
+                    "attempt": attempt,
+                    "runId": run_ref,
+                    "replyRunId": local_run,
+                    "text": "业务结果待核实，请先到业务系统核对，不要重复提交。",
+                    "tone": "warning",
+                    "unknown": True,
+                    "taskId": task.get("taskId"),
+                })
+                continue
             if kind not in TERMINAL:
                 # Nonterminal origin events are already presented in the original turn.
                 await ack(delivery, attempt, True)
@@ -152,21 +334,63 @@ async def notifications(host, record, action, body):
                 continue
             if task.get("status") != TERMINAL[kind]:
                 continue
-            with sqlite3.connect(path) as db:
-                db.execute(
-                    """INSERT INTO notification_claims VALUES(?,?,?,?)
-                        ON CONFLICT(delivery) DO UPDATE SET attempt=excluded.attempt
-                        WHERE endpoint=excluded.endpoint AND run=excluded.run""",
-                    (delivery, req["endpoint"], local[0], attempt),
-                )
-            deliveries.append(
-                {
+            if tg_command and command.get("kind") == "oa_pending_query":
+                if TERMINAL[kind] == "succeeded":
+                    view = await _issue_task_result_view(session, req, meta, task["taskId"], origins)
+                    if view:
+                        run_ref = f"result_view:{task['taskId']}"
+                        _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                        deliveries.append({
+                            "kind": "result_view",
+                            "deliveryId": delivery,
+                            "attempt": attempt,
+                            "runId": run_ref,
+                            "resultView": view,
+                            "summary": "已查询最新 OA 待办，可从下方进入选择与办理。",
+                            "taskId": task["taskId"],
+                        })
+                        continue
+                    msg = "已查询 OA 待办，当前没有可直接办理的待办事项。"
+                    tone = "info"
+                else:
+                    msg = "查询 OA 待办未完成，请稍后重试。"
+                    tone = "danger"
+                run_ref = f"status:{delivery}"
+                _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                deliveries.append({
+                    "kind": "status",
                     "deliveryId": delivery,
                     "attempt": attempt,
-                    "runId": local[0],
-                    "status": TERMINAL[kind],
-                }
-            )
+                    "runId": run_ref,
+                    "text": msg,
+                    "tone": tone,
+                    "unknown": False,
+                    "taskId": task["taskId"],
+                })
+                continue
+            if local_run:
+                _record_claim(path, delivery, req["endpoint"], local_run, attempt)
+                deliveries.append(
+                    {
+                        "deliveryId": delivery,
+                        "attempt": attempt,
+                        "runId": local_run,
+                        "status": TERMINAL[kind],
+                    }
+                )
+            elif tg_command:
+                run_ref = f"status:{delivery}"
+                _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                deliveries.append({
+                    "kind": "status",
+                    "deliveryId": delivery,
+                    "attempt": attempt,
+                    "runId": run_ref,
+                    "text": TerminalMessages.TEXT[TERMINAL[kind]],
+                    "tone": "info" if TERMINAL[kind] == "succeeded" else "danger",
+                    "unknown": False,
+                    "taskId": task["taskId"],
+                })
     return {"deliveries": deliveries}
 
 
@@ -181,15 +405,86 @@ class TerminalMessages:
         self.pilot = pilot
         self.chat = ChatMirrors(pilot)
         with pilot.db:
-            pilot.db.execute("""CREATE TABLE IF NOT EXISTS notification_receipts(
+            pilot.db.executescript("""
+                CREATE TABLE IF NOT EXISTS notification_receipts(
                     bot INTEGER, chat INTEGER, delivery TEXT, run TEXT, state TEXT NOT NULL,
-                    PRIMARY KEY(bot,chat,delivery))""")
-            pilot.db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS terminal_once_per_run ON notification_receipts(bot,chat,run)"
-            )
-            pilot.db.execute(
-                "UPDATE notification_receipts SET state='delivery_unknown' WHERE state='sending'"
-            )
+                    PRIMARY KEY(bot,chat,delivery));
+                CREATE UNIQUE INDEX IF NOT EXISTS terminal_once_per_run ON notification_receipts(bot,chat,run);
+                UPDATE notification_receipts SET state='delivery_unknown' WHERE state='sending';
+                CREATE TABLE IF NOT EXISTS telegram_card_deliveries(
+                    bot INTEGER NOT NULL, chat INTEGER NOT NULL, dedupe_key TEXT NOT NULL,
+                    delivery TEXT, state TEXT NOT NULL, receipt INTEGER,
+                    PRIMARY KEY(bot,chat,dedupe_key));
+                UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state='sending';
+            """)
+
+    def _reply_message_id(self, chat, binding, digest, run_id):
+        if not run_id:
+            return None
+        row = self.pilot.db.execute(
+            """SELECT message FROM messages WHERE bot=? AND chat=? AND subject=?
+               AND binding_hash=? AND run_id=? AND state IN ('working','delivered','delivery_unknown')""",
+            (self.pilot.bot_id, chat, binding["user_subject"], digest, run_id),
+        ).fetchone()
+        return row["message"] if row else None
+
+    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None):
+        from .telegram import TelegramUnavailable, numeric
+
+        pilot = self.pilot
+        with pilot.db:
+            inserted = pilot.db.execute(
+                "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,?,'sending',NULL)",
+                (pilot.bot_id, chat, dedupe_key, delivery),
+            ).rowcount
+        if inserted:
+            status = "delivery_unknown"
+            receipt = None
+            try:
+                active, proof = pilot._binding(chat)
+                if active != binding or proof != digest:
+                    status = "binding_changed"
+                else:
+                    call_params = {"chat_id": chat, **params}
+                    if reply_to is not None:
+                        call_params["reply_parameters"] = {
+                            "message_id": reply_to,
+                            "allow_sending_without_reply": True,
+                        }
+                    result = pilot.api.call("sendMessage", **call_params)
+                    if (
+                        isinstance(result, dict)
+                        and numeric(result.get("message_id"))
+                        and (result.get("from") or {}).get("id") == pilot.bot_id
+                        and (result.get("chat") or {}).get("id") == chat
+                        and (result.get("chat") or {}).get("type") == "private"
+                    ):
+                        receipt = result["message_id"]
+                        status = "delivered"
+            except TelegramUnavailable:
+                pass
+            with pilot.db:
+                pilot.db.execute(
+                    "UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
+                    (status, receipt, pilot.bot_id, chat, dedupe_key),
+                )
+        row = pilot.db.execute(
+            "SELECT state FROM telegram_card_deliveries WHERE bot=? AND chat=? AND dedupe_key=?",
+            (pilot.bot_id, chat, dedupe_key),
+        ).fetchone()
+        return bool(row and row[0] == "delivered")
+
+    def _ack_receipt(self, binding, delivery, run_id, attempt, delivered):
+        self.pilot.gateway._request(
+            "telegram-notification-receipt",
+            {
+                "binding": binding,
+                "deliveryId": delivery,
+                "runId": run_id,
+                "attempt": attempt,
+                "delivered": bool(delivered),
+            },
+        )
 
     def poll(self, chat, binding, digest):
         from .telegram import TelegramUnavailable, numeric
@@ -197,8 +492,57 @@ class TerminalMessages:
         pilot = self.pilot
         reply = pilot.gateway._request("telegram-notifications", {"binding": binding})
         for event in reply.get("deliveries", []):
-            if event.get("kind") == "workspace_chat":
+            kind = event.get("kind")
+            if kind == "workspace_chat":
                 self.chat.poll(chat, binding, digest, event)
+                continue
+            if kind == "trusted_interaction":
+                card = event.get("interaction")
+                if not isinstance(card, dict) or not card.get("interactionId"):
+                    continue
+                from urllib.parse import urlsplit
+                parsed_url = urlsplit(str((card.get("presentation") or {}).get("url") or ""))
+                origins = frozenset({f"https://{parsed_url.netloc}"}) if parsed_url.scheme == "https" and parsed_url.netloc else frozenset()
+                params = render_interaction_message(card, origins)
+                if not params:
+                    self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], True)
+                    continue
+                reply_to = self._reply_message_id(chat, binding, digest, event.get("replyRunId"))
+                delivered = self.send_once(
+                    chat, binding, digest, f"interaction:{card['interactionId']}", params,
+                    delivery=event["deliveryId"], reply_to=reply_to,
+                )
+                self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
+                continue
+            if kind == "result_view":
+                view = event.get("resultView")
+                if not isinstance(view, dict) or not view.get("sourceTaskId"):
+                    continue
+                params = render_result_view_message(
+                    view,
+                    summary=event.get("summary") or "OA 待办已查询，可从下方进入选择与办理。",
+                )
+                delivered = self.send_once(
+                    chat, binding, digest, f"result_view:{view['sourceTaskId']}", params,
+                    delivery=event["deliveryId"],
+                )
+                self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
+                continue
+            if kind == "status":
+                text = event.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                params = render_status_message(
+                    text,
+                    tone=event.get("tone") or "info",
+                    unknown=bool(event.get("unknown")),
+                )
+                reply_to = self._reply_message_id(chat, binding, digest, event.get("replyRunId"))
+                delivered = self.send_once(
+                    chat, binding, digest, f"status:{event['deliveryId']}", params,
+                    delivery=event["deliveryId"], reply_to=reply_to,
+                )
+                self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
                 continue
             if event.get("status") not in self.TEXT:
                 continue
@@ -230,7 +574,6 @@ class TerminalMessages:
                                 "message_id": original["message"],
                                 "allow_sending_without_reply": False,
                             },
-                            link_preview_options={"is_disabled": True},
                         )
                         if (
                             isinstance(result, dict)
@@ -253,13 +596,4 @@ class TerminalMessages:
                 (pilot.bot_id, chat, event["runId"]),
             ).fetchone()
             if row:
-                pilot.gateway._request(
-                    "telegram-notification-receipt",
-                    {
-                        "binding": binding,
-                        "deliveryId": delivery,
-                        "runId": event["runId"],
-                        "attempt": event["attempt"],
-                        "delivered": row[0] == "delivered",
-                    },
-                )
+                self._ack_receipt(binding, delivery, event["runId"], event["attempt"], row[0] == "delivered")

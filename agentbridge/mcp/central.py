@@ -6004,8 +6004,12 @@ def create_central_mcp_server(
         endpoint_id = runtime_context.get("endpointId")
         if _request_task_id(ctx) != task_id or not endpoint_id:
             raise HostContractError("result view requires the exact trusted task and endpoint metadata")
+        host_context = _require_host_context(ctx)
+        caller_host = host_context.get("agentHost")
+        if caller_host not in {"openclaw", "nanobot"}:
+            raise HostContractError("result view is only available to registered Telegram hosts")
         await _require_registered_host_call(ctx, service=service, identity=identity,
-            agent_host="openclaw", minimum_level="L3", task_id=task_id)
+            agent_host=caller_host, minimum_level="L3", task_id=task_id)
         from agentbridge.core.telegram_result_views import ResultViewService
         return await asyncio.to_thread(ResultViewService(service).issue, identity["user_subject"], task_id, endpoint_id,
             {**runtime_context, "tokenId": identity["token_id"]})

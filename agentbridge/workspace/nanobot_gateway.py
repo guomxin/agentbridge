@@ -326,8 +326,9 @@ class NanoBotGatewayClient:
             "prompt_observed": True,
             "observed_run_id": result["runId"],
             "state": result["state"],
-            "has_private_card":bool(result.get("hasPrivateCard")),
-            "card_revision":result.get("cardRevision",0),
+            "has_private_card": bool(result.get("hasPrivateCard")),
+            "card_revision": result.get("cardRevision", 0),
+            "has_result_view": bool(result.get("hasResultView")),
             "final_text": result.get("answer")
             if result["state"] == "completed"
             else None,
@@ -342,4 +343,29 @@ class NanoBotGatewayClient:
         if (result.get("kind") not in {"credential","business_input","execution_authorization"} or parsed.scheme!="https" or not parsed.hostname
                 or parsed.username or parsed.password or parsed.fragment):
             raise GatewayRequestError("GATEWAY_RESPONSE_INVALID","可信卡地址无效。")
-        return {"available":True,"kind":result["kind"],"url":result["url"],"cardRevision":result.get("cardRevision",1)}
+        return {
+            "available": True,
+            "kind": result["kind"],
+            "url": result["url"],
+            "cardRevision": result.get("cardRevision", 1),
+            **({"interaction": result["interaction"]} if isinstance(result.get("interaction"), dict) else {}),
+        }
+
+    def result_view(self, dispatch: dict, binding: dict, run_ref: str) -> dict:
+        result = self._request("result-view", {
+            "binding": self._binding(binding),
+            "requestKey": dispatch["idempotency_key"],
+            "runId": run_ref,
+        })
+        if result.get("available") is not True or not isinstance(result.get("resultView"), dict):
+            return {"available": False}
+        view = result["resultView"]
+        parsed = urlsplit(str(view.get("url") or ""))
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise GatewayRequestError("GATEWAY_RESPONSE_INVALID", "待办办理入口地址无效。")
+        return {
+            "available": True,
+            "resultView": view,
+            "count": result.get("count"),
+            "complete": bool(result.get("complete")),
+        }

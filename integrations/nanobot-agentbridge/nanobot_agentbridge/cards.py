@@ -72,7 +72,12 @@ async def present_credential(
         or not _valid_card(card, frozenset(request["trustedCardOrigins"]))
     ):
         return None
-    return {"available": True, "kind": "credential", "url": card["presentation"]["url"]}
+    return {
+        "available": True,
+        "kind": "credential",
+        "url": card["presentation"]["url"],
+        "interaction": card,
+    }
 
 
 async def wait_for_credential(
@@ -180,4 +185,5 @@ async def present_coordinated(session, request, context, waiting):
         "available": True,
         "kind": waiting["kind"],
         "url": card["presentation"]["url"],
+        "interaction": card,
     }

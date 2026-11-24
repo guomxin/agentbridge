@@ -116,9 +116,7 @@ class BoundDriver(ReferenceTaskDriver):
             "agentbridge_host_interaction_present",
             {
                 "agent_host": "nanobot",
-                "endpoint_key": self.req.get(
-                    "workspaceEndpointKey", self.req["endpointKey"]
-                ),
+                "endpoint_key": self.req["endpointKey"],
                 "interaction_id": interaction_id,
             },
             meta=self.host_context(),
@@ -132,7 +130,7 @@ class BoundDriver(ReferenceTaskDriver):
         if (
             result.is_error
             or (payload.get("endpoint") or {}).get("endpointId")
-            != self.req.get("workspaceEndpointId", self.req["endpoint"])
+            != self.req["endpoint"]
             or card.get("interactionId") != interaction_id
             or card.get("type")
             not in {"business_input", "execution_authorization", "credential"}

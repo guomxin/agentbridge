@@ -732,15 +732,36 @@ def _telegram_endpoint(connection, subject, endpoint_id):
     endpoint = dict(row)
     route = json.loads(endpoint["route_json"])
     conversation = endpoint["conversation_ref"]
-    match = re.fullmatch(r"agent:[^:]+:telegram:(?:direct|dm):([^:]+)", conversation, re.IGNORECASE)
     sender = endpoint["external_subject"]
     route_account = route.get("accountId") if isinstance(route, dict) else None
     endpoint_account = endpoint["account_id"]
     accounts_valid = all(value is None or isinstance(value, str) for value in (route_account, endpoint_account))
     canonical_route_account = (route_account or "").strip() or "default" if accounts_valid else None
     canonical_endpoint_account = (endpoint_account or "").strip() or "default" if accounts_valid else None
-    if (endpoint["state"] != "active" or endpoint["agent_host"] != "openclaw"
-            or endpoint["client_type"].lower() != "telegram" or not match or match[1] != sender
+    host = endpoint["agent_host"]
+    instance_id = None
+    if host == "openclaw":
+        match = re.fullmatch(r"agent:[^:]+:telegram:(?:direct|dm):([^:]+)", conversation, re.IGNORECASE)
+        route_valid = bool(match and match[1] == sender)
+    elif host == "nanobot":
+        from agentbridge.core.endpoint_instances import endpoint_instances
+        scope = endpoint_instances(connection, subject).get(endpoint_id)
+        numeric_ok = (
+            isinstance(endpoint_account, str) and re.fullmatch(r"[1-9][0-9]{0,15}", endpoint_account)
+            and isinstance(sender, str) and re.fullmatch(r"[1-9][0-9]{0,15}", sender)
+        )
+        route_valid = bool(
+            numeric_ok
+            and scope and scope[0] == "nanobot"
+            and endpoint["endpoint_key"] == f"telegram:{endpoint_account}:{sender}"
+            and re.fullmatch(r"agentbridge:telegram:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", conversation, re.IGNORECASE)
+        )
+        if route_valid:
+            instance_id = scope[1]
+    else:
+        route_valid = False
+    if (endpoint["state"] != "active" or not route_valid
+            or endpoint["client_type"].lower() != "telegram"
             or not isinstance(route, dict) or route.get("channel") != "telegram"
             or not accounts_valid or canonical_route_account != canonical_endpoint_account
             or str(route.get("to") or "").removeprefix("telegram:") != sender
@@ -762,6 +783,8 @@ def _telegram_endpoint(connection, subject, endpoint_id):
         account_id="default" if canonical_endpoint_account == "default" else endpoint_account,
         route=canonical_route)
     endpoint["_binding_hash"] = _hash(binding)
+    if instance_id:
+        endpoint["_instance_id"] = instance_id
     return endpoint
 
 
@@ -796,8 +819,10 @@ def queue_endpoint_preparation(service, subject, endpoint_id, source_task_id, bo
         if _hash(pending) != source_hash:
             _fail("ACTION_SOURCE_CHANGED", "原查询内容已变化，请重新查询。")
         binding = {"endpoint_id": endpoint_id, "endpoint_key": endpoint["endpoint_key"],
-            "openclaw_session_key": endpoint["conversation_ref"], "_request_scope": endpoint_id,
-            "_telegram": True, "_binding_hash": binding_hash}
+            "openclaw_session_key": endpoint["conversation_ref"], "agent_host": endpoint["agent_host"],
+            "_request_scope": endpoint_id, "_telegram": True, "_binding_hash": binding_hash}
+        if endpoint.get("_instance_id"):
+            binding["instance_id"] = endpoint["_instance_id"]
         result = _queue_preparation(service, subject, source_task_id, body, binding, connection)
         previous = connection.execute("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
             "AND event_type='task.result_view.prepared' AND causation_ref=?", (result["taskId"], subject, view_hash)).fetchone()
@@ -1061,7 +1086,29 @@ def pending_preparations(service, subject, limit=16, *, registration=None):
                    ORDER BY t.created_at,t.rowid LIMIT ?""",
                 (subject, registration["agentHost"], registration["hostInstanceId"], COMMAND_KIND, "oa_pending_query", limit)
             ).fetchall()
-            telegram_rows = []
+            telegram_candidates = connection.execute(
+                """SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t
+                   JOIN client_endpoints e ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject
+                       AND e.conversation_ref=t.active_conversation_ref AND e.agent_host=t.agent_host
+                       AND e.client_type='telegram' AND e.state='active'
+                   WHERE t.user_subject=? AND t.agent_host=?
+                       AND t.status IN ('active','running','waiting_user')
+                       AND json_extract(t.summary_json,'$.command.kind') IN (?,?)
+                       AND json_extract(t.summary_json,'$.command.state')='pending'
+                       AND json_extract(t.summary_json,'$.command.originKind')='telegram'
+                   ORDER BY t.created_at,t.rowid LIMIT ?""",
+                (subject, registration["agentHost"], COMMAND_KIND, "oa_pending_query", limit),
+            ).fetchall()
+            if telegram_candidates:
+                from agentbridge.core.endpoint_instances import endpoint_instances
+                ownership = endpoint_instances(connection, subject)
+                expected_scope = (registration["agentHost"], registration["hostInstanceId"])
+                telegram_rows = [
+                    row for row in telegram_candidates
+                    if ownership.get(row["origin_endpoint_id"]) == expected_scope
+                ]
+            else:
+                telegram_rows = []
         else:
             rows = connection.execute(
                 "SELECT t.*,e.endpoint_key AS prepare_endpoint_key FROM agent_tasks t "

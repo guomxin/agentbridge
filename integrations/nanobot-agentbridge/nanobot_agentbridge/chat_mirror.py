@@ -106,9 +106,14 @@ class ChatMirrors:
                 inserted = pilot.db.execute("INSERT OR IGNORE INTO chat_mirror_parts VALUES(?,?,?,?,'sending',NULL)", segment).rowcount
             if not inserted:
                 return
+            from .telegram_presentation import format_ordinary_telegram_message
+            formatted = format_ordinary_telegram_message(chunk)
             receipt = None
             try:
-                result = pilot.api.call("sendMessage", chat_id=chat, text=chunk, link_preview_options={"is_disabled": True})
+                send_params = {"chat_id": chat, "text": formatted["text"], "link_preview_options": {"is_disabled": True}}
+                if formatted.get("parse_mode"):
+                    send_params["parse_mode"] = formatted["parse_mode"]
+                result = pilot.api.call("sendMessage", **send_params)
                 if (isinstance(result, dict) and numeric(result.get("message_id"))
                         and isinstance(result.get("chat"), dict) and result["chat"].get("id") == chat
                         and result["chat"].get("type") == "private" and isinstance(result.get("from"), dict)

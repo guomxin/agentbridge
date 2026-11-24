@@ -155,6 +155,14 @@ def mirror_pair_proof(db, subject, binding, sender):
     return hashlib.sha256(json.dumps(basis, separators=(",", ":")).encode()).hexdigest()
 
 
+NANOBOT_TELEGRAM_CAPABILITIES = [
+    "timeline_message",
+    "trusted_interaction",
+    "direct_status",
+    "continuous_flow_v1",
+]
+
+
 def _ensure_telegram_endpoint(db, tasks, subject, binding, bot, sender, token_id, *, refresh):
     key = f"telegram:{bot}:{sender}"
     conversation = telegram_conversation_ref(binding["instance_id"], subject, binding["endpoint_id"], bot, sender)
@@ -164,12 +172,13 @@ def _ensure_telegram_endpoint(db, tasks, subject, binding, bot, sender, token_id
                 or old["client_type"] != "telegram" or old["external_subject"] != sender or old["account_id"] != bot
                 or json.loads(old["route_json"]) != route):
         raise PermissionError("Telegram endpoint ownership changed")
-    if old and not refresh and "timeline_message" in json.loads(old["capabilities_json"]):
+    if old and not refresh and set(NANOBOT_TELEGRAM_CAPABILITIES).issubset(set(json.loads(old["capabilities_json"]))):
         return old["endpoint_id"]
     endpoint, _ = tasks.ensure_endpoint(
         user_subject=subject, token_id=old["token_id"] if old and not refresh else token_id,
         agent_host="nanobot", endpoint_key=key, client_type="telegram", external_subject=sender,
-        conversation_ref=conversation, account_id=bot, route=route, capabilities=["timeline_message"], connection=db)
+        conversation_ref=conversation, account_id=bot, route=route,
+        capabilities=NANOBOT_TELEGRAM_CAPABILITIES, connection=db)
     return endpoint["endpoint_id"]
 
 

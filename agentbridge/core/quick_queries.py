@@ -89,9 +89,11 @@ def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, s
                 or source["active_conversation_ref"] != endpoint["conversation_ref"]:
             actions._fail("ACTION_ENDPOINT_INVALID", "查询请求必须来自原 Telegram 私聊。")
         workspace = {"endpoint_id": endpoint_id, "endpoint_key": endpoint["endpoint_key"],
-            "openclaw_session_key": endpoint["conversation_ref"], "_telegram": True,
-            "_binding_hash": binding_hash, "_request_scope": endpoint_id,
+            "openclaw_session_key": endpoint["conversation_ref"], "agent_host": endpoint["agent_host"],
+            "_telegram": True, "_binding_hash": binding_hash, "_request_scope": endpoint_id,
             "_source_task_id": source_task_id, "_view_hash": view_hash}
+        if endpoint.get("_instance_id"):
+            workspace["instance_id"] = endpoint["_instance_id"]
         if remaining_context is not None:
             workspace["_remaining_context"] = remaining_context
         return _queue(service, subject, workspace, body, connection)

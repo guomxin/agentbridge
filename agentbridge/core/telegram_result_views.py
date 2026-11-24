@@ -45,7 +45,8 @@ class ResultViewService:
         with store_transaction(service.tasks) as connection:
             endpoint = actions._telegram_endpoint(connection, subject, endpoint_id)
             task = actions._owned_task(connection, subject, task_id)
-            if (task["agent_host"] != "openclaw" or task["origin_endpoint_id"] != endpoint_id
+            if (task["agent_host"] not in {"openclaw", "nanobot"} or task["agent_host"] != endpoint["agent_host"]
+                    or task["origin_endpoint_id"] != endpoint_id
                     or task["active_conversation_ref"] != endpoint["conversation_ref"]):
                 actions._fail("ACTION_ENDPOINT_INVALID", "查询任务与原 Telegram 私聊不一致。")
             if host_context and (host_context.get("endpointId") != endpoint_id

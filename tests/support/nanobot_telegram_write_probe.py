@@ -37,7 +37,12 @@ def exercise(*, fixture, binding, instance, gateway, model):
         ):
             continue
         decided = True
-        assert not gateway.private_card(req, tg, run_id)["available"]
+        tg_card = gateway.private_card(req, tg, run_id)
+        assert (
+            tg_card["available"]
+            and tg_card["url"].startswith(ORIGIN + "/")
+            and (tg_card.get("interaction") or {}).get("type") == "business_input"
+        )
         with sqlite3.connect(fixture.service.db_path) as db:
             id_, resource = db.execute(
                 "SELECT interaction_id,resource_id FROM interactions WHERE user_subject=? AND interaction_type='business_input' ORDER BY rowid DESC LIMIT 1",
@@ -63,6 +68,7 @@ def exercise(*, fixture, binding, instance, gateway, model):
         "telegram_input": "synthetic private sender",
         "workspace_approved": True,
         "original_telegram_endpoint": True,
+        "telegram_private_card_available": True,
         "link_in_telegram_messages": False,
         "central_verified": True,
         "effects": 1,

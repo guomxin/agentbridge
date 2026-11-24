@@ -19,6 +19,9 @@ class TaskContext:
         with sqlite3.connect(self.db) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS tasks (
                 run_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE, version INTEGER NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS pending_queries (
+                run_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
+                item_count INTEGER NOT NULL, complete INTEGER NOT NULL)""")
 
     async def get(self, *, existing_only=False):
         req = self.request
@@ -116,6 +119,23 @@ class TaskContext:
             self.delegated = True
             return
         data = result.structuredContent or {}
+        if (
+            tool == "oa_workflow_pending_list"
+            and self.meta
+            and data.get("status") == "succeeded"
+            and re.fullmatch(r"telegram:[0-9]+:[0-9]+", self.request.get("endpointKey", ""))
+        ):
+            payload = data.get("result") if isinstance(data.get("result"), dict) else data
+            items = payload.get("items") if isinstance(payload, dict) else None
+            coverage = payload.get("coverage") if isinstance(payload, dict) else None
+            if isinstance(items, list) and len(items) > 0:
+                complete = isinstance(coverage, dict) and coverage.get("status") == "complete"
+                task_id = self.meta["io.agentbridge/task"]["taskId"]
+                with sqlite3.connect(self.db) as db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO pending_queries VALUES(?,?,?,?,?)",
+                        (self.request["runId"], self.request["endpoint"], task_id, len(items), int(complete)),
+                    )
         if data.get("interaction") or data.get("operationId"):
             self.delegated = True
         elif tool == "database_execute" and (data.get("status") == "succeeded" or
@@ -137,3 +157,21 @@ class TaskContext:
         }, meta=self.meta)
         if result.isError:
             raise PermissionError("Central completion of the read could not be confirmed")
+
+
+def pending_query_for_run(directory: Path, run_id: str, endpoint: str) -> dict | None:
+    path = directory / "coordinated-runs.sqlite3"
+    if not path.is_file():
+        return None
+    with sqlite3.connect(path, timeout=8) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_queries'").fetchone():
+            return None
+        row = db.execute(
+            """SELECT p.task_id, t.version, p.item_count, p.complete
+               FROM pending_queries p JOIN tasks t ON t.run_id=p.run_id AND t.endpoint=p.endpoint AND t.task_id=p.task_id
+               WHERE p.run_id=? AND p.endpoint=?""",
+            (run_id, endpoint),
+        ).fetchone()
+    if not row:
+        return None
+    return {"taskId": row[0], "version": row[1], "count": row[2], "complete": bool(row[3])}

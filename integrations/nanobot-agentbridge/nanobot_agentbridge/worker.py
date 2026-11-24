@@ -95,7 +95,7 @@ async def run(request: dict) -> None:
             if target!=binding:
                 raise PermissionError("Card binding unavailable")
             return await wait_for_credential(session,request,meta,card)
-        can_present = level in {"L2","L3"} and channel=="workspace"
+        can_present = level in {"L2","L3"} and channel in {"workspace","telegram"}
         if request.get("trial") is not None:
             if channel!="workspace":
                 raise PermissionError("Workspace trial binding required")
@@ -110,7 +110,7 @@ async def run(request: dict) -> None:
             context = TaskContext(session,request,meta)
             skill_args["business_context"] = context.get
             coordinator_tool = (request,context)
-            if request.get("enableSkills") and channel=="workspace":
+            if request.get("enableSkills") and (channel=="workspace" or request.get("workspaceEndpointId")):
                 from .skills import SkillRun
                 skill_args["skill_run"] = SkillRun(session,context.get)
         answer = await run_readonly(config,session,binding,request["message"],emit,

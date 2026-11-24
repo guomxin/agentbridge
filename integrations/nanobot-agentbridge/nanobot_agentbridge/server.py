@@ -361,6 +361,7 @@ class Host:
         entry = self.runs.lookup(request_key, **binding)
         waiting = None
         task_card = None
+        pending_query = None
         work = None
         if entry and self.card_origins and entry["state"] in {"accepted","unknown"}:
             work = self.worker_payload(record,entry["run_id"])
@@ -368,6 +369,10 @@ class Host:
                 waiting = CredentialCards(Path(work["userDir"])).waiting(entry["run_id"],key[1])
             if self.coordinator:
                 task_card=coordinated_waiting(Path(work["userDir"]),entry["run_id"],key[1])
+        if entry and self.card_origins and self.coordinator and entry["state"] == "completed" and channel_for(record["endpoint_key"]) == "telegram":
+            work = work or self.worker_payload(record, entry["run_id"])
+            from .task_context import pending_query_for_run
+            pending_query = pending_query_for_run(Path(work["userDir"]), entry["run_id"], key[1])
         if action == "lookup":
             if entry is None:
                 return {"runId": None}
@@ -377,6 +382,7 @@ class Host:
                 "answer": entry["answer"],
                 "hasPrivateCard": bool(waiting or task_card),
                 "cardRevision": task_card["revision"] if task_card else int(bool(waiting)),
+                "hasResultView": bool(pending_query),
             }
         if entry is None or body.get("runId") != entry["run_id"]:
             raise web.HTTPForbidden()
@@ -394,12 +400,14 @@ class Host:
                 "cardRevision": task_card["revision"] if task_card else int(bool(waiting)),
             }
         if action == "card":
-            if channel_for(record["endpoint_key"])=="telegram":
-                return {"available":False}
             if not waiting and not task_card:
                 return {"available":False}
             try:
                 async with authenticated_session(work) as (session, meta, level):
+                    if channel_for(record["endpoint_key"]) == "telegram":
+                        from .telegram_identity import verify_telegram_binding
+                        if not await verify_telegram_binding(session, self.instance, key[0], meta, record["endpoint_key"]):
+                            return {"available": False}
                     if task_card and level=="L3":
                         card = await present_coordinated(session,work,meta,task_card)
                     else:
@@ -407,6 +415,48 @@ class Host:
             except Exception:
                 raise web.HTTPServiceUnavailable() from None
             return {**card,"cardRevision":task_card["revision"] if task_card else 1} if card else {"available":False}
+        if action == "result-view":
+            if channel_for(record["endpoint_key"]) != "telegram" or not pending_query:
+                return {"available": False}
+            try:
+                from .telegram_identity import verify_telegram_binding
+                from .telegram_presentation import normalize_result_view
+                async with authenticated_session(work) as (session, meta, level):
+                    if level != "L3" or not await verify_telegram_binding(session, self.instance, key[0], meta, record["endpoint_key"]):
+                        return {"available": False}
+                    task_meta = {
+                        **meta,
+                        "io.agentbridge/task": {
+                            "taskId": pending_query["taskId"],
+                            "coordinatorLeaseVersion": str(pending_query["version"]),
+                            "endpointId": work["endpoint"],
+                            "conversationRef": work["conversation"],
+                            "hostRunId": entry["run_id"],
+                        },
+                    }
+                    issued = await session.call_tool(
+                        "agentbridge_result_view",
+                        {"operation": "issue", "task_id": pending_query["taskId"]},
+                        meta=task_meta,
+                    )
+                if issued.isError:
+                    return {"available": False}
+                view = normalize_result_view(
+                    (issued.structuredContent or {}).get("resultView"),
+                    source_task_id=pending_query["taskId"],
+                    endpoint_id=work["endpoint"],
+                    allowed_origins=frozenset(self.card_origins),
+                )
+            except Exception:
+                raise web.HTTPServiceUnavailable() from None
+            if not view:
+                return {"available": False}
+            return {
+                "available": True,
+                "resultView": view,
+                "count": pending_query["count"],
+                "complete": pending_query["complete"],
+            }
         if action == "cancel":
             stopped = await self.runs.cancel(entry["run_id"], **binding)
             return {"runId": entry["run_id"], "state": stopped["state"]}
@@ -416,7 +466,7 @@ class Host:
 def create_app(spec: dict) -> web.Application:
     host = Host(spec)
     app = web.Application(client_max_size=18 * 1024 * 1024)
-    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-mirror-peers}", host.handle)
+    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-mirror-peers}", host.handle)
 
     if host.coordinator:
         from .recovery import recover

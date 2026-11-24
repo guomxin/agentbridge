@@ -17,12 +17,19 @@ import sqlite3
 import time
 from pathlib import Path
 
+from urllib.parse import urlsplit
+
 from agentbridge.core.chat_mirror import public_mirror_text
 from agentbridge.workspace.gateway import GatewayRequestError
 from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
 
 from .private_files import private_directory, private_text
 from .telegram_credentials import bot_token
+from .telegram_presentation import (
+    format_ordinary_telegram_message,
+    render_interaction_message,
+    render_result_view_message,
+)
 from .telegram_text import split_telegram_text
 from .telegram_timeline import TelegramTimeline, telegram_answer, telegram_text_fits
 
@@ -86,6 +93,7 @@ class TelegramPilot:
         self.bot_username = bot_username
         self.allow_pairing = allow_pairing
         self.next_notifications = 0.0
+        self._typing_at: dict[int, float] = {}
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -94,6 +102,11 @@ class TelegramPilot:
                 bot INTEGER, chat INTEGER, message INTEGER, subject TEXT, binding_hash TEXT,
                 state TEXT, run_id TEXT, receipt INTEGER, PRIMARY KEY(bot,chat,message));
             CREATE INDEX IF NOT EXISTS messages_waiting ON messages(bot,state);
+            CREATE TABLE IF NOT EXISTS telegram_card_deliveries(
+                bot INTEGER NOT NULL, chat INTEGER NOT NULL, dedupe_key TEXT NOT NULL,
+                delivery TEXT, state TEXT NOT NULL, receipt INTEGER,
+                PRIMARY KEY(bot,chat,dedupe_key));
+            UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state='sending';
         """)
 
         self.timeline = TelegramTimeline(self)
@@ -101,6 +114,16 @@ class TelegramPilot:
         if allow_pairing:
             from .notifications import TerminalMessages
             self.terminal = TerminalMessages(self)
+
+    def _typing(self, chat: int) -> None:
+        now = time.monotonic()
+        if now - self._typing_at.get(chat, 0.0) < 4.0:
+            return
+        self._typing_at[chat] = now
+        try:
+            self.api.call("sendChatAction", chat_id=chat, action="typing")
+        except TelegramUnavailable:
+            pass
 
     def verify(self):
         me = self.api.call("getMe")
@@ -236,7 +259,7 @@ class TelegramPilot:
                 self.deliver(chat_id, message_id, "请在本人工作台的可信界面填写受保护的信息。")
             elif text == "/start":
                 self.deliver(
-                    chat_id, message_id, "已连接独立 NanoBot 测试助手。请发送只读查询。"
+                    chat_id, message_id, "已连接 NanoBot 助手，可以直接提问、查询待办或发起业务办理。"
                 )
             elif text == "/status" and isinstance(msg.get("reply_to_message"), dict):
                 original = msg["reply_to_message"]
@@ -268,6 +291,7 @@ class TelegramPilot:
             if accepted.get("type") != "accepted" or not accepted.get("runId"):
                 return
             self._state(chat_id, message_id, "working", run=accepted["runId"])
+            self._typing(chat_id)
         except RuntimeError:
             # On failure after admission, lookup is the only permitted next step.
             return
@@ -299,20 +323,24 @@ class TelegramPilot:
         else:
             self._send(chat, message, answer)
 
-    def _confirmed_send(self, chat, message, answer):
+    def _confirmed_send(self, chat, message, answer, *, parse_mode=None, reply_markup=None):
         # Telegram sendMessage has no idempotency key. A lost reply after this
         # durable boundary leaves the receipt unknown and cannot trigger a resend.
+        params = {
+            "chat_id": chat,
+            "text": answer,
+            "reply_parameters": {
+                "message_id": message,
+                "allow_sending_without_reply": False,
+            },
+            "link_preview_options": {"is_disabled": True},
+        }
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        if reply_markup:
+            params["reply_markup"] = reply_markup
         try:
-            result = self.api.call(
-                "sendMessage",
-                chat_id=chat,
-                text=answer,
-                reply_parameters={
-                    "message_id": message,
-                    "allow_sending_without_reply": False,
-                },
-                link_preview_options={"is_disabled": True},
-            )
+            result = self.api.call("sendMessage", **params)
             if (
                 not isinstance(result, dict)
                 or not numeric(result.get("message_id"))
@@ -331,6 +359,38 @@ class TelegramPilot:
         self._state(chat, message, "sending")
         receipt = self._confirmed_send(chat, message, answer)
         self._state(chat, message, "delivered" if receipt else "delivery_unknown", receipt=receipt)
+
+    def _deliver_card_once(self, chat, message, binding, binding_digest, dedupe_key, params):
+        with self.db:
+            inserted = self.db.execute(
+                "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,NULL,'sending',NULL)",
+                (self.bot_id, chat, dedupe_key),
+            ).rowcount
+        if not inserted:
+            return
+        status = "delivery_unknown"
+        receipt = None
+        try:
+            active, digest = self._binding(chat)
+            if active != binding or digest != binding_digest:
+                status = "binding_changed"
+            else:
+                receipt = self._confirmed_send(
+                    chat,
+                    message,
+                    params["text"],
+                    parse_mode=params.get("parse_mode"),
+                    reply_markup=params.get("reply_markup"),
+                )
+                if receipt is not None:
+                    status = "delivered"
+        except TelegramUnavailable:
+            pass
+        with self.db:
+            self.db.execute(
+                "UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
+                (status, receipt, self.bot_id, chat, dedupe_key),
+            )
 
     def _send_public_reply(self, chat, message, answer, binding_digest):
         key = (self.bot_id, chat, message)
@@ -352,8 +412,11 @@ class TelegramPilot:
                 if not binding or digest != binding_digest:
                     self._state(chat, message, "binding_changed")
                     return
+            formatted = format_ordinary_telegram_message(text)
             self._state(chat, message, "sending")
-            receipt = self._confirmed_send(chat, message, text)
+            receipt = self._confirmed_send(
+                chat, message, formatted["text"], parse_mode=formatted.get("parse_mode")
+            )
             if not receipt or self.db.execute("SELECT 1 FROM telegram_reply_parts WHERE bot=? AND chat=? AND receipt=?",
                                               (self.bot_id, chat, receipt)).fetchone():
                 self._state(chat, message, "delivery_unknown")
@@ -361,6 +424,40 @@ class TelegramPilot:
             final = index == len(parts) - 1
             self._state(chat, message, "delivered" if final else "working", receipt=receipt if final else None,
                         confirmed_part=(index, content_digest, receipt), public_answer=answer if final else None)
+
+    def _deliver_active_card(self, chat, message, binding, digest, key, run_id):
+        try:
+            card_resp = self.gateway.private_card({"idempotency_key": key}, binding, run_id)
+        except (RuntimeError, GatewayRequestError):
+            return
+        card = card_resp.get("interaction") if card_resp.get("available") else None
+        if not isinstance(card, dict) or not card.get("interactionId"):
+            return
+        parsed = urlsplit(str((card.get("presentation") or {}).get("url") or ""))
+        origins = frozenset({f"https://{parsed.netloc}"}) if parsed.scheme == "https" and parsed.netloc else frozenset()
+        rendered = render_interaction_message(card, origins)
+        if rendered:
+            self._deliver_card_once(chat, message, binding, digest, f"interaction:{card['interactionId']}", rendered)
+
+    def _deliver_result_view(self, chat, message, binding, digest, key, run_id):
+        try:
+            rv = self.gateway.result_view({"idempotency_key": key}, binding, run_id)
+        except (RuntimeError, GatewayRequestError):
+            return
+        view = rv.get("resultView") if rv.get("available") else None
+        if not isinstance(view, dict) or not view.get("sourceTaskId"):
+            return
+        count = rv.get("count")
+        if type(count) is int and count > 0:
+            summary = (
+                f"已查询，发现 {count} 项 OA 待办，可从下方进入选择与办理。"
+                if rv.get("complete")
+                else f"已读取 {count} 项 OA 待办（结果尚不完整），可从下方查看或重新查询。"
+            )
+        else:
+            summary = "OA 待办已查询，可从下方进入选择与办理。"
+        rendered = render_result_view_message(view, summary=summary)
+        self._deliver_card_once(chat, message, binding, digest, f"result_view:{view['sourceTaskId']}", rendered)
 
     def reconcile(self):
         # Only the single owning consumer calls this. A surviving sending row
@@ -398,8 +495,14 @@ class TelegramPilot:
                 self._state(chat, message, "admission_unknown")
                 continue
             self._state(chat, message, "working", run=run_id)
-            if evidence["state"] == "completed":
+            if evidence["state"] == "accepted":
+                self._typing(chat)
+                if evidence.get("has_private_card"):
+                    self._deliver_active_card(chat, message, binding, digest, key, run_id)
+            elif evidence["state"] == "completed":
                 self.deliver(chat, message, telegram_answer(evidence.get("final_text")), ordinary=True)
+                if evidence.get("has_result_view"):
+                    self._deliver_result_view(chat, message, binding, digest, key, run_id)
             elif evidence["state"] in {"stopped", "unknown"}:
                 self.deliver(chat, message, "原请求已停止或结果待核对。")
         self.timeline.flush()
@@ -446,7 +549,7 @@ class TelegramPilot:
                 )
         self.reconcile()
         if self.terminal and time.monotonic() >= self.next_notifications:
-            self.next_notifications = time.monotonic() + 5
+            self.next_notifications = time.monotonic() + 2
             rows = self.db.execute("SELECT DISTINCT chat FROM messages WHERE bot=? AND run_id IS NOT NULL", (self.bot_id,))
             recipients = {row["chat"] for row in rows.fetchall()}
             try:
