@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "f0ff15b03798"
+    "f65cde4d9a24"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Allow new OA preparation after a confirmed single-item decision expired before submission, using the existing operation and authorization ledgers without rewriting historical decisions."
+  "reason": "Resolve trusted card return navigation against the registered Workspace host binding. No change to the central data schema or existing cards."
 }

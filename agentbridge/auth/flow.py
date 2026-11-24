@@ -260,17 +260,37 @@ class TrustedFlowApplication:
         """
         if not self.workspace_root or not context.presentation_id or not context.endpoint_id:
             return None
-        with self.reader.service.workspace._connect() as connection:
-            row = connection.execute(
+        workspace = self.reader.service.workspace
+        owner = context.resource["user_subject"]
+        with workspace._connect() as connection:
+            connection.execute("BEGIN")
+            legacy = connection.execute(
                 "SELECT a.account_id FROM workspace_accounts a JOIN client_endpoints e "
                 "ON e.endpoint_id=a.endpoint_id AND e.user_subject=a.user_subject "
                 "WHERE a.user_subject=? AND a.endpoint_id=? AND a.state='active' AND e.state='active' "
                 "AND e.agent_host='openclaw' AND e.client_type IN ('web','webchat') "
                 "AND e.account_id=a.account_id AND e.external_subject=a.account_id "
                 "AND e.endpoint_key=a.endpoint_key AND e.conversation_ref=a.openclaw_session_key",
-                (context.resource["user_subject"], context.endpoint_id),
+                (owner, context.endpoint_id),
             ).fetchone()
-        return self._workspace_home() if row else None
+            if legacy:
+                return self._workspace_home()
+            presentation_binding = connection.execute(
+                """SELECT b.account_id,b.instance_id FROM workspace_host_bindings b
+                   JOIN workspace_accounts a USING(account_id)
+                   WHERE a.user_subject=? AND b.endpoint_id=?""",
+                (owner, context.endpoint_id),
+            ).fetchone()
+            if presentation_binding is None:
+                return None
+            try:
+                binding = workspace.hosts.resolve(
+                    connection, presentation_binding["account_id"],
+                    instance_id=presentation_binding["instance_id"], existing=True,
+                )
+            except PermissionError:
+                return None
+            return self._workspace_home() if binding["endpoint_id"] == context.endpoint_id else None
 
     @staticmethod
     def _with_back(response: AuthCardResponse, navigation: dict | None) -> AuthCardResponse:

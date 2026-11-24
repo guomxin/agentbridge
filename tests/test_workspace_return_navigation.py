@@ -11,6 +11,7 @@ import pytest
 from agentbridge.auth.card import TrustedAuthApplication
 from agentbridge.auth.flow import TrustedFlowApplication, _workspace_root
 from agentbridge.auth.server import create_auth_http_server, validate_auth_server_config
+from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID
 from tests import test_trusted_flow as flow_helpers
 from tests.test_workspace import _create_account
 
@@ -45,6 +46,83 @@ def test_only_actual_workspace_presentation_has_configured_return(flow):
         response, _ = flow.open(presentation_id=presentation_id)
         assert response.status == 200
         assert b'id="agentbridge-back"' not in response.body
+
+
+@pytest.fixture
+def nanobot_presentation(flow):
+    account = flow.account
+    hosts = flow.service.workspace.hosts
+    assert hosts.choices(account["account_id"])["default_instance_id"] == LEGACY_INSTANCE_ID
+    hosts.save_instance("office", host_type="nanobot", display_name="NanoBot", route_ref="office-route",
+                        adapter_version="0.3.0", state="enabled", subjects=[account["user_subject"]],
+                        expected_revision=0, actor="test-admin", reason="Verify trusted form navigation")
+    key = f"workspace:office:{account['account_id']}"
+    endpoint, _ = flow.service.tasks.ensure_endpoint(
+        user_subject=account["user_subject"], token_id="fixture-web", agent_host="nanobot",
+        client_type="web", account_id=account["account_id"], external_subject=account["account_id"],
+        endpoint_key=key, conversation_ref=key,
+    )
+    hosts.bind(account["account_id"], "office", endpoint_id=endpoint["endpoint_id"], credential_ref="fixture-owner")
+    return flow.service.field_submissions.create_presentation(
+        flow.source["submission_id"], user_subject=account["user_subject"], endpoint_id=endpoint["endpoint_id"])
+
+
+@pytest.mark.parametrize("state", ["enabled", "draining"])
+def test_nondefault_nanobot_web_presentation_returns_to_deployment_root(flow, nanobot_presentation, state):
+    with flow.service.workspace._connect() as db:
+        db.execute("UPDATE workspace_host_instances SET state=? WHERE instance_id='office'", (state,))
+    flow.app = TrustedFlowApplication(service=flow.service, field_application=flow.field_app,
+                                      action_application=flow.action_app,
+                                      workspace_base_url="https://workspace.example.test/configured")
+    response, _ = flow.open(presentation_id=nanobot_presentation["presentation_id"])
+    assert response.status == 200
+    body = response.body.decode()
+    assert 'id="agentbridge-back" href="https://workspace.example.test/configured/"' in body
+    assert '>返回 Workspace</a>' in body
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert flow.service.workspace.hosts.choices(flow.account["account_id"])["default_instance_id"] == LEGACY_INSTANCE_ID
+
+
+@pytest.mark.parametrize("table,key_column,column,value", [
+    ("workspace_accounts", "account_id", "state", "disabled"),
+    ("workspace_accounts", "account_id", "user_subject", "different-subject"),
+    ("workspace_host_bindings", "endpoint_id", "account_id", "different-account"),
+    ("workspace_host_bindings", "endpoint_id", "instance_id", "missing-instance"),
+    ("workspace_host_bindings", "endpoint_id", "endpoint_id", "different-endpoint"),
+    ("workspace_host_bindings", "endpoint_id", "endpoint_key", "different-key"),
+    ("workspace_host_bindings", "endpoint_id", "session_key", "different-session"),
+    ("workspace_host_instances", "instance_id", "state", "revoked"),
+    ("workspace_host_instances", "instance_id", "host_type", "openclaw"),
+    ("workspace_host_visibility", "instance_id", "user_subject", "different-subject"),
+    ("client_endpoints", "endpoint_id", "state", "revoked"),
+    ("client_endpoints", "endpoint_id", "user_subject", "different-subject"),
+    ("client_endpoints", "endpoint_id", "account_id", "different-account"),
+    ("client_endpoints", "endpoint_id", "external_subject", "different-account"),
+    ("client_endpoints", "endpoint_id", "client_type", "telegram"),
+])
+def test_invalid_nanobot_binding_omits_return(flow, nanobot_presentation, table, key_column, column, value):
+    keys = {"account_id": flow.account["account_id"], "instance_id": "office",
+            "endpoint_id": nanobot_presentation["endpoint_id"]}
+    with flow.service.workspace._connect() as db:
+        changed = db.execute(f"UPDATE {table} SET {column}=? WHERE {key_column}=?", (value, keys[key_column]))
+        assert changed.rowcount == 1
+    response, _ = flow.open(presentation_id=nanobot_presentation["presentation_id"])
+    assert response.status == 200
+    assert b'id="agentbridge-back"' not in response.body
+
+
+@pytest.mark.parametrize("agent_host", ["openclaw", "nanobot"])
+def test_telegram_presentation_of_same_users_form_has_no_workspace_return(flow, nanobot_presentation, agent_host):
+    endpoint, _ = flow.service.tasks.ensure_endpoint(
+        user_subject=flow.account["user_subject"], token_id="fixture-chat", agent_host=agent_host,
+        client_type="telegram", external_subject="501", endpoint_key="telegram:8001:501",
+        conversation_ref="agent:main:telegram:direct:501", route={"channel": "telegram", "to": "501"},
+    )
+    presentation = flow.service.field_submissions.create_presentation(
+        flow.source["submission_id"], user_subject=flow.account["user_subject"], endpoint_id=endpoint["endpoint_id"])
+    response, _ = flow.open(presentation_id=presentation["presentation_id"])
+    assert response.status == 200
+    assert b'id="agentbridge-back"' not in response.body
 
 
 @pytest.mark.parametrize("table,column,value", [
