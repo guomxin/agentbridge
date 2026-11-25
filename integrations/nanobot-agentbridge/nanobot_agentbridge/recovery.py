@@ -69,14 +69,14 @@ async def reconcile(host, record, run, task, phase):
         endpoint=record["endpoint_id"],
         conversation=record["session_key"],
     )
-    if host.runs.snapshot(run, **bound)["state"] != "unknown":
+    run_state = host.runs.snapshot(run, **bound)["state"]
+    if run_state != "unknown" and not (run_state == "completed" and phase == "waiting"):
         return
     async with authenticated_session(request) as (session, meta, level):
         if level != "L3":
             return
-        with sqlite3.connect(
-            Path(request["userDir"]) / "coordinated-private.sqlite3"
-        ) as db:
+        private_db = Path(request["userDir"]) / "coordinated-private.sqlite3"
+        with sqlite3.connect(private_db) as db:
             scope = db.execute(
                 "SELECT prepare,expected_commit FROM write_scope WHERE run=?", (run,)
             ).fetchone()
@@ -117,6 +117,11 @@ async def reconcile(host, record, run, task, phase):
                     batch_snapshot=snapshot,
                     expected_batch_id=batch[0],
                 )
+                with sqlite3.connect(private_db) as db:
+                    db.execute(
+                        "UPDATE coordinated SET phase='verified' WHERE run=? AND endpoint=? AND central_task=?",
+                        (run, record["endpoint_id"], task),
+                    )
                 return
         else:
             op = await verified_operation(
@@ -130,6 +135,11 @@ async def reconcile(host, record, run, task, phase):
                     operation=op,
                     expected_capability=scope[1],
                 )
+                with sqlite3.connect(private_db) as db:
+                    db.execute(
+                        "UPDATE coordinated SET phase='verified' WHERE run=? AND endpoint=? AND central_task=?",
+                        (run, record["endpoint_id"], task),
+                    )
                 return
         if phase != "waiting":
             return
@@ -199,7 +209,9 @@ async def recover(host):
                     except KeyError:
                         # Source-bound preparation commands use their own receipt and lifecycle.
                         continue
-                    if original["state"] == "unknown":
+                    if original["state"] == "unknown" or (
+                        original["state"] == "completed" and phase == "waiting"
+                    ):
                         jobs[run] = asyncio.create_task(
                             reconcile(host, record, run, task, phase)
                         )

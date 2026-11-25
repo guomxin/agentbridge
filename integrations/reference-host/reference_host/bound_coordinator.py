@@ -198,7 +198,22 @@ class BoundDriver(ReferenceTaskDriver):
 
     async def close_interaction(self, local_task_id, interaction):
         if self.req.get("commandKind") != QUERY:
-            return await super().close_interaction(local_task_id, interaction)
+            await super().close_interaction(local_task_id, interaction)
+            state = str(interaction.get("state") or "").lower()
+            phase = {
+                "expired": "expired",
+                "declined": "canceled",
+                "failed": "failed",
+                "superseded": "failed",
+                "completed": "closed",
+            }.get(state)
+            if phase:
+                with self.journal:
+                    self.journal.execute(
+                        "UPDATE coordinated SET phase=? WHERE run=? AND phase='waiting'",
+                        (phase, self.req["runId"]),
+                    )
+            return
         task, command = await command_snapshot(self, local_task_id)
         if (task.get("status") not in {"failed", "canceled", "expired", "succeeded"}
                 and interaction.get("state") in {"expired", "declined", "failed", "superseded"}
@@ -515,8 +530,25 @@ async def run_locked(req):
                 central_task, original = await command_snapshot(driver, local_id)
                 if req["commandKind"] == QUERY and await finish_query(driver, local_id, central_task, original):
                     return "verified" if central_task["status"] == "succeeded" else central_task["status"]
-                if row[1] != "waiting" or central_task.get("currentInteractionId") != state.get_task(local_id).get("active_interaction_id"):
+                if row[1] != "waiting":
                     return "unknown"
+                local_interaction = state.get_task(local_id).get("active_interaction_id")
+                central_interaction = central_task.get("currentInteractionId")
+                if central_interaction != local_interaction:
+                    # Continuous flow may advance business_input -> execution_authorization during the
+                    # brief subprocess handoff gap; keep monitoring local_interaction only if it is
+                    # an unresumed business_input bound to this task with resume allowed.
+                    if not local_interaction or journal.execute(
+                        "SELECT 1 FROM resumes WHERE interaction=?", (local_interaction,)
+                    ).fetchone():
+                        return "unknown"
+                    local_card = await driver.get_interaction(local_id, local_interaction)
+                    if (
+                        local_card.get("type") != "business_input"
+                        or local_card.get("taskId") != task["taskId"]
+                        or (local_card.get("resume") or {}).get("allowed") is not True
+                    ):
+                        return "unknown"
                 if req["commandKind"] == PREPARE and not any(
                     d["prepareCapability"] == req["commandCapability"] and d["commitCapability"] == scope[1]
                     for d in governed.values()
@@ -525,6 +557,21 @@ async def run_locked(req):
                 req["expectedCommit"] = scope[1]
             elif row[1] != "waiting":
                 return row[1] if row[1] == "verified" else "unknown"
+            else:
+                snapshot = await driver.refresh_task_snapshot(local_id)
+                central_task = snapshot.get("task") or {}
+                if central_task.get("status") in {"failed", "canceled", "expired"}:
+                    terminal_status = central_task["status"]
+                    state.finish_task(
+                        local_id,
+                        status="canceled" if terminal_status == "expired" else terminal_status,
+                    )
+                    with journal:
+                        journal.execute(
+                            "UPDATE coordinated SET phase=? WHERE run=? AND phase='waiting'",
+                            (terminal_status, run_id),
+                        )
+                    return terminal_status
             owns_run = True
             item = state.get_task(local_id)
             interaction = item.get("active_interaction_id")
@@ -556,7 +603,7 @@ async def run_locked(req):
                 await asyncio.sleep(0.25)
     except TimeoutError:
         row = journal.execute("SELECT phase FROM coordinated WHERE run=?", (run_id,)).fetchone()
-        if owns_run and command and row and row[0] == "waiting":
+        if owns_run and row and row[0] == "waiting":
             return "waiting"
         return "unknown"
     finally:

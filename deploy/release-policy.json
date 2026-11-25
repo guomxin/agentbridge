@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "0f41de9bd456"
+    "e74060b571c6"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Add NanoBot Telegram trusted interaction cards, same-instance Workspace companion sync, safe Markdown/typing, OA pending result views, prepared commands, and verified Telegram business skills. No central database migration required."
+  "reason": "Keep monitoring waiting NanoBot chat-initiated coordinated cards across the 237s turn timeout and continuous-flow handoffs, and safely release proven-unsubmitted expired batch-item authorizations. No central database migration required."
 }

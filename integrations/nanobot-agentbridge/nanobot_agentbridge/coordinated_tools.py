@@ -97,6 +97,7 @@ class CoordinatorTool(Tool):
             return {
                 "verified": ("中央业务操作记录已核验请假草稿保存成功，流程尚未提交。" if self.definition.name=="oa_leave_prepare" else "中央已核验原任务的业务操作成功。"),
                 "closed": "可信交互已关闭，本次未核验写入。",
+                "waiting": "可信办理卡仍在等待你的确认，后台将继续监听；请在卡片有效期内打开核对并确认。",
             }.get(outcome, "本次业务结果有待核对，请在原任务中查看。")
         except Exception:
             return "本次业务结果有待核对，请在原任务中查看。"

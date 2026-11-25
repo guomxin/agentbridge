@@ -1043,3 +1043,152 @@ def test_notifications_handler_dispatches_prepared_command_waiting_card_result_v
     assert result["deliveries"][0]["interaction"]["interactionId"] == "interaction-cmd-00000001"
     assert result["deliveries"][1]["resultView"]["url"] == rv_url
 
+
+def test_recovery_reconciles_waiting_coordinated_task_on_completed_chat_run(tmp_path, monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+    import sqlite3
+    from types import SimpleNamespace
+
+    from nanobot_agentbridge.runs import RunCoordinator
+
+    user_dir = tmp_path / "user"
+    user_dir.mkdir()
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(mode=0o700)
+    runs_dir.chmod(0o700)
+
+    ep_id = "ep-tg-501"
+    conv = "agentbridge:telegram:00000000-0000-0000-0000-000000000501"
+    task_id = "9add7759-0f2f-4d9a-8546-d5b0e45b2b60"
+    batch_id = "90f84f1d-2a65-4520-ac98-360cd9bfc2e0"
+    runs = RunCoordinator(runs_dir)
+
+    async def finish_run():
+        entry = runs.accept(
+            subject="alice",
+            endpoint=ep_id,
+            conversation=conv,
+            request_key="tg:8001:501:31",
+            payload_digest="digest-1",
+            execute=lambda _rid, _emit: asyncio.sleep(0, result="可信办理卡仍在等待你的确认。"),
+        )
+        await asyncio.sleep(0.05)
+        return entry["run_id"]
+
+    run_id = asyncio.run(finish_run())
+    assert runs.snapshot(run_id, subject="alice", endpoint=ep_id, conversation=conv)["state"] == "completed"
+
+    with sqlite3.connect(user_dir / "coordinated-private.sqlite3") as db:
+        db.execute(
+            "CREATE TABLE coordinated (run TEXT PRIMARY KEY, endpoint TEXT NOT NULL, central_task TEXT NOT NULL, local_task TEXT, interaction TEXT, kind TEXT, phase TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE write_scope (run TEXT PRIMARY KEY, prepare TEXT NOT NULL, expected_commit TEXT NOT NULL, argument_digest TEXT NOT NULL)"
+        )
+        db.execute("CREATE TABLE batch_scope (run TEXT PRIMARY KEY, batch TEXT NOT NULL)")
+        db.execute(
+            "INSERT INTO coordinated VALUES (?,?,?,?,?,?,?)",
+            (run_id, ep_id, task_id, "local-1", "inter-1", "business_input", "waiting"),
+        )
+        db.execute(
+            "INSERT INTO write_scope VALUES (?,?,?,?)",
+            (run_id, "oa_workflow_pending_batch_prepare", "oa.missed_punch.approve", "arg-digest"),
+        )
+        db.execute("INSERT INTO batch_scope VALUES (?,?)", (run_id, batch_id))
+    with sqlite3.connect(user_dir / "coordinated-runs.sqlite3") as db:
+        db.execute(
+            "CREATE TABLE tasks (run_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE, version INTEGER NOT NULL)"
+        )
+        db.execute("INSERT INTO tasks VALUES (?,?,?,?)", (run_id, ep_id, task_id, 1))
+
+    batch_verified = [False]
+    spawned = []
+
+    class FakeSession:
+        async def call_tool(self, name, args, meta=None):
+            assert name == "agentbridge_host_task_snapshot"
+            if batch_verified[0]:
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent={
+                        "task": {"taskId": task_id, "userSubject": "alice", "originEndpointId": ep_id},
+                        "batchVerification": {
+                            "taskId": task_id,
+                            "batchId": batch_id,
+                            "state": "succeeded",
+                            "allVerified": True,
+                            "totalCount": 2,
+                            "verifiedCount": 2,
+                        },
+                    },
+                )
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={
+                    "task": {"taskId": task_id, "userSubject": "alice", "originEndpointId": ep_id, "status": "waiting_user"},
+                    "batchVerification": {"allVerified": False},
+                },
+            )
+
+    @asynccontextmanager
+    async def fake_auth(_req):
+        yield FakeSession(), {}, "L3"
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self, data):
+            spawned.append(json.loads(data.decode()))
+            return b'{"outcome":"waiting"}', b""
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **_kwargs):
+        return FakeProc()
+
+    host = SimpleNamespace(
+        runs=runs,
+        coordinator="/fake/coordinator",
+        worker_environment=lambda _d: {},
+        worker_payload=lambda rec, rid: {
+            "userDir": str(user_dir),
+            "controlledPrepares": {
+                "oa_workflow_pending_batch_prepare": {"commitCapability": "oa.missed_punch.approve"}
+            },
+        },
+    )
+    record = {
+        "user_subject": "alice",
+        "endpoint_id": ep_id,
+        "endpoint_key": f"telegram:{BOT}:501",
+        "session_key": conv,
+    }
+
+    monkeypatch.setitem(sys.modules, "nanobot_agentbridge.worker", SimpleNamespace(authenticated_session=fake_auth))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    from nanobot_agentbridge.recovery import reconcile as run_reconcile
+
+    # 1. Completed chat run with phase='waiting' MUST reopen recoveryOnly coordinator monitoring!
+    asyncio.run(run_reconcile(host, record, run_id, task_id, "waiting"))
+    assert len(spawned) == 1
+    assert spawned[0]["recoveryOnly"] is True
+    assert spawned[0]["task"]["taskId"] == task_id
+
+    # 2. Once central verifies the batch, reconcile updates coordinated.phase='verified' and does NOT spawn again.
+    batch_verified[0] = True
+    asyncio.run(run_reconcile(host, record, run_id, task_id, "waiting"))
+    assert len(spawned) == 1
+    with sqlite3.connect(user_dir / "coordinated-private.sqlite3") as db:
+        assert db.execute("SELECT phase FROM coordinated WHERE run=?", (run_id,)).fetchone()[0] == "verified"
+
+    # 3. Terminal non-waiting phase on a completed run MUST NOT spawn coordinator.
+    asyncio.run(run_reconcile(host, record, run_id, task_id, "expired"))
+    assert len(spawned) == 1
+    runs._db.close()
+    runs._lock.close()
+

@@ -854,6 +854,83 @@ class ActionableResultsTests(unittest.TestCase):
                     connection.execute("DELETE FROM operations WHERE operation_id=?", (operation["operation_id"],))
         self.assertEqual(self.fixture.oa.writes, [])
 
+    def test_expired_unconsumed_batch_item_approval_releases_fresh_query_while_preserving_unattached_submit_block(self):
+        from agentbridge.core.business_drafts import BusinessDraftService
+
+        self.fixture.oa.add_affair("synthetic-missed-1", profile="missed_punch")
+        self.fixture.oa.add_affair("synthetic-missed-2", profile="missed_punch")
+        task, _ = self.service.tasks.ensure_task(
+            user_subject=OWNER,
+            agent_host="openclaw",
+            host_task_key=uuid4().hex,
+            origin_endpoint_id=self.account["endpoint_id"],
+            active_conversation_ref=self.account["openclaw_session_key"],
+            title="对话发起的批量补签审批",
+        )
+        prepared = self.service.invoke(
+            user_subject=OWNER,
+            capability_name="oa.workflow.pending.batch.prepare",
+            arguments={"affair_ids": ["synthetic-missed-1", "synthetic-missed-2"], "max_items": 2},
+            task_id=task["task_id"],
+            idempotency_key=uuid4().hex,
+        )
+        self.assertEqual(prepared["status"], "requires_user_action")
+        card = self.service.present_interaction(
+            user_subject=OWNER,
+            agent_host="openclaw",
+            endpoint_key=self.account["endpoint_key"],
+            interaction_id=prepared["interaction"]["interactionId"],
+        )["interaction"]
+        drafts = BusinessDraftService(self.service)
+        submission = prepared["nextAction"]["inputSubmissionId"]
+        presentation = card["presentation"]["presentationId"]
+        opened = drafts.open(submission, presentation_id=presentation)
+        args = {
+            "source_submission_id": submission,
+            "presentation_id": presentation,
+            "csrf_token": opened["csrfToken"],
+            "csrf_cookie": opened["csrfToken"],
+        }
+        saved = drafts.save(**args, expected_revision=opened["state"]["revision"], values={"opinion": "同意"})
+        ready = drafts.preview(**args, expected_revision=saved["revision"])
+        receipt = drafts.approve(
+            **args,
+            expected_revision=ready["revision"],
+            preview_id=ready["preview"]["previewId"],
+            request_key=uuid4().hex,
+        )["receipt"]
+        authorization = receipt["authorizationId"]
+        with patch.object(self.service.write_authorizations, "clock", return_value=actions._now() + timedelta(hours=1)):
+            expired = self.service.get_interaction(user_subject=OWNER, interaction_id=receipt["interactionId"])
+        self.assertEqual(expired["interaction"]["state"], "expired")
+        self.assertEqual(self.service.tasks.get_task(task["task_id"], user_subject=OWNER)["status"], "expired")
+
+        # Both items in the expired, unsubmitted batch are cleanly re-selectable from a fresh query.
+        fresh = self.fresh_query()
+        missed_targets = [t for t in fresh["targets"] if t["workflowType"] == "missed_punch"]
+        self.assertGreaterEqual(len(missed_targets), 2)
+        for target in missed_targets:
+            self.assertTrue(target["enabled"], target)
+            self.assertIsNone(target["preparation"], target)
+
+        # If an unattached commit operation exists (exact or padded), item 1 immediately locks as outcome_unknown.
+        for supplied in (authorization + " ", authorization):
+            with self.subTest(padded=supplied != authorization):
+                operation, _ = self.service.operations.create(
+                    user_subject=OWNER,
+                    capability_name="oa.missed_punch.approve",
+                    capability_version=self.service.registry.get("oa.missed_punch.approve").version,
+                    input_summary={"authorization_id": {"redacted": True, "length": len(supplied)}},
+                    input_identity={"authorization_id": supplied},
+                )
+                rechecked = self.fresh_query()
+                blocked = [t for t in rechecked["targets"] if t["workflowType"] == "missed_punch" and not t["enabled"]]
+                self.assertEqual(len(blocked), 1)
+                self.assertEqual(blocked[0]["preparation"]["state"], "outcome_unknown")
+                with self.service.tasks._connect() as connection:
+                    connection.execute("DELETE FROM operations WHERE operation_id=?", (operation["operation_id"],))
+        self.assertEqual(self.fixture.oa.writes, [])
+
     def test_direct_prepare_resource_is_found_without_actionable_command(self):
         direct = self.fixture.add_pending_case("efficiency_data", case_key="direct-existing")
         self.fresh_query()

@@ -280,27 +280,49 @@ def _proven_pre_submit_failure(operation, authorization):
     return operation["input_hash"] == _hash({"authorization_id": authorization["authorization_id"]})
 
 
-def _expired_without_submission(connection, task, command, selection, authorization, principal):
-    if (task["status"] != "expired" or command.get("kind") != COMMAND_KIND
-            or command.get("affairIds") != [selection["affairId"]]
-            or command.get("capabilityName") != selection["prepareCapability"]):
-        return False
+def _expired_without_submission(connection, task, command, selection, authorization, principal, *, batch_item=None):
     if (authorization["state"] != "expired"
             or not authorization["decided_at"]
             or authorization["decided_endpoint_id"] != task["origin_endpoint_id"]
             or authorization["consumed_at"] is not None
             or authorization["commit_operation_id"] is not None
-            or authorization["plan"].get("prepare_capability") != selection["prepareCapability"]
+            or authorization["capability_name"] != selection["commitCapability"]
+            or (authorization["plan"].get("target") or {}).get("affair_id") != selection["affairId"]
             or _principal(authorization["plan"].get("session_binding") or {}) != principal):
         return False
-    decision = connection.execute(
-        "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=? "
-        "AND task_id=? AND endpoint_id=? AND prepare_operation_id=? AND plan_hash=? "
-        "AND NOT EXISTS (SELECT 1 FROM task_batches WHERE parent_task_id=business_draft_decisions.task_id) "
-        "AND NOT EXISTS (SELECT 1 FROM task_plans WHERE parent_task_id=business_draft_decisions.task_id)",
-        (authorization["authorization_id"], task["user_subject"], task["task_id"], task["origin_endpoint_id"],
-         authorization["prepare_operation_id"], authorization["plan_hash"]),
-    ).fetchone()
+    if batch_item is not None:
+        if (batch_item["state"] != "expired"
+                or batch_item["error_code"] != "INTERACTION_EXPIRED"
+                or batch_item["operation_id"] != authorization["prepare_operation_id"]
+                or batch_item["batch_state"] not in {"expired", "failed", "partially_succeeded"}
+                or batch_item["batch_capability"] not in {PENDING_BATCH_PREPARE_CAPABILITY, "oa.missed_punch.approval.batch.prepare"}
+                or authorization["plan"].get("prepare_capability") != batch_item["batch_capability"]):
+            return False
+        decision = connection.execute(
+            "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=? "
+            "AND task_id=? AND endpoint_id=? AND prepare_operation_id=? AND plan_hash=? "
+            "AND NOT EXISTS (SELECT 1 FROM task_plans WHERE parent_task_id=business_draft_decisions.task_id)",
+            (authorization["authorization_id"], task["user_subject"], task["task_id"], task["origin_endpoint_id"],
+             authorization["prepare_operation_id"], authorization["plan_hash"]),
+        ).fetchone()
+    else:
+        if task["status"] != "expired":
+            return False
+        if command:
+            if (command.get("kind") != COMMAND_KIND
+                    or command.get("affairIds") != [selection["affairId"]]
+                    or command.get("capabilityName") != selection["prepareCapability"]):
+                return False
+        if authorization["plan"].get("prepare_capability") != selection["prepareCapability"]:
+            return False
+        decision = connection.execute(
+            "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=? "
+            "AND task_id=? AND endpoint_id=? AND prepare_operation_id=? AND plan_hash=? "
+            "AND NOT EXISTS (SELECT 1 FROM task_batches WHERE parent_task_id=business_draft_decisions.task_id) "
+            "AND NOT EXISTS (SELECT 1 FROM task_plans WHERE parent_task_id=business_draft_decisions.task_id)",
+            (authorization["authorization_id"], task["user_subject"], task["task_id"], task["origin_endpoint_id"],
+             authorization["prepare_operation_id"], authorization["plan_hash"]),
+        ).fetchone()
     if decision is None:
         return False
     # An operation is recorded before it is linked to the task. Preserve the
@@ -318,7 +340,9 @@ def _expired_without_submission(connection, task, command, selection, authorizat
 def _preparation_state(connection, task, command, selection, fields, authorizations, *, verified_principal):
     affair, commit = selection["affairId"], selection["commitCapability"]
     item = connection.execute(
-        "SELECT i.state,i.ordinal,b.current_ordinal FROM task_batch_items i JOIN task_batches b ON b.batch_id=i.batch_id "
+        "SELECT i.state,i.ordinal,i.operation_id,i.error_code,b.current_ordinal,"
+        "b.state AS batch_state,b.capability_name AS batch_capability "
+        "FROM task_batch_items i JOIN task_batches b ON b.batch_id=i.batch_id "
         "WHERE b.parent_task_id=? AND b.user_subject=? AND i.resource_ref=?",
         (task["task_id"], task["user_subject"], affair),
     ).fetchone()
@@ -343,8 +367,10 @@ def _preparation_state(connection, task, command, selection, fields, authorizati
         return "succeeded", True
     if any(_proven_pre_submit_failure(operation, authorization) for operation in commits for authorization in related_auths):
         return "failed", True  # The old decision stays bound; this is not retry permission.
-    if (not commits and verified_principal and len(authorizations) == len(related_auths) == 1
-            and _expired_without_submission(connection, task, command, selection, related_auths[0], verified_principal)):
+    if (not commits and verified_principal and len(related_auths) == 1
+            and (item is not None or len(authorizations) == 1)
+            and _expired_without_submission(connection, task, command, selection, related_auths[0],
+                                            verified_principal, batch_item=item)):
         return None, False
     decided = any(a["state"] in {"approved", "consumed"} or connection.execute(
         "SELECT 1 FROM business_draft_decisions WHERE authorization_id=? AND user_subject=?",
