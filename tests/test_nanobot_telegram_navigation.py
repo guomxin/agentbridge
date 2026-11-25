@@ -131,7 +131,11 @@ def test_navigation_uses_real_central_cancel_and_keeps_already_submitted_input(t
     from tests.test_plan_write_boundaries import PlanWriteBoundaryTests
 
     # The embedded central service must use an isolated session key on macOS.
-    monkeypatch.setenv("AGENTBRIDGE_SESSION_KEY_FILE", str(tmp_path / "session.key"))
+    import secrets
+    key = tmp_path / "session.key"
+    key.write_bytes(secrets.token_bytes(32))
+    key.chmod(0o600)
+    monkeypatch.setenv("AGENTBRIDGE_SESSION_KEY_FILE", str(key))
     case = PlanWriteBoundaryTests()
     case.setUp()
     try:
