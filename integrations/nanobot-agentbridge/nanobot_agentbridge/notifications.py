@@ -197,6 +197,8 @@ async def notifications(host, record, action, body):
             "lease_seconds": 60,
             "include_workspace_chat": True,
             "include_business_watch": True,
+            "include_task_files": True,
+            "include_oa_digest": True,
         }
         raw_wait = body.get("waitSeconds") if isinstance(body, dict) else None
         if isinstance(raw_wait, (int, float)) and not isinstance(raw_wait, bool) and raw_wait > 0:

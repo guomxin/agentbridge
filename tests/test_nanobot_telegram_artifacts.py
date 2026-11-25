@@ -209,7 +209,13 @@ def test_source_task_multiple_files_central_to_telegram_receipts(origin, monkeyp
 def test_source_file_rechecked_before_send(origin, mirror, boundary):
     artifact, _ = pdf(origin)
     service = origin.service
-    items = service.claim_host_notifications(**origin.scope)["notifications"]
+    # 2f7bd8a7d64d's deployed consumer already includes ordinary Workspace chat.
+    old = service.claim_host_notifications(**origin.scope, limit=32, lease_seconds=60, include_workspace_chat=True)
+    assert not any(item["deliveryMode"] == "artifact" for item in old["notifications"])
+    row = next(d for d in service.tasks.list_outbox(user_subject=origin.subject)
+               if d["payload"].get("artifactPairProof"))
+    assert (row["state"], row["attempt_count"]) == ("pending", 0)
+    items = service.claim_host_notifications(**origin.scope, include_task_files=True)["notifications"]
     row = next(i for i in items if i["deliveryMode"] == "artifact")
     args = {**origin.scope, "delivery_id": row["deliveryId"], "attempt_count": row["attemptCount"]}
     assert (

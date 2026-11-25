@@ -6507,6 +6507,8 @@ def create_central_mcp_server(
         wait_seconds: Annotated[float, Field(ge=0, le=20)] = 0,
         include_workspace_chat: bool = False,
         include_business_watch: bool = False,
+        include_task_files: bool = False,
+        include_oa_digest: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6526,6 +6528,8 @@ def create_central_mcp_server(
             host_instance_id=host["hostInstanceId"],
             **({"include_workspace_chat": True} if include_workspace_chat else {}),
             **({"include_business_watch": True} if include_business_watch else {}),
+            **({"include_task_files": True} if include_task_files else {}),
+            **({"include_oa_digest": True} if include_oa_digest else {}),
         )
 
     @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Endpoint Delivery Before Sending',

@@ -1759,6 +1759,8 @@ class CentralCapabilityService:
         host_instance_id: str | None = None,
         include_workspace_chat: bool = False,
         include_business_watch: bool = False,
+        include_task_files: bool = False,
+        include_oa_digest: bool = False,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1773,6 +1775,8 @@ class CentralCapabilityService:
             host_instance_id=host_instance_id,
             include_workspace_chat=include_workspace_chat,
             **({"include_business_watch": True} if include_business_watch else {}),
+            **({"include_task_files": True} if include_task_files else {}),
+            **({"include_oa_digest": True} if include_oa_digest else {}),
         )
         notifications = []
         for delivery in deliveries:

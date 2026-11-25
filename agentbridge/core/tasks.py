@@ -4507,6 +4507,8 @@ class TaskHubStore:
         host_instance_id: str | None = None,
         include_workspace_chat: bool = False,
         include_business_watch: bool = False,
+        include_task_files: bool = False,
+        include_oa_digest: bool = False,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 100)
         lease_seconds = min(max(int(lease_seconds), 5), 300)
@@ -4522,8 +4524,30 @@ class TaskHubStore:
             if host_instance_id and endpoint_instances(connection, user_subject).get(endpoint_id) != instance_key(
                     endpoint["agent_host"], host_instance_id):
                 raise TaskNotFound("client endpoint does not belong to this host instance")
+            # Old Telegram consumers cannot interpret newer payloads. Apply their negotiated
+            # types before both the cheap pending probe and the durable lease reservation.
+            consumer_clause = ""
+            consumer_params = []
+            if endpoint["agent_host"] == "nanobot":
+                if not include_task_files:
+                    consumer_clause += " AND json_type(payload_json, '$.artifactPairProof') IS NULL"
+                if not include_business_watch:
+                    consumer_clause += " AND json_type(payload_json, '$.watchPairProof') IS NULL"
+                if not include_oa_digest:
+                    consumer_clause += " AND json_extract(payload_json, '$.mirrorKind') IS NOT ?"
+                    consumer_params.append(NANOBOT_OA_DIGEST)
+                if not include_workspace_chat:
+                    # Original-task events, explicitly supported daily reports and watch events
+                    # remain independent of ordinary cross-endpoint Workspace mirroring.
+                    consumer_clause += """ AND (
+                        (payload_type <> 'timeline_message' AND EXISTS (
+                             SELECT 1 FROM agent_tasks t WHERE t.task_id=notification_outbox.task_id
+                             AND t.origin_endpoint_id=notification_outbox.endpoint_id))
+                        OR json_extract(payload_json, '$.mirrorKind')=?
+                        OR json_type(payload_json, '$.watchPairProof')='text')"""
+                    consumer_params.append(NANOBOT_OA_DIGEST)
             candidate = connection.execute(
-                """
+                f"""
                 SELECT 1 FROM notification_outbox
                 WHERE user_subject = ? AND endpoint_id = ?
                   AND (
@@ -4540,9 +4564,10 @@ class TaskHubStore:
                       AND next_attempt_at <= ?
                     )
                   )
+                {consumer_clause}
                 LIMIT 1
                 """,
-                (user_subject, endpoint_id, now, now),
+                (user_subject, endpoint_id, now, now, *consumer_params),
             ).fetchone()
             if candidate is None:
                 return []
@@ -4575,17 +4600,6 @@ class TaskHubStore:
                 """,
                 (now, user_subject, endpoint_id, now),
             )
-            # Old NanoBot consumers acknowledge unfamiliar deliveries. Leave companion
-            # Workspace chat and task deliveries pending until the consumer opts in.
-            chat_clause = ""
-            if endpoint["agent_host"] == "nanobot" and not include_workspace_chat:
-                chat_clause = (
-                    "AND payload_type <> 'timeline_message' "
-                    "AND EXISTS (SELECT 1 FROM agent_tasks t WHERE t.task_id=notification_outbox.task_id "
-                    "AND t.origin_endpoint_id=notification_outbox.endpoint_id)"
-                )
-            if endpoint["agent_host"] == "nanobot" and not include_business_watch:
-                chat_clause += " AND json_type(payload_json,'$.watchPairProof') IS NULL"
             rows = connection.execute(
                 f"""
                 SELECT * FROM notification_outbox
@@ -4595,11 +4609,11 @@ class TaskHubStore:
                     state IN ('pending', 'delivering')
                     AND next_attempt_at <= ?
                   )
-                {chat_clause}
+                {consumer_clause}
                 ORDER BY created_at, rowid
                 LIMIT ?
                 """,
-                (user_subject, endpoint_id, now, limit),
+                (user_subject, endpoint_id, now, *consumer_params, limit),
             ).fetchall()
             claimed = []
             for row in rows:

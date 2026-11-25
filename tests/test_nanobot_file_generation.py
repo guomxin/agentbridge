@@ -176,7 +176,7 @@ def test_four_private_entries_link_original_task_and_deliver_only_prepared_bytes
     )
     events = [
         row
-        for row in origin.service.claim_host_notifications(**origin.scope)["notifications"]
+        for row in origin.service.claim_host_notifications(**origin.scope, include_task_files=True)["notifications"]
         if row["deliveryMode"] == "artifact"
     ]
     assert len(events) == expected

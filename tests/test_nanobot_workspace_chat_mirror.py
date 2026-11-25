@@ -384,7 +384,12 @@ def test_explicit_nanobot_digest_is_scoped_and_rechecked_before_send(
     assert not service.tasks.list_outbox(user_subject=other)
     claim_scope = dict(user_subject=owner, agent_host="nanobot", endpoint_key=target["endpointKey"], host_instance_id=INSTANCE)
     assert not service.claim_host_notifications(**claim_scope)["notifications"]
-    event, = service.claim_host_notifications(**claim_scope, include_workspace_chat=True)["notifications"]
+    # The previous deployed consumer supports ordinary mirrors and sends this exact claim.
+    old = service.claim_host_notifications(**claim_scope, limit=32, lease_seconds=60, include_workspace_chat=True)
+    assert old["notifications"] == []
+    unclaimed = service.tasks.get_delivery(queued["delivery_id"])
+    assert (unclaimed["state"], unclaimed["attempt_count"]) == ("pending", 0)
+    event, = service.claim_host_notifications(**claim_scope, include_oa_digest=True)["notifications"]
     assert event["timeline"]["text"] == "OA 日报 合成条目"
     assert event["timeline"]["source"]["endpointId"] == target["workspaceEndpointId"]
     assert not {"pairProof", "targetEndpointBinding"} & event["timeline"].keys()
