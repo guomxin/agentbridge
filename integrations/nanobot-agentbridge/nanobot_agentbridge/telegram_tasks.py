@@ -66,18 +66,32 @@ async def navigate(host, record, body):
                 raise web.HTTPForbidden()
             return reply.structuredContent or {}
 
-        if operation in {"list", "history"}:
-            result = await read("agentbridge_host_task_list", {**endpoint, "active_only": operation == "list", "limit": 100})
+        target = body.get("target") or {}
+        kind, key = target.get("kind"), target.get("id")
+        if operation == "history" or kind == "history_task":
+            if kind == "history_task" and (operation != "continue" or not identifier(key)):
+                return {"state": "unavailable"}
+            history = await read("agentbridge_host_task_list", {**endpoint, "limit": 100, "terminal_history": True,
+                                 **({"history_task_id": key} if kind == "history_task" else {})})
+            if (history.get("verifiedTerminalHistory") is not True
+                    or (history.get("endpoint") or {}).get("endpointId") != request["endpoint"]):
+                raise web.HTTPForbidden()
+            tasks = [task for task in history.get("tasks", []) if identifier(task.get("taskId"))
+                     and task.get("status") in TERMINAL_TASK_STATUSES]
+            if kind == "history_task":
+                if len(tasks) == 1 and tasks[0]["taskId"] == key:
+                    return {"state": tasks[0]["status"], "taskId": key}
+                return {"state": "unavailable"}
+            return {"candidates": tasks}
+        if operation == "list":
+            result = await read("agentbridge_host_task_list", {**endpoint, "active_only": True, "limit": 100})
             if (result.get("endpoint") or {}).get("endpointId") != request["endpoint"]:
                 raise web.HTTPForbidden()
             return {"candidates": [
                 {"taskId": task["taskId"], "title": str(task.get("title") or "办公任务")[:80],
                  "status": task.get("status"), "createdAt": task.get("createdAt")}
                 for task in result.get("tasks", []) if _owned(task, request)
-                and (operation != "history" or task.get("status") in TERMINAL_TASK_STATUSES)
             ]}
-        target = body.get("target") or {}
-        kind, key = target.get("kind"), target.get("id")
         if kind == "interaction":
             valid_key = isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key)
         else:
@@ -128,10 +142,6 @@ async def navigate(host, record, body):
             task_id = prior.get("acknowledgedTaskId")
             if prior.get("allowed") is not False or not identifier(task_id):
                 return {"state": "unavailable"}
-        elif kind == "history_task":
-            if operation != "continue":
-                return {"state": "unavailable"}
-            task_id = key
         elif kind in {"task", "result"}:
             task_id = key
         else:
@@ -145,7 +155,7 @@ async def navigate(host, record, body):
             raise web.HTTPForbidden()
         state = task["status"]
         summary = {"taskId": task_id, "state": state}
-        if kind in {"history_task", "status_delivery"}:
+        if kind == "status_delivery":
             return summary if state in TERMINAL_TASK_STATUSES else {"state": "unavailable"}
         if operation == "stop":
             if state not in {"active", "running", "waiting_user"}:

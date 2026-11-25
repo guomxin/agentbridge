@@ -32,9 +32,14 @@ def test_old_receipt_reads_only_its_acknowledged_terminal_task(mirror, pair_fixt
     args = dict(user_subject=subject, agent_host="nanobot", endpoint_key=scope["endpointKey"], host_instance_id=INSTANCE)
     store = service.tasks
 
+    from agentbridge.core.actionable_results import _telegram_endpoint
+    with store._connect() as db:
+        original_hash = _telegram_endpoint(db, subject, scope["endpoint"])["_binding_hash"]
+
     def make_task():
         return store.ensure_task(user_subject=subject, agent_host="nanobot", host_task_key=str(uuid4()),
-            origin_endpoint_id=scope["endpoint"], active_conversation_ref=scope["conversation"], title="合成流程")[0]["task_id"]
+            origin_endpoint_id=scope["endpoint"], active_conversation_ref=scope["conversation"], title="合成流程",
+            summary={"command": {"originKind": "telegram", "endpointBindingHash": original_hash}})[0]["task_id"]
 
     task = make_task()
     service.finish_host_task(user_subject=subject, task_id=task, outcome="succeeded")
@@ -50,6 +55,18 @@ def test_old_receipt_reads_only_its_acknowledged_terminal_task(mirror, pair_fixt
     assert service.validate_host_notification(**lookup) == {"allowed": False}
     service.acknowledge_host_notification(**args, delivery_id=delivery, attempt_count=attempt, succeeded=True)
     assert service.validate_host_notification(**lookup) == {"allowed": False, "acknowledgedTaskId": task}
+    with store._connect() as db:
+        db.execute("UPDATE agent_tasks SET summary_json=json_set(summary_json,'$.command.endpointBindingHash','rotated') WHERE task_id=?", (task,))
+    assert service.validate_host_notification(**lookup) == {"allowed": False}
+    with store._connect() as db:
+        db.execute("UPDATE agent_tasks SET summary_json=json_set(summary_json,'$.command.endpointBindingHash',?) WHERE task_id=?", (original_hash, task))
+    with store._connect() as db:
+        db.execute("UPDATE agent_tasks SET summary_json='{}' WHERE task_id=?", (task,))
+    assert service.validate_host_notification(**lookup) == {"allowed": False}
+    assert service.list_host_tasks(**args, terminal_history=True)["tasks"][0]["taskId"] == task
+    with store._connect() as db:
+        summary = json.dumps({"command": {"originKind": "telegram", "endpointBindingHash": original_hash}})
+        db.execute("UPDATE agent_tasks SET summary_json=? WHERE task_id=?", (summary, task))
     for change in [{"host_instance_id": "other-office"}, {"attempt_count": attempt + 1}, {"include_artifact": True}]:
         assert service.validate_host_notification(**{**lookup, **change}) == {"allowed": False}
     with pytest.raises((KeyError, PermissionError)):
@@ -70,7 +87,7 @@ def test_old_receipt_reads_only_its_acknowledged_terminal_task(mirror, pair_fixt
             elif name == "agentbridge_host_task_snapshot":
                 value = service.get_host_task_snapshot(user_subject=subject, **params)
             elif name == "agentbridge_host_task_list":
-                value = service.list_host_tasks(user_subject=subject, **params)
+                value = service.list_host_tasks(user_subject=subject, host_instance_id=INSTANCE, **params)
             else:
                 raise AssertionError(name)
             return SimpleNamespace(isError=False, structuredContent=value)
@@ -143,15 +160,25 @@ def test_old_receipt_reads_only_its_acknowledged_terminal_task(mirror, pair_fixt
                           "agentbridge_host_task_list", "agentbridge_host_task_snapshot"}
 
 
-def test_missing_receipt_requires_choice_and_history_can_never_stop(tmp_path, monkeypatch):
+@pytest.mark.parametrize("has_unverifiable_receipt", [False, True])
+def test_missing_receipt_requires_choice_and_history_can_never_stop(tmp_path, monkeypatch, has_unverifiable_receipt):
     task = str(uuid4())
     with fixture(tmp_path) as (state, bindings, create):
         pilot = create()
         old = pilot.gateway._request
         calls = []
+        if has_unverifiable_receipt:
+            delivery = str(uuid4())
+            with pilot.db:
+                pilot.db.execute("INSERT INTO telegram_card_deliveries VALUES(?,?,?,?,?,?)",
+                                 (BOT, 501, "status:" + delivery, delivery, "delivered", 499))
+
         def gateway(action, body, **kwargs):
             if action != "telegram-task":
                 return old(action, body, **kwargs)
+            if body.get("target", {}).get("kind") == "status_delivery":
+                assert has_unverifiable_receipt and body["operation"] == "continue" and body["target"]["id"] == delivery
+                return {"state": "unavailable"}
             calls.append(body["operation"])
             if body["operation"] == "history":
                 return {"candidates": [{"taskId": task, "title": "历史事项", "status": "succeeded"}]}
@@ -197,3 +224,35 @@ def test_terminal_notification_stores_confirmed_receipt_once(tmp_path, monkeypat
         assert pilot.navigation.quoted(501, "changed", quote(701)) is None
         assert pilot.db.execute("SELECT state FROM notification_receipts").fetchone()[0] == "delivered"
         pilot.db.close()
+
+
+def test_same_sender_repaired_on_same_endpoint_cannot_read_old_grant(mirror, pair_fixture):
+    service, links, accounts, _, owner, *_ = mirror
+    bot, sender = BOT, 509
+
+    def pair():
+        request = links.begin(accounts[owner], INSTANCE, bot)
+        confirmation = links.present(owner, INSTANCE, bot, sender, request["code"])
+        assert links.confirm(accounts[owner], INSTANCE, bot, request["challenge_id"], confirmation)
+        return links.ensure_endpoint(owner, pair_fixture[0].tokens["b"], INSTANCE, bot, sender)
+
+    endpoint = pair()
+    route = dict(user_subject=owner, agent_host="nanobot", endpoint_key=endpoint["endpointKey"], host_instance_id=INSTANCE)
+    task = service.tasks.ensure_task(user_subject=owner, agent_host="nanobot", host_task_key=str(uuid4()),
+        origin_endpoint_id=endpoint["endpointId"], active_conversation_ref=endpoint["conversationRef"], title="已办事项")[0]
+    service.finish_host_task(user_subject=owner, task_id=task["task_id"], outcome="succeeded")
+    rows = service.tasks.claim_outbox(user_subject=owner, endpoint_id=endpoint["endpointId"], host_instance_id=INSTANCE)
+    delivery = next(r for r in rows if r["payload"]["eventType"] == "task.completed")
+    ack = dict(delivery_id=delivery["delivery_id"], attempt_count=delivery["attempt_count"])
+    service.acknowledge_host_notification(**route, **ack, succeeded=True)
+    def inspect():
+        return (service.validate_host_notification(**route, **ack, lookup_acknowledged_task=True),
+                service.list_host_tasks(**route, terminal_history=True)["tasks"],
+                service.list_host_tasks(**route, terminal_history=True, history_task_id=task["task_id"])["tasks"])
+    receipt, items, chosen = inspect()
+    assert receipt == {"allowed": False, "acknowledgedTaskId": task["task_id"]}
+    assert items == chosen and [it["taskId"] for it in items] == [task["task_id"]]
+    links.revoke(accounts[owner], INSTANCE, bot)
+    assert inspect() == ({"allowed":False}, [], [])
+    assert pair()["endpointId"] == endpoint["endpointId"]
+    assert inspect() == ({"allowed":False}, [], [])

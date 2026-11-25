@@ -160,8 +160,12 @@ class TelegramNavigation:
             verb = "continue"
         request = {"binding": binding}
         try:
-            if not target or kind == "legacy_history":
-                history = kind == "legacy_history"
+            result = None
+            history = kind == "legacy_history"
+            if kind == "status_delivery":
+                result = pilot.gateway._request("telegram-task", {**request, "operation": verb, "target": target})
+                history = result.get("state") == "unavailable"
+            if not target or history:
                 reply_data = pilot.gateway._request("telegram-task", {**request, "operation": "history" if history else "list"})
                 choices = reply_data.get("candidates") or []
                 if not choices:
@@ -176,13 +180,14 @@ class TelegramNavigation:
                         state = _STATES.get(task.get("status"), "待核对")
                         lines.append(f"{i}. {' '.join(title.split())[:60]} · {state}{_local_time(task.get('createdAt'))}")
                     action = "停止" if verb == "stop" else "继续查看"
-                    prompt = ("这条旧通知缺少可核对的消息回执。请选择要查看的本人历史任务" if history else f"请选择要{action}的任务")
+                    prompt = ("无法核实这条旧通知的原任务。请选择要查看的本人历史任务" if history else f"请选择要{action}的任务")
                     send(f"{prompt}（列出 {len(shown)} 项）。回复本条消息并输入编号。\n" + "\n".join(lines),
                          target={"kind": "history_choices" if history else "choices", "action": verb, "ids": [task["taskId"] for task in shown],
                                  "expires": time.time() + 300})
                     return
                 target = {"kind": "task", "id": choices[0]["taskId"]}
-            result = pilot.gateway._request("telegram-task", {**request, "operation": verb, "target": target})
+            if result is None:
+                result = pilot.gateway._request("telegram-task", {**request, "operation": verb, "target": target})
         except GatewayRequestError:
             send("暂时无法核对原任务，请在本人工作台查看最新状态。")
             return

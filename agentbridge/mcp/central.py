@@ -6304,9 +6304,11 @@ def create_central_mcp_server(
         endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
         active_only: bool = False,
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
+        terminal_history: bool = False,
+        history_task_id: Annotated[str | None, Field(min_length=16, max_length=128)] = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(
+        host, _ = await _require_registered_host_call(
             ctx,
             service=service,
             identity=identity,
@@ -6319,6 +6321,8 @@ def create_central_mcp_server(
             endpoint_key=endpoint_key,
             active_only=active_only,
             limit=limit,
+            **({"terminal_history": True, "history_task_id": history_task_id, "host_instance_id": host["hostInstanceId"]}
+               if terminal_history else {}),
         )
 
     @mcp.tool(

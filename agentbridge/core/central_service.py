@@ -1965,7 +1965,7 @@ class CentralCapabilityService:
         if delivery['user_subject']!=user_subject or delivery['endpoint_id']!=endpoint['endpoint_id']:
             raise PermissionError('Notification does not belong to this endpoint')
         if lookup_acknowledged_task:
-            from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
+            from agentbridge.workspace.telegram_pilot_identity import historical_private_binding, historical_task_matches
 
             # Historical lookup never authorizes a send or exposes the old notification payload.
             denied = {"allowed": False}
@@ -1982,9 +1982,8 @@ class CentralCapabilityService:
                             endpoint_id=endpoint["endpoint_id"], delivery_id=delivery_id, host_instance_id=host_instance_id)):
                 return denied
             task = self.tasks.get_task(delivery["task_id"], user_subject=user_subject)
-            if (task["status"] not in TERMINAL_TASK_STATUSES or task["agent_host"] != agent_host
-                    or task["origin_endpoint_id"] != endpoint["endpoint_id"]
-                    or task["active_conversation_ref"] != endpoint["conversation_ref"]):
+            scope = historical_private_binding(self, endpoint, host_instance_id)
+            if not historical_task_matches(task, endpoint, scope, exact_receipt=True):
                 return denied
             return {**denied, "acknowledgedTaskId": task["task_id"]}
         if (type(attempt_count) is not int or delivery['state']!='delivering'
@@ -3003,12 +3002,32 @@ class CentralCapabilityService:
         endpoint_key: str,
         active_only: bool = False,
         limit: int = 100,
+        terminal_history: bool = False,
+        history_task_id: str | None = None,
+        host_instance_id: str | None = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
             agent_host=agent_host,
             endpoint_key=endpoint_key,
         )
+        if terminal_history:
+            from agentbridge.workspace.telegram_pilot_identity import historical_private_binding, historical_task_matches
+
+            scope = historical_private_binding(self, endpoint, host_instance_id)
+            tasks = []
+            if scope:
+                candidates = ([self.tasks.get_task(history_task_id, user_subject=user_subject)] if history_task_id else
+                              self.tasks.list_tasks(user_subject=user_subject, endpoint_id=endpoint["endpoint_id"], terminal_only=True, limit=limit))
+                for task in candidates:
+                    if historical_task_matches(task, endpoint, scope):
+                        try:
+                            self.require_task_result_access(user_subject=user_subject, task_id=task["task_id"])
+                        except PermissionError:
+                            continue
+                        tasks.append({"taskId": task["task_id"], "title": task["title"],
+                                      "status": task["status"], "createdAt": task["created_at"]})
+            return {"verifiedTerminalHistory": True, "endpoint": endpoint_response(endpoint), "tasks": tasks}
         tasks = self.tasks.list_tasks(
             user_subject=user_subject,
             endpoint_id=endpoint["endpoint_id"],
