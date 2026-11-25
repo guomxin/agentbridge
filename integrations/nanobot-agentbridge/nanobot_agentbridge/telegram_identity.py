@@ -1,6 +1,16 @@
 """Verify a private sender against the central subject's existing Telegram identity."""
 
 import re
+from uuid import UUID
+
+
+def identifier(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(UUID(value)) == value
+    except ValueError:
+        return False
 
 
 async def verify_telegram_binding(

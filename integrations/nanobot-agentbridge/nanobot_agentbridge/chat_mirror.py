@@ -4,20 +4,11 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from uuid import UUID
 
 from agentbridge.core.chat_mirror import NANOBOT_OA_DIGEST, public_mirror_text
 
+from .telegram_identity import identifier
 from .telegram_text import split_telegram_text
-
-
-def identifier(value):
-    if not isinstance(value, str):
-        return False
-    try:
-        return str(UUID(value)) == value
-    except ValueError:
-        return False
 
 
 def projected_chat(item, workspace_endpoint):

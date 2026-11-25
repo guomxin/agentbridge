@@ -6,8 +6,7 @@ import re
 
 from nanobot.agent.tools.base import Tool, ToolResult
 
-from .chat_mirror import identifier
-from .telegram_identity import verify_telegram_binding
+from .telegram_identity import identifier, verify_telegram_binding
 
 CREATE = "agentbridge_business_watch_create"
 UPDATE = "agentbridge_business_watch_update"
