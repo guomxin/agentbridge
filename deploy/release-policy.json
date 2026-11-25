@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "2f7bd8a7d64d"
+    "c81156a33213"
   ],
-  "dataCompatibility": "reviewed-forward-only",
-  "reason": "NanoBot explicitly selected OA digests and watch notifications carry a verified private pairing. The predecessor marks queued digests failed and cannot preserve these deliveries after candidate startup. The four central SQLite schemas stay unchanged. Recover with a compatible forward release and retain the pre-switch backup."
+  "dataCompatibility": "no-migration",
+  "reason": "Historical Telegram task lookup reads previously acknowledged deliveries. Central schemas, notification formats and delivery authorization remain compatible with c81156a33213. Earlier hosts can decline unsupported history lookups."
 }
