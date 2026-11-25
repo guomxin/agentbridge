@@ -130,6 +130,8 @@ def test_live_task_lookup_and_cancel_rejects_expiry_foreign_origin_and_unknown(t
 def test_navigation_uses_real_central_cancel_and_keeps_already_submitted_input(tmp_path, monkeypatch):
     from tests.test_plan_write_boundaries import PlanWriteBoundaryTests
 
+    # The embedded central service must use an isolated session key on macOS.
+    monkeypatch.setenv("AGENTBRIDGE_SESSION_KEY_FILE", str(tmp_path / "session.key"))
     case = PlanWriteBoundaryTests()
     case.setUp()
     try:
