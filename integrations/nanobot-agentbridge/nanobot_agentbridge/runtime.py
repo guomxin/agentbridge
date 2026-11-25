@@ -16,6 +16,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import Config
 from .coordinated_tools import CoordinatorTool
 from .provider import CheckedProvider
+from .draft_tools import AUTHORING, DraftTool
 from .plans import PLAN,PlanTool
 from .watch_tools import WATCH_MUTATIONS, WatchTool
 from .business_reads import BUSINESS_READS, CONTEXT_FREE_READS
@@ -277,7 +278,7 @@ class CentralTools(ToolRegistry):
         return [item for item in definitions if self.skill_run.permits(item["function"]["name"].removeprefix("mcp_ab_"))]
 
     def register(self, tool: Tool) -> None:
-        if isinstance(tool, (CoordinatorTool,PlanTool,WatchTool)):
+        if isinstance(tool, (CoordinatorTool,PlanTool,WatchTool,DraftTool)):
             super().register(tool)
         elif isinstance(tool, CentralReadTool) and (
             tool.definition.name in READ_TOOLS | SESSION_LOGINS | {"agentbridge_skill_get"}
@@ -341,6 +342,9 @@ async def run_readonly(
     while True:
         page = await session.list_tools(cursor=cursor)
         for definition in page.tools:
+            if (coordinator_tool and skill_run is not None and channel == "telegram"
+                    and definition.name == AUTHORING and AUTHORING in allowed):
+                tools.register(DraftTool(config, host_request, task_context, skill_run, registry=tools))
             if coordinator_tool and definition.name in WATCH_MUTATIONS and definition.name in allowed:
                 tools.register(WatchTool(definition, host_request, task_context, skill_run))
             if coordinator_tool and definition.name==PLAN and PLAN in allowed:

@@ -17,6 +17,27 @@ class IsolatedSampleTools(ToolRegistry):
         return None
 
 
+def sample_resources(bundle, profile):
+    manifest = bundle["manifest"]
+    if profile not in manifest["profiles"]:
+        raise ValueError("草稿模式不匹配")
+    resources = bundle["resources"]
+    paths = [
+        manifest["entrypoint"],
+        *manifest.get("required_resources", {}).get(
+            profile, manifest.get("resources", [])
+        ),
+    ]
+    if any(
+        not isinstance(resources.get(path), str)
+        or PurePosixPath(path).is_absolute()
+        or ".." in PurePosixPath(path).parts
+        for path in paths
+    ):
+        raise ValueError("草稿必读资料不完整")
+    return {path: resources[path] for path in paths}
+
+
 async def run_workspace_trial(config, session, binding, request, meta, emit):
     trial = request["trial"]
     dispatch = str(UUID(trial["dispatch_id"]))
@@ -45,33 +66,10 @@ async def run_workspace_trial(config, session, binding, request, meta, emit):
         or receipt.get("status") != "running"
     ):
         raise PermissionError("中央未核验原试用派发")
-    bundle = receipt["bundle"]
-    manifest = bundle["manifest"]
-    if trial["profile"] not in manifest["profiles"]:
-        raise ValueError("草稿模式不匹配")
-    resources = bundle["resources"]
-    paths = [
-        manifest["entrypoint"],
-        *manifest.get("required_resources", {}).get(
-            trial["profile"], manifest.get("resources", [])
-        ),
-    ]
-    if any(
-        not isinstance(resources.get(path), str)
-        or PurePosixPath(path).is_absolute()
-        or ".." in PurePosixPath(path).parts
-        for path in paths
-    ):
-        raise ValueError("草稿必读资料不完整")
-    prompt = json.dumps(
-        {
-            "instruction": receipt["instruction"],
-            "profile": trial["profile"],
-            "resources": {p: resources[p] for p in paths},
-            "sample": model_prompt,
-        },
-        ensure_ascii=False,
-    )
+    prompt = json.dumps({
+        "instruction": receipt["instruction"], "profile": trial["profile"],
+        "resources": sample_resources(receipt["bundle"], trial["profile"]), "sample": model_prompt,
+    }, ensure_ascii=False)
     registry = IsolatedSampleTools()
     checked = CheckedProvider(config)
     loop = AgentLoop.from_config(config, tool_registry=registry, provider=checked)
