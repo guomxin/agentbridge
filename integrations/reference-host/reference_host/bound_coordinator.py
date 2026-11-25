@@ -230,6 +230,11 @@ class BoundDriver(ReferenceTaskDriver):
             raise RuntimeError("Query closure has no terminal central receipt")
 
     async def process_tool_result(self, local_task_id, result, *, resumed_from=None):
+        if self.req.get("boundPlanId"):
+            from .bound_plans import current_plan_result
+            result = await current_plan_result(self, local_task_id, result)
+            if result is None:
+                return
         if self.req.get("commandKind") == QUERY:
             if await query_result(self, local_task_id, result, resumed_from):
                 await super().process_tool_result(local_task_id, result)
@@ -378,6 +383,11 @@ async def run_locked(req):
         journal.execute(
             "CREATE TABLE IF NOT EXISTS batch_scope(run TEXT PRIMARY KEY,batch TEXT NOT NULL)"
         )
+    with journal:
+        journal.execute("CREATE TABLE IF NOT EXISTS write_plan_scope(run TEXT PRIMARY KEY, plan TEXT NOT NULL)")
+        prior_plan = journal.execute("SELECT plan FROM write_plan_scope WHERE run=?", (run_id,)).fetchone()
+        if prior_plan:
+            req["boundPlanId"] = prior_plan[0]
     state = ReferenceHostState(root / "coordinator-state.sqlite3")
     driver = BoundDriver(
         req,
@@ -409,6 +419,7 @@ async def run_locked(req):
             }:
                 raise PermissionError("No controlled prepare for this user and host")
             req["expectedCommit"] = contract["commitCapability"]
+            req["expectedPrepare"] = contract["prepareCapability"]
         req["checkedSkillPin"] = pin_run(
             journal, req, None if command else contract["prepareCapability"]
         )
@@ -522,6 +533,9 @@ async def run_locked(req):
                     with journal:
                         journal.execute("UPDATE write_scope SET expected_commit=? WHERE run=?", (req["expectedCommit"], run_id))
                 await driver.process_tool_result(local_id, result)
+            elif req.get("mode") == "durable_plan":
+                from .bound_plans import begin_write_plan
+                await begin_write_plan(driver, local_id, arguments, governed)
             else:
                 await driver.begin_governed(local_id, req["tool"], arguments, governed)
         else:

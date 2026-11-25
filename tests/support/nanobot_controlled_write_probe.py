@@ -87,7 +87,7 @@ class PlanModel:
             {"goal":"查看我的待办","steps":[{"kind":"capability","stepKey":"list","capabilityName":cap,"arguments":{"limit":2}}]})}}
 
 
-def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exercise=None,capability="oa.leave.prepare",pending_restart=False,skill_scope=False):
+def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exercise=None,capability="oa.leave.prepare",pending_restart=False,skill_scope=False,model_setup=None):
     with tempfile.TemporaryDirectory(prefix="nanobot-controlled-action-") as tmp:
         root = Path(tmp).resolve()
         fixture = ActionMatrixAcceptanceFixture(root / "matrix", seed=False)
@@ -179,6 +179,8 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
         uvthread = threading.Thread(target=uv.run, daemon=True)
         uvthread.start()
         model = PlanModel() if plan else Model()
+        if model_setup is not None:
+            model_setup(model)
         httpd = model_server(model)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         model_config = root / "model.json"
@@ -263,6 +265,8 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
             assert gateway.readiness()["available"], "host_not_ready"
             if pending_restart:
                 import signal
+                if browser:
+                    binding = gateway.resolve_telegram_sender(8001, 501)
                 key={"idempotency_key":"late-claim-after-restart"}
                 for event in gateway.send_dispatch(key,binding,"请帮我保存请假草稿，稍后确认。",[],None):
                     if event["type"]=="accepted": rid=event["runId"]
@@ -279,7 +283,10 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
                     break
                 status={}
                 for _ in range(260):
-                    try: status=gateway.dispatch_evidence(key,binding,rid)
+                    try:
+                        if browser:
+                            gateway.resolve_telegram_sender(8001, 501)
+                        status=gateway.dispatch_evidence(key,binding,rid)
                     except GatewayRequestError: pass
                     if status.get("state")=="completed":break
                     time.sleep(.12)
@@ -288,6 +295,9 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
                     checked=db.execute("SELECT COUNT(*) FROM operations WHERE user_subject=? AND capability_name='oa.leave.save_draft'",(OWNER,)).fetchone()[0]
                     assert checked==1
                 assert len(list(gateway.send_dispatch(key,binding,"请帮我保存请假草稿，稍后确认。",[],None)))==2
+                if model_setup is not None:
+                    with sqlite3.connect(fixture.service.db_path) as db:
+                        assert db.execute("SELECT state FROM task_plans").fetchall() == [("succeeded",)]
                 return {"offline_approval":True,"late_original_lease_resume":True,"commit_operations":1,"reconciled_original":True}
             if exercise is not None:
                 return exercise(fixture=fixture,binding=binding,instance=instance,gateway=gateway,model=model)

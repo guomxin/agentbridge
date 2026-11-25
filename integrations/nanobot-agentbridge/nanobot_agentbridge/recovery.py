@@ -25,30 +25,26 @@ def recovery_rows(directory, endpoint):
         ).fetchall()
 
 
-async def verified_operation(session, subject, task, meta, expected_commit):
-    result = await session.call_tool(
-        "agentbridge_operation_list", {"limit": 100}, meta=meta
-    )
-    items = (result.structuredContent or {}).get("operations", [])
-    if result.isError or not isinstance(items, list):
-        return None
-    for candidate in items:
-        if (
-            not isinstance(candidate, dict)
-            or candidate.get("taskId") != task
-            or candidate.get("userSubject") != subject
-            or candidate.get("capability") != expected_commit
-            or candidate.get("status") != "succeeded"
-        ):
-            continue
-        result = await session.call_tool(
-            "agentbridge_operation_get",
-            {"operation_id": candidate["operationId"]},
-            meta=meta,
-        )
+async def verified_operation(session, subject, task, meta, expected_commit, *, plan_operation=None):
+    if plan_operation:
+        operation_ids = [plan_operation]
+    else:
+        result = await session.call_tool("agentbridge_operation_list", {"limit": 100}, meta=meta)
+        items = (result.structuredContent or {}).get("operations", [])
+        if result.isError or not isinstance(items, list):
+            return None
+        operation_ids = [
+            candidate["operationId"] for candidate in items
+            if isinstance(candidate, dict) and candidate.get("operationId")
+            and candidate.get("taskId") == task and candidate.get("userSubject") == subject
+            and candidate.get("capability") == expected_commit and candidate.get("status") == "succeeded"
+        ]
+    for operation_id in operation_ids:
+        result = await session.call_tool("agentbridge_operation_get", {"operation_id": operation_id}, meta=meta)
         op = (result.structuredContent or {}).get("operation") or {}
         if (
             not result.isError
+            and op.get("operationId") == operation_id
             and op.get("taskId") == task
             and op.get("userSubject") == subject
             and op.get("status") == "succeeded"
@@ -89,6 +85,9 @@ async def reconcile(host, record, run, task, phase):
                 ).fetchone()
                 else None
             )
+            plan_binding = None
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='write_plan_scope'").fetchone():
+                plan_binding = db.execute("SELECT plan FROM write_plan_scope WHERE run=?", (run,)).fetchone()
         if not scope:
             return
         contract = request["controlledPrepares"].get(scope[0]) or {}
@@ -124,9 +123,23 @@ async def reconcile(host, record, run, task, phase):
                     )
                 return
         else:
-            op = await verified_operation(
-                session, bound["subject"], task, meta, scope[1]
-            )
+            plan_operation = None
+            if plan_binding:
+                if not plan_binding[0]:
+                    return
+                result = await session.call_tool("agentbridge_task_plan_get", {"plan_id":plan_binding[0]}, meta=meta)
+                plan = (result.structuredContent or {}).get("plan") or {}
+                if result.isError or (plan.get("planId"), plan.get("taskId")) != (plan_binding[0], task):
+                    return
+                steps = plan.get("steps") or []
+                if (plan.get("state") == "succeeded" and steps and steps[-1].get("state") == "succeeded"
+                        and steps[-1].get("capabilityName") == contract.get("prepareCapability")):
+                    plan_operation = steps[-1].get("operationId")
+                if not plan_operation and phase != "waiting":
+                    return
+            op = None
+            if not plan_binding or plan_operation:
+                op = await verified_operation(session, bound["subject"], task, meta, scope[1], plan_operation=plan_operation)
             if op:
                 host.runs.reconcile_verified(
                     run,

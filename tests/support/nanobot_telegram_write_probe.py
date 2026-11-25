@@ -13,7 +13,7 @@ from tests.support.nanobot_controlled_write_probe import ORIGIN, run
 from tests.test_action_matrix_acceptance import decide, effects
 
 
-def exercise(*, fixture, binding, instance, gateway, model):
+def exercise(*, fixture, binding, instance, gateway, model, capability="oa.leave.prepare"):
     parsed = gateway._request("telegram-route", {"botId": "8001", "senderId": "501"})
     tg = parsed["binding"]
     assert (
@@ -24,7 +24,7 @@ def exercise(*, fixture, binding, instance, gateway, model):
     other = gateway._request("telegram-route", {"botId": "8001", "senderId": "777"})
     assert not other["binding"]
     req = {"idempotency_key": "synthetic-telegram-private-write"}
-    request = "请帮我保存请假草稿，使用我的工作台核验。"
+    request = "请帮我保存请假草稿，使用我的工作台核验。" if capability == "oa.leave.prepare" else "请汇总我的已办和已发，形成工作日志并请我核验。"
     decided = False
     for event in gateway.send_dispatch(req, tg, request, [], None):
         assert ORIGIN not in json.dumps(event)
@@ -62,7 +62,7 @@ def exercise(*, fixture, binding, instance, gateway, model):
         )
         entry = fixture.service.tasks.get_task(task, user_subject=OWNER)
         assert entry["origin_endpoint_id"] == tg["endpoint_id"]
-        assert decide(fixture, {"input_id": resource, "capability": "oa.leave.prepare"})
+        assert decide(fixture, {"input_id": resource, "capability": capability})
     assert model.results and "已核验" in model.results[-1] and effects(fixture) == 1
     return {
         "telegram_input": "synthetic private sender",

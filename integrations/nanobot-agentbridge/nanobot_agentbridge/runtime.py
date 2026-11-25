@@ -336,7 +336,11 @@ async def run_readonly(
     governed = {}
     if coordinator_tool is not None:
         host_request, task_context = coordinator_tool
-        governed = host_request["controlledPrepares"]
+        governed = {
+            name: contract for name, contract in host_request["controlledPrepares"].items()
+            if name in allowed and isinstance(contract, dict)
+            and isinstance(contract.get("prepareCapability"), str) and isinstance(contract.get("commitCapability"), str)
+        }
     cursor = None
     seen = set()
     while True:
@@ -348,7 +352,7 @@ async def run_readonly(
             if coordinator_tool and definition.name in WATCH_MUTATIONS and definition.name in allowed:
                 tools.register(WatchTool(definition, host_request, task_context, skill_run))
             if coordinator_tool and definition.name==PLAN and PLAN in allowed:
-                tools.register(PlanTool(host_request,task_context,definition,skill_run,projected))
+                tools.register(PlanTool(host_request,task_context,definition,skill_run,projected,governed))
             if definition.name in governed and definition.name in allowed:
                 tools.register(CoordinatorTool(host_request,task_context,definition,skill_run))
             if definition.name in projected:
