@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import timedelta
 import json
 from pathlib import Path
 import re
@@ -80,7 +81,10 @@ async def authenticated_session(request):
                                  verify=tls,follow_redirects=False,timeout=30,
                                  limits=httpx.Limits(keepalive_expiry=3.5)) as http:
         async with streamable_http_client(request["mcpUrl"],http_client=http) as (read,write,_):
-            async with ClientSession(read,write) as session:
+            # The Telegram notification claim can long-poll for 15 seconds. Business workers
+            # have their own longer deadlines for interactive operations.
+            deadline = timedelta(seconds=30) if request.get("pooledSession") else None
+            async with ClientSession(read, write, read_timeout_seconds=deadline) as session:
                 await session.initialize()
                 meta,level = await verify_subject(session,request)
                 yield session,meta,level

@@ -148,6 +148,48 @@ def test_mcp_session_pool_isolation_reuse_owner_task_rotation_error_ttl_and_lru(
     asyncio.run(run())
 
 
+def test_stalled_handshake_and_interrupted_read_release_slot_without_replay(tmp_path):
+    async def run():
+        request = _req(_write_private(tmp_path / "token", "example"))
+        attempts, calls, closed = [], [], []
+        blocked = asyncio.Event()
+
+        @asynccontextmanager
+        async def factory(_request):
+            number = len(attempts) + 1
+            attempts.append(number)
+
+            async def read():
+                calls.append(number)
+                if number == 2:
+                    await blocked.wait()
+                return "fresh"
+
+            try:
+                if number == 1:
+                    await blocked.wait()
+                yield SimpleNamespace(read=read), {}, "L3"
+            finally:
+                closed.append(number)
+
+        pool = McpSessionPool(session_factory=factory, open_timeout_seconds=0.03)
+        try:
+            with pytest.raises(TimeoutError):
+                async with pool.session(request):
+                    pytest.fail("Stalled handshake should never reach the caller")
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.03), pool.session(request) as (session, _, _):
+                    await session.read()
+            async with pool.session(request) as (session, _, _):
+                assert await session.read() == "fresh"
+            assert calls == [2, 3]
+            assert closed == [1, 2]
+        finally:
+            await pool.close()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
 def test_telegram_api_keepalive_reconnects_idempotent_only_and_never_retries_send_message(monkeypatch):
     created: list[dict] = []
     clock = [100.0]

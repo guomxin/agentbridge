@@ -82,7 +82,7 @@ class TelegramRoutes:
 
         async def fetch_subject(record):
             try:
-                async with open_host_session(
+                async with asyncio.timeout(6), open_host_session(
                     self.host, self.host.worker_payload(record, None), lane="control"
                 ) as (session, meta, level):
                     if level != "L3":

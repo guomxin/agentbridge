@@ -30,11 +30,12 @@ class _PooledSession:
         if not self.task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(self.task), timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
+            except TimeoutError:
                 self.task.cancel()
-                await asyncio.gather(self.task, return_exceptions=True)
-            except BaseException:
-                pass
+                await asyncio.wait({self.task}, timeout=1.0)
+            except asyncio.CancelledError:
+                self.task.cancel()
+                raise
         else:
             await asyncio.gather(self.task, return_exceptions=True)
 
@@ -49,12 +50,14 @@ class McpSessionPool:
     def __init__(
         self,
         *,
+        open_timeout_seconds: float = 30.0,
         idle_ttl_seconds: float = 120.0,
         max_age_seconds: float = 300.0,
         max_entries: int = 64,
         session_factory: Callable[[dict[str, Any]], Any] | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
+        self.open_timeout_seconds = open_timeout_seconds
         self.idle_ttl_seconds = max(float(idle_ttl_seconds), 1.0)
         self.max_age_seconds = max(float(max_age_seconds), 1.0)
         self.max_entries = max(int(max_entries), 1)
@@ -94,7 +97,7 @@ class McpSessionPool:
         if factory is None:
             from .worker import authenticated_session as factory
 
-        open_request = dict(request)
+        open_request = {**request, "pooledSession": True}
         loop = asyncio.get_running_loop()
         ready: asyncio.Future[tuple[Any, dict[str, Any], str, dict[str, Any]]] = loop.create_future()
         stop = asyncio.Event()
@@ -112,10 +115,12 @@ class McpSessionPool:
 
         task = asyncio.create_task(owner(), name=f"mcp-pool:{request['subject']}:{request['endpointKey']}")
         try:
-            session, meta, level, prepares = await ready
+            async with asyncio.timeout(self.open_timeout_seconds):
+                session, meta, level, prepares = await ready
         except BaseException:
             stop.set()
-            await asyncio.gather(task, return_exceptions=True)
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
             raise
         now = self._clock()
         return _PooledSession(
