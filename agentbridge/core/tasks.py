@@ -4637,6 +4637,7 @@ class TaskHubStore:
         retry_after_seconds: int = 5,
         defer_until_activity: bool = False,
         expected_attempt_count: int | None = None,
+        terminal_failure: bool = False,
     ) -> dict:
         if expected_attempt_count is not None and (type(expected_attempt_count) is not int or not 1 <= expected_attempt_count <= 5):
             raise ValueError("notification attempt count is invalid")
@@ -4685,7 +4686,7 @@ class TaskHubStore:
                     """,
                     (now, now, delivery_id),
                 )
-            elif int(row["attempt_count"]) >= 5:
+            elif terminal_failure or int(row["attempt_count"]) >= 5:
                 connection.execute(
                     """
                     UPDATE notification_outbox
@@ -5036,6 +5037,15 @@ class TaskHubStore:
             filters = json.loads(subscription["event_filters_json"])
             if "*" not in filters and event_type not in filters:
                 continue
+            envelope = {"eventId": event_id, "taskId": task_id, "eventType": event_type, "payload": payload}
+            if (event_type == "task.artifact.ready" and origin_scope and origin_scope[0] == "nanobot"
+                    and subscription["endpoint_id"] == task_source[0]):
+                from agentbridge.core.telegram_artifacts import ARTIFACT_TYPES, origin_pair_proof
+                if payload.get("artifactType") in ARTIFACT_TYPES:
+                    source_endpoint = self._select_endpoint(connection, task_source[0])
+                    proof = origin_pair_proof(connection, user_subject, source_endpoint, ownership)
+                    if proof:
+                        envelope["artifactPairProof"] = proof
             connection.execute(
                 """
                 INSERT OR IGNORE INTO notification_outbox (
@@ -5050,14 +5060,7 @@ class TaskHubStore:
                     task_id,
                     subscription["endpoint_id"],
                     user_subject,
-                    _canonical_json(
-                        {
-                            "eventId": event_id,
-                            "taskId": task_id,
-                            "eventType": event_type,
-                            "payload": payload,
-                        }
-                    ),
+                    _canonical_json(envelope),
                     created_at,
                     created_at,
                     created_at,

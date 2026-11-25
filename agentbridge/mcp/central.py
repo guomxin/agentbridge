@@ -6529,12 +6529,13 @@ def create_central_mcp_server(
         agent_host:Annotated[str,Field(min_length=1,max_length=80)],
         endpoint_key:Annotated[str,Field(min_length=1,max_length=768)],
         delivery_id:Annotated[str,Field(min_length=16,max_length=128)],
-        attempt_count:Annotated[int,Field(ge=1,le=5)]) -> dict[str,Any]:
+        attempt_count:Annotated[int,Field(ge=1,le=5)], include_artifact:bool=False) -> dict[str,Any]:
         identity=_request_identity(identity_store)
         host, _ = await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
         return await _run_host_control('agentbridge_host_notification_validate',service.validate_host_notification,
             user_subject=identity['user_subject'],agent_host=agent_host,endpoint_key=endpoint_key,
-            delivery_id=delivery_id,attempt_count=attempt_count,host_instance_id=host["hostInstanceId"])
+            delivery_id=delivery_id,attempt_count=attempt_count,host_instance_id=host["hostInstanceId"],
+            **({"include_artifact":True} if include_artifact else {}))
 
     @mcp.tool(
         name="agentbridge_host_notification_ack",
@@ -6560,6 +6561,7 @@ def create_central_mcp_server(
         retry_after_seconds: Annotated[int, Field(ge=1, le=300)] = 5,
         defer_until_activity: bool = False,
         attempt_count: Annotated[int | None, Field(ge=1, le=5)] = None,
+        artifact_outcome: Literal["attachment_sent", "delivery_unknown"] | None = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6580,6 +6582,7 @@ def create_central_mcp_server(
             defer_until_activity=defer_until_activity,
             attempt_count=attempt_count,
             host_instance_id=host["hostInstanceId"],
+            **({"artifact_outcome": artifact_outcome} if artifact_outcome is not None else {}),
         )
 
     @mcp.tool(

@@ -1856,6 +1856,13 @@ class CentralCapabilityService:
                     and command.get("commandKey") == (event.get("payload") or {}).get("commandKey")):
                 item["deliveryMode"] = "prepared_command"
                 item["event"] = {**event, "payload": {"commandKey": command["commandKey"]}}
+            elif (agent_host == "nanobot" and endpoint["client_type"] == "telegram"
+                  and endpoint["endpoint_id"] == task["origin_endpoint_id"] and event.get("artifactPairProof")
+                  and event.get("eventType") == "task.artifact.ready"):
+                # A claim is a hint. File bytes require a fresh, fenced validation.
+                item["deliveryMode"] = "artifact"
+                item["event"] = {"eventType": "task.artifact.ready"}
+                item["artifact"] = {"artifactId": event["payload"]["artifactId"]}
             elif task["origin_endpoint_id"] == endpoint["endpoint_id"]:
                 item["deliveryMode"] = "origin_handled"
             elif event.get("eventType") == "task.artifact.ready":
@@ -1945,7 +1952,8 @@ class CentralCapabilityService:
             "notifications": [{**item, "requiresRouteCheck": True} for item in notifications],
         }
 
-    def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count,host_instance_id=None):
+    def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count,host_instance_id=None,
+                                   include_artifact=False):
         endpoint=self.tasks.endpoint_for_key(user_subject=user_subject,agent_host=agent_host,endpoint_key=endpoint_key)
         delivery=self.tasks.get_delivery(delivery_id)
         if delivery['user_subject']!=user_subject or delivery['endpoint_id']!=endpoint['endpoint_id']:
@@ -1957,6 +1965,11 @@ class CentralCapabilityService:
         if not self.tasks.notification_route_allowed(user_subject=user_subject,endpoint_id=endpoint["endpoint_id"],
                                                     delivery_id=delivery_id,host_instance_id=host_instance_id):
             return {"allowed":False,"stale":True}
+        if delivery["payload"].get("artifactPairProof"):
+            from agentbridge.core.telegram_artifacts import authorized_artifact
+            return authorized_artifact(self, delivery, endpoint, host_instance_id, with_body=include_artifact)
+        if include_artifact:
+            return {"allowed": False}
         from agentbridge.core.business_watch_notifications import validate_watch_delivery, WATCH_EVENT_TYPES
         if delivery['payload'].get('eventType') not in WATCH_EVENT_TYPES:
             return {"allowed": True}
@@ -1975,6 +1988,7 @@ class CentralCapabilityService:
         defer_until_activity: bool = False,
         attempt_count: int | None = None,
         host_instance_id: str | None = None,
+        artifact_outcome: str | None = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1996,6 +2010,19 @@ class CentralCapabilityService:
                 user_subject=user_subject, endpoint_id=endpoint["endpoint_id"], delivery_id=delivery_id,
                 host_instance_id=host_instance_id):
             raise PermissionError("Notification does not belong to this host instance")
+        if pending["payload"].get("artifactPairProof") and succeeded and artifact_outcome is None:
+            raise ValueError("Task file requires a confirmed Telegram receipt")
+        if artifact_outcome is not None:
+            if (artifact_outcome not in {"attachment_sent", "delivery_unknown"} or not host_instance_id
+                    or succeeded != (artifact_outcome == "attachment_sent") or not pending["payload"].get("artifactPairProof")
+                    or agent_host != "nanobot" or endpoint["client_type"] != "telegram" or pending["state"] != "delivering"
+                    or attempt_count != pending["attempt_count"]
+                    or datetime.fromisoformat(pending["next_attempt_at"]) <= datetime.now(timezone.utc)):
+                raise ValueError("Invalid task file receipt")
+            self.report_host_artifact_delivery(user_subject=user_subject, agent_host=agent_host, task_id=pending["task_id"],
+                delivery_ref=delivery_id, channel="telegram", files=[{"artifact_id": pending["payload"]["payload"]["artifactId"],
+                    "state": "attachment_sent" if succeeded else "failed", "attempt_count": 1,
+                    "error_code": None if succeeded else "TELEGRAM_DELIVERY_UNKNOWN"}])
         from agentbridge.core.business_watch_notifications import WATCH_EVENT_TYPES, validate_watch_delivery
         watch_delivery=pending['payload'].get('eventType') in WATCH_EVENT_TYPES
         if watch_delivery:
@@ -2011,6 +2038,7 @@ class CentralCapabilityService:
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
             expected_attempt_count=attempt_count if watch_delivery or agent_host=="nanobot" else None,
+            terminal_failure=artifact_outcome == "delivery_unknown",
         )
         if delivery.get("task_id"):
             trace = self.runtime_governance.trace_for_task(
@@ -2089,7 +2117,7 @@ class CentralCapabilityService:
         if trace is not None:
             states = [str(item.get("state") or "") for item in files]
             succeeded = bool(states) and all(
-                state in {"delivered", "succeeded", "acknowledged"}
+                state in {"attachment_sent", "fallback_link_sent", "delivered", "succeeded", "acknowledged"}
                 for state in states
             )
             self.runtime_governance.record_stage_once(

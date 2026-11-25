@@ -78,6 +78,16 @@ class TelegramAPI:
     def call(self, method, **params):
         payload = json.dumps(params).encode()
         headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
+        return self._post(method, payload, headers)
+
+    def send_document(self, chat, filename, content_type, data):
+        import httpx
+        upload = httpx.Request("POST", "https://api.telegram.org",
+                               data={"chat_id": str(chat)}, files={"document": (filename, data, content_type)})
+        return self._post("sendDocument", upload.read(), {"Content-Type": upload.headers["Content-Type"],
+                                                         "Connection": "keep-alive"})
+
+    def _post(self, method, payload, headers):
         path = f"/bot{self._token}/{method}"
         with self._lock:
             for attempt in range(2):

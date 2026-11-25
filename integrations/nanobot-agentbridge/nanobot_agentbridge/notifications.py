@@ -40,7 +40,7 @@ def _record_claim(path: Path, delivery: str, endpoint: str, run: str, attempt: i
         db.execute(
             """INSERT INTO notification_claims VALUES(?,?,?,?)
                 ON CONFLICT(delivery) DO UPDATE SET attempt=excluded.attempt
-                WHERE endpoint=excluded.endpoint AND run=excluded.run""",
+                WHERE endpoint=excluded.endpoint AND run=excluded.run AND attempt<=excluded.attempt""",
             (delivery, endpoint, run, attempt),
         )
 
@@ -101,7 +101,7 @@ async def notifications(host, record, action, body):
             raise web.HTTPForbidden()
         endpoint_params = {"agent_host": "nanobot", "endpoint_key": req["endpointKey"]}
 
-        async def ack(delivery, attempt, succeeded):
+        async def ack(delivery, attempt, succeeded, artifact_outcome=None):
             reply = await session.call_tool(
                 "agentbridge_host_notification_ack",
                 {
@@ -110,6 +110,7 @@ async def notifications(host, record, action, body):
                     "attempt_count": attempt,
                     "succeeded": succeeded,
                     "retry_after_seconds": 5,
+                    **({"artifact_outcome": artifact_outcome} if artifact_outcome else {}),
                 },
                 meta=meta,
             )
@@ -138,7 +139,7 @@ async def notifications(host, record, action, body):
             with sqlite3.connect(path) as db:
                 db.execute("""CREATE TABLE IF NOT EXISTS notification_claims (
                     delivery TEXT PRIMARY KEY, endpoint TEXT NOT NULL, run TEXT NOT NULL, attempt INTEGER NOT NULL)""")
-        if action == "telegram-notification-receipt":
+        if action in {"telegram-artifact-file", "telegram-notification-receipt"}:
             delivery, attempt, ok = (
                 body.get("deliveryId"),
                 body.get("attempt"),
@@ -147,7 +148,7 @@ async def notifications(host, record, action, body):
             if (
                 type(attempt) is not int
                 or not 1 <= attempt <= 5
-                or type(ok) is not bool
+                or (action == "telegram-notification-receipt" and type(ok) is not bool)
                 or not isinstance(delivery, str)
             ):
                 raise web.HTTPBadRequest()
@@ -160,7 +161,22 @@ async def notifications(host, record, action, body):
                 ).fetchone()
             if not claim or claim[0] != body.get("runId"):
                 raise web.HTTPForbidden()
-            return {"recorded": await ack(delivery, attempt, ok)}
+            if action == "telegram-artifact-file":
+                with_body = body.get("withBody")
+                if not claim[0].startswith("artifact:") or type(with_body) is not bool:
+                    raise web.HTTPForbidden()
+                reply = await session.call_tool("agentbridge_host_notification_validate", {
+                    **endpoint_params, "delivery_id": delivery, "attempt_count": attempt, "include_artifact": with_body,
+                }, meta=meta)
+                result = reply.structuredContent or {}
+                if reply.isError or result.get("allowed") is not True or claim[0] != f"artifact:{result.get('artifactId')}":
+                    return {"allowed": False}
+                return {key: result[key] for key in ("allowed", "artifactId", "file") if key in result}
+            outcome = body.get("artifactOutcome")
+            if outcome is not None and (not claim[0].startswith("artifact:") or outcome not in ("attachment_sent", "delivery_unknown")
+                                        or ok != (outcome == "attachment_sent")):
+                raise web.HTTPBadRequest()
+            return {"recorded": await ack(delivery, attempt, ok, outcome)}
         claim_args = {
             **endpoint_params,
             "limit": 32,
@@ -197,6 +213,16 @@ async def notifications(host, record, action, body):
                 continue
             task, event = item.get("task") or {}, item.get("event") or {}
             if task.get("userSubject") != req["subject"] or task.get("agentHost") != "nanobot":
+                continue
+            if mode == "artifact":
+                artifact_id = (item.get("artifact") or {}).get("artifactId")
+                if (identifier(artifact_id) and event.get("eventType") == "task.artifact.ready"
+                        and task.get("originEndpointId") == req["endpoint"]
+                        and task.get("activeConversationRef") == req["conversation"]):
+                    _record_claim(path, delivery, req["endpoint"], f"artifact:{artifact_id}", attempt)
+                    deliveries.append({"kind": "artifact", "artifactId": artifact_id, "deliveryId": delivery, "attempt": attempt})
+                else:
+                    await ack(delivery, attempt, task.get("originEndpointId") != req["endpoint"])
                 continue
             if mode == "prepared_command":
                 command_key = (event.get("payload") or {}).get("commandKey")
@@ -413,6 +439,10 @@ class TerminalMessages:
         self._deferred_terminal: dict[tuple[int, str], tuple[dict, str, dict, float]] = {}
         with pilot.db:
             pilot.db.executescript("""
+                CREATE TABLE IF NOT EXISTS telegram_artifact_deliveries(
+                    bot INTEGER NOT NULL, chat INTEGER NOT NULL, artifact TEXT NOT NULL, state TEXT NOT NULL, receipt INTEGER,
+                    PRIMARY KEY(bot,chat,artifact), UNIQUE(bot,chat,receipt));
+                UPDATE telegram_artifact_deliveries SET state='delivery_unknown' WHERE state='sending';
                 CREATE TABLE IF NOT EXISTS notification_receipts(
                     bot INTEGER, chat INTEGER, delivery TEXT, run TEXT, state TEXT NOT NULL,
                     PRIMARY KEY(bot,chat,delivery));
@@ -592,6 +622,16 @@ class TerminalMessages:
             reply = pilot.gateway._request("telegram-notifications", payload)
         for event in reply.get("deliveries", []):
             kind = event.get("kind")
+            if kind == "artifact":
+                from .telegram_files import deliver_file
+                from .telegram import TelegramUnavailable
+                from agentbridge.workspace.gateway import GatewayRequestError
+                try:
+                    deliver_file(pilot, chat, binding, digest, event)
+                except (GatewayRequestError, TelegramUnavailable):
+                    # Other files keep their own leases while this claim awaits reconciliation.
+                    pass
+                continue
             if kind == "workspace_chat":
                 self.chat.poll(chat, binding, digest, event)
                 continue

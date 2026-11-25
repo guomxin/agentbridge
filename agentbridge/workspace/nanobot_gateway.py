@@ -108,8 +108,10 @@ class NanoBotGatewayClient:
                 },
             )
             response = connection.getresponse()
-            data = response.read(2_097_153)
-            if response.status >= 500 or len(data) > 2_097_152:
+            # A private file read carries one task artifact (32 MiB maximum) as base64.
+            limit = 45 * 1024 * 1024 if action == "telegram-artifact-file" else 2_097_152
+            data = response.read(limit + 1)
+            if response.status >= 500 or len(data) > limit:
                 raise GatewayRequestError(
                     "GATEWAY_RESPONSE_INVALID",
                     "无法核对宿主收据。",

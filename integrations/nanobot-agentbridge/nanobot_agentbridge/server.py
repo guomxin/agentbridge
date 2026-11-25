@@ -310,7 +310,7 @@ class Host:
         if action == "telegram-timeline":
             from .telegram_timeline import publish_timeline
             return await publish_timeline(self, record, body)
-        if action in {"telegram-notifications","telegram-notification-receipt","telegram-chat-validate","telegram-chat-receipt"}:
+        if action in {"telegram-notifications","telegram-notification-receipt","telegram-chat-validate","telegram-chat-receipt","telegram-artifact-file"}:
             from .notifications import notifications
             return await notifications(self,record,action,body)
         if action == "telegram-task":
@@ -471,7 +471,7 @@ class Host:
 def create_app(spec: dict) -> web.Application:
     host = Host(spec)
     app = web.Application(client_max_size=18 * 1024 * 1024)
-    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-mirror-peers|telegram-task}", host.handle)
+    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-artifact-file|telegram-mirror-peers|telegram-task}", host.handle)
 
     if host.coordinator:
         from .recovery import recover
