@@ -377,8 +377,8 @@ class SkillHostAcceptance:
                 'standard_metadata': manifest.get('standard_metadata'), 'profiles': manifest['profiles'],
                 'pending_cases': pending, 'regression': regression}, 'calls': calls}
 
-    def _invoke(self, name, worker, arguments):
-        if name not in READS or worker.session['user_subject'] != ALICE:
+    def _invoke(self, name, worker, arguments, *, expected_subject=ALICE):
+        if name not in READS or worker.session['user_subject'] != expected_subject:
             raise PermissionError('Synthetic adapter refuses unknown capability or identity')
         self.calls.append({'owner': worker.session['user_subject'], 'capability': name, 'arguments': arguments})
         return {'items': [{'id': 'synthetic-purchase-1', 'title': '采购申请', 'materials': [], 'missing': ['报价']},

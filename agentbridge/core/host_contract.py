@@ -63,6 +63,13 @@ class HostLeaseConflict(PermissionError):
     code = "HOST_COORDINATOR_LEASE_CONFLICT"
 
 
+def _check_pi_deployment(connection, instance, implementation):
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_host_instances' AND type='table'").fetchone():
+        assigned = connection.execute("SELECT host_type FROM workspace_host_instances WHERE instance_id=?", (instance,)).fetchone()
+        if assigned and "pi" in (assigned[0], implementation) and assigned[0] != implementation:
+            raise HostRegistrationRequired("Host implementation differs from the assigned Pi deployment")
+
+
 def host_transport_recovery_strategy(call_class: str) -> str:
     """Public host policy; it does not grant permission to retry a business call.
 
@@ -347,6 +354,7 @@ class HostContractStore:
     def _bootstrap_compatibility(connection: sqlite3.Connection) -> None:
         now = _utc_now()
         builtins = (
+            ("pi", "0.1.0", "L3", "sha256:3221655a79a9254a93e2735121780fb019ecd659bb05e1f639dd1c3020de7a9b"),
             ("nanobot", "0.2.0", "L2", "nanobot-private-credential-poll-resume-v1"),
             ("nanobot", "0.3.0", "L3", "sha256:9046f611fd05c7a8ebafb4a3af979c77cdf12019d1309ca2be0c0e6b6d8beb34"),
             ("openclaw", "0.4.71", "L3", "shared-contract-h01-h29-task-plan-v1"),
@@ -631,7 +639,10 @@ class HostContractStore:
         user_subject: str,
         token_id: str,
         profile: Mapping[str, Any],
+        maximum_level: str = "L3",
     ) -> tuple[dict[str, Any], bool]:
+        if maximum_level not in HOST_LEVELS:
+            raise HostContractError("Unknown deployment level")
         normalized = normalize_host_profile(profile)
         implementation = normalized["implementation"]
         declared_json = _canonical_json(normalized)
@@ -646,7 +657,7 @@ class HostContractStore:
                 """,
                 (implementation["name"], implementation["version"]),
             ).fetchone()
-            approved_level = compatibility["accepted_level"] if compatibility else "L1"
+            approved_level = min(compatibility["accepted_level"], maximum_level) if compatibility else "L1"
             accepted_level = highest_accepted_level(normalized, approved_level)
             status = "approved" if compatibility else "unrecognized"
             existing = connection.execute(
@@ -670,10 +681,12 @@ class HostContractStore:
                     self.last_seen_touch_interval_seconds,
                 )
             ):
+                _check_pi_deployment(connection, normalized["hostInstanceId"], implementation["name"])
                 registration_id = str(existing["registration_id"])
                 changed = False
             else:
                 connection.execute("BEGIN IMMEDIATE")
+                _check_pi_deployment(connection, normalized["hostInstanceId"], implementation["name"])
                 compatibility = connection.execute(
                     """
                     SELECT * FROM agent_host_compatibility
@@ -681,7 +694,7 @@ class HostContractStore:
                     """,
                     (implementation["name"], implementation["version"]),
                 ).fetchone()
-                approved_level = compatibility["accepted_level"] if compatibility else "L1"
+                approved_level = min(compatibility["accepted_level"], maximum_level) if compatibility else "L1"
                 accepted_level = highest_accepted_level(normalized, approved_level)
                 status = "approved" if compatibility else "unrecognized"
                 existing = connection.execute(
@@ -768,10 +781,19 @@ class HostContractStore:
             ).fetchone()
             if row is None:
                 raise HostRegistrationRequired("Agent host is not registered")
+            _check_pi_deployment(connection, host_instance_id, agent_host)
             if row["agent_host"] != agent_host or row["host_version"] != host_version:
                 raise HostRegistrationRequired(
                     "Agent host registration does not match the current runtime"
                 )
+            if agent_host == "pi" and row["accepted_level"] != "L1":
+                reviewed = connection.execute(
+                    "SELECT accepted_level,evidence_digest FROM agent_host_compatibility "
+                    "WHERE implementation_name=? AND implementation_version=?", (agent_host, host_version),
+                ).fetchone()
+                if (not reviewed or not reviewed["evidence_digest"] or reviewed["accepted_level"] not in HOST_LEVELS
+                        or HOST_LEVELS.index(reviewed["accepted_level"]) < HOST_LEVELS.index(row["accepted_level"])):
+                    raise HostRegistrationRequired("Pi compatibility changed. Negotiate the current host level")
             if HOST_LEVELS.index(row["accepted_level"]) < HOST_LEVELS.index(minimum_level):
                 raise HostRegistrationRequired(
                     f"Agent host requires compatibility level {minimum_level}"

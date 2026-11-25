@@ -175,6 +175,8 @@ export function createChatProgress({ document, state, $, scrollChat, scheduleCha
         attachDispatchCancel(key, dispatch.dispatchId);
       } else if (dispatch.hasPrivateCard) {
         showPrivateCard(live, dispatch.dispatchId, dispatch.cardRevision);
+      } else if (dispatch.canStopGeneration) {
+        attachDispatchCancel(key, dispatch.dispatchId, true);
       } else {
         live.actions.replaceChildren();
       }

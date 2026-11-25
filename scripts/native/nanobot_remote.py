@@ -17,6 +17,91 @@ from pathlib import Path
 from nanobot_tunnel import restricted_tunnel
 
 
+def host_type(spec):
+    candidate = spec.get("hostType", "nanobot")
+    if candidate not in {"nanobot", "pi"}:
+        raise ValueError("Unknown private host implementation")
+    return candidate
+
+
+def route_document(config, spec):
+    row = {"url":"http://127.0.0.1:"+str(spec["remotePort"]), "instanceId":spec["instanceId"],
+           "tokenFile":str(config/"service.token"), "adapterVersion":spec["adapterVersion"], "subjects":spec["subjects"]}
+    if host_type(spec) == "pi":
+        row["requiredLevel"] = spec["requiredLevel"]
+    if spec.get("telegram"):
+        row["telegram"] = spec["telegram"]
+    return json.dumps({"routes":{spec["routeRef"]:row}},sort_keys=True).encode()
+
+
+def transition_routes(config, spec, candidate):
+    transition = spec["routeTransition"]
+    if (host_type(spec) != "pi" or not isinstance(transition,dict)
+            or set(transition) != {"fromRelease","toRelease","beforeSha256","afterSha256","fromLevel","fromTelegram"}
+            or not all(isinstance(transition[key],str) and re.fullmatch(r"[0-9a-f]{12}",transition[key])
+                       for key in ("fromRelease","toRelease"))
+            or transition["toRelease"] != candidate or transition["fromRelease"] == candidate
+            or transition["fromLevel"] not in {"L1","L2","L3"} or spec["requiredLevel"] not in {"L1","L2","L3"}):
+        raise ValueError("Unexpected Pi route transition or candidate")
+    telegram = transition["fromTelegram"]
+    if telegram is not None:
+        if (not isinstance(telegram,dict) or set(telegram) != {"botId","username","allowedSenders"}
+                or type(telegram["botId"]) is not int or not 0 < telegram["botId"] < 2**53
+                or not isinstance(telegram["username"],str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}",telegram["username"])
+                or not isinstance(telegram["allowedSenders"],dict) or len(telegram["allowedSenders"]) != 1
+                or not set(telegram["allowedSenders"]) <= set(spec["subjects"])
+                or any(not isinstance(v,str) or not re.fullmatch(r"[1-9][0-9]{0,15}",v) or int(v)>=2**53 for v in telegram["allowedSenders"].values())
+                or spec.get("telegram") and spec["telegram"] != telegram):
+            raise ValueError("Pi transition cannot replace a bot or the reviewed first sender")
+    predecessor = {**spec,"requiredLevel":transition["fromLevel"],"telegram":telegram}
+    before, after = route_document(config,predecessor), route_document(config,spec)
+    if (before == after or hashlib.sha256(before).hexdigest() != transition["beforeSha256"]
+            or hashlib.sha256(after).hexdigest() != transition["afterSha256"]):
+        raise ValueError("Reviewed Pi route transition hashes do not match the complete manifests")
+    return before, after
+
+
+def transition_action(config, spec, candidate, action, uid, gid):
+    """Only replace the pinned active manifest after the old runtime has drained."""
+    before, after = transition_routes(config,spec,candidate)
+    old_file = config/("transition-"+candidate+"-before.json")
+    new_file = config/("transition-"+candidate+"-after.json")
+    active = config/"routes.json"
+    with admission_lock(config):
+        current = credential_file(active,uid)
+        if current not in (before,after):
+            raise ValueError("Active Pi route changed outside the reviewed transition")
+        if action == "stage":
+            if current == before:
+                store_private(old_file,before,uid,gid)
+                store_private(new_file,after,uid,gid)
+        if credential_file(old_file,uid) != before or credential_file(new_file,uid) != after:
+            raise ValueError("Pi route rollback snapshots differ from the reviewed transaction")
+        if action == "stage":
+            return {"staged":True,"routeState":"predecessor" if current==before else "candidate"}
+        if action not in {"route_activate","route_restore"}:
+            raise ValueError("Unknown Pi route transition action")
+        moving_forward = action == "route_activate"
+        desired = after if moving_forward else before
+        if current != desired:
+            fd, name = tempfile.mkstemp(dir=config)
+            try:
+                with os.fdopen(fd,"wb") as output:
+                    os.fchown(output.fileno(),uid,gid)
+                    output.write(desired)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(name,active)
+                directory = os.open(config,os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            finally:
+                Path(name).unlink(missing_ok=True)
+        return {"routeState":"candidate" if moving_forward else "predecessor","changed":current != desired}
+
+
 def store_private(path, data, uid, gid):
     if path.is_symlink():
         raise ValueError("Unexpected credential symlink")
@@ -101,7 +186,7 @@ def display_name_action(db, spec, action, proof, audit=None):
     ).fetchone():
         return {"changed": False}
     if (current["subjects"], current["route_ref"], current["adapter_version"], current["host_type"], current["state"]) != (
-            sorted(spec["subjects"]), spec["routeRef"], spec["adapterVersion"], "nanobot", "enabled"):
+            sorted(spec["subjects"]), spec["routeRef"], spec["adapterVersion"], host_type(spec), "enabled"):
         raise ValueError("Display-name change has no authority over host assignments")
     revision = current["revision"]
     if action == "name_check":
@@ -286,7 +371,7 @@ def recovery_personal(
         raise ValueError(
             "Personal endpoint differs from the original administrator audit"
         )
-    label = f"workspace-nanobot:{instance}:{ref}"
+    label = f"workspace-{host_type(spec)}:{instance}:{ref}"
     rows = db.execute(
         "SELECT * FROM mcp_identity_tokens WHERE label=? ORDER BY created_at", (label,)
     ).fetchall()
@@ -394,7 +479,7 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
                 sorted(accounts),
                 spec["routeRef"],
                 spec["adapterVersion"],
-                "nanobot",
+                host_type(spec),
                 spec["displayName"],
             ):
                 raise ValueError(
@@ -510,7 +595,7 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
                 changed = provision.directory.save_instance(
                     instance,
                     display_name=current["display_name"],
-                    host_type="nanobot",
+                    host_type=host_type(spec),
                     route_ref=current["route_ref"],
                     adapter_version=current["adapter_version"],
                     state=state,
@@ -564,6 +649,7 @@ def execute(request):
     root = Path(request["root"])
     spec = request["spec"]
     instance = spec["instanceId"]
+    implementation = host_type(spec)
     subjects = spec["subjects"]
     user = pwd.getpwnam("agentbridge")
     db_path = root / "data/agentbridge.db"
@@ -580,6 +666,23 @@ def execute(request):
                 (instance,),
             ).fetchone()
         )
+        if implementation == "pi" and scope_table:
+            conflict = db.execute(
+                "SELECT 1 FROM workspace_host_instances WHERE "
+                "(instance_id=? OR route_ref=?) AND NOT "
+                "(instance_id=? AND route_ref=? AND host_type=? AND adapter_version=?)",
+                (instance, spec["routeRef"], instance, spec["routeRef"], implementation, spec["adapterVersion"]),
+            ).fetchone()
+            if conflict:
+                raise ValueError("Pi candidate conflicts with an existing host assignment")
+        if "routeTransition" in spec and action in {"stage","route_activate","route_restore"}:
+            scoped = db.execute("SELECT state,all_subjects FROM workspace_host_instances WHERE instance_id=? AND host_type='pi'",
+                                (instance,)).fetchone() if present else None
+            if scoped != ("enabled",0):
+                raise ValueError("Pi route transition requires its existing enabled scoped deployment")
+            assigned = {row[0] for row in db.execute("SELECT user_subject FROM workspace_host_visibility WHERE instance_id=?", (instance,))}
+            if assigned != set(subjects):
+                raise ValueError("Pi route transition cannot override the current administrator scope")
         preference_table = db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='workspace_host_preferences'"
         ).fetchone()
@@ -594,7 +697,7 @@ def execute(request):
             )
 
         baseline = defaults(db) if preference_table else None
-    config = root / "config" / ("nanobot-" + instance)
+    config = root / "config" / (implementation + "-" + instance)
     routes = config / "routes.json"
     if action in ("tunnel_enable", "tunnel_disable"):
         return restricted_tunnel(spec, action.removeprefix("tunnel_"))
@@ -627,39 +730,29 @@ def execute(request):
             "portOccupied": occupied,
             "productionActions": False,
         }
-    if action == "stage":
+    if action in {"stage","route_activate","route_restore"}:
         if os.geteuid() != 0:
             raise PermissionError(
                 "Publication privilege required to stage the controlled route"
             )
-        config.mkdir(mode=0o700, exist_ok=True)
+        if action == "stage":
+            config.mkdir(mode=0o700, exist_ok=True)
         if config.is_symlink() or config.parent.is_symlink():
             raise ValueError("Unexpected route directory")
         info = config.stat()
         if info.st_uid not in {user.pw_uid, 0} or info.st_mode & 0o077:
             raise ValueError("Unexpected route directory ownership")
+        if action != "stage":
+            return transition_action(config,spec,request["candidate"],action,user.pw_uid,user.pw_gid)
         os.chown(config, user.pw_uid, user.pw_gid)
-        store_private(
-            config / "service.token",
-            request["serviceSecret"].encode(),
-            user.pw_uid,
-            user.pw_gid,
-        )
-        row = {
-            "url": "http://127.0.0.1:" + str(spec["remotePort"]),
-            "instanceId": instance,
-            "tokenFile": str(config / "service.token"),
-            "adapterVersion": spec["adapterVersion"],
-            "subjects": subjects,
-        }
-        if spec.get("telegram"):
-            row["telegram"] = spec["telegram"]
-        data = json.dumps({"routes": {spec["routeRef"]: row}}, sort_keys=True).encode()
-        store_private(routes, data, user.pw_uid, user.pw_gid)
+        store_private(config/"service.token",request["serviceSecret"].encode(),user.pw_uid,user.pw_gid)
+        if "routeTransition" in spec:
+            return transition_action(config,spec,request["candidate"],action,user.pw_uid,user.pw_gid)
+        store_private(routes,route_document(config,spec),user.pw_uid,user.pw_gid)
         return {"staged": True}
     if os.geteuid() != user.pw_uid:
         raise PermissionError("Central provisioning runs under the service identity")
-    os.environ["AGENTBRIDGE_NANOBOT_ROUTES_FILE"] = str(routes)
+    os.environ[f"AGENTBRIDGE_{implementation.upper()}_ROUTES_FILE"] = str(routes)
     from types import SimpleNamespace
 
     from agentbridge.admin.stores import AdminAuditStore
@@ -679,61 +772,73 @@ def execute(request):
         (r for r in provision.directory.admin_list() if r["instance_id"] == instance),
         None,
     )
+    if current and current["host_type"] != implementation:
+        raise ValueError("Instance belongs to another implementation")
     if "recovery" in request:
         with admission_lock(config):
             return recover_scope(
                 request, provision, actor, accounts, config, user.pw_uid, user.pw_gid
             )
     if action == "rollback_scope":
-        if current and current["state"] == "revoked":
+        with admission_lock(config):
+            current = next((r for r in provision.directory.admin_list() if r["instance_id"] == instance), None)
+            if current and current["host_type"] != implementation:
+                raise ValueError("The recorded host type changed during rollback")
+            rolled_back = current and current["state"] == "revoked"
+            with closing(sqlite3.connect(encoded, uri=True)) as db:
+                creator = db.execute(
+                    "SELECT actor FROM workspace_host_directory_audit WHERE instance_id=? AND revision=1",
+                    (instance,),
+                ).fetchone()
+                if rolled_back and implementation == "pi":
+                    audit = db.execute(
+                        "SELECT actor,reason FROM workspace_host_directory_audit WHERE instance_id=? ORDER BY revision",
+                        (instance,),
+                    ).fetchall()
+                    if (current["revision"] != 2 or current["route_ref"] != spec["routeRef"]
+                            or current["subjects"] != sorted(subjects)
+                            or audit != [(actor["username"],FIRST_OPEN),(actor["username"],FIRST_CLOSE)]):
+                        raise RuntimeError("Pi scope changed outside the recorded initial rollback")
+            if rolled_back and implementation == "nanobot":
+                return {"closed": True}
+            if current and not rolled_back:
+                if (current["revision"] != 1 or current["route_ref"] != spec["routeRef"]
+                        or creator != (actor["username"],)):
+                    raise RuntimeError("An administrator changed the pilot after release. Review its scope manually")
+                provision.save(actor, "local-release", {
+                    "instance_id": instance, "display_name": current["display_name"], "route_ref": current["route_ref"],
+                    "state": "revoked", "subjects": current["subjects"], "expected_revision": 1, "reason": FIRST_CLOSE,
+                })
+            identities = McpIdentityTokenStore(db_path)
+            for subject, ref in subjects.items():
+                for identity in identities.list(user_subject=subject, limit=1000):
+                    if identity["label"] == f"workspace-{implementation}:{instance}:{ref}" and identity["state"] == "active":
+                        identities.revoke(identity["token_id"])
             return {"closed": True}
-        with closing(sqlite3.connect(encoded, uri=True)) as db:
-            creator = db.execute(
-                "SELECT actor FROM workspace_host_directory_audit WHERE instance_id=? AND revision=1",
-                (instance,),
-            ).fetchone()
-        if (
-            current
-            and current["revision"] == 1
-            and current["route_ref"] == spec["routeRef"]
-            and creator == (actor["username"],)
-        ):
-            provision.save(
-                actor,
-                "local-release",
-                {
-                    "instance_id": instance,
-                    "display_name": current["display_name"],
-                    "route_ref": current["route_ref"],
-                    "state": "revoked",
-                    "subjects": current["subjects"],
-                    "expected_revision": 1,
-                    "reason": "发布验收失败，撤回首次试点开放",
-                },
-            )
-        elif current and current["state"] != "revoked":
-            raise RuntimeError(
-                "An administrator changed the pilot after release. Review its scope manually"
-            )
-        identities = McpIdentityTokenStore(db_path)
-        for subject, ref in subjects.items():
-            for identity in identities.list(user_subject=subject, limit=1000):
-                if (
-                    identity["label"] == f"workspace-nanobot:{instance}:{ref}"
-                    and identity["state"] == "active"
-                ):
-                    identities.revoke(identity["token_id"])
-        return {"closed": True}
-    if action == "probe":
+    if action in ("probe","probe_predecessor"):
+        level = spec.get("requiredLevel")
+        if "routeTransition" in spec:
+            before, after = transition_routes(config,spec,request["candidate"])
+            predecessor = action == "probe_predecessor"
+            if credential_file(routes,user.pw_uid) != (before if predecessor else after):
+                raise ValueError("Active Pi route does not match the release being probed")
+            if predecessor:
+                level = spec["routeTransition"]["fromLevel"]
+        elif action == "probe_predecessor":
+            raise ValueError("A predecessor probe requires a reviewed Pi route transition")
         client = provision._routes()[spec["routeRef"]]["client"]
         result = client.readiness()
-        required = {"chat", "credential_card", "attachments"}
-        if spec.get("requiredLevel") == "L3":
+        required = {"chat"} if implementation == "pi" else {"chat", "credential_card", "attachments"}
+        if level in {"L2", "L3"}:
+            required.add("credential_card")
+        if level == "L3":
             required.update(("skills", "skill_trial", "skill_model"))
         if (
             not result["available"]
             or result.get("adapterVersion") != spec["adapterVersion"]
             or not required.issubset(result.get("capabilities", ()))
+            or implementation == "pi" and (result.get("acceptedLevel") != level or
+                    any(type(result.get(key)) is not int or result[key] != 2 for key in ("configuredBindings","verifiedBindings")))
         ):
             raise RuntimeError(
                 "Deployed Workspace route failed authenticated readiness"
@@ -769,7 +874,8 @@ def execute(request):
                 },
             )
         if (
-            current["state"] != "enabled"
+            current["host_type"] != implementation
+            or current["state"] != "enabled"
             or current["route_ref"] != spec["routeRef"]
             or current["subjects"] != sorted(subjects)
             or current["adapter_version"] != spec["adapterVersion"]
@@ -804,7 +910,7 @@ def execute(request):
                 },
             )
             path = config / (ref + ".token")
-            label = "workspace-nanobot:" + instance + ":" + ref
+            label = f"workspace-{host_type(spec)}:{instance}:{ref}"
             if ref in issued_generations:
                 path = config / ("issued-" + issued_generations[ref] + ".token")
             if (

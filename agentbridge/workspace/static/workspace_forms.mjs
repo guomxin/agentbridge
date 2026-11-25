@@ -285,7 +285,7 @@ export function createComposer({ document, state, $, toast, getScope, executeCha
     event.preventDefault();
     const form = event.currentTarget;
     const textarea = form.elements.message;
-    if (textarea.disabled) return;
+    if (textarea.disabled || form.inert || state.hostChanging) return;
     const trial = state.composerSkillTrial;
     const attachments = state.composerAttachments.map((item) => ({ ...item }));
     const message =

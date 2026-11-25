@@ -1,9 +1,9 @@
-"""Deliver an existing task file only to the NanoBot private origin that requested it."""
+"""Deliver an existing task file only to the private Bot origin that requested it."""
 
 import base64
 import re
 
-from agentbridge.core.endpoint_instances import endpoint_instances
+from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS, endpoint_instances
 from agentbridge.core.document_downloads import (
     DocumentDownloadAccessDenied,
     DocumentDownloadIntegrityError,
@@ -23,7 +23,7 @@ ARTIFACT_TYPES = {*DOCUMENT_TYPES, "database_csv"}
 
 def origin_pair_proof(db, subject, endpoint, ownership):
     origin = ownership.get(endpoint["endpoint_id"])
-    if not origin or origin[0] != "nanobot" or endpoint["client_type"] != "telegram":
+    if not origin or origin[0] not in PRIVATE_BOT_HOSTS or endpoint["client_type"] != "telegram":
         return None
     binding = mirror_binding(db, subject, origin[1], ownership)
     sender = endpoint["external_subject"]
@@ -43,7 +43,7 @@ def require_certificate_selection(
     """Accept only results from certificate searches actually observed by this private task."""
     task = service.tasks.get_task(task_id, user_subject=subject)
     if (
-        task["agent_host"] != "nanobot"
+        task["agent_host"] not in PRIVATE_BOT_HOSTS
         or task["origin_endpoint_id"] != endpoint_id
         or task["active_conversation_ref"] != conversation
     ):
@@ -51,7 +51,7 @@ def require_certificate_selection(
     endpoint = service.tasks.get_endpoint(endpoint_id, user_subject=subject)
     with service.tasks._connect() as db:
         ownership = endpoint_instances(db, subject)
-        if ownership.get(endpoint_id) != ("nanobot", instance) or not origin_pair_proof(
+        if ownership.get(endpoint_id) != (task["agent_host"], instance) or not origin_pair_proof(
             db, subject, endpoint, ownership
         ):
             raise PermissionError("The original Telegram pairing is no longer available")
@@ -105,14 +105,14 @@ def authorized_artifact(service, delivery, endpoint, instance, *, with_body):
         return {"allowed": False}
     task = service.tasks.get_task(task_id, user_subject=subject)
     if (
-        task["agent_host"] != "nanobot"
+        task["agent_host"] not in PRIVATE_BOT_HOSTS
         or task["origin_endpoint_id"] != endpoint["endpoint_id"]
         or task["active_conversation_ref"] != endpoint["conversation_ref"]
     ):
         return {"allowed": False}
     with service.tasks._connect() as db:
         ownership = endpoint_instances(db, subject)
-        if ownership.get(endpoint["endpoint_id"]) != ("nanobot", instance):
+        if ownership.get(endpoint["endpoint_id"]) != (task["agent_host"], instance):
             return {"allowed": False}
         proof = origin_pair_proof(db, subject, endpoint, ownership)
     if proof != event["artifactPairProof"]:

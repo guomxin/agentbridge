@@ -4,8 +4,30 @@ import base64
 from pathlib import PurePosixPath
 
 
+def document_receipt(result, bot, chat, size):
+    from .telegram import numeric
+
+    document = result.get("document") if isinstance(result, dict) else None
+    sender = result.get("from") if isinstance(result, dict) else None
+    destination = result.get("chat") if isinstance(result, dict) else None
+    if (
+        isinstance(document, dict)
+        and isinstance(document.get("file_id"), str)
+        and document["file_id"]
+        and numeric(result.get("message_id"))
+        and isinstance(sender, dict)
+        and sender.get("id") == bot
+        and isinstance(destination, dict)
+        and destination.get("id") == chat
+        and destination.get("type") == "private"
+        and document.get("file_size", size) == size
+    ):
+        return result["message_id"]
+    return None
+
+
 def deliver_file(pilot, chat, binding, digest, event):
-    from .telegram import TelegramUnavailable, numeric
+    from .telegram import TelegramUnavailable
 
     artifact = event["artifactId"]
     key = (pilot.bot_id, chat, artifact)
@@ -75,22 +97,7 @@ def deliver_file(pilot, chat, binding, digest, event):
         receipt = None
         try:
             result = pilot.api.send_document(chat, name, mime, data)
-            document = result.get("document") if isinstance(result, dict) else None
-            sender = result.get("from") if isinstance(result, dict) else None
-            destination = result.get("chat") if isinstance(result, dict) else None
-            if (
-                isinstance(document, dict)
-                and isinstance(document.get("file_id"), str)
-                and document["file_id"]
-                and numeric(result.get("message_id"))
-                and isinstance(sender, dict)
-                and sender.get("id") == pilot.bot_id
-                and isinstance(destination, dict)
-                and destination.get("id") == chat
-                and destination.get("type") == "private"
-                and document.get("file_size", size) == size
-            ):
-                receipt = result["message_id"]
+            receipt = document_receipt(result, pilot.bot_id, chat, size)
         except TelegramUnavailable:
             pass
         with pilot.db:

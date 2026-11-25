@@ -29,7 +29,7 @@ from agentbridge.core.timeline_attachments import (
     public_attachment,
 )
 from agentbridge.workspace.gateway import GatewayRequestError, OpenClawGatewayClient
-from agentbridge.workspace.stores import normalize_skill_trial
+from agentbridge.workspace.stores import WorkspaceConflictError, normalize_skill_trial
 from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID
 from agentbridge.workspace.performance import WorkspacePerformance
 
@@ -59,6 +59,7 @@ _HOST_DISPATCH_TERMINAL_STATES = {
     "failed_before_accept",
     "acceptance_unknown",
     "result_unknown",
+    "stopped",
     "canceled",
 }
 
@@ -140,7 +141,16 @@ class WorkspaceApplication:
         binding = checked_binding(self.store, owner, recorded)
         if binding is None or binding["instance_id"] == LEGACY_INSTANCE_ID:
             return self._skill_completion(system, prompt)
-        return self._bound_client(binding).skill_completion(binding, system, prompt)
+        telegram_origin = recorded.get("telegram_origin") if recorded else None
+        if telegram_origin:
+            self.service.require_host_registration(
+                user_subject=owner, agent_host="pi", host_instance_id=binding["instance_id"],
+                host_version=telegram_origin["version"], minimum_level="L3",
+            )
+        result = self._bound_client(binding).skill_completion(binding, system, prompt)
+        if telegram_origin:
+            checked_binding(self.store, owner, recorded)
+        return result
 
     def skill_authoring_catalog(self):
         from agentbridge.core.skill_catalog import authoring_catalog
@@ -1112,7 +1122,7 @@ class WorkspaceApplication:
                 raise WorkspaceArtifactError("DATABASE_REPORT_UNAVAILABLE", "原报告已过期或访问权限已变化，请重新查询导出。") from exc
             return self.task_detail(account, task_id)
         task = self.service.tasks.get_task(task_id, user_subject=account["user_subject"])
-        if task["agent_host"] == "nanobot":
+        if task["agent_host"] in {"pi", "nanobot"}:
             dispatch = self.store.dispatch_for_result(task, account)
             if dispatch is not None:
                 binding = self.store.dispatch_binding(dispatch)
@@ -1286,16 +1296,23 @@ class WorkspaceApplication:
         ]
 
     def telegram_hosts(self, account: dict) -> dict:
-        from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
+        from agentbridge.workspace.nanobot_gateway import pi_telegram_sender, route_specs_for
         if not self.host_routes:
             return {}
-        allowed = {item["instance_id"]: item for item in self.hosts.choices(account["account_id"])["items"]
-                   if item["selectable"] and item["host_type"] == "nanobot"}
         result = {}
-        for alias, spec in load_nanobot_route_specs().items():
-            item = allowed.get(spec.get("instanceId"))
+        for item in self.hosts.choices(account["account_id"])["items"]:
+            if not item["selectable"] or item["host_type"] not in {"nanobot", "pi"}:
+                continue
+            with self.store._connect() as db:
+                db.execute("BEGIN")
+                host = self.hosts.resolve(db, account["account_id"], instance_id=item["instance_id"], existing=True)
+            spec = route_specs_for(host["host_type"]).get(host["route_ref"]) or {}
             public = spec.get("telegram")
-            if not item or alias not in self.host_routes or not isinstance(public, dict):
+            if (spec.get("instanceId") != item["instance_id"] or host["route_ref"] not in self.host_routes
+                    or not isinstance(public, dict)):
+                continue
+            if host["host_type"] == "pi" and (not pi_telegram_sender(spec, account["user_subject"])
+                    or (spec.get("subjects") or {}).get(account["user_subject"]) != host["credential_ref"]):
                 continue
             username = public.get("username")
             bot_id = str(public.get("botId", ""))
@@ -1349,8 +1366,10 @@ class WorkspaceApplication:
             except PermissionError:
                 return {"available": False, "code": "HOST_SELECTION_UNAVAILABLE"}
             if binding["instance_id"] != LEGACY_INSTANCE_ID:
-                client = self.host_routes.get(binding["route_ref"])
-                status = client.readiness() if client else {"available": False, "code": "HOST_NOT_CONFIGURED"}
+                try:
+                    status = self._bound_client(binding).readiness()
+                except GatewayRequestError as exc:
+                    status = {"available": False, "code": exc.code}
                 return {**status, "instanceId": binding["instance_id"]}
         if self.gateway is None:
             return {
@@ -1490,6 +1509,7 @@ class WorkspaceApplication:
                     "dispatchId": dispatch["dispatch_id"],
                     "instanceId": dispatch["instance_id"],
                     "hasPrivateCard": dispatch["has_private_card"] and dispatch["state"] == "accepted",
+                    **({"canStopGeneration": True} if dispatch["agent_host"] == "pi" and dispatch["state"] == "accepted" else {}),
                     "cardRevision": dispatch.get("card_revision"),
                     "state": dispatch["state"],
                     "runId": dispatch["accepted_run_id"],
@@ -1541,6 +1561,16 @@ class WorkspaceApplication:
             "dispatchId": dispatch["dispatch_id"],
             "state": dispatch["state"],
         }
+
+    def stop_chat_generation(self, account, dispatch_id):
+        dispatch = self.store.get_host_dispatch(dispatch_id, user_subject=account["user_subject"])
+        if dispatch["account_id"] != account["account_id"] or dispatch["agent_host"] != "pi":
+            raise KeyError("此请求没有可停止的 Pi 运行。")
+        if dispatch["state"] != "accepted" or not dispatch["accepted_run_id"]:
+            raise WorkspaceConflictError("HOST_DISPATCH_CANCEL_NOT_ALLOWED")
+        binding = self.store.dispatch_binding(dispatch)
+        state = self._bound_client(binding).stop_generation(binding, dispatch)
+        return {"dispatchId": dispatch_id, "runState": state}
 
     def close(self) -> None:
         self.service.skill_authoring.workbench.close()
@@ -1603,6 +1633,10 @@ class WorkspaceApplication:
         client = self.host_routes.get(binding["route_ref"])
         if not client:
             raise GatewayRequestError("HOST_NOT_CONFIGURED", "原宿主实例尚未配置连接。")
+        from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
+        if isinstance(client, NanoBotGatewayClient) and (
+                client.host_type != binding["host_type"] or client.instance_id != binding["instance_id"]):
+            raise GatewayRequestError("HOST_BINDING_UNAVAILABLE", "宿主连接与原实例绑定不符。")
         return client
 
     def _run_evidence(self, dispatch: dict, run_ref: str) -> dict:
@@ -1980,6 +2014,10 @@ class WorkspaceApplication:
                  "text": evidence["final_text"], "recovered": True},
             )
             return
+        if evidence and evidence.get("state") == "stopped" and dispatch["agent_host"] == "pi":
+            self._finish_accepted_dispatch(dispatch, account, {"type": "chat", "runId": run_id, "state": "aborted",
+                "text": "已停止生成回复。可在原任务中查看业务状态。", "safeToRetry": False})
+            return
         if not (evidence and evidence.get("state") == "unknown") and not self.store.host_dispatch_result_deadline_passed(dispatch):
             self.store.defer_host_dispatch_result(
                 dispatch["dispatch_id"], claim_token=dispatch["claim_token"],
@@ -2000,6 +2038,8 @@ class WorkspaceApplication:
             "请求已接收，但在结果恢复时限内未能确认最终结果。"
             "这不代表后台任务失败；请核对任务状态，系统不会自动重发。"
         )
+        if evidence and evidence.get("state") == "unknown" and dispatch["agent_host"] == "pi":
+            text = "Pi 已接收请求，原运行的最终结果未知。系统已停止重发，请在原任务中核对业务状态。"
         verified = self._verified_trial_event(dispatch, {'state': 'error', 'text': text})
         text = verified['text']
         trial_payload = {'skillTrial': verified['skillTrial']} if verified.get('skillTrial') else {}
@@ -2086,18 +2126,16 @@ class WorkspaceApplication:
                 message_key=f"workspace:assistant:error:{run_id}",
                 payload=trial_payload,
             )
-            terminal_state = "failed"
+            terminal_state = "stopped" if state == "aborted" and dispatch["agent_host"] == "pi" else "failed"
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
             state=terminal_state,
-            error_code=(
-                None if terminal_state == "completed" else "HOST_RUN_FAILED"
-            ),
+            error_code="HOST_RUN_FAILED" if terminal_state == "failed" else None,
             event={**item, "runId": run_id, "text": text},
         )
         self.performance.record(dispatch, "workspace.host.terminal",
-                                status="succeeded" if terminal_state == "completed" else "failed", terminal=True)
+                                status="succeeded" if terminal_state == "completed" else terminal_state, terminal=True)
 
     def _fail_dispatch_before_accept(
         self,
@@ -2200,6 +2238,8 @@ class WorkspaceApplication:
 
         def public_event(event):
             payload = {key: value for key, value in event['payload'].items() if key != 'skillTrial'}
+            if payload.get('type') == 'accepted' and dispatch["agent_host"] == "pi":
+                payload['canStopGeneration'] = True
             if payload.get('type') == 'chat' and payload.get('state') in {'final', 'error', 'aborted'}:
                 payload = self._verified_trial_event(dispatch, payload)
             return {**payload, 'dispatchId': dispatch_id}
@@ -2443,7 +2483,7 @@ def _validated_chat_attachments(values: list[dict] | None) -> list[dict]:
 def _workspace_gateway_failure_text(error: GatewayRequestError) -> str:
     code = str(error.code or "GATEWAY_REQUEST_FAILED")
     details = error.details if isinstance(error.details, dict) else {}
-    if code == "NANOBOT_CAPABILITY_UNAVAILABLE":
+    if code in {"NANOBOT_CAPABILITY_UNAVAILABLE", "PI_CAPABILITY_UNAVAILABLE"}:
         return "此宿主尚未开放该输入能力，请检查实例支持的附件或技能试用范围。"
     if code == "WORKSPACE_RUN_IN_PROGRESS":
         return "\u4e0a\u4e00\u6761\u7f51\u9875\u4efb\u52a1\u4ecd\u5728\u5904\u7406\uff0c\u672c\u6b21\u8bf7\u6c42\u6ca1\u6709\u6392\u961f\u3002"

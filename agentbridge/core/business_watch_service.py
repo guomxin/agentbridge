@@ -52,12 +52,29 @@ class BusinessWatchService:
         from agentbridge.core.business_watch_notifications import on_watch_change
         self.store.on_change=lambda connection,event,watch:on_watch_change(service,connection,event,watch)
 
+    def _recipient_endpoints(self, subject):
+        from agentbridge.core.oa_daily_digest import check_digest_telegram_endpoint
+        endpoints = self.service.tasks.list_endpoints(user_subject=subject, active_only=True, limit=500)
+        if not any(endpoint['agent_host'] == 'pi' for endpoint in endpoints):
+            return endpoints
+        current = []
+        with self.service.tasks._connect() as db:
+            db.execute("BEGIN")
+            for endpoint in endpoints:
+                if endpoint['agent_host'] == 'pi' and endpoint['client_type'] == 'telegram':
+                    try:
+                        check_digest_telegram_endpoint(db, subject, endpoint['endpoint_id'])
+                    except (PermissionError, ValueError):
+                        continue
+                current.append(endpoint)
+        return current
+
     def options(self,subject):
         try: self.require_permission(subject)
         except PermissionError:
             return {'enabled':False,'endpoints':[],'message':'尚未开通流程持续跟踪，请联系管理员。'}
         labels={'telegram':'Telegram','openclaw-weixin':'微信','wechat':'微信','weixin':'微信'}
-        owned=[e for e in self.service.tasks.list_endpoints(user_subject=subject,active_only=True,limit=500)
+        owned=[e for e in self._recipient_endpoints(subject)
             if e['client_type'] in labels]
         channel_counts,display_counts={},{}
         for endpoint in owned:
@@ -270,7 +287,7 @@ class BusinessWatchService:
     def _endpoints(self, subject, endpoints):
         if not isinstance(endpoints,list) or len(endpoints)>8 or any(not isinstance(e,str) for e in endpoints):
             raise BusinessWatchError('WATCH_ARGUMENTS_INVALID','提醒端点不合法。')
-        owned = {e['endpoint_id'] for e in self.service.tasks.list_endpoints(user_subject=subject,active_only=True,limit=500)}
+        owned = {e['endpoint_id'] for e in self._recipient_endpoints(subject)}
         if set(endpoints)-owned:
             raise BusinessWatchError('WATCH_ENDPOINT_DENIED','只能选择本人已绑定的端点。',status=403)
 

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agentbridge.core.actionable_results import _telegram_endpoint
+from .nanobot_gateway import pi_telegram_sender, route_specs_for
 
 
 def numeric_id(value):
@@ -27,16 +28,42 @@ def telegram_conversation_ref(instance, subject, workspace_endpoint_id, bot, sen
     return "agentbridge:telegram:" + str(uuid5(NAMESPACE_URL, basis))
 
 
-def eligible(service, db, subject, instance, *, new_link=False):
+def _channel_assignment(db, subject, instance, bot=None):
+    """Resolve deployment permission separately from the live private pairing."""
+    row = db.execute("""SELECT h.host_type,h.route_ref,h.state,h.all_subjects,b.credential_ref
+        FROM workspace_host_instances h
+        LEFT JOIN workspace_accounts a ON a.user_subject=? AND a.state='active'
+        LEFT JOIN workspace_host_bindings b ON b.instance_id=h.instance_id AND b.account_id=a.account_id
+        WHERE h.instance_id=?""", (subject, instance)).fetchone()
+    if not row or row["state"] != "enabled":
+        return None, None
+    if row["host_type"] == "nanobot":
+        return "nanobot", None
+    if row["host_type"] != "pi" or row["all_subjects"] or not row["credential_ref"]:
+        return None, None
+    try:
+        spec = route_specs_for("pi").get(row["route_ref"]) or {}
+        subjects = spec.get("subjects")
+        if (spec.get("instanceId") == instance and isinstance(subjects, dict)
+                and subjects.get(subject) == row["credential_ref"]):
+            sender = pi_telegram_sender(spec, subject, bot)
+            if sender:
+                return "pi", sender
+    except (OSError, ValueError, TypeError):
+        pass
+    return None, None
+
+
+def eligible(service, db, subject, instance, *, new_link=False, bot=None):
     account = db.execute(
         "SELECT account_id FROM workspace_accounts WHERE state='active' AND user_subject=?",
         (subject,),
     ).fetchone()
     enabled = db.execute(
-        "SELECT all_subjects FROM workspace_host_instances WHERE instance_id=? AND host_type='nanobot' AND state='enabled'",
+        "SELECT all_subjects FROM workspace_host_instances WHERE instance_id=? AND state='enabled'",
         (instance,),
     ).fetchone()
-    if not account or not enabled or new_link and enabled["all_subjects"]:
+    if not account or not enabled or new_link and enabled["all_subjects"] or not _channel_assignment(db, subject, instance, bot)[0]:
         return False
     try:
         service.workspace.hosts.resolve(
@@ -82,11 +109,17 @@ def active_claimants(db, sender):
 def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
     # Conservatively reject two active owners even if one older row is malformed.
     claimed = active_claimants(db, sender)
-    if claimed:
+    host_type, allowed_sender = _channel_assignment(db, subject, instance, bot)
+    if not host_type:
+        return False
+    if host_type == "pi":
+        if sender != allowed_sender or claimed - {subject}:
+            return False
+    elif claimed:
         return claimed == {subject} and (subject, sender) in old_peers(
             db, sender=sender
         )
-    if not allow_new_pair or old_peers(db, subject=subject):
+    if not allow_new_pair or host_type == "nanobot" and old_peers(db, subject=subject):
         return False
     return bool(
         db.execute(
@@ -97,22 +130,22 @@ def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
 
 def mirror_binding(db, subject, instance, ownership):
     """Return the current deployed Bot and exact private Web binding, failing closed."""
-    from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
-
-    binding = db.execute("""SELECT b.*, h.route_ref,h.all_subjects,e.token_id
+    binding = db.execute("""SELECT b.*, h.host_type,h.route_ref,h.all_subjects,e.token_id
         FROM workspace_host_bindings b JOIN workspace_host_instances h USING(instance_id)
         JOIN workspace_accounts a ON a.account_id=b.account_id JOIN client_endpoints e ON e.endpoint_id=b.endpoint_id
-        WHERE a.user_subject=? AND b.instance_id=? AND h.host_type='nanobot' AND h.state='enabled'""",
+        WHERE a.user_subject=? AND b.instance_id=? AND h.host_type IN ('nanobot','pi') AND h.state='enabled'""",
         (subject, instance)).fetchone()
-    if not binding or ownership.get(binding["endpoint_id"]) != ("nanobot", instance):
+    if not binding or ownership.get(binding["endpoint_id"]) != (binding["host_type"], instance):
         return None
     try:
-        spec = load_nanobot_route_specs().get(binding["route_ref"], {})
+        spec = route_specs_for(binding["host_type"]).get(binding["route_ref"], {})
         if (spec.get("instanceId") != instance or not isinstance(spec.get("subjects"), dict)
                 or spec["subjects"].get(subject) != binding["credential_ref"]
                 or not isinstance(spec.get("telegram"), dict)):
             return None
         bot = numeric_id(spec["telegram"].get("botId"))
+        if binding["host_type"] == "pi" and not pi_telegram_sender(spec, subject, bot):
+            return None
     except (OSError, ValueError):
         return None
     return {**dict(binding), "bot": bot}
@@ -133,7 +166,7 @@ def mirror_sender_ids(db, subject, binding):
 
 def mirror_pair_proof(db, subject, binding, sender):
     """Pin a delivery to the same grant that authorized its creation."""
-    if active_claimants(db, sender):
+    if binding["host_type"] == "nanobot" and active_claimants(db, sender):
         grants = []
         for row in db.execute("""SELECT endpoint_id FROM client_endpoints WHERE user_subject=? AND agent_host='openclaw'
                 AND lower(client_type)='telegram' AND state='active' AND external_subject=? ORDER BY endpoint_id""",
@@ -167,7 +200,7 @@ def _ensure_telegram_endpoint(db, tasks, subject, binding, bot, sender, token_id
     key = f"telegram:{bot}:{sender}"
     conversation = telegram_conversation_ref(binding["instance_id"], subject, binding["endpoint_id"], bot, sender)
     route = {"channel": "telegram", "to": sender, "accountId": bot}
-    old = db.execute("SELECT * FROM client_endpoints WHERE agent_host='nanobot' AND endpoint_key=?", (key,)).fetchone()
+    old = db.execute("SELECT * FROM client_endpoints WHERE agent_host=? AND endpoint_key=?", (binding["host_type"], key)).fetchone()
     if old and (old["state"] != "active" or old["user_subject"] != subject or old["conversation_ref"] != conversation
                 or old["client_type"] != "telegram" or old["external_subject"] != sender or old["account_id"] != bot
                 or json.loads(old["route_json"]) != route):
@@ -176,7 +209,7 @@ def _ensure_telegram_endpoint(db, tasks, subject, binding, bot, sender, token_id
         return old["endpoint_id"]
     endpoint, _ = tasks.ensure_endpoint(
         user_subject=subject, token_id=old["token_id"] if old and not refresh else token_id,
-        agent_host="nanobot", endpoint_key=key, client_type="telegram", external_subject=sender,
+        agent_host=binding["host_type"], endpoint_key=key, client_type="telegram", external_subject=sender,
         conversation_ref=conversation, account_id=bot, route=route,
         capabilities=NANOBOT_TELEGRAM_CAPABILITIES, connection=db)
     return endpoint["endpoint_id"]
@@ -219,12 +252,12 @@ class TelegramPilotLinks:
     def _hash(value):
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    def _owner(self, db, account, instance):
+    def _owner(self, db, account, instance, bot):
         row = db.execute(
             "SELECT user_subject FROM workspace_accounts WHERE account_id=? AND state='active'",
             (account,),
         ).fetchone()
-        if not row or not eligible(self.service, db, row["user_subject"], instance):
+        if not row or not eligible(self.service, db, row["user_subject"], instance, bot=bot):
             raise PermissionError("当前账号无法绑定此试点实例")
         return row["user_subject"]
 
@@ -236,7 +269,8 @@ class TelegramPilotLinks:
             "expires_at": None,
             "sender_hint": None,
         }
-        candidates = old_peers(db, subject=owner)
+        host_type, _ = _channel_assignment(db, owner, instance, bot)
+        candidates = old_peers(db, subject=owner) if host_type == "nanobot" else set()
         for _, sender in candidates:
             if active_claimants(db, sender) == {owner}:
                 return {**view, "state": "linked", "source": "existing"}
@@ -247,7 +281,8 @@ class TelegramPilotLinks:
         if (
             row
             and not candidates
-            and not active_claimants(db, row["sender"])
+            and (verified_pair(db, owner, instance, bot, row["sender"], allow_new_pair=True)
+                 if host_type == "pi" else not active_claimants(db, row["sender"]))
             and eligible(self.service, db, owner, instance, new_link=True)
         ):
             return {**view, "state": "linked", "source": "workspace"}
@@ -276,7 +311,7 @@ class TelegramPilotLinks:
             db.execute("BEGIN")
             return self._status(
                 db,
-                self._owner(db, account_id, instance_id),
+                self._owner(db, account_id, instance_id, bot_id),
                 instance_id,
                 numeric_id(bot_id),
             )
@@ -285,7 +320,7 @@ class TelegramPilotLinks:
         bot = numeric_id(bot_id)
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            owner = self._owner(db, account_id, instance_id)
+            owner = self._owner(db, account_id, instance_id, bot)
             state = self._status(db, owner, instance_id, bot)
             if state["state"] == "linked":
                 return state
@@ -325,8 +360,11 @@ class TelegramPilotLinks:
                 self.service, db, subject, instance_id, new_link=True
             ):
                 return None
+            host_type, allowed_sender = _channel_assignment(db, subject, instance_id, bot)
+            claimed = active_claimants(db, sender)
             if (
-                active_claimants(db, sender)
+                not host_type or (host_type == "pi" and (sender != allowed_sender or claimed - {subject}))
+                or (host_type == "nanobot" and claimed)
                 or db.execute(
                     "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND sender=?",
                     (instance_id, bot, sender),
@@ -349,7 +387,7 @@ class TelegramPilotLinks:
         failed = False
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            owner = self._owner(db, account_id, instance_id)
+            owner = self._owner(db, account_id, instance_id, bot)
             row = db.execute(
                 """SELECT * FROM workspace_telegram_pilot_challenges WHERE instance=? AND bot=? AND owner=?
                 AND challenge_id=? AND expires_at>? AND sender IS NOT NULL AND attempts<5""",
@@ -372,9 +410,11 @@ class TelegramPilotLinks:
                 )
                 failed = True
             else:
+                host_type, allowed_sender = _channel_assignment(db, owner, instance_id, bot)
+                claimed = active_claimants(db, row["sender"])
                 if (
-                    old_peers(db, subject=owner)
-                    or active_claimants(db, row["sender"])
+                    not host_type or (host_type == "pi" and (row["sender"] != allowed_sender or claimed - {owner}))
+                    or (host_type == "nanobot" and (old_peers(db, subject=owner) or claimed))
                     or db.execute(
                         "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND (owner=? OR sender=?)",
                         (instance_id, bot, owner, row["sender"]),
@@ -397,7 +437,7 @@ class TelegramPilotLinks:
         bot = numeric_id(bot_id)
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            owner = self._owner(db, account_id, instance_id)
+            owner = self._owner(db, account_id, instance_id, bot)
             for table in (
                 "workspace_telegram_pilot_links",
                 "workspace_telegram_pilot_challenges",
@@ -431,10 +471,7 @@ class TelegramPilotLinks:
             return {"senderIds": senders}
 
     def ensure_endpoint(self, subject, token_id, instance, bot_id, sender_id):
-        from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
-
         bot, sender = numeric_id(bot_id), numeric_id(sender_id)
-        routes = load_nanobot_route_specs()
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if not self._verified(db, subject, instance, bot, sender):
@@ -446,7 +483,7 @@ class TelegramPilotLinks:
             binding = self.hosts.resolve(
                 db, account["account_id"], instance_id=instance, existing=True
             )
-            route = routes.get(binding["route_ref"]) or {}
+            route = route_specs_for(binding["host_type"]).get(binding["route_ref"]) or {}
             if (
                 route.get("instanceId") != instance
                 or str((route.get("telegram") or {}).get("botId")) != bot
@@ -460,10 +497,17 @@ class TelegramPilotLinks:
             )
             endpoint = _ensure_telegram_endpoint(db, self.service.tasks, subject, binding, bot, sender,
                                                  token_id, refresh=True)
+            pairing = {}
+            if binding["host_type"] == "pi":
+                proof = mirror_pair_proof(db, subject, {**binding, "bot": bot}, sender)
+                if not proof:
+                    raise PermissionError("未取得当前 Pi 私聊配对证明。")
+                pairing = {"pairingRef": proof}
             return {
                 "endpointId": endpoint,
                 "endpointKey": key,
                 "conversationRef": conversation,
                 "workspaceEndpointId": binding["endpoint_id"],
                 "workspaceEndpointKey": binding["endpoint_key"],
+                **pairing,
             }

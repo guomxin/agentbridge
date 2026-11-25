@@ -9,9 +9,9 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from agentbridge.core.actionable_results import ActionableResultError, _telegram_endpoint
-from agentbridge.core.chat_mirror import NANOBOT_OA_DIGEST
+from agentbridge.core.chat_mirror import private_bot_digest_kind
 from agentbridge.core.commit_notifications import mark_transaction_change
-from agentbridge.core.endpoint_instances import endpoint_instances
+from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS, endpoint_instances
 from agentbridge.core.oa_daily_digest_report import collect_oa_daily_digest
 from agentbridge.core.tasks import TaskIntegrityError
 
@@ -71,16 +71,16 @@ def check_digest_telegram_endpoint(connection, user_subject, endpoint_id):
         raise PermissionError("Telegram 端点与原绑定的收件人或机器人账号不一致。")
     if not set(json.loads(checked["capabilities_json"])) & {"direct_status", "timeline_message"}:
         raise PermissionError("本人 Telegram 私聊端点未启用消息投递。")
-    if checked["agent_host"] == "nanobot":
+    if checked["agent_host"] in PRIVATE_BOT_HOSTS:
         from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_pair_proof, mirror_sender_ids
 
         binding = mirror_binding(connection, user_subject, checked["_instance_id"], endpoint_instances(connection, user_subject))
         if (not binding or binding["bot"] != account
                 or mirror_sender_ids(connection, user_subject, binding) != [sender]):
-            raise PermissionError("NanoBot 私聊绑定已更改。")
+            raise PermissionError("私聊绑定已更改。")
         proof = mirror_pair_proof(connection, user_subject, binding, sender)
         if not proof:
-            raise PermissionError("NanoBot 私聊绑定已失效。")
+            raise PermissionError("私聊绑定已失效。")
         checked["_pair_proof"] = proof
         checked["_workspace_endpoint"] = binding["endpoint_id"]
         checked["_binding_hash"] = sha256((checked["_binding_hash"] + proof).encode()).hexdigest()
@@ -180,7 +180,7 @@ def is_current_digest_destination(service, delivery) -> bool:
         ).fetchone()
         if endpoint is None:
             return False
-        if endpoint["agent_host"] == "nanobot" and (run is None or payload.get("mirrorKind") != NANOBOT_OA_DIGEST):
+        if endpoint["agent_host"] in PRIVATE_BOT_HOSTS and (run is None or payload.get("mirrorKind") != private_bot_digest_kind(endpoint["agent_host"])):
             return False
         try:
             if run is not None:
@@ -394,10 +394,10 @@ def _scheduled_watch_since(connection, owner, now):
     return min(now, max(watermarks)) if watermarks else now - timedelta(days=1)
 
 
-def _queue_nanobot_digest(connection, owner, recipient, event_id, report, binding, now):
+def _queue_paired_digest(connection, owner, recipient, event_id, report, binding, now):
     """Only the scheduler may enqueue this body for the user's explicitly selected Bot."""
     payload = {
-        "mirrorKind": NANOBOT_OA_DIGEST, "entryId": event_id, "role": "assistant", "text": report.text,
+        "mirrorKind": private_bot_digest_kind(recipient["agent_host"]), "entryId": event_id, "role": "assistant", "text": report.text,
         "createdAt": now, "source": {"endpointId": recipient["_workspace_endpoint"], "clientType": "web"},
         "pairProof": recipient["_pair_proof"], "targetEndpointBinding": binding,
     }
@@ -487,11 +487,11 @@ def publish_scheduled_oa_digest(service, setting, *, now, clock=None) -> dict:
             return outcome("endpoint_unavailable")
 
         binding = None
-        nano_recipient = None
+        paired_recipient = None
         if telegram is not None:
             recipient = check_digest_telegram_endpoint(connection, owner, telegram[0])
-            if recipient["agent_host"] == "nanobot":
-                nano_recipient = recipient
+            if recipient["agent_host"] in PRIVATE_BOT_HOSTS:
+                paired_recipient = recipient
             binding = _delivery_binding(service, (workspace, *telegram), grant_revision, oa_authority,
                                         settings_version=current["version"])
         timeline_entry_id = None
@@ -505,14 +505,14 @@ def publish_scheduled_oa_digest(service, setting, *, now, clock=None) -> dict:
                     "watchWatermark": watermark.astimezone(timezone.utc).isoformat(),
                 }},
                 target_endpoint_id=telegram[0] if telegram is not None else None,
-                target_endpoint_binding=binding, enqueue_notifications=telegram is not None and nano_recipient is None,
+                target_endpoint_binding=binding, enqueue_notifications=telegram is not None and paired_recipient is None,
             )
             timeline_entry_id = entry["entry_id"]
         delivery_id = None
         if telegram is not None:
-            if nano_recipient is not None:
+            if paired_recipient is not None:
                 event_id = timeline_entry_id or str(uuid4())
-                _queue_nanobot_digest(connection, owner, nano_recipient, event_id, report, binding, published_at)
+                _queue_paired_digest(connection, owner, paired_recipient, event_id, report, binding, published_at)
             else:
                 event_id = timeline_entry_id or _queue_private_telegram_digest(
                     service, connection, owner, workspace, telegram, report, binding, published_at,

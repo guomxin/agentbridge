@@ -12,7 +12,7 @@ from pathlib import Path
 import stat
 import sys
 from urllib.parse import urlsplit
-from uuid import UUID
+from .skill_scope import valid_trial
 
 import httpx
 from aiohttp import web
@@ -59,18 +59,6 @@ def checked_mcp_url(url: str) -> str:
     ):
         raise ValueError("Expected a secure MCP URL or a loopback listener")
     return url
-
-
-def valid_trial(value, message) -> bool:
-    if not isinstance(value,dict) or set(value)!={"dispatch_id","draft_id","expected_revision","profile"}:
-        return False
-    try:
-        return (all(isinstance(value[k],str) and str(UUID(value[k]))==value[k] for k in ("dispatch_id","draft_id"))
-                and type(value["expected_revision"]) is int and value["expected_revision"]>0
-                and isinstance(value["profile"],str) and 0 < len(value["profile"].strip()) <=128
-                and len(message)<=3000)
-    except ValueError:
-        return False
 
 
 def identity_denial(exc: Exception) -> bool:

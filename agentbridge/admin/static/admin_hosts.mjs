@@ -1,6 +1,9 @@
 import { escapeHtml, fmtTime, table } from "./admin_presentation.mjs";
 
 const states = {enabled:"接单中", draining:"停止接单", revoked:"已撤权"};
+const capabilities = {chat:"对话", attachments:"图片附件", credential_card:"凭据卡", skill_trial:"技能试用",
+  skills:"技能", skill_model:"技能模型"};
+const modelStatus = {unverified:"尚无模型调用回执", last_succeeded:"最近模型调用成功", last_unconfirmed:"最近模型调用未确认"};
 const html = escapeHtml;
 const option = (key, label, selected = false) =>
   `<option value="${html(key)}" ${selected ? "selected" : ""}>${html(label)}</option>`;
@@ -17,22 +20,41 @@ export function createHostDirectoryView({api, content, openModal, closeModal, to
     const rows = catalog.items.map(i => {
       const probe = probeResults.get(i.instance_id);
       const status = probe ? (probe.available ? "连接正常" : "连接失败") + " · " + fmtTime(probe.checked_at) : "尚未检查";
+      const details = [
+        probe?.capabilities?.map(name => capabilities[name] || name).join("、"),
+        probe?.modelConfiguration === "configured" && "已读取模型配置",
+        probe?.centralConnection === "verified" && "启动时已核验中央连接",
+        modelStatus[probe?.modelInvocation],
+        probe && !probe.available && probe.code,
+      ].filter(Boolean).map(text => `<br><small>${html(text)}</small>`).join("");
       const buttons = [action(i.instance_id, "probe", "检查连接"), action(i.instance_id, "edit", "配置")];
-      if (i.state === "enabled" && i.host_type === "nanobot") buttons.push(action(i.instance_id, "bind", "开通用户"));
+      if (i.state === "enabled" && i.instance_id !== "openclaw-default" &&
+          catalog.routes.some(route => route.route_ref === i.route_ref && route.host_type === i.host_type)) {
+        buttons.push(action(i.instance_id, "bind", "开通用户"));
+      }
       return `<tr><td><strong>${html(i.display_name)}</strong><br><small>${html(i.instance_id)}</small></td>
         <td>${html(i.host_type)} · ${html(i.adapter_version)}</td><td>${html(i.route_ref)}</td>
         <td>${html(states[i.state])}</td><td>${i.subjects === null ? "所有工作台账号" : html(i.subjects.join("、") || "未开放")}</td>
-        <td>${html(status)}</td><td><div class="actions">${buttons.join("")}</div></td></tr>`;
+        <td>${html(status)}${details}</td><td><div class="actions">${buttons.join("")}</div></td></tr>`;
     });
-    const bindings = catalog.bindings.map(b =>
-      `<tr><td>${html(b.instance_id)}</td><td>${html(b.user_subject)}</td><td class="code">${html(b.endpoint_id)}</td>
-      <td>${action(b.instance_id, "details", "查看绑定").replace("data-host-id", `data-subject="${html(b.user_subject)}" data-host-id`)}</td></tr>`);
+    const bindings = catalog.bindings.map(b => {
+      const instance = catalog.items.find(i => i.instance_id === b.instance_id);
+      let telegram = "";
+      if (instance?.host_type === "pi") {
+        const route = catalog.routes.find(r => r.route_ref === instance.route_ref && r.host_type === "pi");
+        const allowed = instance.state === "enabled" && instance.subjects?.includes(b.user_subject) &&
+          route?.telegram_subjects?.includes(b.user_subject);
+        telegram = `<br><small>Telegram 私聊${allowed ? "可配对" : "未开放"}</small>`;
+      }
+      return `<tr><td>${html(b.instance_id)}</td><td>${html(b.user_subject)}${telegram}</td><td>${html(b.accepted_level || "尚未登记")}</td><td class="code">${html(b.endpoint_id)}</td>
+      <td>${action(b.instance_id, "details", "查看绑定").replace("data-host-id", `data-subject="${html(b.user_subject)}" data-host-id`)}</td></tr>`;
+    });
     content.innerHTML = `<div class="toolbar"><p>按部署连接接入宿主，为工作台账号开通实例。</p>
       <button type="button" class="button primary" data-host-action="new">接入实例</button></div>
       ${catalog.route_error ? '<p class="form-error">部署的连接清单无效。请核对受控配置，可继续停止接单或撤权。</p>' : ""}
       ${table(["实例","宿主及适配器版本","连接引用","接单状态","开放主体","最近连接检查","操作"],rows)}
       <div class="view-head section-spaced"><h2>独立宿主用户绑定</h2></div>
-      ${table(["实例","中央主体","工作台端点","操作"],bindings)}`;
+      ${table(["实例","中央主体","协商等级","工作台端点","操作"],bindings)}`;
   }
 
   function edit(i) {

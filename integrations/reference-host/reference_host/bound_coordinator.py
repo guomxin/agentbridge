@@ -1,4 +1,4 @@
-"""Trusted pipe entry for one prebound NanoBot Workspace task. No listener or model access."""
+"""Trusted pipe entry for one prebound Workspace task. No listener or model access."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ from .task_driver import ReferenceTaskDriver
 IMPLEMENTATION = CoordinatorImplementation(
     "nanobot", "0.3.0", ("web_private", "telegram_private")
 )
+
+
+PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.0", ("web_private", "telegram_private"))
 
 
 class PersonalIdentity(IdentityConfig):
@@ -54,7 +57,7 @@ class BoundDriver(ReferenceTaskDriver):
         # The coordinator reuses the original prepare and its stable idempotency key after login.
         schema = self.tool("owner", tool).get("inputSchema") or {}
         if "idempotency_key" in (schema.get("properties") or {}):
-            arguments = {**arguments, "idempotency_key": "nanobot:" + self.req["runId"]}
+            arguments = {**arguments, "idempotency_key": self.implementation.name + ":" + self.req["runId"]}
         self._plans[local_id] = (tool, arguments)
         system = governed[tool]["prepareCapability"].split(".", 1)[0]
         names = {definition["name"] for definition in self.list_tools("owner")}
@@ -106,7 +109,7 @@ class BoundDriver(ReferenceTaskDriver):
         if match:
             result = await self.client("owner").call_tool(
                 "agentbridge_host_identity_profile",
-                {"agent_host": "nanobot"},
+                {"agent_host": self.implementation.name},
                 meta=self._identity_profile_meta(),
                 recovery_class="read",
             )
@@ -115,13 +118,24 @@ class BoundDriver(ReferenceTaskDriver):
                 or result.payload().get("telegramIdentityVerified") is not True
             ):
                 raise PermissionError("Original Telegram pairing is no longer active")
+            if self.implementation.name == "pi":
+                current = await self.client("owner").call_tool(
+                    "agentbridge_host_telegram_endpoint", {"bot_id": match.group(1), "sender_id": match.group(2)},
+                    meta=self.host_context(), recovery_class="read")
+                endpoint = current.payload()
+                if current.is_error or not re.fullmatch(r"[a-f0-9]{64}", str(self.req.get("pairingRef", ""))) or (
+                        endpoint.get("endpointId"), endpoint.get("endpointKey"), endpoint.get("conversationRef"),
+                        endpoint.get("workspaceEndpointId"), endpoint.get("pairingRef")) != (
+                        self.req["endpoint"], self.req["endpointKey"], self.req["conversation"],
+                        self.req.get("workspaceEndpointId"), self.req["pairingRef"]):
+                    raise PermissionError("Original Pi private endpoint or pairing generation changed")
 
     async def present_interaction(self, local_task_id, interaction_id):
         await self.check_telegram()
         result = await self.client("owner").call_tool(
             "agentbridge_host_interaction_present",
             {
-                "agent_host": "nanobot",
+                "agent_host": self.implementation.name,
                 "endpoint_key": self.req["endpointKey"],
                 "interaction_id": interaction_id,
             },
@@ -334,7 +348,7 @@ class BoundDriver(ReferenceTaskDriver):
                     )
 
 
-async def run_locked(req):
+async def run_locked(req, implementation=IMPLEMENTATION):
     root = Path(req["userDir"])
     run_id = req["runId"]
     task = req["task"]
@@ -396,7 +410,7 @@ async def run_locked(req):
         state=state,
         mcp_url=req["mcpUrl"],
         ca_bundle=req.get("caFile"),
-        implementation=IMPLEMENTATION,
+        implementation=implementation,
         instance_id=req["instance"],
         private_transport=True,
         poll_interval_seconds=0.35,
@@ -408,6 +422,8 @@ async def run_locked(req):
         profile = await driver.ensure_identity("owner")
         if telegram and profile.get("telegramIdentityVerified") is not True:
             raise PermissionError("Original Telegram pairing is no longer active")
+        if telegram and implementation.name == "pi":
+            await driver.check_telegram()
         governed = profile.get("controlledPrepares") or {}
         if command:
             # A pre-created command reveals its exact governed capability only in the central result.
@@ -642,7 +658,7 @@ async def run_locked(req):
         journal.close()
 
 
-async def run(req):
+async def run(req, implementation=IMPLEMENTATION):
     key = hashlib.sha256(req["runId"].encode()).hexdigest()
     path = Path(req["userDir"]) / ("coordinator-" + key + ".lock")
     with path.open("a") as lock:
@@ -650,16 +666,23 @@ async def run(req):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return "busy"
-        return await run_locked(req)
+        return await run_locked(req, implementation)
 
 
 def main():
+    # The service chooses its implementation in the deployment command, never from model/pipe JSON.
+    if sys.argv[1:] == ["--host-type", "pi"]:
+        implementation = PI_IMPLEMENTATION
+    elif sys.argv[1:] in ([], ["--host-type", "nanobot"]):
+        implementation = IMPLEMENTATION
+    else:
+        raise SystemExit("Expected --host-type pi or nanobot")
     os.umask(0o077)
     try:
         data = sys.stdin.buffer.read(65537)
         if len(data) > 65536:
             raise ValueError
-        outcome = asyncio.run(run(json.loads(data)))
+        outcome = asyncio.run(run(json.loads(data), implementation))
     except Exception:
         outcome = "unknown"
     print(json.dumps({"outcome": outcome}), flush=True)

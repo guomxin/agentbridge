@@ -91,10 +91,14 @@ def parse_skill_action(action, data) -> SkillActionRequest:
     return SkillActionRequest(definition, MappingProxyType(dict(data)))
 
 
-def dispatch_skill_action(authoring, owner, action, data):
+def dispatch_skill_action(authoring, owner, action, data, *, telegram_origin=None):
     request = parse_skill_action(action, data)
     definition = request.definition
     target = authoring if definition.target == 'authoring' else authoring.workbench
     # Resolve a declared handler on every call, preserving live method binding.
     method = getattr(target, definition.handler)
+    if telegram_origin is not None:
+        if action != 'evaluate':
+            raise ValueError('此操作不支持私聊评测来源')
+        return method(owner, **request.arguments, telegram_origin=telegram_origin)
     return method(owner, **request.arguments)

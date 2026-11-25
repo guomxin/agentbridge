@@ -9,6 +9,15 @@ from agentbridge.adapters.yuque_content import redact_sensitive_text
 NANOBOT_OA_DIGEST = "nanobot_oa_daily_digest_v1"
 
 
+def private_bot_digest_kind(host: str) -> str:
+    return {"nanobot": NANOBOT_OA_DIGEST, "pi": "pi_oa_daily_digest_v1"}[host]
+
+
+def private_bot_chat_kind(host: str) -> str:
+    return {"nanobot": "nanobot_workspace_text_v1", "pi": "pi_workspace_text_v1"}[host]
+
+
+
 _PRIVATE = re.compile(
     r"/(?:flow/)?(?:auth|authorize|input|download|media|results|result-view)/[a-z0-9_-]+"
     r"|/api/(?:enrollment|private-cards?)/"

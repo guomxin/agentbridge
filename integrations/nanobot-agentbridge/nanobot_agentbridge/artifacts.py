@@ -10,11 +10,10 @@ from uuid import UUID
 from aiohttp import web
 
 from .session_pool import open_host_session
-from .worker import channel_for
 
 
 async def reissue(host, binding, body, run_id):
-    if not host.coordinator or channel_for(binding["endpoint_key"]) != "workspace":
+    if not host.coordinator or not binding["endpoint_key"].startswith("workspace:" + host.instance + ":"):
         raise web.HTTPForbidden()
     try:
         artifact_id = str(UUID(body["artifactId"]))
@@ -44,7 +43,7 @@ async def reissue(host, binding, body, run_id):
         lease = (current.structuredContent or {}).get("coordinatorLease") or {}
         if (
             current.isError
-            or lease.get("agentHost") != "nanobot"
+            or lease.get("agentHost") != payload.get("hostType", "nanobot")
             or lease.get("hostInstanceId") != host.instance
             or lease.get("version") != row[0]
             or lease.get("taskId") != task_id
@@ -71,7 +70,7 @@ async def reissue(host, binding, body, run_id):
         }
         result = await session.call_tool(
             "agentbridge_host_artifact_reissue",
-            {"agent_host": "nanobot", "task_id": task_id, "artifact_id": artifact_id},
+            {"agent_host": payload.get("hostType", "nanobot"), "task_id": task_id, "artifact_id": artifact_id},
             meta=task_meta,
         )
     data = result.structuredContent or {}

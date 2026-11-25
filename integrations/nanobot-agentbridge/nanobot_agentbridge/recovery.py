@@ -10,6 +10,30 @@ import sqlite3
 from .session_pool import open_host_session
 
 
+def verified_answer(subject, endpoint, task_id, operation, expected_capability, batch_snapshot, expected_batch_id):
+    if batch_snapshot is not None:
+        task=batch_snapshot.get("task") or {}
+        proof=batch_snapshot.get("batchVerification") or {}
+        count=proof.get("totalCount")
+        if (not expected_batch_id or task.get("taskId")!=task_id or task.get("userSubject")!=subject
+            or task.get("originEndpointId")!=endpoint or proof.get("taskId")!=task_id
+            or proof.get("batchId")!=expected_batch_id or proof.get("state")!="succeeded"
+            or proof.get("allVerified") is not True or type(count) is not int or count<1 or count!=proof.get("verifiedCount")):
+            raise ValueError("Missing authoritative verification for the complete original batch")
+        answer=f"中央已重新核验原批次全部 {count} 项业务操作成功。"
+    else:
+        operation=operation or {}
+        evidence=(operation.get("result") or {}).get("verification") or {}
+        if (not task_id or operation.get("taskId") != task_id or operation.get("userSubject") != subject
+                or not operation.get("operationId") or not expected_capability or operation.get("capability") != expected_capability
+                or operation.get("status") != "succeeded"
+                or not (evidence.get("confirmed") is True or evidence.get("matched") is True)):
+            raise ValueError("Missing authoritative verification for the original operation")
+        answer=("中央已重新核验原任务的请假草稿保存成功，流程尚未提交。" if expected_capability=="oa.leave.save_draft"
+                else "中央已重新核验原任务的业务操作成功。")
+    return answer
+
+
 def recovery_rows(directory, endpoint):
     source = directory / "coordinated-private.sqlite3"
     if not source.is_file():
@@ -97,7 +121,7 @@ async def reconcile(host, record, run, task, phase):
             response = await session.call_tool(
                 "agentbridge_host_task_snapshot",
                 {
-                    "agent_host": "nanobot",
+                    "agent_host": request.get("hostType", "nanobot"),
                     "endpoint_key": record["endpoint_key"],
                     "task_id": task,
                     "event_limit": 1,
@@ -165,6 +189,10 @@ async def reconcile(host, record, run, task, phase):
                 "SELECT version FROM tasks WHERE run_id=? AND endpoint=? AND task_id=?",
                 (run, record["endpoint_id"], task),
             ).fetchone()
+            if (not row and request.get("hostType") == "pi" and db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='planning_repairs'").fetchone()):
+                row = db.execute("SELECT version FROM planning_repairs WHERE run_id=? AND endpoint=? AND task_id=?",
+                                 (run, record["endpoint_id"], task)).fetchone()
         if not row:
             return
         request.update(

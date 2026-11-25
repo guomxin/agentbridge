@@ -286,7 +286,8 @@ def test_ambiguous_upload_is_terminal_and_never_replayed(origin, monkeypatch, tm
 def test_send_document_posts_multipart_bytes(monkeypatch):
     api = TelegramAPI("synthetic")
 
-    def post(method, payload, headers):
+    def post(method, payload, headers, *, chat):
+        assert chat == 501
         assert method == "sendDocument" and method not in api._SAFE_RECONNECT_METHODS
         message = BytesParser(policy=policy.default).parsebytes(
             ("Content-Type: " + headers["Content-Type"] + "\r\n\r\n").encode() + payload

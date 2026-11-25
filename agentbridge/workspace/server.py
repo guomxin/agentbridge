@@ -497,7 +497,8 @@ def create_workspace_http_server(
                         application.timeline_attachment(
                             account,
                             attachment_match.group(1),
-                        )
+                        ),
+                        inline_image=_query_value(query, "preview") == "1",
                     )
                     return
                 if route.path == "/api/events/stream":
@@ -723,10 +724,15 @@ def create_workspace_http_server(
                     )
                     return
                 dispatch_cancel_match = re.fullmatch(
-                    r"/api/chat/dispatches/([0-9a-f-]{36})/cancel",
+                    r"/api/chat/dispatches/([0-9a-f-]{36})/(cancel|stop-generation)",
                     route.path,
                 )
                 if dispatch_cancel_match:
+                    if dispatch_cancel_match.group(2) == "stop-generation":
+                        if body != {}:
+                            raise ValueError("停止回复只接受原请求编号。")
+                        self._json(200, application.stop_chat_generation(account, dispatch_cancel_match.group(1)))
+                        return
                     self._json(
                         200,
                         application.cancel_chat_dispatch(
@@ -1115,13 +1121,14 @@ def create_workspace_http_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def _download(self, attachment: dict) -> None:
+        def _download(self, attachment: dict, *, inline_image=False) -> None:
             body = attachment["body"]
             filename = str(attachment["filename"])
             ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
             if not ascii_name:
                 ascii_name = "image"
             encoded_name = quote(filename, safe="")
+            disposition = "inline" if inline_image and attachment["content_type"] in {"image/jpeg", "image/png", "image/webp"} else "attachment"
             self.send_response(200)
             self.send_header("Content-Type", attachment["content_type"])
             self.send_header("Content-Length", str(len(body)))
@@ -1129,7 +1136,7 @@ def create_workspace_http_server(
             self.send_header(
                 "Content-Disposition",
                 (
-                    f'attachment; filename="{ascii_name}"; '
+                    f'{disposition}; filename="{ascii_name}"; '
                     f"filename*=UTF-8''{encoded_name}"
                 ),
             )

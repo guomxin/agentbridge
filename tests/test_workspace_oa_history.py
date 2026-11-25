@@ -45,6 +45,37 @@ class WorkspaceHistoryBoundaryTests(TestCase):
         self.service.invoke.assert_called_once_with(user_subject="alice",capability_name="oa.workflow.history.next",
             arguments={"cursor":cursor},host_type="workspace",origin_endpoint_id="endpoint-a")
 
+    def test_pi_refresh_rechecks_original_task_access_and_serves_its_observed_read_once(self):
+        created = self.store.create(**self.binding, query={"collection": "done", "pi_task_id": "task-a"})
+        query_id = created["record"]["query_id"]
+        first = self.store.advance(created["cursor"], **self.binding, expected_version=1, state="complete",
+            state_data={}, response={**self.result, "query_id": query_id}, next_stage="results", next_offset=1)
+        cursor = first["next_cursor"]
+        second = self.store.advance(cursor, **self.binding, expected_version=2, state="complete", state_data={},
+            response={**first, "items": [{"title": "第二项"}], "has_more": False, "next_cursor": None})
+        self.service.tasks.get_task.return_value = {"agent_host": "pi", "origin_endpoint_id": "pi-web"}
+        self.service.workspace = Mock()
+        self.service.workspace.task_host.return_value = {"host_type": "pi", "instance_id": "pi-office"}
+        self.service.user_grants = Mock()
+        self.service.validate_skill_task = Mock()
+        operations = {
+            "first": {"user_subject": "alice", "status": "succeeded", "capability_name": "oa.workflow.history.query", "result": first},
+            "second": {"user_subject": "alice", "status": "succeeded", "capability_name": "oa.workflow.history.next", "result": second},
+        }
+        self.service.operations.get.side_effect = operations.__getitem__
+        self.service.tasks.operation_ids_for_task.return_value = list(operations)
+        self.assertEqual(next_page(self.service, self.account, "task-a", {"cursor": cursor}), {"oaHistoryQuery": second})
+        self.service.user_grants.require_capability.assert_called_with("alice", "oa.workflow.history.next", {"cursor": cursor})
+        self.service.user_grants.require_capability.side_effect = PermissionError("revoked")
+        with self.assertRaises(PermissionError):
+            next_page(self.service, self.account, "task-a", {"cursor": cursor})
+        self.service.user_grants.require_capability.side_effect = None
+        self.service.tasks.operation_ids_for_task.return_value = ["first"]
+        with self.assertRaises(OaHistoryQueryError) as error:
+            next_page(self.service, self.account, "task-a", {"cursor": cursor})
+        self.assertEqual(error.exception.code, "OA_HISTORY_PAGE_UNCONFIRMED")
+        self.service.invoke.assert_not_called()
+
     def test_other_task_query_and_forged_conditions_cannot_continue(self):
         other=self.store.create(**self.binding,query={"collection":"sent"})
         with self.assertRaises(OaHistoryQueryError):

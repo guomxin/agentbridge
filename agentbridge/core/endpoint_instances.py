@@ -3,6 +3,7 @@
 from collections import defaultdict
 import json
 
+PRIVATE_BOT_HOSTS = frozenset({"nanobot", "pi"})
 LEGACY_OPENCLAW = ("openclaw", "openclaw-default")
 
 
@@ -47,7 +48,7 @@ def endpoint_instances(db, user_subject):
                 known[host].add(scope[1])
 
     result = {}
-    nano_web = []
+    private_web = []
     for e in endpoints:
         eid, host = e["endpoint_id"], e["agent_host"]
         if eid in bindings:
@@ -57,10 +58,10 @@ def endpoint_instances(db, user_subject):
                     and e["account_id"] == e["external_subject"] == b["account_id"]
                     and (e["endpoint_key"], e["conversation_ref"]) == (b["endpoint_key"], b["session_key"])):
                 result[eid] = instance_key(host, b["instance_id"])
-                if host == "nanobot" and b["state"] == "enabled":
-                    nano_web.append(b)
+                if host in PRIVATE_BOT_HOSTS and b["state"] == "enabled":
+                    private_web.append(b)
             continue
-        if host == "nanobot":
+        if host in PRIVATE_BOT_HOSTS:
             continue
         if host == "openclaw" and legacy_web and tuple(legacy_web) == (eid, e["endpoint_key"], e["conversation_ref"]):
             result[eid] = LEGACY_OPENCLAW
@@ -72,23 +73,25 @@ def endpoint_instances(db, user_subject):
             # There was only one OpenClaw before the Workspace directory existed.
             result[eid] = LEGACY_OPENCLAW
 
-    if nano_web and "workspace_telegram_pilot_links" in tables:
+    if private_web and "workspace_telegram_pilot_links" in tables:
         from agentbridge.workspace.telegram_pilot_links import telegram_conversation_ref, verified_pair
         for e in endpoints:
-            if e["agent_host"] != "nanobot" or e["client_type"] != "telegram":
+            if e["agent_host"] not in PRIVATE_BOT_HOSTS or e["client_type"] != "telegram":
                 continue
             bot, sender = e["account_id"], e["external_subject"]
             if (not bot or not bot.isdecimal() or not sender.isdecimal() or
                     e["endpoint_key"] != f"telegram:{bot}:{sender}" or
                     json.loads(e["route_json"]) != {"channel": "telegram", "accountId": bot, "to": sender}):
                 continue
-            for b in nano_web:
+            for b in private_web:
+                if b["host_type"] != e["agent_host"]:
+                    continue
                 instance = b["instance_id"]
                 if e["conversation_ref"] != telegram_conversation_ref(instance, user_subject, b["endpoint_id"], bot, sender):
                     continue
                 if "mcp_identity_tokens" in tables and verified_pair(
                         db, user_subject, instance, bot, sender, allow_new_pair=not b["all_subjects"]):
-                    result[e["endpoint_id"]] = ("nanobot", instance)
+                    result[e["endpoint_id"]] = (e["agent_host"], instance)
     granted = {result[eid] for eid in bindings if eid in result}
     return {eid: scope for eid, scope in result.items()
             if scope not in directory or

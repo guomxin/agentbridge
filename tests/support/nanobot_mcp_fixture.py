@@ -37,7 +37,8 @@ def deny_outgoing_network(event, args):
 
 class NanoBotMcpFixture:
     def __init__(self, home: Path, base: str, port: int, *,
-                 trusted_card_origin="http://127.0.0.1:1", service_class=SyntheticReadService, reuse_existing=False):
+                 trusted_card_origin="http://127.0.0.1:1", service_class=SyntheticReadService, reuse_existing=False,
+                 subjects=None):
         home.mkdir(mode=0o700, parents=False, exist_ok=reuse_existing)
         self.home = home
         self.key = home / "session.key"
@@ -56,7 +57,9 @@ class NanoBotMcpFixture:
         self.service.adapter.invoke_capability = self.fixture_read
         self.service.adapter.probe_session = self.fixture_probe
         self.identities = McpIdentityTokenStore(self.service.db_path)
-        self.subjects = {"a": ALICE, "b": BOB}
+        self.subjects = {"a": ALICE, "b": BOB} if subjects is None else dict(subjects)
+        if set(self.subjects) != {"a", "b"} or len(set(self.subjects.values())) != 2:
+            raise ValueError("Expected two distinct isolated test subjects")
         self.tokens = {}
         for label, subject in self.subjects.items():
             if reuse_existing:
@@ -90,7 +93,7 @@ class NanoBotMcpFixture:
     def fixture_read(self, capability, worker, arguments):
         # This existing fixture checks the permitted capability and synthetic
         # worker identity before returning its two synthetic OA records.
-        return SkillHostAcceptance._invoke(self, capability, worker, arguments)
+        return SkillHostAcceptance._invoke(self, capability, worker, arguments, expected_subject=self.subjects["a"])
 
     @staticmethod
     def fixture_probe(worker):

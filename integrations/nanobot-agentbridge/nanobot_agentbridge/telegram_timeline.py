@@ -56,16 +56,18 @@ async def publish_timeline(host, record, body):
                 or any(type(item) is not int or not 0 < item < 2**53 for item in receipts)
                 or len(set(receipts)) != len(receipts)):
             raise web.HTTPForbidden()
-    async with open_host_session(host, host.worker_payload(record, None), lane="control") as (session, meta, level):
+    payload = host.worker_payload(record, None)
+    host_type = payload.get("hostType", "nanobot")
+    async with open_host_session(host, payload, lane="control") as (session, meta, level):
         if level != "L3" or not await verify_telegram_binding(
-                session, host.instance, record["user_subject"], meta, record["endpoint_key"]):
+                session, host.instance, record["user_subject"], meta, record["endpoint_key"], host_type=host_type):
             raise web.HTTPForbidden()
         material = json.dumps([host.instance, record["endpoint_id"], key, role], separators=(",", ":")).encode()
         result = await session.call_tool("agentbridge_host_timeline_append", {
-            "agent_host": "nanobot", "endpoint_key": record["endpoint_key"], "client_type": "telegram",
+            "agent_host": host_type, "endpoint_key": record["endpoint_key"], "client_type": "telegram",
             "external_subject": sender, "conversation_ref": record["session_key"], "account_id": bot,
             "route": {"channel": "telegram", "accountId": bot, "to": sender},
-            "message_key": "nanobot:telegram:" + hashlib.sha256(material).hexdigest(),
+            "message_key": host_type + ":telegram:" + hashlib.sha256(material).hexdigest(),
             "role": role, "text": text,
         }, meta=meta)
         receipt = result.structuredContent or {}

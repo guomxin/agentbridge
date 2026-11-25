@@ -74,6 +74,7 @@ export function createChatStream({ state, getScope, fetchChatStreamResponse, ado
             ensureLiveMessage(runId).requestSkillTrial = activeStream.requestSkillTrial;
             addLiveProgress(runId, "请求已交给智能体", "active");
             ensureLiveMessage(runId).actions.replaceChildren();
+            if (event.data.canStopGeneration) attachDispatchCancel(runId, event.data.dispatchId, true);
             onAccepted?.();
           } else if (event.name === "progress") {
             if (event.data.kind === "tool" && !hadToolActivity)

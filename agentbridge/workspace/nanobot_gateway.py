@@ -1,4 +1,4 @@
-"""Workspace transport for a configured NanoBot instance on a private loopback route."""
+"""Workspace transport for hosted adapters on authenticated private loopback routes."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .gateway import GatewayRequestError
 
 def _private_text(path: Path) -> str:
     if not path.is_absolute():
-        raise ValueError("NanoBot configuration requires absolute paths")
+        raise ValueError("Host configuration requires absolute paths")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, encoding="utf-8") as handle:
         info = os.fstat(handle.fileno())
@@ -24,27 +24,67 @@ def _private_text(path: Path) -> str:
             or info.st_uid != os.getuid()
             or info.st_mode & 0o077
         ):
-            raise PermissionError("NanoBot route material must be owner-only")
+            raise PermissionError("Host route material must be owner-only")
         value = handle.read(1_048_577)
         if len(value) > 1_048_576:
-            raise ValueError("NanoBot route material is too large")
+            raise ValueError("Host route material is too large")
         return value
 
 
-def load_nanobot_route_specs() -> dict:
-    filename = os.environ.get("AGENTBRIDGE_NANOBOT_ROUTES_FILE")
+def _load_route_specs(variable: str) -> dict:
+    filename = os.environ.get(variable)
     if not filename:
         return {}
     document = json.loads(_private_text(Path(filename)))
     if not isinstance(document, dict) or not isinstance(document.get("routes"), dict):
-        raise ValueError("Invalid NanoBot route configuration")
+        raise ValueError("Invalid host route configuration")
     routes = document["routes"]
     if any(not name or not isinstance(spec, dict) for name, spec in routes.items()):
-        raise ValueError("Invalid NanoBot route specification")
+        raise ValueError("Invalid host route specification")
     return routes
 
 
+def load_nanobot_route_specs() -> dict:
+    return _load_route_specs("AGENTBRIDGE_NANOBOT_ROUTES_FILE")
+
+
+def load_pi_route_specs() -> dict:
+    return _load_route_specs("AGENTBRIDGE_PI_ROUTES_FILE")
+
+
+def route_specs_for(host_type: str) -> dict:
+    if host_type == "nanobot":
+        return load_nanobot_route_specs()
+    if host_type == "pi":
+        return load_pi_route_specs()
+    return {}
+
+
+def pi_telegram_sender(spec: dict, subject: str, bot=None) -> str | None:
+    """A Pi Telegram route requires exactly one separately assigned private sender."""
+    telegram = spec.get("telegram")
+    subjects = spec.get("subjects")
+    if not isinstance(telegram, dict) or not isinstance(subjects, dict) or subject not in subjects:
+        return None
+    senders = telegram.get("allowedSenders")
+    if not isinstance(senders, dict) or set(senders) != {subject}:
+        return None
+    from .telegram_pilot_links import numeric_id
+    try:
+        configured_bot = numeric_id(telegram.get("botId"))
+        sender = senders[subject]
+        if not isinstance(sender, str) or numeric_id(sender) != sender:
+            return None
+        if bot is not None and numeric_id(bot) != configured_bot:
+            return None
+        return sender
+    except ValueError:
+        return None
+
+
 class NanoBotGatewayClient:
+    host_type = "nanobot"
+
     def __init__(self, *, url: str, token_file: Path, instance_id: str) -> None:
         parsed = urlsplit(url)
         if (
@@ -59,23 +99,19 @@ class NanoBotGatewayClient:
             or not instance_id
         ):
             raise ValueError(
-                "NanoBot routes require an explicit IPv4 loopback port and instance ID"
+                "Host routes require an explicit IPv4 loopback port and instance ID"
             )
         self.port = parsed.port
         self.token_file = token_file
         self.instance_id = instance_id
 
     @classmethod
+    def from_spec(cls, spec):
+        return cls(url=spec["url"], token_file=Path(spec["tokenFile"]), instance_id=spec["instanceId"])
+
+    @classmethod
     def from_environment(cls) -> dict[str, NanoBotGatewayClient]:
-        routes = load_nanobot_route_specs()
-        return {
-            name: cls(
-                url=spec["url"],
-                token_file=Path(spec["tokenFile"]),
-                instance_id=spec["instanceId"],
-            )
-            for name, spec in routes.items()
-        }
+        return {name: cls.from_spec(spec) for name, spec in route_specs_for(cls.host_type).items()}
 
     def _request(self, action: str, payload: dict, *, timeout=8) -> dict:
         try:
@@ -88,7 +124,7 @@ class NanoBotGatewayClient:
                 raise ValueError("Invalid service credential")
         except (OSError, ValueError):
             raise GatewayRequestError(
-                "NANOBOT_ROUTE_CONFIGURATION", "宿主连接凭证不可用。", {"stage": "bind"}
+                self.host_type.upper() + "_ROUTE_CONFIGURATION", "宿主连接凭证不可用。", {"stage": "bind"}
             ) from None
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
@@ -110,6 +146,8 @@ class NanoBotGatewayClient:
             response = connection.getresponse()
             # A private file read carries one task artifact (32 MiB maximum) as base64.
             limit = 45 * 1024 * 1024 if action == "telegram-artifact-file" else 2_097_152
+            if action == "telegram-workspace-media":
+                limit = 9 * 1024 * 1024
             data = response.read(limit + 1)
             if response.status >= 500 or len(data) > limit:
                 raise GatewayRequestError(
@@ -118,19 +156,17 @@ class NanoBotGatewayClient:
                     {"stage": "request"},
                 )
             if response.status != 200:
-                code = {
-                    401: "NANOBOT_INSTANCE_UNAUTHORIZED",
-                    403: "NANOBOT_BINDING_UNAVAILABLE",
-                    409: "NANOBOT_DISPATCH_CONFLICT",
-                    400: "NANOBOT_INVALID_REQUEST",
-                }.get(response.status, "NANOBOT_REQUEST_FAILED")
+                reason = {401: "INSTANCE_UNAUTHORIZED", 403: "BINDING_UNAVAILABLE",
+                          409: "DISPATCH_CONFLICT", 400: "INVALID_REQUEST"}.get(response.status, "REQUEST_FAILED")
+                code = self.host_type.upper() + "_" + reason
                 raise GatewayRequestError(code, "宿主未接受此请求。", {"stage": "bind"})
             result = json.loads(data)
-            if (
-                not isinstance(result, dict)
-                or result.get("instance") != self.instance_id
-            ):
+            if not isinstance(result, dict) or result.get("instance") != self.instance_id:
                 raise ValueError("Unexpected host reply")
+            if self.host_type == "pi" and result.get("hostType") != self.host_type:
+                raise ValueError("Unexpected host type")
+            if self.host_type == "pi" and action != "ready" and result.get("adapterVersion") != self.adapter_version:
+                raise GatewayRequestError("PI_ADAPTER_VERSION_MISMATCH", "Pi 返回的适配器版本与部署配置不符。")
             return result
         except (TimeoutError, OSError, http.client.HTTPException, ValueError):
             raise GatewayRequestError(
@@ -151,11 +187,12 @@ class NanoBotGatewayClient:
     def readiness(self) -> dict:
         try:
             result = self._request("ready", {})
-            if result.get("available") is not True:
+            available = result.get("available") is True
+            if not available and self.host_type != "pi":
                 return {
                     "available": False,
                     "recoverable": False,
-                    "code": "NANOBOT_BINDINGS_UNAVAILABLE",
+                    "code": self.host_type.upper() + "_BINDINGS_UNAVAILABLE",
                 }
         except GatewayRequestError as exc:
             return {
@@ -163,12 +200,25 @@ class NanoBotGatewayClient:
                 "recoverable": exc.code.startswith("GATEWAY_"),
                 "code": exc.code,
             }
-        capabilities = result.get("capabilities", ["chat"])
+        capabilities = result.get("capabilities", ["chat"]) if available else []
         if not isinstance(capabilities,list):
             capabilities = []
-        return {"available": True, "recoverable": False, "code": None,
-                "adapterVersion":result.get("adapterVersion"),
-                "capabilities":[name for name in ("chat","credential_card","attachments","skill_trial","skills","skill_model") if name in capabilities]}
+        status = {"available": available, "recoverable": False,
+                  "code": None if available else "PI_BINDINGS_UNAVAILABLE",
+                  "adapterVersion": result.get("adapterVersion"),
+                  "capabilities": [name for name in ("chat", "credential_card", "attachments", "skill_trial", "skills", "skill_model")
+                                   if name in capabilities]}
+        if self.host_type == "pi":
+            if result.get("sdkVersion") != "1.6.0" or result.get("acceptedLevel") not in ("L1", "L2", "L3"):
+                return {"available": False, "recoverable": False, "code": "PI_COMPATIBILITY_MISMATCH"}
+            status.update(sdkVersion=result["sdkVersion"], acceptedLevel=result["acceptedLevel"])
+            configured, verified = result.get("configuredBindings"), result.get("verifiedBindings")
+            if type(configured) is int and type(verified) is int and 0 <= verified <= configured:
+                status.update(configuredBindings=configured, verifiedBindings=verified)
+            fields = {"modelConfiguration": ("configured",), "centralConnection": ("verified", "partial", "unavailable"),
+                      "modelInvocation": ("unverified", "last_succeeded", "last_unconfirmed")}
+            status.update({name: result[name] for name, values in fields.items() if result.get(name) in values})
+        return status
 
     @staticmethod
     def _binding(binding: dict) -> dict:
@@ -231,7 +281,7 @@ class NanoBotGatewayClient:
             allowed = self.readiness().get("capabilities", [])
         if (attachments and "attachments" not in allowed) or (trial and "skill_trial" not in allowed):
             raise GatewayRequestError(
-                "NANOBOT_CAPABILITY_UNAVAILABLE",
+                self.host_type.upper() + "_CAPABILITY_UNAVAILABLE",
                 "此宿主尚未开放附件或技能试用。",
                 {"stage": "bind"},
             )
@@ -275,7 +325,13 @@ class NanoBotGatewayClient:
             last_card_revision = revision
             for event in page["events"]:
                 cursor = event["sequence"]
-                if event["kind"] == "delta":
+                if self.host_type == "pi" and event["kind"] in {"tool_started", "tool_finished"}:
+                    # Raw tool arguments and provider diagnostics never enter public progress events.
+                    started = event["kind"] == "tool_started"
+                    yield {"type": "progress", "kind": "tool", "runId": run_id,
+                           "phase": "start" if started else "result",
+                           "label": "正在调用业务工具" if started else "业务工具已返回"}
+                elif event["kind"] == "delta":
                     text += event["text"]
                     yield {
                         "type": "chat",
@@ -297,6 +353,7 @@ class NanoBotGatewayClient:
                         "state": "aborted",
                         "runId": run_id,
                         "text": "已停止回复。",
+                        **({"safeToRetry": False} if self.host_type == "pi" else {}),
                     }
                     return
                 elif event["kind"] == "unknown":
@@ -371,3 +428,46 @@ class NanoBotGatewayClient:
             "count": result.get("count"),
             "complete": bool(result.get("complete")),
         }
+
+
+class PiGatewayClient(NanoBotGatewayClient):
+    host_type = "pi"
+
+    def __init__(self, *, url, token_file, instance_id, adapter_version):
+        super().__init__(url=url, token_file=token_file, instance_id=instance_id)
+        if not isinstance(adapter_version, str) or not adapter_version.strip():
+            raise ValueError("Pi adapter version required")
+        self.adapter_version = adapter_version
+
+    @classmethod
+    def from_spec(cls, spec):
+        return cls(url=spec["url"], token_file=Path(spec["tokenFile"]), instance_id=spec["instanceId"],
+                   adapter_version=spec["adapterVersion"])
+
+    def readiness(self):
+        result = super().readiness()
+        if "adapterVersion" in result and result["adapterVersion"] != self.adapter_version:
+            return {"available": False, "recoverable": False, "code": "PI_ADAPTER_VERSION_MISMATCH"}
+        return result
+
+    def stop_generation(self, binding, dispatch):
+        run_id = dispatch["accepted_run_id"]
+        receipt = self._request("cancel", {"binding": self._binding(binding),
+            "requestKey": dispatch["idempotency_key"], "runId": run_id})
+        if receipt.get("runId") != run_id or receipt.get("state") not in {"stopped", "completed", "unknown"}:
+            raise GatewayRequestError("GATEWAY_RESPONSE_INVALID", "停止回复的原运行回执待核对。")
+        return receipt["state"]
+
+
+def configured_adapters():
+    """Yield the same reviewed manifest entries to both the runtime and admin catalog."""
+    aliases = {"openclaw-default"}
+    instances = {"openclaw-default"}
+    for client_type in (NanoBotGatewayClient, PiGatewayClient):
+        for alias, spec in route_specs_for(client_type.host_type).items():
+            instance = spec["instanceId"]
+            if alias in aliases or instance in instances:
+                raise ValueError("Duplicate Workspace route or instance")
+            aliases.add(alias)
+            instances.add(instance)
+            yield alias, spec, client_type.from_spec(spec)

@@ -469,7 +469,7 @@ def context_endpoint_ids(service, subject, host_type, instance, endpoints):
         db.execute("BEGIN")
         scopes = endpoint_instances(db, subject)
         allowed = {key for key in endpoints if scopes.get(key) == scope}
-        if host_type != "nanobot" or not allowed:
+        if host_type not in {"nanobot", "pi"} or not allowed:
             return allowed
         row = db.execute("""SELECT a.account_id FROM workspace_host_bindings b
             JOIN workspace_accounts a USING(account_id) WHERE a.user_subject=? AND b.instance_id=?""",
@@ -477,12 +477,13 @@ def context_endpoint_ids(service, subject, host_type, instance, endpoints):
         if not row:
             return set()
         binding = service.workspace.hosts.resolve(db, row[0], instance_id=instance, existing=True)
-    from agentbridge.workspace.nanobot_gateway import load_nanobot_route_specs
-    spec = load_nanobot_route_specs().get(binding["route_ref"]) or {}
+    from agentbridge.workspace.nanobot_gateway import pi_telegram_sender, route_specs_for
+    spec = route_specs_for(host_type).get(binding["route_ref"]) or {}
     web_id = binding["endpoint_id"]
     if (spec.get("instanceId") != instance or
             (spec.get("subjects") or {}).get(subject) != binding["credential_ref"]):
         return allowed.intersection({web_id})
     bot = str((spec.get("telegram") or {}).get("botId", ""))
     return {key for key in allowed if key == web_id or
-            (endpoints[key]["client_type"] == "telegram" and str(endpoints[key]["account_id"]) == bot)}
+            (endpoints[key]["client_type"] == "telegram" and str(endpoints[key]["account_id"]) == bot
+             and (host_type != "pi" or pi_telegram_sender(spec, subject, bot) == endpoints[key]["external_subject"]))}

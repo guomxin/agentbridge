@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 WORKSPACE_NODE = (
     "tests/test_workspace_gateway_events.mjs",
     "tests/test_workspace_gateway_run_guard.mjs",
+    "tests/test_pi_workspace_transition.mjs",
     "tests/test_workspace_gateway_client.mjs",
     "tests/test_workspace_gateway_history.mjs",
     "tests/test_workspace_history.mjs",

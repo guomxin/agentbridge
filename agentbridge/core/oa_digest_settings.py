@@ -59,7 +59,7 @@ def _owned_telegram_options(connection, subject):
     routes = {}
     for row in connection.execute(
         """SELECT endpoint_id FROM client_endpoints WHERE user_subject = ?
-           AND state = 'active' AND agent_host IN ('openclaw', 'nanobot') AND client_type = 'telegram'
+           AND state = 'active' AND agent_host IN ('openclaw', 'nanobot', 'pi') AND client_type = 'telegram'
            ORDER BY created_at, endpoint_id""", (subject,),
     ):
         endpoint_id = row["endpoint_id"]
@@ -74,7 +74,7 @@ def _options_view(routes):
     names = {}
     for endpoint_id, endpoint in routes.items():
         label = " ".join((endpoint.get("label") or "").split())[:100]
-        host = "NanoBot" if endpoint["agent_host"] == "nanobot" else "OpenClaw"
+        host = {"nanobot": "NanoBot", "openclaw": "OpenClaw", "pi": "Pi"}[endpoint["agent_host"]]
         names[endpoint_id] = f"{host} · Telegram 私聊"
         if label and label != "Telegram 私聊":
             names[endpoint_id] += f" · {label}"

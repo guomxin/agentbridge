@@ -1,4 +1,4 @@
-"""Read-only counterpart check for an already authenticated NanoBot Telegram user."""
+"""Read-only counterpart check for a registered private Telegram endpoint."""
 
 from .telegram_pilot_links import TelegramPilotLinks
 
@@ -24,7 +24,7 @@ def historical_private_binding(service, endpoint, instance):
     from .telegram_pilot_links import active_claimants
 
     subject, sender = endpoint["user_subject"], endpoint["external_subject"]
-    if not instance or endpoint["agent_host"] != "nanobot" or endpoint["client_type"] != "telegram":
+    if not instance or endpoint["agent_host"] not in {"nanobot", "pi"} or endpoint["client_type"] != "telegram":
         return None
     with service.tasks._connect() as db:
         db.execute("BEGIN")
@@ -32,7 +32,7 @@ def historical_private_binding(service, endpoint, instance):
             current = _telegram_endpoint(db, subject, endpoint["endpoint_id"])
             if current.get("_instance_id") != instance:
                 return None
-            inherited = bool(active_claimants(db, sender))
+            inherited = endpoint["agent_host"] == "nanobot" and bool(active_claimants(db, sender))
             if inherited:
                 # Inherited pairings may be refreshed routinely. Issuance and creation
                 # dates remain stable across those refreshes and change for a new grant.
@@ -61,7 +61,8 @@ def historical_task_matches(task, endpoint, scope, *, exact_receipt=False):
 
     from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
 
-    if (not scope or task["user_subject"] != endpoint["user_subject"] or task["agent_host"] != "nanobot"
+    if (not scope or task["user_subject"] != endpoint["user_subject"] or task["agent_host"] not in {"nanobot", "pi"}
+            or task["agent_host"] != endpoint["agent_host"]
             or task["origin_endpoint_id"] != endpoint["endpoint_id"]
             or task["active_conversation_ref"] != endpoint["conversation_ref"] or task["status"] not in TERMINAL_TASK_STATUSES):
         return False

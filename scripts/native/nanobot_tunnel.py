@@ -104,6 +104,7 @@ def restricted_tunnel(spec, action):
     user, home, options, body, key = tunnel_settings(spec)
     config = Path("/etc/ssh/sshd_config.d") / (user + ".conf")
     authorized = home / "authorized_keys"
+    description = "AgentBridge Pi tunnel" if spec.get("hostType") == "pi" else "AgentBridge NanoBot tunnel"
     try:
         account = pwd.getpwnam(user)
     except KeyError:
@@ -112,7 +113,7 @@ def restricted_tunnel(spec, action):
         account.pw_uid == 0
         or account.pw_dir != str(home)
         or account.pw_shell != "/usr/sbin/nologin"
-        or account.pw_gecos != "AgentBridge NanoBot tunnel"
+        or account.pw_gecos != description
     ):
         raise ValueError("The pilot forwarding account is not publication-owned")
     if (home.exists() or home.is_symlink()) and (
@@ -149,7 +150,7 @@ def restricted_tunnel(spec, action):
             "--shell",
             "/usr/sbin/nologin",
             "--comment",
-            "AgentBridge NanoBot tunnel",
+            description,
             user,
         )
     home.mkdir(mode=0o755, exist_ok=True)

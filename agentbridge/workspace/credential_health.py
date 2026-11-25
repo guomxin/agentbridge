@@ -58,7 +58,17 @@ def preparation_health(service, task, *, now=None):
     if age >= 600 and command.get('kind') == 'oa_pending_query':
         return {'state':'expired', 'label':'查询等待已超期',
                 'message':'本次查询等待已超过10分钟，不能再执行。请重新发送“查询 OA 待办”获取最新结果。'}
-    health = credential_health(service, task['user_subject'], now=now)
+    host_type = task['agent_host']
+    instance_id = None
+    if host_type in {"pi", "nanobot"}:
+        from agentbridge.core.endpoint_instances import endpoint_instances
+        with service.tasks._connect() as db:
+            db.execute("BEGIN")
+            scope = endpoint_instances(db, task['user_subject']).get(task['origin_endpoint_id'])
+        if not scope or scope[0] != host_type:
+            return None
+        instance_id = scope[1]
+    health = credential_health(service, task['user_subject'], host_type=host_type, instance_id=instance_id, now=now)
     if health['blocked']:
         return {'state':'authentication_required','label':'连接凭证不可用','message':health['message'] + ' 原请求已保留，有效期内恢复后会自动接续；请勿重复提交。'}
     with service.tasks._connect() as db:
@@ -66,7 +76,7 @@ def preparation_health(service, task, *, now=None):
                          "AND event_type='task.prepare.delivery' AND causation_ref=? ORDER BY rowid DESC LIMIT 1",
                          (task['task_id'],task['user_subject'],command.get('commandKey'))).fetchone()
     code = json.loads(row[0]).get('code') if row else None
-    if code in {'FORBIDDEN','UNAUTHORIZED','MCP_HTTP_401','HTTP_401'}:
+    if code in {'FORBIDDEN','UNAUTHORIZED','MCP_HTTP_401','HTTP_401','PI_INSTANCE_UNAUTHORIZED','NANOBOT_INSTANCE_UNAUTHORIZED'}:
         return {'state':'authentication_required','label':'连接认证失败',
                 'message':'智能体拒绝了本次身份绑定，请联系管理员检查连接凭证与账号绑定。原请求已保留，尚未进入业务执行；请勿重复提交。'}
     if (code and code != "accepted") or age >= 30:

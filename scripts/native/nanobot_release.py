@@ -271,6 +271,10 @@ def reviewed_contract(spec):
 
 
 def remote(pub, spec, action, **extra):
+    return remote_request(pub, metadata(spec), action, **extra)
+
+
+def remote_request(pub, remote_spec, action, **extra):
     # The script and any credentials pass on stdin. No literal secret in ssh/ps arguments.
     tunnel_code = (ROOT / "scripts/native/nanobot_tunnel.py").read_bytes()
     program = (
@@ -282,7 +286,7 @@ def remote(pub, spec, action, **extra):
         + (ROOT / "scripts/native/nanobot_remote.py").read_text()
     )
     runner = "import base64,sys;exec(compile(base64.b64decode(sys.stdin.readline()),'<reviewed-nanobot-release>','exec'))"
-    if action in ("bind", "probe", "rollback_scope", "recovery_check", "name_check", "name_apply", "name_restore"):
+    if action in ("bind", "probe", "probe_predecessor", "rollback_scope", "recovery_check", "name_check", "name_apply", "name_restore"):
         args = [
             "sudo",
             "-u",
@@ -297,7 +301,7 @@ def remote(pub, spec, action, **extra):
         args = ["python3", "-I", "-c", runner]
     request = {
         "action": action,
-        "spec": metadata(spec),
+        "spec": remote_spec,
         "root": pub.args.remote_root,
         **extra,
     }
@@ -435,9 +439,11 @@ def archive_bridge(pub, spec, artifact):
     return release
 
 
-def jobs(spec, mac):
+def jobs(spec, mac, *, host_type="nanobot"):
+    if host_type not in {"nanobot", "pi"}:
+        raise ValueError("Unsupported local host implementation")
     root = Path(spec["runtimeDir"])
-    prefix = "ai.agentbridge.nanobot." + spec["instanceId"]
+    prefix = "ai.agentbridge." + host_type + "." + spec["instanceId"]
     launcher = (
         "import runpy,sys;root=sys.argv.pop(1);sys.path[:0]=[root,root+'/agentbridge.whl'];"
         "runpy.run_module(sys.argv.pop(1),run_name='__main__')"
@@ -451,12 +457,12 @@ def jobs(spec, mac):
             "-c",
             launcher,
             str(root / "current"),
-            "nanobot_agentbridge." + module,
+            module,
             "--config",
             str(root / "current" / config),
         ]
 
-    worker = launch("server", "host.json")
+    worker = launch(host_type + "_agentbridge.server", "host.json")
     tunnel = mac["tunnel"]
     ssh = [
         "/usr/bin/ssh",
@@ -488,7 +494,7 @@ def jobs(spec, mac):
     ]
     processes = [("worker", worker), ("tunnel", ssh)]
     if spec.get("telegram"):
-        processes.append(("telegram", launch("telegram", "telegram.json")))
+        processes.append(("telegram", launch("nanobot_agentbridge.telegram", "telegram.json")))
     return {
         prefix + "." + name: {
             "Label": prefix + "." + name,
@@ -604,7 +610,7 @@ def local_port_free(port):
         return sock.connect_ex(("127.0.0.1", port)) == errno.ECONNREFUSED
 
 
-def drain_jobs(pub, spec, definitions):
+def drain_jobs(pub, spec, definitions, *, observe_remote=None):
     if not definitions:
         return
     deadline = time.monotonic() + 45
@@ -616,7 +622,7 @@ def drain_jobs(pub, spec, definitions):
     while time.monotonic() < deadline:
         if (local_port_free(spec["listenPort"])
                 and (not spec.get("telegram") or not poll_lock_held(poll_lock_path(spec)))
-                and remote(pub, spec, "observe")["portOccupied"] is False):
+                and (observe_remote or remote)(pub, spec, "observe")["portOccupied"] is False):
             return
         time.sleep(0.25)
     raise RuntimeError("NanoBot listener, reverse port or Telegram poll lock remained occupied")
@@ -830,7 +836,7 @@ def configure_release(pub, spec, mac, root, archive, recovery=None):
     save(archive / "host.json", config)
 
 
-def retry_proof(pub, spec, root, old, last, definitions, prior):
+def retry_proof(pub, spec, root, old, last, definitions, prior, *, recovery_remote=None):
     if (
         last.get("stage") != "rolled_back"
         or last.get("previousScopePresent") is not False
@@ -905,7 +911,7 @@ def retry_proof(pub, spec, root, old, last, definitions, prior):
         "archiveCandidate": anchor,
         "subjects": subjects,
     }
-    proof["baseRevision"] = remote(pub, spec, "recovery_check", recovery=proof)[
+    proof["baseRevision"] = (recovery_remote or remote)(pub, spec, "recovery_check", recovery=proof)[
         "baseRevision"
     ]
     # Preserve the private original receipt before the new transaction takes its place.

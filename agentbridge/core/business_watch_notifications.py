@@ -80,12 +80,12 @@ def on_watch_change(service, connection: sqlite3.Connection, event: dict, privat
     for endpoint in endpoints:
         if endpoint["endpoint_id"] not in selected or str(endpoint["client_type"]).lower() in {"web", "webchat"}:
             continue
-        if endpoint["agent_host"] == "nanobot":
+        if endpoint["agent_host"] in {"nanobot", "pi"}:
             from agentbridge.core.endpoint_instances import endpoint_instances
             from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_pair_proof, mirror_sender_ids
             ownership = endpoint_instances(connection, owner)
             destination = ownership.get(endpoint["endpoint_id"])
-            if not destination or destination[0] != "nanobot" or endpoint["client_type"] != "telegram":
+            if not destination or destination[0] != endpoint["agent_host"] or endpoint["client_type"] != "telegram":
                 continue
             binding = mirror_binding(connection, owner, destination[1], ownership)
             if (not binding or endpoint["account_id"] != binding["bot"]

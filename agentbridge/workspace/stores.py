@@ -43,6 +43,7 @@ _HOST_DISPATCH_TERMINAL_STATES = {
     "failed_before_accept",
     "acceptance_unknown",
     "result_unknown",
+    "stopped",
     "canceled",
 }
 
@@ -106,6 +107,8 @@ class WorkspaceStore:
             connection.execute("PRAGMA journal_mode=WAL")
             from agentbridge.workspace.telegram_pilot_links import initialize_telegram_pilot_links
             initialize_telegram_pilot_links(connection)
+            from agentbridge.workspace.pi_timeline_media import initialize as initialize_pi_media
+            initialize_pi_media(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS workspace_accounts (
@@ -972,6 +975,9 @@ class WorkspaceStore:
                     or entry["payload"].get("skillTrial") != trial_snapshot
                 ):
                     raise WorkspaceConflictError("IDEMPOTENCY_PAYLOAD_MISMATCH")
+                if host["host_type"] == "pi" and stored_attachments and not (skill_trial or continuation_task_id):
+                    from agentbridge.workspace.pi_timeline_media import enqueue
+                    enqueue(connection, tasks, dispatch, entry, stored_attachments)
             return dispatch, False
         except BaseException:
             attachment_store._discard_created_files(created_paths)

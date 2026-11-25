@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/reference-host"))
 from reference_host.bound_commands import PENDING_LIST, QUERY, finish_query, query_result
-from reference_host.bound_coordinator import BoundDriver
+from reference_host.bound_coordinator import BoundDriver, IMPLEMENTATION, PI_IMPLEMENTATION
 
 
 def reply(data, card=None, *, error=False):
@@ -34,13 +34,22 @@ def bound():
     req = {"commandKey":"fixed","runId":"fixed","endpoint":"ep","subject":"person","task":{"taskId":"original"},
            "conversation":"original-web"}
     api = SimpleNamespace(call_tool=AsyncMock(return_value=reply({"operation":operation})))
-    driver = SimpleNamespace(req=req, journal=journal, client=lambda _:api, host_context=lambda:{},
+    driver = SimpleNamespace(req=req, journal=journal, implementation=IMPLEMENTATION, client=lambda _:api, host_context=lambda:{},
                              state=SimpleNamespace(finish_task=Mock()),
                              refresh_task_snapshot=AsyncMock(return_value={"task":task,"endpoint":{"endpointId":"ep"}}))
     result = {"status":"succeeded","capability":PENDING_LIST,"commandKind":QUERY,"operationId":"read-op",
               "queryResult":{"kind":QUERY,"taskId":"original","endpointId":"ep","count":0,"complete":True}}
     yield SimpleNamespace(driver=driver,task=task,cmd=command,op=operation,api=api,data=result)
     journal.close()
+
+
+def test_pi_and_nanobot_commands_cannot_share_origin(bound):
+    from reference_host.bound_commands import command_snapshot
+    bound.driver.implementation = PI_IMPLEMENTATION
+    with pytest.raises(PermissionError):
+        asyncio.run(command_snapshot(bound.driver, "local"))
+    bound.task["agentHost"] = "pi"
+    assert asyncio.run(command_snapshot(bound.driver, "local"))[0] is bound.task
 
 
 @pytest.mark.parametrize("resumed", [False, True])

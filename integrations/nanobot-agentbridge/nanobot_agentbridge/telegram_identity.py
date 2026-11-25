@@ -14,7 +14,7 @@ def identifier(value):
 
 
 async def verify_telegram_binding(
-    session, instance, subject, host_context, endpoint_key
+    session, instance, subject, host_context, endpoint_key, *, host_type="nanobot"
 ):
     match = re.fullmatch(
         r"telegram:([1-9][0-9]{0,15}):([1-9][0-9]{0,15})", endpoint_key
@@ -23,13 +23,13 @@ async def verify_telegram_binding(
         return False
     context = host_context.get("io.agentbridge/host-context", host_context)
     if (
-        context.get("agentHost") != "nanobot"
+        host_type not in {"nanobot", "pi"} or context.get("agentHost") != host_type
         or context.get("hostInstanceId") != instance
     ):
         return False
     result = await session.call_tool(
         "agentbridge_host_identity_profile",
-        {"agent_host": "nanobot"},
+        {"agent_host": host_type},
         meta={
             "io.agentbridge/host-context": context,
             "io.agentbridge/telegram-identity": {

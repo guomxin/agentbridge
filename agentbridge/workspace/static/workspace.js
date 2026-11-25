@@ -20,6 +20,7 @@ import { createDailyDigestSettings } from './workspace_daily_digest.mjs';
 
 const state = {
   account: null,
+  hostChanging: null,
   activeView: "chat",
   taskPanel: "records",
   tasks: [],
@@ -192,6 +193,7 @@ function scopedApi(scope) {
 
 function resetWorkspaceState() {
   state.hostChoices = null;
+  $("#chat-form").inert = true;
   state.hostCapabilities = null;
   $("#workspace-host").disabled = true;
   $("#workspace-host").replaceChildren();
@@ -465,7 +467,8 @@ function showHostChoices(choices) {
     select.add(option);
   }
   select.value = choices.default_instance_id || "";
-  select.disabled = !choices.items.some(item => item.selectable);
+  select.disabled = Boolean(state.hostChanging) || !choices.items.some(item => item.selectable);
+  $("#chat-form").inert = Boolean(state.hostChanging) || !choices.default_instance_id;
   $("#host-name").textContent = select.selectedOptions[0]?.textContent || "暂无宿主";
 }
 
@@ -482,6 +485,10 @@ async function loadHostChoices(scope = sessionScope) {
 async function changeDefaultHost() {
   const scope = sessionScope;
   const select = $("#workspace-host");
+  if (state.hostChanging || !state.hostChoices) return;
+  const change = Symbol();
+  state.hostChanging = change;
+  $("#chat-form").inert = true;
   select.disabled = true;
   try {
     await scopedApi(scope)("/api/hosts/default", {method:"POST", csrf:true,
@@ -496,6 +503,11 @@ async function changeDefaultHost() {
       showHostChoices(state.hostChoices);
     }
     toast(friendlyError(error), true, "host-default");
+  } finally {
+    if (state.hostChanging === change) {
+      state.hostChanging = null;
+      if (state.hostChoices) showHostChoices(state.hostChoices);
+    }
   }
 }
 
@@ -507,16 +519,18 @@ async function reloadHostWorkspace({message, attachments, skillTrial} = {}) {
   const account = state.account;
   const reload = enterWorkspace(account);
   const scope = sessionScope;
-  await reload;
-  if (!scope.current() || state.account !== account) return false;
+  // enterWorkspace clears the preceding view synchronously. Restore the draft
+  // before waiting for history so later edits cannot be overwritten.
   if (trial) beginComposerTrial(trial);
   state.composerAttachments = images;
   renderComposerAttachments();
   input.value = draft;
-  return true;
+  await reload;
+  return scope.current() && state.account === account && Boolean(state.hostChoices);
 }
 
 async function enterWorkspace(account) {
+  if (state.account !== account) state.hostChanging = null;
   stopWorkspaceObservers();
   sessionScope.dispose();
   sessionScope = lifecycle.scope();
@@ -1309,7 +1323,9 @@ function timelineEntryImages(entry) {
         Number(left.ordinal || 0) - Number(right.ordinal || 0),
     )
     .map((attachment) => ({
-      mediaUrl: attachment.mediaUrl,
+      mediaUrl: attachment.attachmentId
+        ? `/api/timeline/attachments/${encodeURIComponent(attachment.attachmentId)}/download?preview=1`
+        : attachment.mediaUrl,
       downloadUrl: attachment.attachmentId
         ? `/api/timeline/attachments/${encodeURIComponent(attachment.attachmentId)}/download`
         : attachment.mediaUrl,
@@ -1381,28 +1397,34 @@ function renderRunFailure(
   scrollChat();
 }
 
-function attachDispatchCancel(runId, dispatchId) {
+function attachDispatchCancel(runId, dispatchId, stopGeneration = false) {
   if (!runId || !dispatchId) return;
   const live = ensureLiveMessage(runId);
-  if (live.cancelDispatchId === dispatchId && live.actions.childElementCount) {
+  if (live.cancelDispatchId === dispatchId && live.stopGeneration === stopGeneration && live.actions.querySelector(".cancel-dispatch")) {
     return;
   }
   live.cancelDispatchId = dispatchId;
+  live.stopGeneration = stopGeneration;
   const cancelTrial = state.activeStreams.get(runId)?.onCanceled;
   live.actions.replaceChildren();
   const cancel = document.createElement("button");
   cancel.type = "button";
-  cancel.className = "secondary retry-command";
-  cancel.textContent = "取消本次请求";
+  cancel.className = "secondary retry-command cancel-dispatch";
+  cancel.textContent = stopGeneration ? "停止生成回复" : "取消本次请求";
   cancel.addEventListener("click", async () => {
     cancel.disabled = true;
     try {
-      await api(
-        `/api/chat/dispatches/${encodeURIComponent(dispatchId)}/cancel`,
+      const receipt = await api(
+        `/api/chat/dispatches/${encodeURIComponent(dispatchId)}/${stopGeneration ? "stop-generation" : "cancel"}`,
         { method: "POST", body: {}, csrf: true },
       );
-      cancelTrial?.();
-      addLiveProgress(runId, "已取消等待", "failed");
+      if (stopGeneration) {
+        const labels = {stopped: "已停止生成回复", completed: "回复已完成", unknown: "原运行状态待核对"};
+        addLiveProgress(runId, labels[receipt.runState] || "原运行状态待核对", "active");
+      } else {
+        cancelTrial?.();
+        addLiveProgress(runId, "已取消等待", "failed");
+      }
     } catch (error) {
     if (isCancellation(error)) return;
       cancel.disabled = false;

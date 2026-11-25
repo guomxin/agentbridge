@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 import json
+import re
 import time
 from typing import Callable, Protocol
 
@@ -75,6 +76,12 @@ class SkillJobExecutor:
         try:
             self._dependencies.active(job)
             payload = json.loads(job['payload_json'])
+            route = payload.get('model_route') or {}
+            if (job['kind'] == 'evaluation' and re.fullmatch(r'pi:draft:[a-f0-9]{64}', job.get('request_key', ''))
+                    and 'telegram_origin' not in route):
+                raise PermissionError('旧 Pi 私聊评测缺少原配对，请重新发起评测。')
+            if 'telegram_origin' in route and bound_completion is None:
+                raise PermissionError('当前无法核验原 Pi 私聊的模型绑定。')
             if bound_completion is not None:
                 complete = partial(bound_completion, job['owner_subject'], payload.get('model_route'))
             result = self._dependencies.generation(job, payload, complete) if job['kind'] == 'generation' else self._dependencies.evaluation(job, payload, complete)

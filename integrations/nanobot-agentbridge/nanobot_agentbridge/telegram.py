@@ -1,4 +1,4 @@
-"""One private-chat Telegram Bot API consumer for an independent NanoBot instance.
+"""Private-chat Telegram Bot API consumer for a single reviewed host instance.
 
 Start with python -m nanobot_agentbridge.telegram --config /absolute/private/config.json.
 The AgentBridge wheel supplies the same authenticated local host client as Workspace.
@@ -48,7 +48,7 @@ class TelegramUnavailable(RuntimeError):
 class TelegramAPI:
     _SAFE_RECONNECT_METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "getFile", "sendChatAction"})
 
-    def __init__(self, token, connection_factory=None):
+    def __init__(self, token, connection_factory=None, *, private_sender=None):
         if (
             not isinstance(token, str)
             or not token
@@ -56,6 +56,7 @@ class TelegramAPI:
         ):
             raise ValueError("Invalid Telegram credential")
         self._token = token
+        self._private_sender = private_sender
         self._connect = connection_factory or (
             lambda: http.client.HTTPSConnection("api.telegram.org", timeout=8)
         )
@@ -79,19 +80,22 @@ class TelegramAPI:
     def call(self, method, **params):
         payload = json.dumps(params).encode()
         headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
-        return self._post(method, payload, headers)
+        return self._post(method, payload, headers, chat=params.get("chat_id"))
 
     def send_document(self, chat, filename, content_type, data):
         import httpx
         upload = httpx.Request("POST", "https://api.telegram.org",
                                data={"chat_id": str(chat)}, files={"document": (filename, data, content_type)})
         return self._post("sendDocument", upload.read(), {"Content-Type": upload.headers["Content-Type"],
-                                                         "Connection": "keep-alive"})
+                                                         "Connection": "keep-alive"}, chat=chat)
 
-    def _post(self, method, payload, headers):
+    def _post(self, method, payload, headers, *, chat=None):
         path = f"/bot{self._token}/{method}"
         with self._lock:
             for attempt in range(2):
+                if (self._private_sender is not None and method not in {"getMe", "getWebhookInfo", "getUpdates", "getFile"}
+                        and not self._private_sender(chat)):
+                    raise TelegramUnavailable("Private channel destination is no longer authorized")
                 # Avoid writing a non-idempotent sendMessage onto a socket nearing server idle close.
                 if (
                     self._conn is not None
@@ -142,13 +146,19 @@ class TelegramAPI:
 
 class TelegramPilot:
     def __init__(
-        self, database, *, api, bot_id, instance, gateway, bindings, bot_username=None, allow_pairing=False
+        self, database, *, api, bot_id, instance, gateway, bindings, bot_username=None,
+        allow_pairing=False, sender_subject=None
     ):
         self.api, self.bot_id, self.instance = api, bot_id, instance
         self.gateway, self.bindings = gateway, bindings
+        self.host_type = getattr(gateway, "host_type", "nanobot")
+        if self.host_type not in {"nanobot", "pi"} or (self.host_type == "pi" and not callable(sender_subject)):
+            raise ValueError("Pi Telegram requires a reviewed private sender")
+        self.sender_subject = sender_subject
         self.bot_username = bot_username
         self.allow_pairing = allow_pairing
         self.next_notifications = 0.0
+        self.next_workspace_images = 0.0
         self._typing_at: dict[int, float] = {}
         self._paired_bindings: dict[int, dict] = {}
         self._mirror_peers_cache: list[int] = []
@@ -208,6 +218,8 @@ class TelegramPilot:
             )
 
     def _binding(self, chat):
+        if self.sender_subject is not None and self.sender_subject(chat) is None:
+            return None, None
         static_binding = self.bindings().get(str(chat))
         binding = static_binding
         used_cached_pair = False
@@ -226,7 +238,7 @@ class TelegramPilot:
             try:
                 verified = self.gateway.verify_telegram_binding(binding)
             except GatewayRequestError as exc:
-                if exc.code == "NANOBOT_BINDING_UNAVAILABLE" and used_cached_pair:
+                if exc.code == self.host_type.upper() + "_BINDING_UNAVAILABLE" and used_cached_pair:
                     # Host process may have restarted and cleared in-memory routes; re-resolve once.
                     self._paired_bindings.pop(chat, None)
                     binding = self.gateway.resolve_telegram_sender(self.bot_id, chat)
@@ -248,12 +260,15 @@ class TelegramPilot:
                 else:
                     return None, None
         except GatewayRequestError as exc:
-            if exc.code == "NANOBOT_BINDING_UNAVAILABLE":
+            if exc.code == self.host_type.upper() + "_BINDING_UNAVAILABLE":
                 self._paired_bindings.pop(chat, None)
                 return None, None
             raise TelegramUnavailable(
                 "Central Telegram identity temporarily unavailable"
             ) from None
+        if self.sender_subject is not None and binding.get("user_subject") != self.sender_subject(chat):
+            self._paired_bindings.pop(chat, None)
+            return None, None
         digest = hashlib.sha256(
             json.dumps(
                 [self.instance, self.bot_id, chat, binding],
@@ -313,6 +328,8 @@ class TelegramPilot:
             or (not any(k in msg for k in telegram_media.MEDIA_FIELDS) and not telegram_text_fits(msg.get("text")))
         ):
             return
+        if self.sender_subject is not None and self.sender_subject(chat_id) is None:
+            return
         if self._record(chat_id,message_id):
             return
         if any(k in msg for k in telegram_media.MEDIA_FIELDS):
@@ -361,9 +378,14 @@ class TelegramPilot:
                 self.navigation.handle(chat_id, message_id, binding, digest, msg.get("reply_to_message"), *navigation)
             elif plain:
                 self.deliver(chat_id, message_id, "请在本人工作台的可信界面填写受保护的信息。")
+            elif self.host_type == "pi" and text in {"/agentbridge", "/agentbridge status"}:
+                status = self.gateway.readiness()
+                state = "已就绪" if status.get("available") is True else "暂不可用"
+                self.deliver(chat_id, message_id, f"Pi 私聊已绑定，宿主{state}。使用 /pending 查看本人待处理任务。")
             elif text == "/start":
+                name = "Pi" if self.host_type == "pi" else "NanoBot"
                 self.deliver(
-                    chat_id, message_id, "已连接 NanoBot 助手，可以直接提问、查询待办或发起业务办理。用 /pending 找回原卡，回复原消息并发送“继续”或“停止”可处理原任务。"
+                    chat_id, message_id, f"已连接 {name} 助手，可以直接提问、查询待办或发起业务办理。用 /pending 找回原卡，回复原消息并发送“继续”或“停止”可处理原任务。"
                 )
             elif text == "/status" and isinstance(msg.get("reply_to_message"), dict):
                 original = msg["reply_to_message"]
@@ -431,6 +453,8 @@ class TelegramPilot:
             self._send(chat, message, answer)
 
     def _confirmed_send(self, chat, message, answer, *, parse_mode=None, reply_markup=None):
+        if self.sender_subject is not None and self.sender_subject(chat) is None:
+            return None
         # Telegram sendMessage has no idempotency key. A lost reply after this
         # durable boundary leaves the receipt unknown and cannot trigger a resend.
         params = {
@@ -710,6 +734,13 @@ class TelegramPilot:
                 try:
                     route, digest = self._binding(chat)
                     if route:
+                        if self.host_type == "pi" and time.monotonic() >= self.next_workspace_images:
+                            from .pi_workspace_images import poll as poll_workspace_images
+                            self.next_workspace_images = time.monotonic() + 2
+                            try:
+                                poll_workspace_images(self, chat, route, digest)
+                            except (TelegramUnavailable, GatewayRequestError):
+                                pass
                         self.terminal.poll(chat, route, digest, wait_seconds=1 if use_long_poll else 0)
                 except (TelegramUnavailable,GatewayRequestError):
                     continue
@@ -726,11 +757,21 @@ def main():
         raise ValueError("Invalid bot or instance identity")
     home = private_directory(Path(config["dataDir"]))
     token = bot_token(config)
-    gateway = NanoBotGatewayClient(
-        url=config["hostUrl"],
-        token_file=Path(config["hostTokenFile"]),
-        instance_id=instance,
-    )
+    host_type = config.get("hostType", "nanobot")
+    gateway_args = dict(url=config["hostUrl"], token_file=Path(config["hostTokenFile"]), instance_id=instance)
+    sender_subject = None
+    if host_type == "nanobot":
+        gateway = NanoBotGatewayClient(**gateway_args)
+    elif host_type == "pi":
+        from agentbridge.workspace.nanobot_gateway import PiGatewayClient
+        from .pi_channel import private_sender_policy
+
+        sender_subject = private_sender_policy(filename, config)
+        gateway = PiGatewayClient(**gateway_args, adapter_version=config["adapterVersion"])
+        if gateway.readiness()["available"] is not True:
+            raise ValueError("Pi host identity or readiness did not match")
+    else:
+        raise ValueError("Unknown Telegram host")
 
     def bindings():
         current = json.loads(private_text(filename))
@@ -785,13 +826,13 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         consumer = TelegramPilot(
             home / "messages.sqlite3",
-            api=TelegramAPI(token),
+            api=TelegramAPI(token, private_sender=sender_subject),
             bot_id=bot_id,
             instance=instance,
             gateway=gateway,
             bindings=bindings,
             bot_username=config.get("botUsername"),
-            allow_pairing=config.get("allowWorkspacePairing") is True,
+            allow_pairing=config.get("allowWorkspacePairing") is True, sender_subject=sender_subject,
         )
         try:
             consumer.verify()

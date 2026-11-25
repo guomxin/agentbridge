@@ -96,10 +96,10 @@ async def notifications(host, record, action, body):
     lane = "notifications" if action == "telegram-notifications" else "control"
     async with open_host_session(host, req, lane=lane) as (session, meta, level):
         if level != "L3" or not await verify_telegram_binding(
-            session, req["instance"], req["subject"], meta, req["endpointKey"]
+            session, req["instance"], req["subject"], meta, req["endpointKey"], host_type=req.get("hostType", "nanobot")
         ):
             raise web.HTTPForbidden()
-        endpoint_params = {"agent_host": "nanobot", "endpoint_key": req["endpointKey"]}
+        endpoint_params = {"agent_host": req.get("hostType", "nanobot"), "endpoint_key": req["endpointKey"]}
 
         async def ack(delivery, attempt, succeeded, artifact_outcome=None):
             reply = await session.call_tool(
@@ -233,7 +233,7 @@ async def notifications(host, record, action, body):
                     deliveries.append({"kind": "business_watch", "runId": run_ref, "deliveryId": delivery, "attempt": attempt})
                 continue
             if mode == "timeline_message":
-                message = projected_chat(item, req["workspaceEndpointId"])
+                message = projected_chat(item, req["workspaceEndpointId"], host_type=req.get("hostType", "nanobot"))
                 if message and chat_claim(req["userDir"], req["endpoint"], delivery, attempt, register=True):
                     deliveries.append({"kind": "workspace_chat", "deliveryId": delivery, "attempt": attempt, **message})
                 continue
@@ -241,7 +241,7 @@ async def notifications(host, record, action, body):
                 await ack(delivery, attempt, True)
                 continue
             task, event = item.get("task") or {}, item.get("event") or {}
-            if task.get("userSubject") != req["subject"] or task.get("agentHost") != "nanobot":
+            if task.get("userSubject") != req["subject"] or task.get("agentHost") != req.get("hostType", "nanobot"):
                 continue
             if mode == "artifact":
                 artifact_id = (item.get("artifact") or {}).get("artifactId")
@@ -341,7 +341,7 @@ async def notifications(host, record, action, body):
                 presented = await session.call_tool(
                     "agentbridge_host_interaction_present",
                     {
-                        "agent_host": "nanobot",
+                        "agent_host": req.get("hostType", "nanobot"),
                         "endpoint_key": req["endpointKey"],
                         "interaction_id": interaction_id,
                     },

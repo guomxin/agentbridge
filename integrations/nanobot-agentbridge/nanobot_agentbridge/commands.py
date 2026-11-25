@@ -52,7 +52,7 @@ class CommandQueue:
                 result = await mcp.call_tool(
                     "agentbridge_host_task_snapshot",
                     {
-                        "agent_host": "nanobot",
+                        "agent_host": request.get("hostType", "nanobot"),
                         "endpoint_key": record["endpoint_key"],
                         "task_id": task,
                         "event_limit": 1,
@@ -65,6 +65,7 @@ class CommandQueue:
                     result.isError
                     or observed.get("taskId") != task
                     or observed.get("userSubject") != subject
+                    or observed.get("agentHost") != request.get("hostType", "nanobot")
                     or observed.get("originEndpointId") != endpoint
                     or observed.get("activeConversationRef") != session
                 ):

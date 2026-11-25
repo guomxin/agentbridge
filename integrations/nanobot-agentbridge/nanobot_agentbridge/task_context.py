@@ -8,10 +8,15 @@ import re
 
 
 class TaskContext:
-    def __init__(self, session, request, host_meta):
+    def __init__(self, session, request, host_meta, *, host_type="nanobot", verify_telegram=None, repair_source=None):
         self.session = session
         self.request = request
         self.host_meta = host_meta
+        if host_type not in {"nanobot", "pi"}:
+            raise ValueError("Unsupported private coordinator implementation")
+        self.host_type, self.verify_telegram = host_type, verify_telegram
+        self.repair_source = repair_source
+        self.task_table = "planning_repairs" if repair_source else "tasks"
         self.meta = None
         self.read_outcome = None
         self.delegated = False
@@ -22,6 +27,24 @@ class TaskContext:
             db.execute("""CREATE TABLE IF NOT EXISTS pending_queries (
                 run_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
                 item_count INTEGER NOT NULL, complete INTEGER NOT NULL)""")
+            if repair_source:
+                db.execute("""CREATE TABLE IF NOT EXISTS planning_repairs (
+                    run_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE, version INTEGER NOT NULL)""")
+
+    def ensure_arguments(self):
+        req = self.request
+        sender = re.fullmatch(r"telegram:([0-9]+):([0-9]+)", req["endpointKey"])
+        account = (req["workspaceEndpointKey"] if sender else req["endpointKey"])[len("workspace:" + req["instance"] + ":"):]
+        args = {"agent_host":self.host_type, "host_task_key":req["runId"], "endpoint_key":req["endpointKey"],
+                "client_type":"telegram" if sender else "web", "external_subject":sender.group(2) if sender else account,
+                "account_id":sender.group(1) if sender else account, "conversation_ref":req["conversation"],
+                "title":("Pi" if self.host_type == "pi" else "NanoBot") + " 工作台任务", "task_scope":"independent"}
+        if sender:
+            args["route"] = {"channel":"telegram", "to":sender.group(2), "accountId":sender.group(1)}
+        if self.repair_source:
+            args.update(host_task_key=req["runId"] + ":plan-repair", tool_name="agentbridge_task_plan_prepare",
+                        planning_task_key=req["runId"], planning_repair_source_task_id=self.repair_source)
+        return args
 
     async def get(self, *, existing_only=False):
         req = self.request
@@ -31,33 +54,21 @@ class TaskContext:
             from .telegram_identity import verify_telegram_binding
             if not req.get("workspaceEndpointId") or not req.get("workspaceEndpointKey","").startswith(prefix):
                 raise PermissionError("No bound Workspace counterpart")
-            if not await verify_telegram_binding(self.session,req["instance"],req["subject"],self.host_meta,req["endpointKey"]):
+            verifier = self.verify_telegram or verify_telegram_binding
+            if not await verifier(self.session,req["instance"],req["subject"],self.host_meta,req["endpointKey"]):
                 raise PermissionError("Original Telegram pairing no longer active")
         elif not req["endpointKey"].startswith(prefix):
             raise PermissionError("No private endpoint binding")
         with sqlite3.connect(self.db) as db:
             row = db.execute(
-                "SELECT task_id,version FROM tasks WHERE run_id=? AND endpoint=?",
+                f"SELECT task_id,version FROM {self.task_table} WHERE run_id=? AND endpoint=?",
                 (req["runId"], req["endpoint"]),
             ).fetchone()
         if row is None:
             if existing_only:
                 raise PermissionError("No previously bound task")
-            account = (req["workspaceEndpointKey"] if sender else req["endpointKey"])[len(prefix):]
             result = await self.session.call_tool(
-                "agentbridge_host_task_ensure",
-                {
-                    "agent_host": "nanobot",
-                    "host_task_key": req["runId"],
-                    "endpoint_key": req["endpointKey"],
-                    "client_type": "telegram" if sender else "web",
-                    "external_subject": sender.group(2) if sender else account,
-                    "account_id": sender.group(1) if sender else account,
-                    **({"route":{"channel":"telegram","to":sender.group(2),"accountId":sender.group(1)}} if sender else {}),
-                    "conversation_ref": req["conversation"],
-                    "title": "NanoBot 工作台任务",
-                    "task_scope": "independent",
-                },
+                "agentbridge_host_task_ensure", self.ensure_arguments(),
                 meta=self.host_meta,
             )
             payload = result.structuredContent or {}
@@ -69,16 +80,17 @@ class TaskContext:
                 or not task_id
                 or endpoint.get("endpointId") != req["endpoint"]
                 or lease.get("hostInstanceId") != req["instance"]
+                or self.repair_source and ((payload.get("task") or {}).get("summary") or {}).get("planRepair", {}).get("sourceTaskId") != self.repair_source
             ):
                 raise PermissionError("Central endpoint or coordinator unavailable")
             version = int(lease["version"])
             with sqlite3.connect(self.db) as db:
                 db.execute(
-                    "INSERT OR IGNORE INTO tasks VALUES(?,?,?,?)",
+                    f"INSERT OR IGNORE INTO {self.task_table} VALUES(?,?,?,?)",
                     (req["runId"], req["endpoint"], task_id, version),
                 )
                 row = db.execute(
-                    "SELECT task_id,version FROM tasks WHERE run_id=? AND endpoint=?",
+                    f"SELECT task_id,version FROM {self.task_table} WHERE run_id=? AND endpoint=?",
                     (req["runId"], req["endpoint"]),
                 ).fetchone()
             if not row or row[0] != task_id:
@@ -152,7 +164,7 @@ class TaskContext:
             return
         task = self.meta["io.agentbridge/task"]
         result = await self.session.call_tool("agentbridge_host_task_finish", {
-            "agent_host": "nanobot", "task_id": task["taskId"], "outcome": self.read_outcome,
+            "agent_host": self.host_type, "task_id": task["taskId"], "outcome": self.read_outcome,
             "reason": "confirmed_read_receipt", "causation_ref": self.request["runId"],
         }, meta=self.meta)
         if result.isError:

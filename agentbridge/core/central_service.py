@@ -22,6 +22,7 @@ from typing import (
 )
 from uuid import uuid4
 
+from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS
 from agentbridge.core.trusted_flow_presentation import (
     FLOW_ENDPOINT_CAPABILITY,
     continuous_flow_presentation,
@@ -671,6 +672,28 @@ class CentralCapabilityService:
             "plan": task_plan_response(plan),
         }
 
+    def _pi_report_origin(self, subject, plan_id, endpoint_id, conversation):
+        from agentbridge.core.task_projections import plan_result_response
+        plan = self.task_plans.get(plan_id, user_subject=subject)
+        parent = self.tasks.get_task(plan["parent_task_id"], user_subject=subject)
+        repair = (parent.get("summary") or {}).get("planRepair") or {}
+        if (plan["state"] != "succeeded" or parent["agent_host"] != "pi"
+                or parent["origin_endpoint_id"] != endpoint_id or parent["active_conversation_ref"] != conversation
+                or not repair.get("sourceTaskId") or not all(step.get("kind") == "transform" or
+                    self.registry.get(step["capability_name"]).effect == "read" for step in plan["steps"])):
+            raise TaskIntegrityError("An owned completed read-only Pi repair plan is required")
+        for step in plan["steps"]:
+            if step.get("capability_name"):
+                self.user_grants.require_capability(subject, step["capability_name"], step.get("arguments"))
+        packet = plan_result_response(plan)
+        next_action = packet.get("nextAction") or {}
+        if next_action.get("tool") != "oa_workflow_history_next" or next_action.get("readOnly") is not True:
+            raise TaskIntegrityError("The Pi plan did not return a saved history report")
+        source = self.tasks.get_task(repair["sourceTaskId"], user_subject=subject)
+        if source["origin_endpoint_id"] != endpoint_id or source["active_conversation_ref"] != conversation:
+            raise TaskIntegrityError("Pi report source belongs to another endpoint")
+        return source["host_task_key"], next_action["arguments"]["cursor"]
+
     @_serialize_host_task_calls
     def cancel_unsubmitted_task(self, *, user_subject: str, task_id: str) -> dict:
         task = self.tasks.get_task(task_id, user_subject=user_subject)
@@ -831,6 +854,38 @@ class CentralCapabilityService:
 
         self.validate_skill_task(user_subject, task_id, capability=capability_name)
         self.user_grants.require_capability(user_subject, capability_name, arguments)
+        if host_type == "pi" and task_id:
+            pi_task = self.tasks.get_task(task_id, user_subject=user_subject)
+            report_plan = (pi_task.get("summary") or {}).get("piReportPlan")
+            if report_plan and capability_name != "oa.workflow.history.next":
+                raise PermissionError("A Pi plan report task can only read the original saved pages")
+        history_call = capability_name in {"oa.workflow.history.query", "oa.workflow.history.next"}
+        task = (self.tasks.get_task(task_id, user_subject=user_subject)
+                if history_call and task_id and host_type in {"workspace", "pi"} else None)
+        if history_call and (host_type == "pi" or task and task["agent_host"] == "pi"):
+            from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
+            if not task or task["agent_host"] != "pi" or task["status"] in TERMINAL_TASK_STATUSES:
+                raise PermissionError("历史查询需要本人进行中的原 Pi 任务。")
+            if host_type == "workspace":
+                if origin_endpoint_id != task["origin_endpoint_id"]:
+                    raise PermissionError("历史查询需要本任务的原端点。")
+                self._require_pi_origin(user_subject, {"agentHost": "pi", "hostInstanceId": host_instance_id},
+                                        origin_endpoint_id)
+            prior_id = task["current_operation_id"]
+            prior = self.operations.get(prior_id) if prior_id else None
+            page = ((prior.get("result") or {}) if prior and prior["capability_name"] in {
+                "oa.workflow.history.query", "oa.workflow.history.next"} else {})
+            if capability_name == "oa.workflow.history.next":
+                expected = page.get("next_cursor") if page.get("has_more") is True else None
+                if host_type == "pi" and report_plan:
+                    _, initial = self._pi_report_origin(user_subject, report_plan, task["origin_endpoint_id"],
+                                                        task["active_conversation_ref"])
+                    if prior is None:
+                        expected = initial
+                if not expected or expected != arguments.get("cursor"):
+                    raise PermissionError("请使用原任务当前页签发的历史游标。")
+            elif page.get("has_more") is True:
+                raise PermissionError("原任务仍有历史结果待取，请沿原游标继续。")
         from agentbridge.core.business_draft_profiles import BY_PREPARE
         if capability_name in BY_PREPARE and arguments.get("input_submission_id"):
             from agentbridge.core.business_drafts import BusinessDraftService
@@ -1815,7 +1870,7 @@ class CentralCapabilityService:
                     'message':None,'watchId':validated['watchId']})
                 continue
             if delivery["payload_type"] == "timeline_message":
-                if agent_host == "nanobot":
+                if agent_host in PRIVATE_BOT_HOSTS:
                     event = {key: value for key, value in event.items() if key != "pairProof"}
                 if "targetEndpointBinding" in event:
                     from agentbridge.core.oa_daily_digest import is_current_digest_destination
@@ -1862,7 +1917,7 @@ class CentralCapabilityService:
                     and command.get("commandKey") == (event.get("payload") or {}).get("commandKey")):
                 item["deliveryMode"] = "prepared_command"
                 item["event"] = {**event, "payload": {"commandKey": command["commandKey"]}}
-            elif (agent_host == "nanobot" and endpoint["client_type"] == "telegram"
+            elif (agent_host in PRIVATE_BOT_HOSTS and endpoint["client_type"] == "telegram"
                   and endpoint["endpoint_id"] == task["origin_endpoint_id"] and event.get("artifactPairProof")
                   and event.get("eventType") == "task.artifact.ready"):
                 # A claim is a hint. File bytes require a fresh, fenced validation.
@@ -1969,7 +2024,7 @@ class CentralCapabilityService:
 
             # Historical lookup never authorizes a send or exposes the old notification payload.
             denied = {"allowed": False}
-            if (include_artifact or agent_host != "nanobot" or endpoint["client_type"] != "telegram"
+            if (include_artifact or agent_host not in PRIVATE_BOT_HOSTS or endpoint["client_type"] != "telegram"
                     or not host_instance_id or type(attempt_count) is not int or not 1 <= attempt_count <= 5
                     or delivery["attempt_count"] != attempt_count or delivery["state"] != "acknowledged"
                     or not delivery.get("acknowledged_at") or delivery["payload_type"] != "task_event"
@@ -2046,7 +2101,7 @@ class CentralCapabilityService:
         if artifact_outcome is not None:
             if (artifact_outcome not in {"attachment_sent", "delivery_unknown"} or not host_instance_id
                     or succeeded != (artifact_outcome == "attachment_sent") or not pending["payload"].get("artifactPairProof")
-                    or agent_host != "nanobot" or endpoint["client_type"] != "telegram" or pending["state"] != "delivering"
+                    or agent_host not in PRIVATE_BOT_HOSTS or endpoint["client_type"] != "telegram" or pending["state"] != "delivering"
                     or attempt_count != pending["attempt_count"]
                     or datetime.fromisoformat(pending["next_attempt_at"]) <= datetime.now(timezone.utc)):
                 raise ValueError("Invalid task file receipt")
@@ -2068,7 +2123,7 @@ class CentralCapabilityService:
             succeeded=succeeded,
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
-            expected_attempt_count=attempt_count if watch_delivery or agent_host=="nanobot" else None,
+            expected_attempt_count=attempt_count if watch_delivery or agent_host in PRIVATE_BOT_HOSTS else None,
             terminal_failure=artifact_outcome == "delivery_unknown",
         )
         if delivery.get("task_id"):
@@ -2200,6 +2255,7 @@ class CentralCapabilityService:
         tool_name: str | None = None,
         planning_task_key: str | None = None,
         planning_repair_source_task_id: str | None = None,
+        planning_report_plan_id: str | None = None,
         host_instance_id: str | None = None,
         host_version: str | None = None,
     ) -> dict:
@@ -2208,7 +2264,7 @@ class CentralCapabilityService:
             raise ValueError("task_scope is invalid")
         if planning_repair_source_task_id and (tool_name != "agentbridge_task_plan_prepare" or task_scope != "independent"):
             raise TaskIntegrityError("planning repair source requires an independent plan preparation")
-        if agent_host == "nanobot" and (client_type == "telegram" or endpoint_key.startswith("telegram:")):
+        if agent_host in PRIVATE_BOT_HOSTS and (client_type == "telegram" or endpoint_key.startswith("telegram:")):
             from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
             parts = endpoint_key.split(":")
             if (len(parts) != 3 or parts[0] != "telegram" or client_type != "telegram"
@@ -2218,8 +2274,18 @@ class CentralCapabilityService:
             if paired["conversationRef"] != conversation_ref:
                 raise TaskIntegrityError("Telegram task conversation has changed")
             endpoint = self.tasks.get_endpoint(paired["endpointId"],user_subject=user_subject)
+            if endpoint["agent_host"] != agent_host:
+                raise TaskIntegrityError("Telegram endpoint belongs to another host")
             endpoint_reused = True
         else:
+            if agent_host == "pi":
+                endpoint = self.tasks.endpoint_for_key(user_subject=user_subject, agent_host=agent_host, endpoint_key=endpoint_key)
+                self._require_pi_origin(user_subject, {"agentHost": agent_host, "hostInstanceId": host_instance_id},
+                                        endpoint["endpoint_id"])
+                if (client_type != "web" or endpoint["client_type"] != client_type
+                        or endpoint["external_subject"] != external_subject
+                        or account_id not in (None, endpoint["account_id"])):
+                    raise TaskIntegrityError("Pi tasks require their assigned Workspace endpoint")
             try:
                 endpoint = self.tasks.endpoint_for_key(
                     user_subject=user_subject,
@@ -2306,6 +2372,13 @@ class CentralCapabilityService:
             if control:
                 return {"protocolVersion": "0.1", "taskId": source_task["task_id"], **control}
         plan_repair = None
+        if planning_report_plan_id:
+            if agent_host != "pi" or task_scope != "independent" or tool_name != "oa_workflow_history_next" or planning_repair_source_task_id:
+                raise TaskIntegrityError("A plan report needs its dedicated Pi read task")
+            original_key, _ = self._pi_report_origin(user_subject, planning_report_plan_id,
+                                                      endpoint["endpoint_id"], conversation_ref)
+            if host_task_key != original_key + ":plan-report":
+                raise TaskIntegrityError("Pi plan report does not belong to this accepted run")
         if planning_repair_source_task_id:
             original = self.tasks.get_task(planning_repair_source_task_id, user_subject=user_subject)
             original_for_turn = self.tasks.find_host_task(user_subject=user_subject, agent_host=agent_host,
@@ -2335,11 +2408,14 @@ class CentralCapabilityService:
                 active_conversation_ref=conversation_ref,
                 title=title,
                 summary={**({"workspaceQueryGroup": workspace_query_group} if workspace_query_group else {}),
-                    **({"planRepair": plan_repair} if plan_repair else {})} or None,
+                    **({"planRepair": plan_repair} if plan_repair else {}),
+                    **({"piReportPlan": planning_report_plan_id} if planning_report_plan_id else {})} or None,
                 connection=connection,
             )
             if plan_repair and task.get("summary", {}).get("planRepair") != plan_repair:
                 raise TaskIntegrityError("planning repair task is bound to a different source")
+            if planning_report_plan_id and task.get("summary", {}).get("piReportPlan") != planning_report_plan_id:
+                raise TaskIntegrityError("Pi report task is bound to a different plan")
             if host_instance_id and host_version:
                 coordinator_lease = self.host_contract.acquire_coordinator_lease(
                     task_id=task["task_id"],
@@ -2380,6 +2456,42 @@ class CentralCapabilityService:
             "coordinatorLease": coordinator_lease,
         }
 
+    def _pi_deployment(self, subject, host_context):
+        """Read the authenticated route owner and the reviewed ceiling of one Pi deployment."""
+        from agentbridge.workspace.nanobot_gateway import load_pi_route_specs
+
+        instance = host_context["hostInstanceId"]
+        if host_context["agentHost"] != "pi":
+            raise PermissionError("Pi credentials belong only to their registered Pi instance")
+        with self.workspace._connect() as db:
+            deployed = db.execute(
+                """SELECT h.route_ref, h.adapter_version FROM workspace_host_instances h
+                JOIN workspace_host_visibility v ON v.instance_id=h.instance_id
+                WHERE h.host_type='pi' AND h.instance_id=? AND h.all_subjects=0
+                AND h.state IN ('enabled','draining') AND v.user_subject=?""",
+                (instance, subject),
+            ).fetchone()
+        if not deployed or deployed["adapter_version"] != host_context["hostVersion"]:
+            raise PermissionError("Pi deployment is not assigned to this identity and version")
+        try:
+            route = load_pi_route_specs().get(deployed["route_ref"], {})
+            credentials = route["subjects"]
+            reference = credentials[subject]
+            if (route["instanceId"] != instance or route["adapterVersion"] != host_context["hostVersion"]
+                    or not isinstance(reference, str) or not reference
+                    or len(set(credentials.values())) != len(credentials)
+                    or route.get("requiredLevel","L1") not in {"L1","L2","L3"}):
+                raise ValueError("Route mismatch")
+        except (TypeError, KeyError, OSError, ValueError):
+            raise PermissionError("Pi deployment credential does not match its configured subject") from None
+
+        return f"workspace-pi:{instance}:{reference}", route.get("requiredLevel","L1")
+
+    def require_pi_identity(self, identity, host_context):
+        label, _ = self._pi_deployment(identity["user_subject"], host_context)
+        if identity.get("label") != label:
+            raise PermissionError("Pi deployment credential does not match its configured subject")
+
     def negotiate_host(
         self,
         *,
@@ -2387,10 +2499,17 @@ class CentralCapabilityService:
         token_id: str,
         profile: dict,
     ) -> dict:
+        options = {}
+        implementation = profile.get("implementation") if isinstance(profile, dict) else None
+        if isinstance(implementation, dict) and implementation.get("name") == "pi":
+            _, options["maximum_level"] = self._pi_deployment(user_subject, {
+                "agentHost":"pi","hostInstanceId":profile.get("hostInstanceId"),"hostVersion":implementation.get("version"),
+            })
         negotiation, changed = self.host_contract.negotiate_with_change(
             user_subject=user_subject,
             token_id=token_id,
             profile=profile,
+            **options,
         )
         if changed:
             self.runtime_governance.record_signal(
@@ -2421,13 +2540,18 @@ class CentralCapabilityService:
         host_version: str,
         minimum_level: str = "L1",
     ) -> dict:
-        return self.host_contract.require_registration(
+        registration = self.host_contract.require_registration(
             user_subject=user_subject,
             agent_host=agent_host,
             host_instance_id=host_instance_id,
             host_version=host_version,
             minimum_level=minimum_level,
         )
+        if agent_host == "pi":
+            _, ceiling = self._pi_deployment(user_subject, {"agentHost":agent_host,"hostInstanceId":host_instance_id,"hostVersion":host_version})
+            if registration["acceptedLevel"] > ceiling:
+                raise PermissionError("Pi deployment level changed. Negotiate the current route level")
+        return registration
 
     def record_host_runtime_snapshot(
         self,
@@ -2543,7 +2667,7 @@ class CentralCapabilityService:
         takeover: bool = False,
         expected_version: int | None = None,
     ) -> dict:
-        self.tasks.get_task(task_id, user_subject=user_subject)
+        self._check_lease_task(user_subject, task_id, registration)
         return self.host_contract.acquire_coordinator_lease(
             task_id=task_id,
             user_subject=user_subject,
@@ -2562,7 +2686,7 @@ class CentralCapabilityService:
         registration: dict,
         expected_version: int | None = None,
     ) -> dict:
-        self.tasks.get_task(task_id, user_subject=user_subject)
+        self._check_lease_task(user_subject, task_id, registration)
         return self.host_contract.assert_coordinator_lease(
             task_id=task_id,
             user_subject=user_subject,
@@ -2578,7 +2702,7 @@ class CentralCapabilityService:
         registration: dict,
         expected_version: int | None = None,
     ) -> dict:
-        self.tasks.get_task(task_id, user_subject=user_subject)
+        self._check_lease_task(user_subject, task_id, registration)
         return self.host_contract.release_coordinator_lease(
             task_id=task_id,
             user_subject=user_subject,
@@ -2591,15 +2715,31 @@ class CentralCapabilityService:
         *,
         user_subject: str,
         task_id: str,
+        registration: dict | None = None,
     ) -> dict | None:
-        self.tasks.get_task(task_id, user_subject=user_subject)
+        self._check_lease_task(user_subject, task_id, registration)
         return self.host_contract.get_coordinator_lease(
             task_id=task_id,
             user_subject=user_subject,
         )
 
+    def _check_lease_task(self, subject, task_id, registration):
+        task = self.tasks.get_task(task_id, user_subject=subject)
+        if task["agent_host"] == "pi" and not registration:
+            raise TaskIntegrityError("Pi lease inspection requires its registered host instance")
+        if registration and "pi" in (task["agent_host"], registration["agentHost"]):
+            self._require_pi_origin(subject, registration, task["origin_endpoint_id"])
+
     def host_runtime_overview(self) -> dict:
         return self.host_contract.runtime_overview()
+
+    def _require_pi_origin(self, subject, registration, endpoint_id):
+        from agentbridge.core.endpoint_instances import endpoint_instances
+
+        with self.tasks._connect() as db:
+            scope = endpoint_instances(db, subject).get(endpoint_id)
+        if registration["agentHost"] != "pi" or scope != ("pi", registration["hostInstanceId"]):
+            raise TaskIntegrityError("Pi task or endpoint belongs to another host or inactive binding")
 
     def validate_host_call_context(
         self,
@@ -2618,12 +2758,16 @@ class CentralCapabilityService:
                 endpoint_id,
                 user_subject=user_subject,
             )
+            if registration["agentHost"] == "pi":
+                self._require_pi_origin(user_subject, registration, endpoint_id)
             if endpoint["agent_host"] != registration["agentHost"]:
                 raise TaskIntegrityError(
                     "host call endpoint belongs to another agent host"
                 )
         if task_id:
             task = self.tasks.get_task(task_id, user_subject=user_subject)
+            if registration["agentHost"] == "pi":
+                self._require_pi_origin(user_subject, registration, task["origin_endpoint_id"])
             if task["agent_host"] != registration["agentHost"]:
                 raise TaskIntegrityError(
                     "host call task belongs to another agent host"
@@ -2688,7 +2832,7 @@ class CentralCapabilityService:
                    UNION ALL SELECT 1 FROM workspace_host_bindings WHERE endpoint_id=? LIMIT 1""",
                 (user_subject, old["endpoint_id"], old["endpoint_id"]),
             ).fetchone()
-            if agent_host == "nanobot" and (client_type == "telegram" or (old and old["client_type"] == "telegram")):
+            if agent_host in PRIVATE_BOT_HOSTS and (client_type == "telegram" or (old and old["client_type"] == "telegram")):
                 # The pairing service owns this endpoint's identity, route and subscription capabilities.
                 # A display copy must never create, edit or reactivate a delivery target.
                 if (not old or not host_instance_id or old["state"] != "active" or
@@ -4531,9 +4675,18 @@ class CentralCapabilityService:
                             raise CapabilityRejected("OA_HISTORY_SESSION_CHANGED", "OA 会话身份尚未核实，不能读取历史查询。")
                         query_context = dict(user_subject=user_subject, session_id=session["session_id"],
                             principal_ref=principal, adapter=adapter, worker=worker)
+                        original = self.tasks.get_task(task_id, user_subject=user_subject) if task_id else None
+                        if original and original["agent_host"] == "pi":
+                            query_context["pi_task_id"] = task_id
+                            report_id = (original.get("summary") or {}).get("piReportPlan")
+                            if report_id and capability_name == "oa.workflow.history.next":
+                                # The read task journals delivery. The cursor remains owned by
+                                # the original immutable plan task that issued the saved report.
+                                report = self.task_plans.get(report_id, user_subject=user_subject)
+                                query_context["pi_task_id"] = report["parent_task_id"]
                         try:
                             if capability_name == "oa.workflow.history.query":
-                                accepted = self.task_request_accepted_at(self.tasks.get_task(task_id, user_subject=user_subject)) if task_id else self.operations.get(context.operation_id)["created_at"]
+                                accepted = self.task_request_accepted_at(original) if original else self.operations.get(context.operation_id)["created_at"]
                                 result = self.oa_history_query_service.query(**query_context,
                                     accepted_at=accepted, **arguments)
                             else:

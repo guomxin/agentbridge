@@ -1158,9 +1158,9 @@ def handle_mcp(args: argparse.Namespace) -> int:
     insecure_private_http = (
         mcp_config.insecure_private_http or auth_config.insecure_private_http
     )
-    from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
+    from agentbridge.workspace.nanobot_gateway import configured_adapters
     try:
-        workspace_host_routes = NanoBotGatewayClient.from_environment() if workspace_config else {}
+        workspace_host_routes = {alias: client for alias, _, client in configured_adapters()} if workspace_config else {}
     except (OSError, ValueError, KeyError, TypeError):
         print_json(_central_cli_error("WORKSPACE_HOST_CONFIG_INVALID", "工作台宿主路由配置不可用。"))
         return 2

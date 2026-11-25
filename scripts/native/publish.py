@@ -11,6 +11,7 @@ import uuid
 from common import ROOT, external, private_file, read, run, save, sha, timestamp
 from validation import validate, test_run
 import nanobot_release
+import pi_release
 
 
 def git(*args):
@@ -80,6 +81,7 @@ class Publisher:
             raise ValueError('Invalid explicit deployment target')
         self.units = environment(args.profile, args.host, args.remote_root)
         self.nanobot = nanobot_release.profile_for(self)
+        self.pi = pi_release.profile_for(self)
         self.policy = read(ROOT / 'deploy/release-policy.json')
         self.commit = git('rev-parse', 'HEAD')
         if not re.fullmatch(r'[0-9a-f]{40}', self.commit):
@@ -113,8 +115,12 @@ class Publisher:
         preflight = 'not_checked_offline' if offline else compatibility(current, self.release, self.policy, self.args.resume)
         pilot = getattr(self, 'nanobot', None)
         pilot_plan = nanobot_release.observability(self, pilot, offline=offline) if pilot else None
+        pi = getattr(self, 'pi', None)
+        pi_plan = pi_release.observability(self, pi, offline=offline) if pi else None
+        reverting = getattr(self.args, 'rollback_nanobot', False) or getattr(self.args, 'rollback_pi', False)
         return {'status': 'planned', 'commit': self.commit, 'branch': branch, 'remoteUrl': remote,
                 'nanoBotPilot': pilot_plan,
+                'piPilot': pi_plan,
                 'trackedFilesClean': clean, 'releaseBranchAllowed': branch_ok,
                 'releasePreflight': preflight, 'currentRelease': current,
                 'unitHashes': {n: sha(v) for n, v in self.units.items()},
@@ -124,7 +130,8 @@ class Publisher:
                     'gateway-runtime', 'conditional-restart', 'pending-warmup', 'identity-isolation'],
                 'blockers': ([] if branch_ok else ['candidate must be integrated into main']) +
                             ([] if clean else ['commit tracked changes']) +
-                            (['NanoBot runtime level is not approved for this candidate'] if pilot_plan and not pilot_plan['compatibility']['approved'] else []) +
+                            (['NanoBot runtime level is not approved for this candidate'] if not reverting and pilot_plan and not pilot_plan['compatibility']['approved'] else []) +
+                            (['Pi runtime or candidate qualification is not approved'] if not reverting and pi_plan and not pi_plan['compatibility']['approved'] else []) +
                             (['remote predecessor unverified'] if offline else [])}
 
     def deploy(self, artifact):
@@ -188,6 +195,14 @@ class Publisher:
             raise ValueError('Isolation requires two distinct identities and expected endpoints')
         if any(not re.fullmatch(r'[A-Za-z0-9_.@-]+=[A-Za-z0-9_.-]+', e) for e in self.args.expect_endpoint):
             raise ValueError('Invalid endpoint expectation')
+        if getattr(self.args, 'rollback_pi', False):
+            import pi_local
+            if not self.pi or self.args.resume or getattr(self.args, 'rollback_nanobot', False):
+                raise ValueError('Pi rollback requires its reviewed, distinct host transaction')
+            candidate_artifact(require_receipt=True)
+            if self.plan()['blockers'] or pi_release.profile_for(self) != self.pi:
+                raise ValueError('Pi rollback inputs changed during validation')
+            return pi_local.restore(self, self.pi, host, remote=pi_release.remote)
         if getattr(self.args,"rollback_nanobot",False):
             if not self.nanobot or self.args.resume:
                 raise ValueError("Pilot rollback requires its reviewed configuration and cannot be resumed as a deployment")
@@ -210,6 +225,16 @@ class Publisher:
                 or lifecycle.fingerprint(reviewed_host) != before):
             raise ValueError('Host configuration changed during validation')
         pilot = getattr(self, 'nanobot', None)
+        pi = getattr(self, 'pi', None)
+        if pi:
+            if pi_release.profile_for(self) != pi or not pi_release.reviewed_contract(self, pi, artifact)['approved']:
+                raise ValueError('Pi pilot inputs or reviewed qualification changed during validation')
+            pi_release.verify_conformance(self, pi, artifact)
+            if not self.args.resume:
+                nanobot_release.verify_bot(pi)
+                state = pi_release.remote(self, pi, 'observe')
+                if state['portOccupied'] and not state['routeInstalled']:
+                    raise ValueError('Pi listener is occupied outside the reviewed route')
         if pilot:
             if nanobot_release.profile_for(self) != pilot:
                 raise ValueError('NanoBot pilot configuration changed during validation')
@@ -221,6 +246,8 @@ class Publisher:
                 # The new central unit reads this file on startup. It contains references only.
                 nanobot_release.remote(self,pilot,'stage',
                                        serviceSecret=private_file(pilot['serviceTokenFile']).read_text())
+        if pi and not self.args.resume:
+            pi_release.remote(self, pi, 'stage', serviceSecret=private_file(pi['serviceTokenFile']).read_text())
         self.deploy(artifact)
         if lifecycle.fingerprint(host) != before:
             raise ValueError('Host inputs changed during deployment')
@@ -239,6 +266,9 @@ class Publisher:
         result = acceptance(self, host, self.args.identity_label, self.args.expect_endpoint)
         if pilot:
             result['nanoBotPilot'] = nanobot_release.admission(self,pilot,host,artifact)
+        if pi:
+            import pi_local
+            result['piPilot'] = pi_local.admission(self, pi, host, artifact, remote=pi_release.remote)
         # Push is the last step; no push on any failed acceptance or changed candidate.
         run([sys.executable, ROOT / 'scripts/agentbridge_artifact.py', 'verify', '--root', ROOT])
         if git('rev-parse', 'HEAD') != self.commit:

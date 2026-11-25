@@ -13,7 +13,7 @@ async def command_snapshot(driver, local_id):
     kind, capability = command.get("kind"), command.get("capabilityName")
     if (req["runId"] != req["commandKey"] or command.get("commandKey") != req["commandKey"]
             or task.get("taskId") != req["task"]["taskId"] or task.get("userSubject") != req["subject"]
-            or task.get("agentHost") != "nanobot" or task.get("activeConversationRef") != req["conversation"]
+            or task.get("agentHost") != driver.implementation.name or task.get("activeConversationRef") != req["conversation"]
             or task.get("originEndpointId") != req["endpoint"]
             or (snapshot.get("endpoint") or {}).get("endpointId") != req["endpoint"]
             or kind not in (QUERY, PREPARE) or not isinstance(capability, str) or not capability

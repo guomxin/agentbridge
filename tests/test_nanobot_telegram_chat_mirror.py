@@ -206,8 +206,8 @@ def test_host_claim_validate_ack_require_same_peer_current_lease_and_web_origin(
     async def session(_):
         yield Session(), {"private": True}, "L3"
 
-    async def verified(*_):
-        return True
+    async def verified(*_, host_type):
+        return host_type == "nanobot"
 
     monkeypatch.setitem(sys.modules, "nanobot_agentbridge.worker", SimpleNamespace(authenticated_session=session))
     monkeypatch.setattr("nanobot_agentbridge.telegram_identity.verify_telegram_binding", verified)

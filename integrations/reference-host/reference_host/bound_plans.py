@@ -47,7 +47,7 @@ async def begin_write_plan(driver, local_id, proposal, governed):
         meta["agentbridge/skill"] = {"bindingId": req["checkedSkillPin"]["binding_id"]}
     answer = await driver.client("owner").call_tool(
         "agentbridge_task_plan_prepare",
-        {**proposal, "idempotency_key": "nanobot:" + req["runId"]},
+        {**proposal, "idempotency_key": driver.implementation.name + ":" + req["runId"]},
         meta=meta,
         recovery_class="unsafe",
     )

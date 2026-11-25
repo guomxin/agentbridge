@@ -632,5 +632,5 @@ class SkillAuthoring:
                            'content_hash': bundle['content_hash'], 'manifest': bundle['manifest'],
                            **({'standard_name': standard_name} if standard_name else {})}}
 
-    def dispatch(self, owner, action, data):
-        return dispatch_skill_action(self, owner, action, data)
+    def dispatch(self, owner, action, data, *, telegram_origin=None):
+        return dispatch_skill_action(self, owner, action, data, telegram_origin=telegram_origin)

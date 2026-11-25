@@ -5,13 +5,13 @@ import json
 from pathlib import Path
 import sqlite3
 
-from agentbridge.core.chat_mirror import NANOBOT_OA_DIGEST, public_mirror_text
+from agentbridge.core.chat_mirror import private_bot_chat_kind, private_bot_digest_kind, public_mirror_text
 
 from .telegram_identity import identifier
 from .telegram_text import split_telegram_text
 
 
-def projected_chat(item, workspace_endpoint):
+def projected_chat(item, workspace_endpoint, *, host_type="nanobot"):
     if not isinstance(item, dict) or not isinstance(item.get("timeline"), dict):
         return None
     line = item["timeline"]
@@ -20,8 +20,9 @@ def projected_chat(item, workspace_endpoint):
         return None
     role, text = line.get("role"), public_mirror_text(line.get("text"))
     kind = line.get("mirrorKind")
-    if (item.get("deliveryMode") != "timeline_message" or kind not in ("nanobot_workspace_text_v1", NANOBOT_OA_DIGEST)
-            or (kind == NANOBOT_OA_DIGEST and role != "assistant")
+    digest_kind = private_bot_digest_kind(host_type)
+    if (item.get("deliveryMode") != "timeline_message" or kind not in (private_bot_chat_kind(host_type), digest_kind)
+            or (kind == digest_kind and role != "assistant")
             or item.get("requiresRouteCheck") is not True or item.get("interaction") or item.get("task")
             or item.get("event") or item.get("attachments") or line.get("attachments")
             or role not in ("user", "assistant") or text is None or not identifier(line.get("entryId"))

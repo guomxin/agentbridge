@@ -90,7 +90,7 @@ class OaHistoryQueryService:
         self.target_ref_factory = target_ref_factory
 
     def query(self, *, user_subject, session_id, principal_ref, adapter, worker,
-              collection, temporal, accepted_at, keyword=None, limit=50, selection=None):
+              collection, temporal, accepted_at, keyword=None, limit=50, selection=None, pi_task_id=None):
         if collection not in {"done", "sent"} or type(limit) is not int or not 1 <= limit <= 50:
             raise OaHistoryQueryError("OA_HISTORY_QUERY_INVALID", "查询集合或结果分页大小不合法。")
         if keyword is not None and (not isinstance(keyword, str) or len(keyword) > 200):
@@ -99,6 +99,8 @@ class OaHistoryQueryService:
             default_date_basis="processed_at" if collection == "done" else "initiated_at",
             supported_date_bases=("processed_at", "initiated_at") if collection == "done" else ("initiated_at",))
         query = {"collection": collection, "temporal": normalized, "keyword": (keyword or "").strip(), "limit": limit}
+        if pi_task_id is not None:
+            query["pi_task_id"] = pi_task_id
         data = {"rows": [], "seen_ids": [], "next_page": 1, "metadata": None,
             "first_anchor": None, "last_anchor": None, "scan_complete": False,
             "scanned_count": 0, "details_index": 0, "details_checked": 0,
@@ -108,11 +110,13 @@ class OaHistoryQueryService:
             data["selection"] = {"selected_indices": [], "evaluated_indices": [], "complete": False}
         binding = dict(user_subject=user_subject, session_id=session_id, principal_ref=principal_ref)
         created = self.store.create(**binding, query=query, state_data=data)
-        return self.next(cursor=created["cursor"], adapter=adapter, worker=worker, **binding)
+        return self.next(cursor=created["cursor"], adapter=adapter, worker=worker, pi_task_id=pi_task_id, **binding)
 
-    def next(self, *, cursor, user_subject, session_id, principal_ref, adapter, worker):
+    def next(self, *, cursor, user_subject, session_id, principal_ref, adapter, worker, pi_task_id=None):
         binding = dict(user_subject=user_subject, session_id=session_id, principal_ref=principal_ref)
         resolved = self.store.resolve(cursor, **binding)
+        if resolved["record"]["query"].get("pi_task_id") != pi_task_id:
+            raise OaHistoryQueryError("OA_HISTORY_TASK_CHANGED", "历史游标不属于当前原任务。")
         if resolved["cached_response"] is not None:
             return resolved["cached_response"]
         record = resolved["record"]

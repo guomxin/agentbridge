@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.workspace.gateway import GatewayRequestError
 from agentbridge.workspace.host_instances import (
     HostInstanceConflict, LEGACY_INSTANCE_ID, WorkspaceHostInstances, _alias, _label,
 )
-from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient, load_nanobot_route_specs
+from agentbridge.workspace.nanobot_gateway import configured_adapters, pi_telegram_sender
 
 
 class WorkspaceHostProvision:
@@ -24,11 +23,9 @@ class WorkspaceHostProvision:
         routes = {LEGACY_INSTANCE_ID: {"host_type": "openclaw", "instance_id": LEGACY_INSTANCE_ID,
                                       "adapter_version": "legacy", "subjects": {}, "client": self.gateway}}
         try:
-            for alias, spec in load_nanobot_route_specs().items():
+            for alias, spec, client in configured_adapters():
                 _alias(alias, "route")
                 instance = _alias(spec["instanceId"], "instance")
-                if alias == LEGACY_INSTANCE_ID or instance in {item["instance_id"] for item in routes.values()}:
-                    raise ValueError("duplicate instance")
                 credentials = spec.get("subjects", {})
                 if not isinstance(credentials, dict):
                     raise ValueError("invalid principal mapping")
@@ -37,11 +34,11 @@ class WorkspaceHostProvision:
                     _alias(ref, "credential")
                 if len(set(credentials.values())) != len(credentials):
                     raise ValueError("each principal requires a distinct personal credential reference")
-                client = NanoBotGatewayClient(url=spec["url"], token_file=Path(spec["tokenFile"]),
-                                              instance_id=instance)
-                routes[alias] = {"host_type": "nanobot", "instance_id": instance,
+                routes[alias] = {"host_type": client.host_type, "instance_id": instance,
                                  "adapter_version": _label(spec["adapterVersion"], "version", 80),
                                  "subjects": credentials, "client": client}
+                if client.host_type == "pi":
+                    routes[alias]["telegram_subjects"] = [subject for subject in credentials if pi_telegram_sender(spec, subject)]
         except (KeyError, OSError, TypeError, ValueError) as exc:
             raise ValueError("部署的宿主连接清单无效，请核对受控配置。") from exc
         return routes
@@ -58,10 +55,14 @@ class WorkspaceHostProvision:
                 "SELECT account_id, user_subject, username FROM workspace_accounts WHERE state='active' "
                 "ORDER BY username")]
             bindings = [dict(row) for row in db.execute(
-                "SELECT b.instance_id, a.user_subject, b.endpoint_id, b.endpoint_key, b.session_key, b.credential_ref "
+                "SELECT b.instance_id, a.user_subject, b.endpoint_id, b.endpoint_key, b.session_key, b.credential_ref, "
+                "r.accepted_level, r.compatibility_status "
                 "FROM workspace_host_bindings b JOIN workspace_accounts a ON a.account_id=b.account_id "
+                "JOIN workspace_host_instances h USING(instance_id) "
+                "LEFT JOIN agent_host_registrations r ON r.user_subject=a.user_subject AND r.agent_host=h.host_type "
+                "AND r.host_instance_id=b.instance_id AND r.host_version=h.adapter_version "
                 "ORDER BY b.instance_id, a.user_subject")]
-        public_routes = [{"route_ref": alias, **{k: spec[k] for k in ("instance_id", "adapter_version", "host_type")},
+        public_routes = [{"route_ref": alias, **{k: spec[k] for k in ("instance_id", "adapter_version", "host_type", "telegram_subjects") if k in spec},
                           "subjects": sorted(spec["subjects"])} for alias, spec in routes.items()]
         return {"items": self.directory.admin_list(), "routes": public_routes, "route_error": route_error,
                 "accounts": accounts, "bindings": bindings}
@@ -109,7 +110,7 @@ class WorkspaceHostProvision:
             if type(body["expected_revision"]) is not int or instance["revision"] != body["expected_revision"]:
                 raise HostInstanceConflict("实例配置已更新，请刷新后确认。")
             route = self._routes().get(instance["route_ref"])
-            if not route or route["instance_id"] != instance_id:
+            if not route or any(route[key] != instance[key] for key in ("instance_id", "host_type", "adapter_version")):
                 raise ValueError("未找到匹配该实例的受控连接。")
             subject = account["user_subject"]
             credential_ref = route["subjects"].get(subject)
@@ -167,9 +168,9 @@ class WorkspaceHostProvision:
         instance_id = _alias(body["instance_id"], "instance")
         row = next((r for r in self.directory.admin_list() if r["instance_id"] == instance_id), None)
         route = self._routes().get(row["route_ref"]) if row else None
-        if not route or route["instance_id"] != instance_id or not route["client"]:
+        if not route or any(route[key] != row[key] for key in ("instance_id", "host_type", "adapter_version")) or not route["client"]:
             result = {"available": False, "code": "HOST_ROUTE_UNAVAILABLE"}
-        elif route["host_type"] == "nanobot":
+        elif instance_id != LEGACY_INSTANCE_ID:
             result = route["client"].readiness()
         else:
             try:
@@ -178,4 +179,7 @@ class WorkspaceHostProvision:
             except GatewayRequestError as exc:
                 result = {"available": False, "code": exc.code}
         return {"available": result["available"], "code": result["code"],
-                "checked_at": datetime.now(timezone.utc).isoformat()}
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                **{key: result[key] for key in ("adapterVersion", "sdkVersion", "acceptedLevel", "capabilities", "modelConfiguration",
+                                                 "modelInvocation", "centralConnection", "configuredBindings",
+                                                 "verifiedBindings") if key in result}}

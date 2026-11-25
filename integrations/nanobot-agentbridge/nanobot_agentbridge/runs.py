@@ -121,26 +121,8 @@ class RunCoordinator:
                            batch_snapshot: dict | None=None, expected_batch_id: str | None=None) -> dict:
         binding = dict(subject=subject, endpoint=endpoint, conversation=conversation)
         original = self.snapshot(run_id, **binding)
-        if batch_snapshot is not None:
-            task=batch_snapshot.get("task") or {}
-            proof=batch_snapshot.get("batchVerification") or {}
-            count=proof.get("totalCount")
-            if (not expected_batch_id or task.get("taskId")!=task_id or task.get("userSubject")!=subject
-                or task.get("originEndpointId")!=endpoint or proof.get("taskId")!=task_id
-                or proof.get("batchId")!=expected_batch_id or proof.get("state")!="succeeded"
-                or proof.get("allVerified") is not True or type(count) is not int or count<1 or count!=proof.get("verifiedCount")):
-                raise ValueError("Missing authoritative verification for the complete original batch")
-            answer=f"中央已重新核验原批次全部 {count} 项业务操作成功。"
-        else:
-            operation=operation or {}
-            evidence=(operation.get("result") or {}).get("verification") or {}
-            if (not task_id or operation.get("taskId") != task_id or operation.get("userSubject") != subject
-                    or not operation.get("operationId") or not expected_capability or operation.get("capability") != expected_capability
-                    or operation.get("status") != "succeeded"
-                    or not (evidence.get("confirmed") is True or evidence.get("matched") is True)):
-                raise ValueError("Missing authoritative verification for the original operation")
-            answer=("中央已重新核验原任务的请假草稿保存成功，流程尚未提交。" if expected_capability=="oa.leave.save_draft"
-                    else "中央已重新核验原任务的业务操作成功。")
+        from .recovery import verified_answer
+        answer = verified_answer(subject, endpoint, task_id, operation, expected_capability, batch_snapshot, expected_batch_id)
         if original["state"] == "unknown":
             with self._db:
                 updated = self._db.execute("""UPDATE runs SET state='completed',answer=? WHERE run_id=? AND

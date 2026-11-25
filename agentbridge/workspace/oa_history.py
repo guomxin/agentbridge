@@ -82,11 +82,31 @@ def next_page(service, account, task_id, body):
     resolved = service.oa_history_queries.resolve(body["cursor"], **binding)
     if resolved["record"]["query_id"] not in ids:
         raise OaHistoryQueryError("OA_HISTORY_QUERY_NOT_FOUND", "原任务不包含此查询。", status=404)
+    route = {"origin_endpoint_id": account["endpoint_id"]}
+    task = service.tasks.get_task(task_id, user_subject=subject)
+    if task.get("agent_host") == "pi":
+        binding = service.workspace.task_host(account, task_id)
+        if binding["host_type"] != "pi" or resolved["record"]["query"].get("pi_task_id") != task_id:
+            raise OaHistoryQueryError("OA_HISTORY_TASK_CHANGED", "此页游标与原 Pi 任务不符。", status=403)
+        saved = resolved["cached_response"]
+        if saved is not None:
+            # A refresh may start from page one after this task finished. Show only
+            # an already observed successful read, without creating another operation.
+            service.validate_skill_task(subject, task_id, capability="oa.workflow.history.next")
+            service.user_grants.require_capability(subject, "oa.workflow.history.next", body)
+            for operation_id in service.tasks.operation_ids_for_task(task_id=task_id, user_subject=subject):
+                operation = service.operations.get(operation_id)
+                if (operation["user_subject"] == subject and operation["status"] == "succeeded"
+                        and operation["capability_name"] == "oa.workflow.history.next"
+                        and operation["result"] == saved):
+                    return {"oaHistoryQuery": saved}
+            raise OaHistoryQueryError("OA_HISTORY_PAGE_UNCONFIRMED", "原任务尚未确认此页结果。")
+        route.update(task_id=task_id, host_instance_id=binding["instance_id"],
+                     origin_endpoint_id=task["origin_endpoint_id"])
     # Central invocation rechecks grants, session/profile locks and identity.
     # The immutable cursor receipt makes network retries safe without a new query.
     response = service.invoke(user_subject=subject, capability_name="oa.workflow.history.next",
-        arguments={"cursor": body["cursor"]}, host_type="workspace",
-        origin_endpoint_id=account["endpoint_id"])
+        arguments={"cursor": body["cursor"]}, host_type="workspace", **route)
     if response.get("status") != "succeeded":
         error = response.get("error") or {}
         code = error.get("code", "OA_HISTORY_QUERY_FAILED")

@@ -96,13 +96,17 @@ class SkillWorkbench:
             now=lambda: datetime.now(timezone.utc),
         )
 
-    def _enqueue(self, owner, kind, payload, request_key, *, source_dispatch=None):
+    def _enqueue(self, owner, kind, payload, request_key, *, source_dispatch=None, telegram_origin=None):
         from agentbridge.workspace.skill_model_route import snapshot
 
         def prepare(db, previous):
             value = payload(db, previous)
-            route = (previous.get('model_route') if previous is not None else
-                     snapshot(self.authoring.service.workspace, db, owner, source_dispatch=source_dispatch))
+            route = previous.get('model_route') if previous is not None else None
+            if previous is None or telegram_origin is not None:
+                route = snapshot(self.authoring.service.workspace, db, owner, source_dispatch=source_dispatch,
+                                 telegram_origin=telegram_origin)
+            elif route and 'telegram_origin' in route:
+                raise PermissionError('此请求属于原 Pi 私聊评测。')
             return {**value, 'model_route': route} if route else value
 
         return self._job_queue().enqueue(owner, kind, prepare, request_key)
@@ -230,7 +234,7 @@ class SkillWorkbench:
                     'automatic': automatic, 'provenance': source}
         return self._enqueue(owner, 'generation', prepare, request_key, source_dispatch=source_dispatch)
 
-    def evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1):
+    def evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1, telegram_origin=None):
         if type(repeats) is not int or not 1 <= repeats <= 3: raise ValueError('重复次数为 1 至 3')
         cases = validate_cases(cases)
         if not isinstance(draft_id, str) or not draft_id:
@@ -257,7 +261,7 @@ class SkillWorkbench:
                 if 'evaluation_protocol' in previous:
                     target['evaluation_protocol'] = previous['evaluation_protocol']
             return {**target, 'bundle': bundle, 'baseline': baseline, 'cases': cases, 'repeats': repeats}
-        return self._enqueue(owner, 'evaluation', prepare, request_key)
+        return self._enqueue(owner, 'evaluation', prepare, request_key, telegram_origin=telegram_origin)
 
     def latest_report(self, db, owner, draft_id, revision):
         return self._report_reviews(db, owner, SkillJobQueue.latest_report(db, owner, draft_id, revision, include_job_id=True))

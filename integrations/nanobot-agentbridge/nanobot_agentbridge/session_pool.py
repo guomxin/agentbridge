@@ -206,6 +206,10 @@ class McpSessionPool:
 @asynccontextmanager
 async def open_host_session(host: Any, request: dict[str, Any], *, lane: str = "control"):
     """Use the host's isolated session pool unless unit tests monkeypatched worker.authenticated_session."""
+    if getattr(type(host), "private_session", None) is not None:
+        async with host.private_session(request) as opened:
+            yield opened
+        return
     from . import worker
 
     pool = getattr(host, "mcp_pool", None)

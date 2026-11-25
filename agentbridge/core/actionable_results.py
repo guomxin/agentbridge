@@ -769,7 +769,7 @@ def _telegram_endpoint(connection, subject, endpoint_id):
     if host == "openclaw":
         match = re.fullmatch(r"agent:[^:]+:telegram:(?:direct|dm):([^:]+)", conversation, re.IGNORECASE)
         route_valid = bool(match and match[1] == sender)
-    elif host == "nanobot":
+    elif host in {"nanobot", "pi"}:
         from agentbridge.core.endpoint_instances import endpoint_instances
         scope = endpoint_instances(connection, subject).get(endpoint_id)
         numeric_ok = (
@@ -778,7 +778,7 @@ def _telegram_endpoint(connection, subject, endpoint_id):
         )
         route_valid = bool(
             numeric_ok
-            and scope and scope[0] == "nanobot"
+            and scope and scope[0] == host
             and endpoint["endpoint_key"] == f"telegram:{endpoint_account}:{sender}"
             and re.fullmatch(r"agentbridge:telegram:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", conversation, re.IGNORECASE)
         )

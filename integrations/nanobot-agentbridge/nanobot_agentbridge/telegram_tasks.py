@@ -18,7 +18,7 @@ def _owned(task, request):
         isinstance(task, dict)
         and identifier(task.get("taskId"))
         and task.get("userSubject") == request["subject"]
-        and task.get("agentHost") == "nanobot"
+        and task.get("agentHost") == request.get("hostType", "nanobot")
         and task.get("originEndpointId") == request["endpoint"]
         and task.get("activeConversationRef") == request["conversation"]
     )
@@ -55,10 +55,10 @@ async def navigate(host, record, body):
         raise web.HTTPForbidden()
     async with open_host_session(host, request, lane="control") as (session, meta, level):
         if level != "L3" or not await verify_telegram_binding(
-            session, host.instance, request["subject"], meta, request["endpointKey"]
+            session, host.instance, request["subject"], meta, request["endpointKey"], host_type=request.get("hostType", "nanobot")
         ):
             raise web.HTTPForbidden()
-        endpoint = {"agent_host": "nanobot", "endpoint_key": request["endpointKey"]}
+        endpoint = {"agent_host": request.get("hostType", "nanobot"), "endpoint_key": request["endpointKey"]}
 
         async def read(name, arguments):
             reply = await session.call_tool(name, arguments, meta=meta)
@@ -105,10 +105,12 @@ async def navigate(host, record, body):
                 # Standalone login cards predate governed tasks. The original host
                 # admission and card path must still match this exact Telegram turn.
                 if operation == "continue" and isinstance(target.get("requestKey"), str):
-                    from .cards import CredentialCards, present_credential
                     entry = host.runs.lookup(target["requestKey"], subject=request["subject"],
                                              endpoint=request["endpoint"], conversation=request["conversation"])
                     if entry and entry["run_id"] == key and entry["state"] == "accepted":
+                        if getattr(type(host), "standalone_card", None) is not None:
+                            return await host.standalone_card(key, target["requestKey"])
+                        from .cards import CredentialCards, present_credential
                         waiting = CredentialCards(Path(request["userDir"])).waiting(key, request["endpoint"])
                         card = await present_credential(session, request, meta, waiting) if waiting else None
                         if card and _valid_until(card["interaction"].get("expiresAt")):
