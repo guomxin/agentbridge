@@ -1658,6 +1658,10 @@ class RuntimeGovernanceStore:
 
         dimension = _canonical_json({"windowHours": hours})
         created_at = self._now()
+        bucket_end = end.replace(minute=0, second=0, microsecond=0)
+        bucket_start = bucket_end - timedelta(hours=hours)
+        bucket_start_text = bucket_start.isoformat()
+        bucket_end_text = bucket_end.isoformat()
         with self._connect() as connection:
             for metric in metrics:
                 connection.execute(
@@ -1679,8 +1683,8 @@ class RuntimeGovernanceStore:
                         str(uuid4()),
                         metric["metricKey"],
                         dimension,
-                        start_text,
-                        end_text,
+                        bucket_start_text,
+                        bucket_end_text,
                         metric["sampleCount"],
                         metric.get("successCount"),
                         metric.get("value"),
@@ -1972,9 +1976,16 @@ class RuntimeGovernanceStore:
         *,
         raw_days: int = 30,
         rollup_days: int = 180,
+        legacy_subhour_rollup_days: int = 7,
+        batch_limit: int = 5000,
     ) -> dict[str, int]:
-        raw_cutoff = (self._clock().astimezone(timezone.utc) - timedelta(days=max(raw_days, 1))).isoformat()
-        rollup_cutoff = (self._clock().astimezone(timezone.utc) - timedelta(days=max(rollup_days, 1))).isoformat()
+        now = self._clock().astimezone(timezone.utc)
+        raw_cutoff = (now - timedelta(days=max(raw_days, 1))).isoformat()
+        rollup_cutoff = (now - timedelta(days=max(rollup_days, 1))).isoformat()
+        legacy_rollup_cutoff = (
+            now - timedelta(days=max(legacy_subhour_rollup_days, 1))
+        ).isoformat()
+        limit = max(int(batch_limit), 1)
         counts: dict[str, int] = {}
         with self._connect() as connection:
             for table, column, cutoff in (
@@ -1984,9 +1995,33 @@ class RuntimeGovernanceStore:
                 ("runtime_observation_snapshots", "observed_at", rollup_cutoff),
             ):
                 cursor = connection.execute(
-                    f"DELETE FROM {table} WHERE {column} < ?", (cutoff,)
+                    f"""
+                    DELETE FROM {table}
+                    WHERE rowid IN (
+                        SELECT rowid FROM {table}
+                        WHERE {column} < ?
+                        LIMIT ?
+                    )
+                    """,
+                    (cutoff, limit),
                 )
-                counts[table] = int(cursor.rowcount)
+                deleted = int(cursor.rowcount)
+                if table == "runtime_slo_rollups" and deleted < limit:
+                    remaining = limit - deleted
+                    legacy_cursor = connection.execute(
+                        """
+                        DELETE FROM runtime_slo_rollups
+                        WHERE rowid IN (
+                            SELECT rowid FROM runtime_slo_rollups
+                            WHERE window_end < ?
+                              AND window_end NOT LIKE '%:00:00+00:00'
+                            LIMIT ?
+                        )
+                        """,
+                        (legacy_rollup_cutoff, remaining),
+                    )
+                    deleted += int(legacy_cursor.rowcount)
+                counts[table] = deleted
         return counts
 
     def _now(self) -> str:

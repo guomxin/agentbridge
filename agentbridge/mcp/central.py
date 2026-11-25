@@ -694,6 +694,9 @@ class CentralRuntimeGovernanceWorker:
             minimum_interval_minutes=60,
         )
         retention = self.service.runtime_governance.prune()
+        retention["agent_host_runtime_snapshots"] = (
+            self.service.host_contract.prune_runtime_snapshots()
+        )
         return {
             "taskPlans": task_plans,
             "evaluation": evaluation,

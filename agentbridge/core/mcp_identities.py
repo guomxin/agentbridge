@@ -33,6 +33,9 @@ _ALLOWED_SCOPES = frozenset(
 )
 
 
+LAST_USED_TOUCH_INTERVAL_SECONDS = 60
+
+
 class TokenEditConflict(RuntimeError):
     pass
 
@@ -43,10 +46,12 @@ class McpIdentityTokenStore:
         db_path: Path | str,
         *,
         clock: Callable[[], datetime] | None = None,
+        last_used_touch_interval_seconds: int = LAST_USED_TOUCH_INTERVAL_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.last_used_touch_interval_seconds = max(int(last_used_touch_interval_seconds), 0)
         self._initialize()
         from agentbridge.core.user_grants import UserGrants
         self.user_grants = UserGrants(self.db_path)
@@ -172,11 +177,20 @@ class McpIdentityTokenStore:
             record["scopes"] = self.user_grants.effective_scopes(record["user_subject"])
             if required_scopes and not required_scopes.issubset(set(record["scopes"])):
                 return None
-            connection.execute(
-                "UPDATE mcp_identity_tokens SET last_used_at = ? WHERE token_id = ?",
-                (_format_time(now), record["token_id"]),
-            )
-        record["last_used_at"] = _format_time(now)
+            should_touch = self.last_used_touch_interval_seconds <= 0 or record["last_used_at"] is None
+            if not should_touch:
+                try:
+                    elapsed = (now - _parse_time(record["last_used_at"])).total_seconds()
+                    should_touch = elapsed >= self.last_used_touch_interval_seconds
+                except ValueError:
+                    should_touch = True
+            if should_touch:
+                formatted_now = _format_time(now)
+                connection.execute(
+                    "UPDATE mcp_identity_tokens SET last_used_at = ? WHERE token_id = ?",
+                    (formatted_now, record["token_id"]),
+                )
+                record["last_used_at"] = formatted_now
         return record
 
     def resolve_client(self, token_id: str, *, required_scopes: set[str] | None = None) -> dict:

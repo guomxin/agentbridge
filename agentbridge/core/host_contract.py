@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 from agentbridge.core.store_transactions import store_transaction
 
@@ -15,6 +15,7 @@ HOST_CONTEXT_META_KEY = "io.agentbridge/host-context"
 LEGACY_HOST_CONTEXT_META_KEY = "io.agentbridge/host"
 HOST_PROFILE_META_KEY = "io.agentbridge/host-profile"
 TASK_CONTEXT_META_KEY = "io.agentbridge/task"
+LAST_SEEN_TOUCH_INTERVAL_SECONDS = 60
 
 HOST_LEVELS = ("L1", "L2", "L3")
 HOST_CAPABILITIES = (
@@ -244,9 +245,17 @@ def highest_accepted_level(profile: Mapping[str, Any], approved_level: str) -> s
 class HostContractStore:
     """Persistent host compatibility, registration, runtime, and lease ledger."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        last_seen_touch_interval_seconds: int = LAST_SEEN_TOUCH_INTERVAL_SECONDS,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.last_seen_touch_interval_seconds = max(int(last_seen_touch_interval_seconds), 0)
         self._initialize()
 
     @contextmanager
@@ -609,11 +618,27 @@ class HostContractStore:
         token_id: str,
         profile: Mapping[str, Any],
     ) -> dict[str, Any]:
+        result, _ = self.negotiate_with_change(
+            user_subject=user_subject,
+            token_id=token_id,
+            profile=profile,
+        )
+        return result
+
+    def negotiate_with_change(
+        self,
+        *,
+        user_subject: str,
+        token_id: str,
+        profile: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
         normalized = normalize_host_profile(profile)
         implementation = normalized["implementation"]
-        now = _utc_now()
+        declared_json = _canonical_json(normalized)
+        now_dt = self._clock().astimezone(timezone.utc)
+        now = now_dt.isoformat()
+        changed = True
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             compatibility = connection.execute(
                 """
                 SELECT * FROM agent_host_compatibility
@@ -631,55 +656,93 @@ class HostContractStore:
                 """,
                 (user_subject, normalized["hostInstanceId"]),
             ).fetchone()
-            registration_id = (
-                str(existing["registration_id"]) if existing else str(uuid4())
-            )
-            connection.execute(
-                """
-                INSERT INTO agent_host_registrations (
-                    registration_id, user_subject, token_id, host_instance_id,
-                    agent_host, host_version, declared_profile_json,
-                    accepted_level, compatibility_status, registered_at, last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_subject, host_instance_id) DO UPDATE SET
-                    token_id = excluded.token_id,
-                    agent_host = excluded.agent_host,
-                    host_version = excluded.host_version,
-                    declared_profile_json = excluded.declared_profile_json,
-                    accepted_level = excluded.accepted_level,
-                    compatibility_status = excluded.compatibility_status,
-                    last_seen_at = excluded.last_seen_at
-                """,
-                (
-                    registration_id,
-                    user_subject,
-                    token_id,
-                    normalized["hostInstanceId"],
-                    implementation["name"],
-                    implementation["version"],
-                    _canonical_json(normalized),
-                    accepted_level,
-                    status,
-                    now,
-                    now,
-                ),
-            )
+            if (
+                existing is not None
+                and existing["token_id"] == token_id
+                and existing["agent_host"] == implementation["name"]
+                and existing["host_version"] == implementation["version"]
+                and existing["declared_profile_json"] == declared_json
+                and existing["accepted_level"] == accepted_level
+                and existing["compatibility_status"] == status
+                and not _should_touch_timestamp(
+                    existing["last_seen_at"],
+                    now_dt,
+                    self.last_seen_touch_interval_seconds,
+                )
+            ):
+                registration_id = str(existing["registration_id"])
+                changed = False
+            else:
+                connection.execute("BEGIN IMMEDIATE")
+                compatibility = connection.execute(
+                    """
+                    SELECT * FROM agent_host_compatibility
+                    WHERE implementation_name = ? AND implementation_version = ?
+                    """,
+                    (implementation["name"], implementation["version"]),
+                ).fetchone()
+                approved_level = compatibility["accepted_level"] if compatibility else "L1"
+                accepted_level = highest_accepted_level(normalized, approved_level)
+                status = "approved" if compatibility else "unrecognized"
+                existing = connection.execute(
+                    """
+                    SELECT * FROM agent_host_registrations
+                    WHERE user_subject = ? AND host_instance_id = ?
+                    """,
+                    (user_subject, normalized["hostInstanceId"]),
+                ).fetchone()
+                registration_id = (
+                    str(existing["registration_id"]) if existing else str(uuid4())
+                )
+                connection.execute(
+                    """
+                    INSERT INTO agent_host_registrations (
+                        registration_id, user_subject, token_id, host_instance_id,
+                        agent_host, host_version, declared_profile_json,
+                        accepted_level, compatibility_status, registered_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_subject, host_instance_id) DO UPDATE SET
+                        token_id = excluded.token_id,
+                        agent_host = excluded.agent_host,
+                        host_version = excluded.host_version,
+                        declared_profile_json = excluded.declared_profile_json,
+                        accepted_level = excluded.accepted_level,
+                        compatibility_status = excluded.compatibility_status,
+                        last_seen_at = excluded.last_seen_at
+                    """,
+                    (
+                        registration_id,
+                        user_subject,
+                        token_id,
+                        normalized["hostInstanceId"],
+                        implementation["name"],
+                        implementation["version"],
+                        declared_json,
+                        accepted_level,
+                        status,
+                        now,
+                        now,
+                    ),
+                )
         missing = sorted(
             name
             for name in LEVEL_REQUIREMENTS[approved_level]
             if normalized["capabilities"].get(name) is not True
         )
-        return {
-            "schemaVersion": "agentbridge.host-negotiation.v1",
-            "status": "succeeded",
-            "registrationId": registration_id,
-            "hostInstanceId": normalized["hostInstanceId"],
-            "implementation": implementation,
-            "acceptedLevel": accepted_level,
-            "compatibilityStatus": status,
-            "missingCapabilities": missing,
-            "mustReregisterOnVersionChange": True,
-        }
+        return (
+            {
+                "schemaVersion": "agentbridge.host-negotiation.v1",
+                "status": "succeeded",
+                "registrationId": registration_id,
+                "hostInstanceId": normalized["hostInstanceId"],
+                "implementation": implementation,
+                "acceptedLevel": accepted_level,
+                "compatibilityStatus": status,
+                "missingCapabilities": missing,
+                "mustReregisterOnVersionChange": True,
+            },
+            changed,
+        )
 
     def require_registration(
         self,
@@ -693,7 +756,8 @@ class HostContractStore:
         minimum_level = str(minimum_level or "L1").upper()
         if minimum_level not in HOST_LEVELS:
             raise ValueError("minimum host level is invalid")
-        now = _utc_now()
+        now_dt = self._clock().astimezone(timezone.utc)
+        now = now_dt.isoformat()
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -712,14 +776,73 @@ class HostContractStore:
                 raise HostRegistrationRequired(
                     f"Agent host requires compatibility level {minimum_level}"
                 )
-            connection.execute(
-                """
-                UPDATE agent_host_registrations
-                SET last_seen_at = ? WHERE registration_id = ?
-                """,
-                (now, row["registration_id"]),
-            )
+            if _should_touch_timestamp(
+                row["last_seen_at"],
+                now_dt,
+                self.last_seen_touch_interval_seconds,
+            ):
+                connection.execute(
+                    """
+                    UPDATE agent_host_registrations
+                    SET last_seen_at = ? WHERE registration_id = ?
+                    """,
+                    (now, row["registration_id"]),
+                )
         return _registration_from_row(row)
+
+    def prune_runtime_snapshots(
+        self,
+        *,
+        retention_days: int = 14,
+        batch_limit: int = 5000,
+    ) -> int:
+        cutoff = (
+            self._clock().astimezone(timezone.utc)
+            - timedelta(days=max(int(retention_days), 1))
+        ).isoformat()
+        remaining = max(int(batch_limit), 1)
+        removed = 0
+        with self._connect() as connection:
+            pairs = connection.execute(
+                """
+                SELECT DISTINCT user_subject, host_instance_id
+                FROM agent_host_runtime_snapshots
+                """
+            ).fetchall()
+            for pair in pairs:
+                if remaining <= 0:
+                    break
+                subject = pair["user_subject"]
+                instance = pair["host_instance_id"]
+                latest = connection.execute(
+                    """
+                    SELECT snapshot_id FROM agent_host_runtime_snapshots
+                    WHERE user_subject = ? AND host_instance_id = ?
+                    ORDER BY observed_at DESC, recorded_at DESC
+                    LIMIT 1
+                    """,
+                    (subject, instance),
+                ).fetchone()
+                if latest is None:
+                    continue
+                cursor = connection.execute(
+                    """
+                    DELETE FROM agent_host_runtime_snapshots
+                    WHERE snapshot_id IN (
+                        SELECT snapshot_id FROM agent_host_runtime_snapshots
+                        WHERE user_subject = ? AND host_instance_id = ?
+                          AND observed_at < ?
+                          AND snapshot_id != ?
+                        ORDER BY observed_at ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (subject, instance, cutoff, str(latest["snapshot_id"]), remaining),
+                )
+                deleted = int(cursor.rowcount)
+                removed += deleted
+                remaining -= deleted
+        return removed
 
     def record_runtime_snapshot(
         self,
@@ -1135,6 +1258,22 @@ def _iso_time(value: Any, name: str) -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _should_touch_timestamp(
+    existing_iso: str | None,
+    now: datetime,
+    interval_seconds: int,
+) -> bool:
+    if interval_seconds <= 0 or not existing_iso:
+        return True
+    try:
+        parsed = datetime.fromisoformat(str(existing_iso).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (now - parsed.astimezone(timezone.utc)).total_seconds() >= interval_seconds
 
 
 def _utc_now() -> str:

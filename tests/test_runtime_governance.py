@@ -433,6 +433,79 @@ class RuntimeGovernanceStoreTests(unittest.TestCase):
             self.assertEqual(removed["runtime_spans"], 1)
             self.assertEqual(len(store.list_incidents()), 1)
 
+    def test_slo_rollups_upsert_within_same_utc_hour_and_prune_drains_legacy_subhour_rows(self) -> None:
+        clock = MutableClock()
+        clock.value = datetime(2026, 8, 23, 4, 1, 15, tzinfo=timezone.utc)
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "agentbridge.db"
+            store = RuntimeGovernanceStore(db_path, clock=clock)
+
+            store.refresh_slo_rollups(hours=24)
+            with closing(sqlite3.connect(db_path)) as conn:
+                first_count = conn.execute("SELECT COUNT(*) FROM runtime_slo_rollups").fetchone()[0]
+            self.assertGreater(first_count, 0)
+
+            # Subsequent refreshes inside the same UTC hour update in-place without multiplying rows.
+            clock.value = datetime(2026, 8, 23, 4, 30, 42, tzinfo=timezone.utc)
+            store.refresh_slo_rollups(hours=24)
+            clock.value = datetime(2026, 8, 23, 4, 59, 58, tzinfo=timezone.utc)
+            store.refresh_slo_rollups(hours=24)
+            with closing(sqlite3.connect(db_path)) as conn:
+                same_hour_count = conn.execute("SELECT COUNT(*) FROM runtime_slo_rollups").fetchone()[0]
+            self.assertEqual(same_hour_count, first_count)
+
+            # Next UTC hour creates a new hourly bucket.
+            clock.value = datetime(2026, 8, 23, 5, 2, 0, tzinfo=timezone.utc)
+            store.refresh_slo_rollups(hours=24)
+            with closing(sqlite3.connect(db_path)) as conn:
+                next_hour_count = conn.execute("SELECT COUNT(*) FROM runtime_slo_rollups").fetchone()[0]
+            self.assertEqual(next_hour_count, first_count * 2)
+
+            # Insert 5 legacy microsecond-stamped rollups older than 7 days, plus keep hourly ones > 7d but < 180d.
+            legacy_end = (clock.value - timedelta(days=10)).replace(minute=17, second=33, microsecond=123456)
+            with closing(sqlite3.connect(db_path)) as conn, conn:
+                for idx in range(5):
+                    w_end = (legacy_end + timedelta(minutes=idx)).isoformat()
+                    w_start = (legacy_end + timedelta(minutes=idx) - timedelta(hours=24)).isoformat()
+                    conn.execute(
+                        """
+                        INSERT INTO runtime_slo_rollups (
+                            rollup_id, metric_key, dimension_key, window_start,
+                            window_end, sample_count, success_count, value,
+                            target, status, created_at
+                        ) VALUES (?, ?, '{"windowHours":24}', ?, ?, 1, 1, 1.0, 0.99, 'healthy', ?)
+                        """,
+                        (f"legacy-{idx}", "trace_success_rate", w_start, w_end, w_end),
+                    )
+            clock.value += timedelta(days=10)
+            first_prune = store.prune(raw_days=30, rollup_days=180, legacy_subhour_rollup_days=7, batch_limit=3)
+            self.assertEqual(first_prune["runtime_slo_rollups"], 3)
+            second_prune = store.prune(raw_days=30, rollup_days=180, legacy_subhour_rollup_days=7, batch_limit=10)
+            self.assertEqual(second_prune["runtime_slo_rollups"], 2)
+            # Hourly buckets (< 180 days old) are preserved!
+            with closing(sqlite3.connect(db_path)) as conn:
+                remaining_hourly = conn.execute("SELECT COUNT(*) FROM runtime_slo_rollups").fetchone()[0]
+            self.assertEqual(remaining_hourly, first_count * 2)
+
+    def test_negotiate_host_skips_redundant_signal_within_throttle_window(self) -> None:
+        import json as _json
+        with TemporaryDirectory() as tmp:
+            service = authorized_service(
+                home=tmp,
+                base_url="http://127.0.0.1:8000/seeyon",
+            )
+            vectors = _json.loads(
+                (Path(__file__).parents[1] / "schemas" / "agent-host" / "v1" / "test-vectors.json").read_text(encoding="utf-8")
+            )
+            profile = vectors["profiles"][0]["value"]
+            service.negotiate_host(user_subject="user-a", token_id="token-a", profile=profile)
+            service.negotiate_host(user_subject="user-a", token_id="token-a", profile=profile)
+            with closing(sqlite3.connect(service.db_path)) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM runtime_signals WHERE signal_type = 'host.contract.negotiated'"
+                ).fetchone()[0]
+            self.assertEqual(count, 1)
+
 
 class RuntimeFailureClassificationTests(unittest.TestCase):
     def test_failure_classification_preserves_result_unknown_boundary(self) -> None:

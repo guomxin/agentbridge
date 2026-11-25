@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "e74060b571c6"
+    "27158ab8f2d9"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Keep monitoring waiting NanoBot chat-initiated coordinated cards across the 237s turn timeout and continuous-flow handoffs, and safely release proven-unsubmitted expired batch-item authorizations. No central database migration required."
+  "reason": "Throttle redundant last_used_at/last_seen_at/negotiation writes on central MCP read paths, bucket persisted SLO rollups hourly, and bound retention pruning including host runtime snapshots. Fully forward- and rollback-compatible without schema migration."
 }

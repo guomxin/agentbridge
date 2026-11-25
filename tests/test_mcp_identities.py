@@ -233,6 +233,44 @@ class McpIdentityTokenStoreTests(unittest.TestCase):
                     expected_principal_ref="Alice",
                 )
 
+    def test_verify_throttles_last_used_at_writes_while_enforcing_immediate_revocation(self):
+        with TemporaryDirectory() as tmp:
+            clock = MutableClock(datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc))
+            store = McpIdentityTokenStore(Path(tmp) / "agentbridge.db", clock=clock)
+            first = store.issue(
+                user_subject="user-a",
+                expected_principal_ref="Alice",
+                ttl_seconds=3600,
+            )
+            second = store.issue(
+                user_subject="user-b",
+                expected_principal_ref="Bob",
+                ttl_seconds=3600,
+            )
+
+            verified_first = store.verify(first["token"])
+            self.assertEqual(verified_first["last_used_at"], clock.value.isoformat())
+            first_touch = verified_first["last_used_at"]
+
+            # Within 60s window: verify succeeds without writing last_used_at again.
+            clock.value += timedelta(seconds=20)
+            verified_again = store.verify(first["token"])
+            self.assertIsNotNone(verified_again)
+            self.assertEqual(verified_again["last_used_at"], first_touch)
+            self.assertEqual(store.get(first["token_id"])["last_used_at"], first_touch)
+
+            # Revocation within the throttle window must take effect immediately.
+            store.revoke(first["token_id"])
+            self.assertIsNone(store.verify(first["token"]))
+
+            # Active token past 60s window refreshes last_used_at cleanly.
+            verified_second = store.verify(second["token"])
+            self.assertEqual(verified_second["last_used_at"], clock.value.isoformat())
+            clock.value += timedelta(seconds=61)
+            verified_second_later = store.verify(second["token"])
+            self.assertEqual(verified_second_later["last_used_at"], clock.value.isoformat())
+            self.assertEqual(store.get(second["token_id"])["last_used_at"], clock.value.isoformat())
+
 
 class MutableClock:
     def __init__(self, value):

@@ -2328,28 +2328,29 @@ class CentralCapabilityService:
         token_id: str,
         profile: dict,
     ) -> dict:
-        negotiation = self.host_contract.negotiate(
+        negotiation, changed = self.host_contract.negotiate_with_change(
             user_subject=user_subject,
             token_id=token_id,
             profile=profile,
         )
-        self.runtime_governance.record_signal(
-            signal_type="host.contract.negotiated",
-            source="agent_host_contract",
-            status=(
-                "healthy"
-                if negotiation["compatibilityStatus"] == "approved"
-                else "degraded"
-            ),
-            user_subject=user_subject,
-            host_type=negotiation["implementation"]["name"],
-            value={
-                "hostInstanceId": negotiation["hostInstanceId"],
-                "hostVersion": negotiation["implementation"]["version"],
-                "acceptedLevel": negotiation["acceptedLevel"],
-                "compatibilityStatus": negotiation["compatibilityStatus"],
-            },
-        )
+        if changed:
+            self.runtime_governance.record_signal(
+                signal_type="host.contract.negotiated",
+                source="agent_host_contract",
+                status=(
+                    "healthy"
+                    if negotiation["compatibilityStatus"] == "approved"
+                    else "degraded"
+                ),
+                user_subject=user_subject,
+                host_type=negotiation["implementation"]["name"],
+                value={
+                    "hostInstanceId": negotiation["hostInstanceId"],
+                    "hostVersion": negotiation["implementation"]["version"],
+                    "acceptedLevel": negotiation["acceptedLevel"],
+                    "compatibilityStatus": negotiation["compatibilityStatus"],
+                },
+            )
         return negotiation
 
     def require_host_registration(

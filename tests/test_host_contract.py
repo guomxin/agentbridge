@@ -242,6 +242,128 @@ class HostContractStoreTests(unittest.TestCase):
         self.assertNotIn("token-a", serialized)
         self.assertNotIn("declared_profile_json", serialized)
 
+    def test_registration_touch_and_negotiate_throttle_writes_until_interval_or_change(self) -> None:
+        from datetime import timedelta
+        now = [datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)]
+        store = HostContractStore(Path(self.temp.name) / "throttled.db", clock=lambda: now[0])
+
+        first, changed = store.negotiate_with_change(
+            user_subject="user-a",
+            token_id="token-a",
+            profile=self.profile,
+        )
+        self.assertTrue(changed)
+        first_seen = store.require_registration(
+            user_subject="user-a",
+            agent_host="reference-host",
+            host_instance_id="reference-host-test-01",
+            host_version="0.1.0",
+            minimum_level="L3",
+        )["lastSeenAt"]
+
+        # Within 60s window with identical profile/token: skip write & keep lastSeenAt.
+        now[0] += timedelta(seconds=15)
+        second, changed_second = store.negotiate_with_change(
+            user_subject="user-a",
+            token_id="token-a",
+            profile=self.profile,
+        )
+        self.assertFalse(changed_second)
+        self.assertEqual(second["registrationId"], first["registrationId"])
+        reg_within = store.require_registration(
+            user_subject="user-a",
+            agent_host="reference-host",
+            host_instance_id="reference-host-test-01",
+            host_version="0.1.0",
+            minimum_level="L3",
+        )
+        self.assertEqual(reg_within["lastSeenAt"], first_seen)
+
+        # Token change triggers immediate write even within 60s.
+        _, changed_token = store.negotiate_with_change(
+            user_subject="user-a",
+            token_id="token-a-rotated",
+            profile=self.profile,
+        )
+        self.assertTrue(changed_token)
+
+        # Past 60s window: require_registration updates lastSeenAt.
+        now[0] += timedelta(seconds=61)
+        store.require_registration(
+            user_subject="user-a",
+            agent_host="reference-host",
+            host_instance_id="reference-host-test-01",
+            host_version="0.1.0",
+            minimum_level="L3",
+        )
+        refreshed = store.require_registration(
+            user_subject="user-a",
+            agent_host="reference-host",
+            host_instance_id="reference-host-test-01",
+            host_version="0.1.0",
+            minimum_level="L3",
+        )
+        self.assertEqual(refreshed["lastSeenAt"], now[0].isoformat())
+
+    def test_prune_runtime_snapshots_bounded_and_preserves_latest_per_host(self) -> None:
+        from datetime import timedelta
+        import sqlite3
+
+        now = [datetime(2026, 9, 20, 8, 0, tzinfo=timezone.utc)]
+        db_path = Path(self.temp.name) / "prune.db"
+        store = HostContractStore(db_path, clock=lambda: now[0])
+        store.negotiate(user_subject="user-a", token_id="token-a", profile=self.profile)
+        reg_a = store.require_registration(
+            user_subject="user-a",
+            agent_host="reference-host",
+            host_instance_id="reference-host-test-01",
+            host_version="0.1.0",
+            minimum_level="L3",
+        )
+        profile_b = deepcopy(self.profile)
+        profile_b["hostInstanceId"] = "reference-host-test-02"
+        store.negotiate(user_subject="user-b", token_id="token-b", profile=profile_b)
+        reg_b = store.require_registration(
+            user_subject="user-b",
+            agent_host="reference-host",
+            host_instance_id="reference-host-test-02",
+            host_version="0.1.0",
+            minimum_level="L3",
+        )
+
+        # Host A: 3 old snapshots + 1 fresh snapshot.
+        for days_ago in (25, 22, 18, 1):
+            store.record_runtime_snapshot(
+                user_subject="user-a",
+                registration=reg_a,
+                snapshot={
+                    "status": "healthy",
+                    "observedAt": (now[0] - timedelta(days=days_ago)).isoformat(),
+                },
+            )
+        # Host B: 2 old snapshots only — latest one MUST still be kept!
+        for days_ago in (30, 20):
+            store.record_runtime_snapshot(
+                user_subject="user-b",
+                registration=reg_b,
+                snapshot={
+                    "status": "healthy",
+                    "observedAt": (now[0] - timedelta(days=days_ago)).isoformat(),
+                },
+            )
+
+        first_removed = store.prune_runtime_snapshots(retention_days=14, batch_limit=2)
+        self.assertEqual(first_removed, 2)
+        second_removed = store.prune_runtime_snapshots(retention_days=14, batch_limit=5)
+        self.assertEqual(second_removed, 2)
+        self.assertEqual(store.prune_runtime_snapshots(retention_days=14, batch_limit=5), 0)
+
+        with sqlite3.connect(db_path) as conn:
+            remaining = conn.execute(
+                "SELECT user_subject, COUNT(*) FROM agent_host_runtime_snapshots GROUP BY user_subject"
+            ).fetchall()
+        self.assertEqual(dict(remaining), {"user-a": 1, "user-b": 1})
+
 
 if __name__ == "__main__":
     unittest.main()
