@@ -345,3 +345,54 @@ def test_two_distinct_legacy_private_senders_disable_automatic_mirror(mirror):
     )["allowed"]
     ask(a, "ambiguous-route", "路由不唯一时的消息")
     assert len(service.tasks.list_outbox(user_subject=a)) == 1
+
+
+@pytest.mark.parametrize("also_workspace", [True, False])
+def test_explicit_nanobot_digest_is_scoped_and_rechecked_before_send(
+    mirror, pair_fixture, monkeypatch, also_workspace,
+):
+    from datetime import datetime
+    from agentbridge.core import oa_daily_digest as digest
+    from agentbridge.core import tasks
+    from agentbridge.core.oa_daily_digest_report import DigestReport
+    from agentbridge.core.business_watches import BusinessWatchError
+
+    service, links, accounts, owner, other, _, deploy = mirror
+    target = links.ensure_endpoint(owner, pair_fixture[0].tokens["a"], INSTANCE, 8001, 501)
+    account = service.workspace.get_account(accounts[owner])
+    settings = service.oa_digest_settings
+    default = settings.get(account)
+    choices = {option["id"]: option["label"] for option in default["telegramOptions"]}
+    assert "NanoBot" in choices[target["endpointId"]]
+    assert default["telegramEndpointId"] is None and not default["enabled"]
+    body = {"enabled": True, "time": "08:30", "workspace": also_workspace,
+            "telegramEndpointId": target["endpointId"], "expectedVersion": 0}
+    with pytest.raises(BusinessWatchError):
+        settings.update(service.workspace.get_account(accounts[other]), body)
+
+    saved = settings.update(account, body)
+    now = datetime.fromisoformat(saved["nextRunAt"])
+    settings.clock = lambda: now
+    monkeypatch.setattr(tasks, "_utc_now", lambda: now.isoformat())
+    monkeypatch.setattr(digest, "collect_oa_daily_digest", lambda *a, **kw: DigestReport("OA 日报 合成条目", True))
+    claimed = settings._claim_due(now)
+    result = digest.publish_scheduled_oa_digest(service, claimed, now=now, clock=settings._now)
+    assert result["status"] == "published" and bool(result["timelineEntryId"]) == also_workspace
+    assert digest.publish_scheduled_oa_digest(service, claimed, now=now, clock=settings._now)["status"] == "reused"
+    queued, = service.tasks.list_outbox(user_subject=owner)
+    assert queued["endpoint_id"] == target["endpointId"]
+    assert not service.tasks.list_outbox(user_subject=other)
+    claim_scope = dict(user_subject=owner, agent_host="nanobot", endpoint_key=target["endpointKey"], host_instance_id=INSTANCE)
+    assert not service.claim_host_notifications(**claim_scope)["notifications"]
+    event, = service.claim_host_notifications(**claim_scope, include_workspace_chat=True)["notifications"]
+    assert event["timeline"]["text"] == "OA 日报 合成条目"
+    assert event["timeline"]["source"]["endpointId"] == target["workspaceEndpointId"]
+    assert not {"pairProof", "targetEndpointBinding"} & event["timeline"].keys()
+    receipt = dict(**claim_scope, delivery_id=event["deliveryId"], attempt_count=event["attemptCount"])
+    assert service.validate_host_notification(**receipt)["allowed"]
+    if also_workspace:
+        settings.update(account, {**body, "expectedVersion": saved["version"], "enabled": False})
+    else:
+        deploy("8002")
+        assert not settings.get(account)["telegramAvailable"]
+    assert not service.validate_host_notification(**receipt)["allowed"]

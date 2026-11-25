@@ -1970,6 +1970,9 @@ class CentralCapabilityService:
             return authorized_artifact(self, delivery, endpoint, host_instance_id, with_body=include_artifact)
         if include_artifact:
             return {"allowed": False}
+        if delivery["payload_type"] == "timeline_message" and "targetEndpointBinding" in delivery["payload"]:
+            from agentbridge.core.oa_daily_digest import is_current_digest_destination
+            return {"allowed": is_current_digest_destination(self, delivery)}
         from agentbridge.core.business_watch_notifications import validate_watch_delivery, WATCH_EVENT_TYPES
         if delivery['payload'].get('eventType') not in WATCH_EVENT_TYPES:
             return {"allowed": True}

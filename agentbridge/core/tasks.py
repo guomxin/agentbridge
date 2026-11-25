@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core.chat_mirror import NANOBOT_OA_DIGEST
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
 from agentbridge.core.commit_notifications import (
@@ -126,7 +127,11 @@ def _delivery_scope(db, ownership, endpoint):
         companion_task = """d.payload_type='task_event' AND EXISTS (
             SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
               AND t.agent_host='nanobot' AND t.origin_endpoint_id=?)"""
-        return f"""({original_task}) OR ({companion_task}) OR (d.payload_type='timeline_message' AND d.task_id=''
+        digest = """d.payload_type='timeline_message' AND d.task_id=''
+            AND json_extract(d.payload_json,'$.mirrorKind')=? AND json_extract(d.payload_json,'$.pairProof')=?
+            AND json_extract(d.payload_json,'$.source.endpointId')=? AND json_extract(d.payload_json,'$.role')='assistant'
+            AND json_extract(d.payload_json,'$.entryId')=d.event_id AND json_type(d.payload_json,'$.targetEndpointBinding')='text'"""
+        return f"""({original_task}) OR ({companion_task}) OR ({digest}) OR (d.payload_type='timeline_message' AND d.task_id=''
             AND json_extract(d.payload_json,'$.mirrorKind')=? AND json_extract(d.payload_json,'$.pairProof')=? AND EXISTS (
                 SELECT 1 FROM user_timeline u WHERE u.entry_id=d.event_id AND u.user_subject=d.user_subject
                 AND u.source_endpoint_id=? AND u.task_id IS NULL AND u.entry_type='chat_message'
@@ -139,7 +144,8 @@ def _delivery_scope(db, ownership, endpoint):
                 AND u.source_endpoint_id=json_extract(d.payload_json,'$.source.endpointId')
                 AND u.role=json_extract(d.payload_json,'$.role')
                 AND u.entry_id=json_extract(d.payload_json,'$.entryId')
-                AND u.text=json_extract(d.payload_json,'$.text')))""", (True, binding["endpoint_id"], NANOBOT_WORKSPACE_MIRROR, proof, binding["endpoint_id"])
+                AND u.text=json_extract(d.payload_json,'$.text')))""", (True, binding["endpoint_id"], NANOBOT_OA_DIGEST, proof, binding["endpoint_id"],
+                    NANOBOT_WORKSPACE_MIRROR, proof, binding["endpoint_id"])
     marks = ",".join("?" for _ in source_ids) or "NULL"
     # Digest-only rows carry an explicit destination binding and have no public
     # timeline entry. The digest sender separately revalidates that binding.
