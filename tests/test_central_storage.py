@@ -106,6 +106,8 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'workspace_telegram_pilot_links'],
                     ['table', 'workspace_telegram_pilot_challenges'],
                     ['index', 'workspace_dispatch_request'],
+                    ['table', 'pi_workspace_image_deliveries'],
+                    ['index', 'pi_workspace_images_destination'],
                 ]
                 self.assertEqual([[r[0], r[1]] for r in schema],
                                  sorted(baseline['schemaObjects'] + additions))
@@ -116,6 +118,8 @@ class CentralStorageTests(unittest.TestCase):
                                  'CREATE INDEX user_timeline_subject_type_created ON user_timeline (user_subject, entry_type, created_at, entry_id)')
                 self.assertEqual(index_sql['workspace_dispatch_request'],
                                  'CREATE INDEX workspace_dispatch_request ON agent_host_dispatches(user_subject, idempotency_key)')
+                self.assertEqual(index_sql['pi_workspace_images_destination'],
+                                 'CREATE INDEX pi_workspace_images_destination ON pi_workspace_image_deliveries(subject,instance,destination,pair_proof,state)')
                 # SQLite inserts an ALTER TABLE column before the original table constraints.
                 # Remove exactly the reviewed declaration, keeping every prior column and constraint in the frozen digest.
                 instance_column = ", instance_id TEXT NOT NULL DEFAULT 'openclaw-default'"

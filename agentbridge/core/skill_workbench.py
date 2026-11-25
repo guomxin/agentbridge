@@ -234,7 +234,11 @@ class SkillWorkbench:
                     'automatic': automatic, 'provenance': source}
         return self._enqueue(owner, 'generation', prepare, request_key, source_dispatch=source_dispatch)
 
-    def evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1, telegram_origin=None):
+    def evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1):
+        return self._evaluate(owner, draft_id=draft_id, expected_revision=expected_revision, cases=cases,
+                              request_key=request_key, repeats=repeats, telegram_origin=None)
+
+    def _evaluate(self, owner, *, draft_id, expected_revision, cases, request_key, repeats=1, telegram_origin):
         if type(repeats) is not int or not 1 <= repeats <= 3: raise ValueError('重复次数为 1 至 3')
         cases = validate_cases(cases)
         if not isinstance(draft_id, str) or not draft_id:
