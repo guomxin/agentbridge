@@ -21,7 +21,8 @@ from .private_files import private_directory, private_file, private_text
 from .cards import CredentialCards, coordinated_waiting, present_coordinated, present_credential
 from .media import clear_stale_images, staged_images, validate_images
 from .runs import RunCoordinator
-from .worker import authenticated_session, channel_for
+from .session_pool import McpSessionPool, open_host_session
+from .worker import channel_for
 
 
 BINDING_KEYS = (
@@ -145,6 +146,7 @@ class Host:
         self.runs = RunCoordinator(self.state / "runs")
         from .commands import CommandQueue
         self.commands=CommandQueue(self)
+        self.mcp_pool = McpSessionPool()
         for directory in (self.state / "users").glob("*"):
             if directory.is_dir() and not directory.is_symlink():
                 clear_stale_images(directory)
@@ -316,7 +318,7 @@ class Host:
                 raise web.HTTPForbidden()
             from .telegram_identity import verify_telegram_binding
             try:
-                async with authenticated_session(self.worker_payload(record,None)) as (session,meta,_):
+                async with open_host_session(self, self.worker_payload(record,None), lane="control") as (session,meta,_):
                     verified = await verify_telegram_binding(session,self.instance,key[0],meta,record["endpoint_key"])
             except Exception as exc:
                 if not identity_denial(exc):
@@ -369,7 +371,7 @@ class Host:
                 waiting = CredentialCards(Path(work["userDir"])).waiting(entry["run_id"],key[1])
             if self.coordinator:
                 task_card=coordinated_waiting(Path(work["userDir"]),entry["run_id"],key[1])
-        if entry and self.card_origins and self.coordinator and entry["state"] == "completed" and channel_for(record["endpoint_key"]) == "telegram":
+        if entry and self.card_origins and self.coordinator and entry["state"] in {"accepted", "completed"} and channel_for(record["endpoint_key"]) == "telegram":
             work = work or self.worker_payload(record, entry["run_id"])
             from .task_context import pending_query_for_run
             pending_query = pending_query_for_run(Path(work["userDir"]), entry["run_id"], key[1])
@@ -403,7 +405,7 @@ class Host:
             if not waiting and not task_card:
                 return {"available":False}
             try:
-                async with authenticated_session(work) as (session, meta, level):
+                async with open_host_session(self, work, lane="control") as (session, meta, level):
                     if channel_for(record["endpoint_key"]) == "telegram":
                         from .telegram_identity import verify_telegram_binding
                         if not await verify_telegram_binding(session, self.instance, key[0], meta, record["endpoint_key"]):
@@ -421,7 +423,7 @@ class Host:
             try:
                 from .telegram_identity import verify_telegram_binding
                 from .telegram_presentation import normalize_result_view
-                async with authenticated_session(work) as (session, meta, level):
+                async with open_host_session(self, work, lane="control") as (session, meta, level):
                     if level != "L3" or not await verify_telegram_binding(session, self.instance, key[0], meta, record["endpoint_key"]):
                         return {"available": False}
                     task_meta = {
@@ -483,6 +485,7 @@ def create_app(spec: dict) -> web.Application:
     async def close(_app):
         await host.commands.close()
         await host.runs.close()
+        await host.mcp_pool.close()
 
     app.on_cleanup.append(close)
     return app

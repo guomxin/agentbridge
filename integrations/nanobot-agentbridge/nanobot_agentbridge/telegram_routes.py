@@ -71,42 +71,54 @@ class TelegramRoutes:
         return self.known.get(key)
 
     async def mirror_peers(self, body):
+        import asyncio
         from aiohttp import web
         from .server import identity_denial
-        from .worker import authenticated_session
+        from .session_pool import open_host_session
 
         if not self.bot or self.bot != body.get("botId"):
             raise web.HTTPForbidden()
-        senders = set()
-        duplicates = set()
         records = {**self.host.enrollment.identities, **self.web}
-        for subject, record in records.items():
+
+        async def fetch_subject(record):
             try:
-                async with authenticated_session(self.host.worker_payload(record, None)) as (session, meta, level):
+                async with open_host_session(
+                    self.host, self.host.worker_payload(record, None), lane="control"
+                ) as (session, meta, level):
                     if level != "L3":
-                        continue
-                    result = await session.call_tool("agentbridge_host_telegram_mirror_peers", {"bot_id": self.bot}, meta=meta)
+                        return []
+                    result = await session.call_tool(
+                        "agentbridge_host_telegram_mirror_peers",
+                        {"bot_id": self.bot},
+                        meta=meta,
+                    )
                 if result.isError:
-                    continue
+                    return []
                 peers = (result.structuredContent or {}).get("senderIds")
-                if not isinstance(peers, list):
-                    continue
-                for sender in peers:
-                    if not isinstance(sender, str) or not re.fullmatch(r"[1-9][0-9]{0,15}", sender) or int(sender) >= 2**53:
-                        continue
-                    if sender in senders:
-                        duplicates.add(sender)
-                    senders.add(sender)
+                return peers if isinstance(peers, list) else []
             except Exception as error:
                 if not identity_denial(error):
                     raise
+                return []
+
+        results = await asyncio.gather(*(fetch_subject(record) for record in records.values()))
+        senders = set()
+        duplicates = set()
+        for peers in results:
+            for sender in peers:
+                if not isinstance(sender, str) or not re.fullmatch(r"[1-9][0-9]{0,15}", sender) or int(sender) >= 2**53:
+                    continue
+                if sender in senders:
+                    duplicates.add(sender)
+                senders.add(sender)
         return {"senderIds": sorted(senders - duplicates)}
 
     async def action(self, action, body):
+        import asyncio
         from aiohttp import web
 
-        from .server import BINDING_KEYS
-        from .worker import authenticated_session
+        from .server import BINDING_KEYS, identity_denial
+        from .session_pool import open_host_session
 
         sender = body.get("senderId")
         if (
@@ -122,12 +134,12 @@ class TelegramRoutes:
             not isinstance(code, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{32}", code)
         ):
             raise web.HTTPBadRequest()
-        matches = []
-        for subject, web_record in self.web.items():
+
+        async def probe_subject(subject, web_record):
             record = self.record(web_record, sender)
             try:
-                async with authenticated_session(
-                    self.host.worker_payload(record, None)
+                async with open_host_session(
+                    self.host, self.host.worker_payload(web_record, None), lane="control"
                 ) as (session, meta, _):
                     if action == "telegram-route":
                         if await verify_telegram_binding(
@@ -154,32 +166,37 @@ class TelegramRoutes:
                                 != web_record["endpoint_key"]
                                 or not isinstance(paired.get("endpointId"), str)
                             ):
-                                continue
+                                return None
                             record["endpoint_id"] = paired["endpointId"]
                             record.update(
                                 workspaceEndpointId=paired["workspaceEndpointId"],
                                 workspaceEndpointKey=paired["workspaceEndpointKey"],
                             )
-                            matches.append(record)
-                    else:
-                        response = await session.call_tool(
-                            "agentbridge_host_telegram_pair_present",
-                            {"bot_id": self.bot, "sender_id": sender, "code": code},
-                            meta=meta,
-                        )
-                        if response.isError:
-                            continue
-                        proof = (response.meta or {}).get(
-                            "io.agentbridge/telegram-confirmation"
-                        )
-                        if isinstance(proof, str) and re.fullmatch(r"[0-9]{8}", proof):
-                            return {"confirmationCode": proof}
+                            return record
+                        return None
+                    response = await session.call_tool(
+                        "agentbridge_host_telegram_pair_present",
+                        {"bot_id": self.bot, "sender_id": sender, "code": code},
+                        meta=meta,
+                    )
+                    if response.isError:
+                        return None
+                    proof = (response.meta or {}).get(
+                        "io.agentbridge/telegram-confirmation"
+                    )
+                    if isinstance(proof, str) and re.fullmatch(r"[0-9]{8}", proof):
+                        return proof
+                    return None
             except Exception as error:
-                from .server import identity_denial
-
                 if not identity_denial(error):
                     raise
+                return None
+
+        outcomes = await asyncio.gather(
+            *(probe_subject(subject, web_record) for subject, web_record in self.web.items())
+        )
         if action == "telegram-route":
+            matches = [item for item in outcomes if isinstance(item, dict)]
             if len(matches) != 1:
                 return {"binding": None}
             from .server import binding_key
@@ -187,4 +204,7 @@ class TelegramRoutes:
             record = matches[0]
             self.known[binding_key(record)] = record
             return {"binding": {key: record[key] for key in BINDING_KEYS}}
+        for proof in outcomes:
+            if isinstance(proof, str):
+                return {"confirmationCode": proof}
         return {"confirmationCode": None}

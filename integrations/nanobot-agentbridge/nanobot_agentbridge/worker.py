@@ -72,6 +72,9 @@ async def authenticated_session(request):
                 yield session,meta,level
 
 
+_ORIGINAL_AUTHENTICATED_SESSION = authenticated_session
+
+
 async def run(request: dict) -> None:
     source = json.loads(private_text(Path(request["modelConfigFile"])))
     directory = Path(request["userDir"])

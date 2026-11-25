@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +44,8 @@ class TelegramUnavailable(RuntimeError):
 
 
 class TelegramAPI:
+    _SAFE_RECONNECT_METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendChatAction"})
+
     def __init__(self, token, connection_factory=None):
         if (
             not isinstance(token, str)
@@ -54,34 +57,75 @@ class TelegramAPI:
         self._connect = connection_factory or (
             lambda: http.client.HTTPSConnection("api.telegram.org", timeout=8)
         )
+        self._lock = threading.Lock()
+        self._conn = None
+        self._last_used = 0.0
+
+    def _close_conn(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_conn()
 
     def call(self, method, **params):
-        connection = self._connect()
-        try:
-            connection.request(
-                "POST",
-                f"/bot{self._token}/{method}",
-                json.dumps(params).encode(),
-                {"Content-Type": "application/json"},
-            )
-            response = connection.getresponse()
-            raw = response.read(1_048_577)
-            if response.status != 200 or len(raw) > 1_048_576:
-                raise TelegramUnavailable("Telegram request was not confirmed")
-            data = json.loads(raw)
-            if (
-                not isinstance(data, dict)
-                or data.get("ok") is not True
-                or "result" not in data
-            ):
-                raise TelegramUnavailable("Invalid Telegram receipt")
-            return data["result"]
-        except (OSError, ValueError, http.client.HTTPException):
-            raise TelegramUnavailable(
-                "Telegram request could not be reconciled"
-            ) from None
-        finally:
-            connection.close()
+        payload = json.dumps(params).encode()
+        headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
+        path = f"/bot{self._token}/{method}"
+        with self._lock:
+            for attempt in range(2):
+                # Avoid writing a non-idempotent sendMessage onto a socket nearing server idle close.
+                if (
+                    self._conn is not None
+                    and method not in self._SAFE_RECONNECT_METHODS
+                    and (time.monotonic() - self._last_used) >= 40.0
+                ):
+                    self._close_conn()
+                reused = self._conn is not None
+                connection = self._conn if reused else self._connect()
+                self._conn = connection
+                try:
+                    connection.request("POST", path, payload, headers)
+                    response = connection.getresponse()
+                    raw = response.read(1_048_577)
+                    will_close = getattr(response, "will_close", True)
+                    if will_close:
+                        self._close_conn()
+                    else:
+                        self._last_used = time.monotonic()
+                    if response.status != 200 or len(raw) > 1_048_576:
+                        raise TelegramUnavailable("Telegram request was not confirmed")
+                    data = json.loads(raw)
+                    if (
+                        not isinstance(data, dict)
+                        or data.get("ok") is not True
+                        or "result" not in data
+                    ):
+                        raise TelegramUnavailable("Invalid Telegram receipt")
+                    return data["result"]
+                except (
+                    http.client.RemoteDisconnected,
+                    http.client.CannotSendRequest,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                ):
+                    self._close_conn()
+                    if attempt == 0 and reused and method in self._SAFE_RECONNECT_METHODS:
+                        continue
+                    raise TelegramUnavailable(
+                        "Telegram request could not be reconciled"
+                    ) from None
+                except (OSError, ValueError, http.client.HTTPException):
+                    self._close_conn()
+                    raise TelegramUnavailable(
+                        "Telegram request could not be reconciled"
+                    ) from None
 
 
 class TelegramPilot:
@@ -94,6 +138,10 @@ class TelegramPilot:
         self.allow_pairing = allow_pairing
         self.next_notifications = 0.0
         self._typing_at: dict[int, float] = {}
+        self._paired_bindings: dict[int, dict] = {}
+        self._mirror_peers_cache: list[int] = []
+        self._mirror_peers_at: float = 0.0
+        self._mirror_peers_interval: float = 10.0
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -144,16 +192,48 @@ class TelegramPilot:
             )
 
     def _binding(self, chat):
-        binding = self.bindings().get(str(chat))
+        static_binding = self.bindings().get(str(chat))
+        binding = static_binding
+        used_cached_pair = False
         try:
             if not binding and self.allow_pairing:
-                binding=self.gateway.resolve_telegram_sender(self.bot_id,chat)
+                cached = self._paired_bindings.get(chat)
+                if cached is not None:
+                    binding = cached
+                    used_cached_pair = True
+                else:
+                    binding = self.gateway.resolve_telegram_sender(self.bot_id, chat)
+                    if binding:
+                        self._paired_bindings[chat] = binding
             if not binding:
-                return None,None
-            if not self.gateway.verify_telegram_binding(binding):
                 return None, None
+            try:
+                verified = self.gateway.verify_telegram_binding(binding)
+            except GatewayRequestError as exc:
+                if exc.code == "NANOBOT_BINDING_UNAVAILABLE" and used_cached_pair:
+                    # Host process may have restarted and cleared in-memory routes; re-resolve once.
+                    self._paired_bindings.pop(chat, None)
+                    binding = self.gateway.resolve_telegram_sender(self.bot_id, chat)
+                    if not binding:
+                        return None, None
+                    self._paired_bindings[chat] = binding
+                    verified = self.gateway.verify_telegram_binding(binding)
+                else:
+                    raise
+            if not verified:
+                self._paired_bindings.pop(chat, None)
+                if used_cached_pair:
+                    binding = self.gateway.resolve_telegram_sender(self.bot_id, chat)
+                    if not binding:
+                        return None, None
+                    if not self.gateway.verify_telegram_binding(binding):
+                        return None, None
+                    self._paired_bindings[chat] = binding
+                else:
+                    return None, None
         except GatewayRequestError as exc:
             if exc.code == "NANOBOT_BINDING_UNAVAILABLE":
+                self._paired_bindings.pop(chat, None)
                 return None, None
             raise TelegramUnavailable(
                 "Central Telegram identity temporarily unavailable"
@@ -231,11 +311,13 @@ class TelegramPilot:
                     self._state(chat_id,message_id,"enrollment_unknown")
                     return
                 if confirmed:
+                    self._mirror_peers_at = 0.0
                     self._send(chat_id,message_id,"身份已确认，请回到原工作台页面完成账号设置。")
                 else:
                     self._state(chat_id,message_id,"enrollment_denied")
             return
         if self.allow_pairing and (match:=re.fullmatch(r"/start ([A-Za-z0-9_-]{32})",msg["text"])):
+            self._mirror_peers_at = 0.0
             self._pair(chat_id,message_id,match[1])
             return
         binding, digest = self._binding(chat_id)
@@ -499,13 +581,35 @@ class TelegramPilot:
                 self._typing(chat)
                 if evidence.get("has_private_card"):
                     self._deliver_active_card(chat, message, binding, digest, key, run_id)
+                if evidence.get("has_result_view"):
+                    self._deliver_result_view(chat, message, binding, digest, key, run_id)
             elif evidence["state"] == "completed":
                 self.deliver(chat, message, telegram_answer(evidence.get("final_text")), ordinary=True)
                 if evidence.get("has_result_view"):
                     self._deliver_result_view(chat, message, binding, digest, key, run_id)
+                if self.terminal:
+                    self.terminal.flush_deferred(chat=chat, run_id=run_id)
             elif evidence["state"] in {"stopped", "unknown"}:
                 self.deliver(chat, message, "原请求已停止或结果待核对。")
+        if self.terminal:
+            self.terminal.flush_deferred()
         self.timeline.flush()
+
+    def _discover_mirror_peers(self) -> list[int]:
+        now = time.monotonic()
+        if self._mirror_peers_at > 0.0 and (now - self._mirror_peers_at) < self._mirror_peers_interval:
+            return list(self._mirror_peers_cache)
+        try:
+            peers = self.gateway._request("telegram-mirror-peers", {"botId": str(self.bot_id)})
+            discovered = []
+            for sender in peers.get("senderIds", []):
+                if isinstance(sender, str) and re.fullmatch(r"[1-9][0-9]{0,15}", sender) and numeric(int(sender)):
+                    discovered.append(int(sender))
+            self._mirror_peers_cache = discovered
+            self._mirror_peers_at = now
+        except GatewayRequestError:
+            pass
+        return list(self._mirror_peers_cache)
 
     def poll_once(self):
         state = self.db.execute(
@@ -518,10 +622,16 @@ class TelegramPilot:
             if state and time.time() - state["observed_at"] < 6 * 86400
             else 0
         )
+        has_active = bool(
+            self.db.execute(
+                "SELECT 1 FROM messages WHERE bot=? AND state IN ('accepting','working') LIMIT 1",
+                (self.bot_id,),
+            ).fetchone()
+        )
         updates = self.api.call(
             "getUpdates",
             offset=offset,
-            timeout=2,
+            timeout=0 if has_active else 1,
             limit=100,
             allowed_updates=["message"],
         )
@@ -549,21 +659,27 @@ class TelegramPilot:
                 )
         self.reconcile()
         if self.terminal and time.monotonic() >= self.next_notifications:
-            self.next_notifications = time.monotonic() + 2
+            active_now = bool(
+                self.db.execute(
+                    "SELECT 1 FROM messages WHERE bot=? AND state IN ('accepting','working') LIMIT 1",
+                    (self.bot_id,),
+                ).fetchone()
+            )
+            self.next_notifications = time.monotonic() + (0.4 if active_now else 0.5)
             rows = self.db.execute("SELECT DISTINCT chat FROM messages WHERE bot=? AND run_id IS NOT NULL", (self.bot_id,))
             recipients = {row["chat"] for row in rows.fetchall()}
-            try:
-                peers = self.gateway._request("telegram-mirror-peers", {"botId": str(self.bot_id)})
-                for sender in peers.get("senderIds", []):
-                    if isinstance(sender, str) and re.fullmatch(r"[1-9][0-9]{0,15}", sender) and numeric(int(sender)):
-                        recipients.add(int(sender))
-            except GatewayRequestError:
-                pass
-            for chat in sorted(recipients):
+            recipients.update(self._discover_mirror_peers())
+            sorted_recipients = sorted(recipients)
+            use_long_poll = (
+                not active_now
+                and len(sorted_recipients) == 1
+                and isinstance(self.gateway, NanoBotGatewayClient)
+            )
+            for chat in sorted_recipients:
                 try:
                     route, digest = self._binding(chat)
                     if route:
-                        self.terminal.poll(chat, route, digest)
+                        self.terminal.poll(chat, route, digest, wait_seconds=1 if use_long_poll else 0)
                 except (TelegramUnavailable,GatewayRequestError):
                     continue
 
@@ -649,11 +765,17 @@ def main():
         try:
             consumer.verify()
             while True:
+                started = time.monotonic()
                 try:
                     consumer.poll_once()
                 except TelegramUnavailable:
                     time.sleep(2)
+                    continue
+                elapsed = time.monotonic() - started
+                if elapsed < 0.25:
+                    time.sleep(0.25 - elapsed)
         finally:
+            consumer.api.close()
             consumer.db.close()
 
 

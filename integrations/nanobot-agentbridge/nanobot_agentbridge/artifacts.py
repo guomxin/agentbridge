@@ -9,7 +9,8 @@ from uuid import UUID
 
 from aiohttp import web
 
-from .worker import authenticated_session, channel_for
+from .session_pool import open_host_session
+from .worker import channel_for
 
 
 async def reissue(host, binding, body, run_id):
@@ -21,7 +22,7 @@ async def reissue(host, binding, body, run_id):
     except (KeyError, ValueError, TypeError, AttributeError):
         raise web.HTTPBadRequest() from None
     payload = host.worker_payload(binding, run_id)
-    async with authenticated_session(payload) as (session, meta, level):
+    async with open_host_session(host, payload, lane="control") as (session, meta, level):
         if level != "L3":
             raise web.HTTPForbidden()
         # Read the original coordinate stamp; a terminal task cannot reacquire a

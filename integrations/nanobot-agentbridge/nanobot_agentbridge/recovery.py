@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 
-from .worker import authenticated_session
+from .session_pool import open_host_session
 
 
 def recovery_rows(directory, endpoint):
@@ -72,7 +72,7 @@ async def reconcile(host, record, run, task, phase):
     run_state = host.runs.snapshot(run, **bound)["state"]
     if run_state != "unknown" and not (run_state == "completed" and phase == "waiting"):
         return
-    async with authenticated_session(request) as (session, meta, level):
+    async with open_host_session(host, request, lane="control") as (session, meta, level):
         if level != "L3":
             return
         private_db = Path(request["userDir"]) / "coordinated-private.sqlite3"

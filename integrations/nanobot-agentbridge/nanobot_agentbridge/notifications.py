@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import time
 from typing import ClassVar
 
 from .chat_mirror import ChatMirrors, chat_claim, identifier, projected_chat
@@ -81,8 +82,8 @@ async def _issue_task_result_view(session, req: dict, meta: dict, task_id: str, 
 async def notifications(host, record, action, body):
     from aiohttp import web
 
+    from .session_pool import open_host_session
     from .telegram_identity import verify_telegram_binding
-    from .worker import authenticated_session
 
     if not host.coordinator or not record.get("workspaceEndpointId"):
         return (
@@ -92,7 +93,8 @@ async def notifications(host, record, action, body):
         )
     req = host.worker_payload(record, None)
     origins = frozenset(getattr(host, "card_origins", None) or req.get("trustedCardOrigins") or ())
-    async with authenticated_session(req) as (session, meta, level):
+    lane = "notifications" if action == "telegram-notifications" else "control"
+    async with open_host_session(host, req, lane=lane) as (session, meta, level):
         if level != "L3" or not await verify_telegram_binding(
             session, req["instance"], req["subject"], meta, req["endpointKey"]
         ):
@@ -159,14 +161,18 @@ async def notifications(host, record, action, body):
             if not claim or claim[0] != body.get("runId"):
                 raise web.HTTPForbidden()
             return {"recorded": await ack(delivery, attempt, ok)}
+        claim_args = {
+            **endpoint_params,
+            "limit": 32,
+            "lease_seconds": 60,
+            "include_workspace_chat": True,
+        }
+        raw_wait = body.get("waitSeconds") if isinstance(body, dict) else None
+        if isinstance(raw_wait, (int, float)) and not isinstance(raw_wait, bool) and raw_wait > 0:
+            claim_args["wait_seconds"] = min(float(raw_wait), 15.0)
         reply = await session.call_tool(
             "agentbridge_host_notification_claim",
-            {
-                **endpoint_params,
-                "limit": 32,
-                "lease_seconds": 60,
-                "include_workspace_chat": True,
-            },
+            claim_args,
             meta=meta,
         )
         payload = reply.structuredContent or {}
@@ -404,6 +410,7 @@ class TerminalMessages:
     def __init__(self, pilot):
         self.pilot = pilot
         self.chat = ChatMirrors(pilot)
+        self._deferred_terminal: dict[tuple[int, str], tuple[dict, str, dict, float]] = {}
         with pilot.db:
             pilot.db.executescript("""
                 CREATE TABLE IF NOT EXISTS notification_receipts(
@@ -486,11 +493,96 @@ class TerminalMessages:
             },
         )
 
-    def poll(self, chat, binding, digest):
+    def _deliver_terminal_event(self, chat, binding, digest, event, original_message):
         from .telegram import TelegramUnavailable, numeric
 
         pilot = self.pilot
-        reply = pilot.gateway._request("telegram-notifications", {"binding": binding})
+        delivery = event["deliveryId"]
+        with pilot.db:
+            inserted = pilot.db.execute(
+                "INSERT OR IGNORE INTO notification_receipts VALUES(?,?,?,?,'sending')",
+                (pilot.bot_id, chat, delivery, event["runId"]),
+            ).rowcount
+        if inserted:
+            status = "delivery_unknown"
+            try:
+                active, proof = pilot._binding(chat)
+                if active != binding or proof != digest:
+                    status = "binding_changed"
+                else:
+                    result = pilot.api.call(
+                        "sendMessage",
+                        chat_id=chat,
+                        text=self.TEXT[event["status"]],
+                        reply_parameters={
+                            "message_id": original_message,
+                            "allow_sending_without_reply": False,
+                        },
+                    )
+                    if (
+                        isinstance(result, dict)
+                        and numeric(result.get("message_id"))
+                        and (result.get("from") or {}).get("id") == pilot.bot_id
+                        and (result.get("chat") or {}).get("id") == chat
+                        and (result.get("reply_to_message") or {}).get("message_id")
+                        == original_message
+                    ):
+                        status = "delivered"
+            except TelegramUnavailable:
+                pass
+            with pilot.db:
+                pilot.db.execute(
+                    "UPDATE notification_receipts SET state=? WHERE bot=? AND chat=? AND delivery=?",
+                    (status, pilot.bot_id, chat, delivery),
+                )
+        row = pilot.db.execute(
+            "SELECT state FROM notification_receipts WHERE bot=? AND chat=? AND run=?",
+            (pilot.bot_id, chat, event["runId"]),
+        ).fetchone()
+        if row:
+            self._ack_receipt(binding, delivery, event["runId"], event["attempt"], row[0] == "delivered")
+
+    def flush_deferred(self, *, chat=None, run_id=None):
+        from agentbridge.workspace.gateway import GatewayRequestError
+
+        if not self._deferred_terminal:
+            return
+        now = time.monotonic()
+        pilot = self.pilot
+        for key, (binding, digest, event, expires_at) in list(self._deferred_terminal.items()):
+            item_chat, _delivery_id = key
+            if now >= expires_at:
+                self._deferred_terminal.pop(key, None)
+                continue
+            if chat is not None and item_chat != chat:
+                continue
+            if run_id is not None and event.get("runId") != run_id:
+                continue
+            original = pilot.db.execute(
+                """SELECT message FROM messages WHERE bot=? AND chat=? AND subject=?
+                        AND binding_hash=? AND run_id=? AND state IN ('delivered','delivery_unknown')""",
+                (pilot.bot_id, item_chat, binding["user_subject"], digest, event["runId"]),
+            ).fetchone()
+            if not original:
+                continue
+            self._deferred_terminal.pop(key, None)
+            try:
+                self._deliver_terminal_event(item_chat, binding, digest, event, original["message"])
+            except GatewayRequestError:
+                pass
+
+    def poll(self, chat, binding, digest, *, wait_seconds=0):
+        pilot = self.pilot
+        payload = {"binding": binding}
+        if isinstance(wait_seconds, (int, float)) and not isinstance(wait_seconds, bool) and wait_seconds > 0:
+            payload["waitSeconds"] = min(float(wait_seconds), 15.0)
+            reply = pilot.gateway._request(
+                "telegram-notifications",
+                payload,
+                timeout=max(8, int(payload["waitSeconds"]) + 8),
+            )
+        else:
+            reply = pilot.gateway._request("telegram-notifications", payload)
         for event in reply.get("deliveries", []):
             kind = event.get("kind")
             if kind == "workspace_chat":
@@ -547,53 +639,24 @@ class TerminalMessages:
             if event.get("status") not in self.TEXT:
                 continue
             original = pilot.db.execute(
-                """SELECT message FROM messages WHERE bot=? AND chat=? AND subject=?
-                        AND binding_hash=? AND run_id=? AND state IN ('delivered','delivery_unknown')""",
+                """SELECT message, state FROM messages WHERE bot=? AND chat=? AND subject=?
+                        AND binding_hash=? AND run_id=? AND state IN ('accepting','working','delivered','delivery_unknown')""",
                 (pilot.bot_id, chat, binding["user_subject"], digest, event["runId"]),
             ).fetchone()
             if not original:
                 continue
-            delivery = event["deliveryId"]
-            with pilot.db:
-                inserted = pilot.db.execute(
-                    "INSERT OR IGNORE INTO notification_receipts VALUES(?,?,?,?,'sending')",
-                    (pilot.bot_id, chat, delivery, event["runId"]),
-                ).rowcount
-            if inserted:
-                status = "delivery_unknown"
-                try:
-                    active, proof = pilot._binding(chat)
-                    if active != binding or proof != digest:
-                        status = "binding_changed"
-                    else:
-                        result = pilot.api.call(
-                            "sendMessage",
-                            chat_id=chat,
-                            text=self.TEXT[event["status"]],
-                            reply_parameters={
-                                "message_id": original["message"],
-                                "allow_sending_without_reply": False,
-                            },
-                        )
-                        if (
-                            isinstance(result, dict)
-                            and numeric(result.get("message_id"))
-                            and (result.get("from") or {}).get("id") == pilot.bot_id
-                            and (result.get("chat") or {}).get("id") == chat
-                            and (result.get("reply_to_message") or {}).get("message_id")
-                            == original["message"]
-                        ):
-                            status = "delivered"
-                except TelegramUnavailable:
-                    pass
-                with pilot.db:
-                    pilot.db.execute(
-                        "UPDATE notification_receipts SET state=? WHERE bot=? AND chat=? AND delivery=?",
-                        (status, pilot.bot_id, chat, delivery),
-                    )
-            row = pilot.db.execute(
-                "SELECT state FROM notification_receipts WHERE bot=? AND chat=? AND run=?",
-                (pilot.bot_id, chat, event["runId"]),
-            ).fetchone()
-            if row:
-                self._ack_receipt(binding, delivery, event["runId"], event["attempt"], row[0] == "delivered")
+            if original["state"] in ("accepting", "working"):
+                # Keep this leased delivery in memory so reconcile() flushes it immediately
+                # once the LLM reply completes instead of waiting for the 60s central lease timeout.
+                key = (chat, event["deliveryId"])
+                if len(self._deferred_terminal) >= 64 and key not in self._deferred_terminal:
+                    oldest_key = next(iter(self._deferred_terminal))
+                    self._deferred_terminal.pop(oldest_key, None)
+                self._deferred_terminal[key] = (
+                    dict(binding),
+                    digest,
+                    dict(event),
+                    time.monotonic() + 50.0,
+                )
+                continue
+            self._deliver_terminal_event(chat, binding, digest, event, original["message"])

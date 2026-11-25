@@ -31,7 +31,7 @@ def telegram_answer(answer):
 async def publish_timeline(host, record, body):
     from aiohttp import web
     from .telegram_identity import verify_telegram_binding
-    from .worker import authenticated_session
+    from .session_pool import open_host_session
 
     route = re.fullmatch(r"telegram:([1-9][0-9]{0,15}):([1-9][0-9]{0,15})", record["endpoint_key"])
     if not route:
@@ -56,7 +56,7 @@ async def publish_timeline(host, record, body):
                 or any(type(item) is not int or not 0 < item < 2**53 for item in receipts)
                 or len(set(receipts)) != len(receipts)):
             raise web.HTTPForbidden()
-    async with authenticated_session(host.worker_payload(record, None)) as (session, meta, level):
+    async with open_host_session(host, host.worker_payload(record, None), lane="control") as (session, meta, level):
         if level != "L3" or not await verify_telegram_binding(
                 session, host.instance, record["user_subject"], meta, record["endpoint_key"]):
             raise web.HTTPForbidden()

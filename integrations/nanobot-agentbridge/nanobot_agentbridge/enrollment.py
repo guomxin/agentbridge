@@ -2,7 +2,7 @@
 
 import re
 
-from .worker import authenticated_session
+from .session_pool import open_host_session
 
 
 class Enrollment:
@@ -26,7 +26,7 @@ class Enrollment:
         if bot != self.bot or sender not in self.senders or not re.fullmatch(r"[A-Z2-9]{8}", code):
             return False
         record = self.identities[self.senders[sender]]
-        async with authenticated_session(self.host.worker_payload(record, None)) as (session, meta, _):
+        async with open_host_session(self.host, self.host.worker_payload(record, None), lane="control") as (session, meta, _):
             result = await session.call_tool("agentbridge_host_workspace_link_confirm", {
                 "agent_host": "nanobot", "client_type": "telegram", "endpoint_key": record["endpoint_key"],
                 "external_subject": sender, "account_id": bot, "conversation_ref": record["session_key"],
@@ -40,7 +40,7 @@ class Enrollment:
         if not subject:
             return None
         seed = self.identities[subject]
-        async with authenticated_session(self.host.worker_payload(seed, None)) as (session, meta, _):
+        async with open_host_session(self.host, self.host.worker_payload(seed, None), lane="control") as (session, meta, _):
             response = await session.call_tool("agentbridge_host_enrolled_workspace_binding",
                                                {"bot_id": self.bot, "sender_id": sender}, meta=meta)
         binding = (response.meta or {}).get("io.agentbridge/workspace-binding")

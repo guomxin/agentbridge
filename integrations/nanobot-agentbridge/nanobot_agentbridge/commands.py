@@ -9,7 +9,7 @@ from uuid import UUID
 
 from aiohttp import web
 
-from .worker import authenticated_session
+from .session_pool import open_host_session
 
 
 class CommandQueue:
@@ -46,7 +46,7 @@ class CommandQueue:
         if previous and previous[:4] != scope:
             raise web.HTTPForbidden()
         if not previous or previous[4] == "queued":
-            async with authenticated_session(request) as (mcp, meta, level):
+            async with open_host_session(self.host, request, lane="control") as (mcp, meta, level):
                 if level != "L3":
                     raise web.HTTPForbidden()
                 result = await mcp.call_tool(
