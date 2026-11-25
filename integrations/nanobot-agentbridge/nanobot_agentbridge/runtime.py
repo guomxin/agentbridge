@@ -136,6 +136,10 @@ async def project_result(
     )
 
 
+SESSION_SYSTEMS = frozenset({"oa", "smartlight", "taihua", "yuque"})
+SESSION_LOGINS = {f"{system}_session_login" for system in SESSION_SYSTEMS}
+
+
 class CentralReadTool(Tool):
     _plugin_discoverable = False
 
@@ -165,29 +169,63 @@ class CentralReadTool(Tool):
             return parameters(self.definition.name, self.definition.inputSchema)
         return self.definition.inputSchema
 
+    async def credential_prerequisite(self, system):
+        status_name, login_name = f"{system}_session_status", f"{system}_session_login"
+        if (system in self.registry.checked_sessions or self.deliver_private is None
+                or "mcp_ab_" + status_name not in self.registry.tool_names
+                or "mcp_ab_" + login_name not in self.registry.tool_names):
+            return None
+        status = await self.session.call_tool(status_name, {})
+        observed = status.structuredContent or {}
+        if status.isError or (observed.get("userSubject"), observed.get("systemId")) != (self.binding.subject, system):
+            return ToolResult.error("无法确认本人在该系统的会话。")
+        if observed.get("status") == "active":
+            self.registry.checked_sessions.add(system)
+            return None
+        if observed.get("status") not in {"expired", "not_found", "login_required"}:
+            return ToolResult.error("当前会话状态待核对，请稍后查看。")
+        if system in self.registry.attempted_logins:
+            return ToolResult.error("此次登录已请求，请查看原任务中的凭证卡。")
+        self.registry.attempted_logins.add(system)
+        # The original L2 OA route uses a standalone credential. L3 business reads
+        # pin the login prerequisite to their existing task and coordinator lease.
+        task_meta = None
+        if system != "oa" and self.registry.business_context is not None:
+            task_meta = await self.registry.business_context()
+        options = {"meta": {**task_meta, "io.agentbridge/continue-after-login": True}} if task_meta else {}
+        login = await self.session.call_tool(login_name, {}, **options)
+        if PRIVATE_INTERACTION in (login.meta or {}):
+            async def deliver(binding, card):
+                if task_meta:
+                    return await self.deliver_private(binding, card, task_meta=task_meta)
+                return await self.deliver_private(binding, card)
+            outcome = await project_result(login, self.binding, deliver, self.trusted_origins)
+            if outcome != "凭证卡已由中央核验并续办。":
+                return outcome
+        elif login.isError or (login.structuredContent or {}).get("status") != "succeeded":
+            return ToolResult.error("中央未确认本人的登录结果。")
+        self.registry.checked_sessions.add(system)
+        return None
+
     async def execute(self, **kwargs) -> str:
         tracker = self.registry.read_task
         receipt = None
         try:
             skill = self.registry.skill_run
+            name = self.definition.name
+            system = name.partition("_")[0]
+            needs_session = name == "oa_workflow_pending_list" or (
+                system in SESSION_SYSTEMS - {"oa"} and name in (BUSINESS_READS - CONTEXT_FREE_READS) | FILE_TOOLS
+            )
+            if needs_session and not (skill is not None and skill.selection):
+                outcome = await self.credential_prerequisite(system)
+                if outcome is not None:
+                    return outcome
             if self.registry.task_files and self.definition.name in FILE_TOOLS | {SEARCH}:
                 receipt, public = await self.registry.task_files.execute(
                     self.definition.name, kwargs, session=self.session, business_context=self.registry.business_context,
                     skill=skill, binding=self.binding)
                 return json.dumps(public, ensure_ascii=False)
-            if (self.definition.name=="oa_workflow_pending_list" and self.deliver_private is not None
-                and not self.registry.oa_checked and not (skill is not None and skill.selection)
-                and "mcp_ab_oa_session_login" in self.registry.tool_names):
-                status=await self.session.call_tool("oa_session_status",{})
-                observed=status.structuredContent or {}
-                if status.isError or observed.get("userSubject")!=self.binding.subject or observed.get("systemId")!="oa":
-                    return ToolResult.error("无法确认办公系统会话归属。")
-                if observed.get("status") in {"expired","not_found","login_required"}:
-                    login=await self.session.call_tool("oa_session_login",{})
-                    login_outcome=await project_result(login,self.binding,self.deliver_private,self.trusted_origins)
-                    if login_outcome!="凭证卡已由中央核验并续办。":
-                        return login_outcome
-                self.registry.oa_checked=True
             if skill is not None and (skill.selection or self.definition.name == "agentbridge_skill_get"):
                 result = await skill.call(self.definition.name, kwargs)
             elif self.registry.business_context and self.definition.name in BUSINESS_READS - CONTEXT_FREE_READS:
@@ -226,7 +264,8 @@ class CentralTools(ToolRegistry):
     def __init__(self, skill_run=None, business_context=None, read_task=None, task_files=None):
         super().__init__()
         self.skill_run=skill_run
-        self.oa_checked=False
+        self.checked_sessions = set()
+        self.attempted_logins = set()
         self.business_context = business_context
         self.read_task = read_task
         self.task_files = task_files
@@ -241,7 +280,7 @@ class CentralTools(ToolRegistry):
         if isinstance(tool, (CoordinatorTool,PlanTool,WatchTool)):
             super().register(tool)
         elif isinstance(tool, CentralReadTool) and (
-            tool.definition.name in READ_TOOLS | {"oa_session_login", "agentbridge_skill_get"}
+            tool.definition.name in READ_TOOLS | SESSION_LOGINS | {"agentbridge_skill_get"}
             or (self.business_context and (tool.definition.name in BUSINESS_READS or self.task_files and tool.definition.name in FILE_TOOLS)
                 and tool.definition.annotations and tool.definition.annotations.readOnlyHint is True)
         ):
@@ -282,7 +321,7 @@ async def run_readonly(
             or not all(isinstance(item, str) for item in allowed)
         ):
             raise ValueError("Central MCP did not confirm this user's tool access")
-    candidates = READ_TOOLS | {"oa_session_login"} if credential_login and deliver_private else READ_TOOLS
+    candidates = READ_TOOLS | SESSION_LOGINS if credential_login and deliver_private else READ_TOOLS
     if skill_run is not None:
         candidates=candidates | {"agentbridge_skill_get"}
     if business_context is not None:

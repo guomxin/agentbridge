@@ -373,13 +373,14 @@ class Host:
         if entry and self.card_origins and entry["state"] in {"accepted","unknown"}:
             work = self.worker_payload(record,entry["run_id"])
             if entry["state"]=="accepted":
-                waiting = CredentialCards(Path(work["userDir"])).waiting(entry["run_id"],key[1])
+                waiting = CredentialCards(Path(work["userDir"])).waiting_card(entry["run_id"],key[1])
             if self.coordinator:
                 task_card=coordinated_waiting(Path(work["userDir"]),entry["run_id"],key[1])
         if entry and self.card_origins and self.coordinator and entry["state"] in {"accepted", "completed"} and channel_for(record["endpoint_key"]) == "telegram":
             work = work or self.worker_payload(record, entry["run_id"])
             from .task_context import pending_query_for_run
             pending_query = pending_query_for_run(Path(work["userDir"]), entry["run_id"], key[1])
+        card_revision = (task_card or waiting or {}).get("revision", 0)
         if action == "lookup":
             if entry is None:
                 return {"runId": None}
@@ -388,7 +389,7 @@ class Host:
                 "state": entry["state"],
                 "answer": entry["answer"],
                 "hasPrivateCard": bool(waiting or task_card),
-                "cardRevision": task_card["revision"] if task_card else int(bool(waiting)),
+                "cardRevision": card_revision,
                 "hasResultView": bool(pending_query),
             }
         if entry is None or body.get("runId") != entry["run_id"]:
@@ -404,7 +405,7 @@ class Host:
                 "events": self.runs.events(entry["run_id"], after=after, **binding),
                 "answer": entry["answer"],
                 "hasPrivateCard": bool(waiting or task_card),
-                "cardRevision": task_card["revision"] if task_card else int(bool(waiting)),
+                "cardRevision": card_revision,
             }
         if action == "card":
             if not waiting and not task_card:
@@ -417,11 +418,13 @@ class Host:
                             return {"available": False}
                     if task_card and level=="L3":
                         card = await present_coordinated(session,work,meta,task_card)
+                    elif waiting and level in {"L2", "L3"} and (not waiting["task"] or level == "L3"):
+                        card = await present_credential(session, work, meta, waiting["interaction"], task_id=waiting["task"])
                     else:
-                        card = await present_credential(session,work,meta,waiting) if waiting and level in {"L2","L3"} else None
+                        card = None
             except Exception:
                 raise web.HTTPServiceUnavailable() from None
-            return {**card,"cardRevision":task_card["revision"] if task_card else 1} if card else {"available":False}
+            return {**card,"cardRevision":card_revision} if card else {"available":False}
         if action == "result-view":
             if channel_for(record["endpoint_key"]) != "telegram" or not pending_query:
                 return {"available": False}

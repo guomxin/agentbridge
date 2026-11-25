@@ -116,10 +116,10 @@ async def run(request: dict) -> None:
                 verified = await verify_telegram_binding(session,request["instance"],binding.subject,meta,request["endpointKey"])
             if not verified:
                 raise PermissionError("Telegram identity has no active central binding")
-        async def deliver(target, card):
+        async def deliver(target, card, *, task_meta=None):
             if target!=binding:
                 raise PermissionError("Card binding unavailable")
-            return await wait_for_credential(session,request,meta,card)
+            return await wait_for_credential(session,request,task_meta or meta,card)
         can_present = level in {"L2","L3"} and channel in {"workspace","telegram"}
         if request.get("trial") is not None:
             if channel!="workspace":

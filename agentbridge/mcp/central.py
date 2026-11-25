@@ -5561,8 +5561,12 @@ def create_central_mcp_server(
             task_id = None
         if _request_meta(ctx).get("io.agentbridge/session-ready-only") is True:
             record = await asyncio.to_thread(service.interactions.get, interaction_id, user_subject=identity["user_subject"])
-            if task_id or record["interaction_type"] != "credential" or record["resume_spec"].get("kind") != "session_ready":
+            spec = record["resume_spec"]
+            if record["interaction_type"] != "credential" or spec.get("kind") != "session_ready":
                 raise PermissionError("A session-ready-only continuation cannot execute a business capability")
+            if task_id and (task_id != _request_task_id(ctx) or spec.get("taskId") != task_id
+                            or spec.get("continueAfterLogin") is not True):
+                raise PermissionError("A credential prerequisite must match the original task")
         if task_id:
             requested_task_id = _request_task_id(ctx)
             if requested_task_id and requested_task_id != task_id:

@@ -17,16 +17,26 @@ class CredentialCards:
             db.execute("""CREATE TABLE IF NOT EXISTS credentials (
                 run_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL,
                 interaction_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS credential_card_versions (
+                run_id TEXT PRIMARY KEY, interaction_id TEXT NOT NULL, task_id TEXT, revision INTEGER NOT NULL)""")
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=8)
 
-    def remember(self, run_id: str, endpoint: str, interaction_id: str) -> None:
+    def remember(self, run_id, endpoint, interaction_id, task_id=None):
         with self.connect() as db:
-            db.execute(
-                "INSERT INTO credentials VALUES (?,?,?,'waiting')",
+            row = db.execute(
+                """INSERT INTO credentials VALUES (?,?,?,'waiting') ON CONFLICT(run_id) DO UPDATE SET
+                   interaction_id=excluded.interaction_id, state='waiting'
+                   WHERE credentials.endpoint=excluded.endpoint AND credentials.state IN ('completed','closed')
+                   AND credentials.interaction_id<>excluded.interaction_id""",
                 (run_id, endpoint, interaction_id),
             )
+            if row.rowcount != 1:
+                raise ValueError("A previous credential is still unresolved")
+            db.execute("""INSERT INTO credential_card_versions VALUES(?,?,?,1)
+                ON CONFLICT(run_id) DO UPDATE SET task_id=excluded.task_id, interaction_id=excluded.interaction_id,
+                revision=credential_card_versions.revision+1""", (run_id, interaction_id, task_id))
 
     def transition(self, run_id: str, previous: str, state: str) -> bool:
         with self.connect() as db:
@@ -38,17 +48,22 @@ class CredentialCards:
                 == 1
             )
 
-    def waiting(self, run_id: str, endpoint: str) -> str | None:
+    def waiting_card(self, run_id, endpoint):
         with self.connect() as db:
             row = db.execute(
-                "SELECT interaction_id FROM credentials WHERE run_id=? AND endpoint=? AND state='waiting'",
-                (run_id, endpoint),
+                """SELECT c.interaction_id, v.task_id, COALESCE(v.revision, 1) FROM credentials c
+                   LEFT JOIN credential_card_versions v ON c.run_id=v.run_id AND c.interaction_id=v.interaction_id
+                   WHERE c.run_id=? AND c.endpoint=? AND c.state='waiting'""", (run_id, endpoint),
             ).fetchone()
-        return row[0] if row else None
+        return {"interaction": row[0], "task": row[1], "revision": row[2]} if row else None
+
+    def waiting(self, run_id, endpoint):
+        card = self.waiting_card(run_id, endpoint)
+        return card["interaction"] if card else None
 
 
 async def present_credential(
-    session, request: dict, context: dict, interaction_id: str
+    session, request: dict, context: dict, interaction_id: str, *, task_id: str | None = None
 ) -> dict | None:
     result = await session.call_tool(
         "agentbridge_host_interaction_present",
@@ -66,7 +81,7 @@ async def present_credential(
         result.isError
         or not isinstance(card, dict)
         or card.get("interactionId") != interaction_id
-        or card.get("taskId")
+        or card.get("taskId") != task_id
         or card.get("type") != "credential"
         or endpoint.get("endpointId") != request["endpoint"]
         or not _valid_card(card, frozenset(request["trustedCardOrigins"]))
@@ -86,11 +101,12 @@ async def wait_for_credential(
     if interaction["type"] != "credential":
         return "unavailable"
     ident = interaction["interactionId"]
-    if not await present_credential(session, request, context, ident):
+    task_id = (context.get("io.agentbridge/task") or {}).get("taskId")
+    if not await present_credential(session, request, context, ident, task_id=task_id):
         return "unavailable"
     journal = CredentialCards(Path(request["userDir"]))
     run_id = request["runId"]
-    journal.remember(run_id, request["endpoint"], ident)
+    journal.remember(run_id, request["endpoint"], ident, task_id)
     try:
         async with asyncio.timeout(235):
             while True:
@@ -115,6 +131,7 @@ async def wait_for_credential(
                 if phase in {"expired", "declined", "failed", "superseded"}:
                     return "closed"
                 if phase == "completed" and resume.get("completed") is True:
+                    journal.transition(run_id, "waiting", "completed")
                     return "completed"
                 if phase == "completed" and resume.get("ready") is True:
                     # Consume the local right to call resume before the MCP round trip.
