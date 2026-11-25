@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tomllib
 from typing import Any
 
 
@@ -57,6 +58,8 @@ def main() -> int:
     parser.add_argument("--skip-openclaw", action="store_true")
     arguments = parser.parse_args()
 
+    openclaw = json.loads((OPENCLAW_ROOT / "package.json").read_bytes())
+    reference = tomllib.loads((REFERENCE_SOURCE.parent / "pyproject.toml").read_text(encoding="utf-8"))
     vectors = json.loads(VECTORS.read_text(encoding="utf-8"))
     case_ids = [item["id"] for item in vectors["conformanceCases"]]
     expected = [f"H{number:02d}" for number in range(1, 30)]
@@ -139,8 +142,8 @@ def main() -> int:
         "generatedAt": generated_at.isoformat(),
         "passed": passed,
         "hosts": [
-            {"name": "openclaw", "version": "0.4.71"},
-            {"name": "reference-host", "version": "0.1.0"},
+            {"name": "openclaw", "version": openclaw["version"]},
+            {"name": "reference-host", "version": reference["project"]["version"]},
         ],
         "contractDigest": _contract_digest(),
         "suiteOutcomes": outcomes,

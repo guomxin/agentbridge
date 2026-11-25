@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from common import ROOT, external, private_file, read, save
 from nanobot_release import owned_directory
-from pi_release import ADAPTER, DIGEST, LEVELS, SDK_VERSION, check_observed_web_subjects, conformance_evidence, engine_identity, file_digest, verify_channel_case, verify_runtime
+from pi_release import ADAPTER, DIGEST, LEVELS, SDK_VERSION, archive_probe_matches, check_observed_web_subjects, conformance_evidence, engine_identity, file_digest, verify_channel_case, verify_runtime
 from pi_model_observation import fixed_candidate
 
 sys.path.insert(0,str(ROOT / "scripts"))
@@ -77,6 +77,8 @@ def checked_report(report, candidate, spec):
             or not all(report.get(flag) is True for flag in ("clean","formal","passed","sourceStable","runtimeStable"))
             or report.get("contractEvidence") != conformance_evidence(report)):
         raise ValueError("Pi formal conformance does not match the approved candidate and runtime")
+    if not archive_probe_matches(report):
+        raise ValueError("Pi formal conformance requires the candidate's verified archived worker")
     vectors = read(ROOT / "schemas/agent-host/v1/test-vectors.json")["conformanceCases"]
     required = {v["id"] for v in vectors if LEVELS.index(v["level"]) <= LEVELS.index(spec["requiredLevel"])}
     results = report["cases"]

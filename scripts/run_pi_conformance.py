@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/native"))
 from common import save
-from pi_release import ADAPTER, LEVELS, SDK, SDK_VERSION, conformance_evidence, engine_identity, file_digest, sdk_tree_digest, verify_runtime
+from pi_release import ADAPTER, LEVELS, SDK, SDK_VERSION, archive_probe_matches, conformance_evidence, engine_identity, expected_archive_probe, file_digest, sdk_tree_digest, verify_runtime
 
 
 # Each item names the concrete, independently checked behavior within this run.
@@ -115,6 +115,23 @@ def execute(argv, env, **kwargs):
                           capture_output=True, text=True, timeout=360, check=True, **kwargs)
 
 
+def run_archive_probe(args, artifact, pins):
+    try:
+        with tempfile.TemporaryDirectory(prefix="pi-formal-archive-") as directory:
+            env = {k:os.environ[k] for k in ("PATH","LANG","LC_ALL") if k in os.environ}
+            env.update(HOME=directory,TMPDIR=directory,AGENTBRIDGE_HOME=str(Path(directory)/"fixture"),
+                       PYTHONNOUSERSITE="1",PYTHONDONTWRITEBYTECODE="1")
+            result = execute(["-m","tests.support.pi_archive_probe","--commit",pins["commit"],
+                              "--wheel",artifact["wheel"],"--wheel-sha256",artifact["sha256"],
+                              "--node",args.node,"--sdk-dir",args.sdk_dir,"--engine-python",args.engine_python],env)
+        proof = {**expected_archive_probe(pins),"measurements":json.loads(result.stdout)}
+        if archive_probe_matches({**pins,"archiveProbe":proof}):
+            return proof
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def check_sdk(payloads):
     return payloads == [{"passed":True,"sdk":SDK_VERSION,"adapter":ADAPTER,"subjects":2,"businessReads":1,
                          "syntheticModel":True,"syntheticDownstream":True,"oneRevokedAvailable":True,
@@ -207,8 +224,13 @@ def main():
     for path, cases in (("tests/test_pi_central.py",AUTHORITY_TESTS),("tests/test_pi_journal_conformance.py",JOURNAL_TESTS)):
         plans.extend((name, claims, "pytest", path+"::"+name, None) for name, claims in cases.items())
     selected = [p for p in plans if set(p[1]) & required]
+    pins = {"commit":start["commit"],"wheelSha256":artifact["sha256"] if artifact else None,
+            "sdkVersion":SDK_VERSION,"adapterVersion":ADAPTER,"engine":engine,
+            **{k:runtime[k] for k in ("nodeSha256","sdkTreeSha256","sdkLockSha256")}}
     with ThreadPoolExecutor(max_workers=3) as pool:
+        archive_job = pool.submit(run_archive_probe,args,artifact,pins) if args.formal else None
         checks = list(pool.map(lambda plan:run_probe(plan,args),selected))
+        archived = archive_job.result() if archive_job else None
     cases = []
     for item in vectors:
         matches = [p for p in checks if item["id"] in p["cases"]]
@@ -224,18 +246,22 @@ def main():
                       and file_digest(modules.parent/"package-lock.json") == runtime["sdkLockSha256"]
                       and file_digest(args.node) == runtime["nodeSha256"]
                       and (not args.engine_python or engine == engine_identity(args.engine_python)))
-    complete = (start == finish and runtime_stable and all(c["status"] in {"passed","outside_level"} for c in cases))
+    complete = (start == finish and runtime_stable and (not args.formal or archived is not None)
+                and all(c["status"] in {"passed","outside_level"} for c in cases))
     report = {"schema":"agentbridge.pi-conformance.v1","implementation":"pi","adapterVersion":ADAPTER,
               "sdkPackage":SDK,"sdkVersion":SDK_VERSION,"level":args.level, **start,
               "sourceStable":start == finish,"runtimeStable":runtime_stable,"engine":engine,"formal":args.formal,"wheelSha256":artifact["sha256"] if artifact else None,
               **{k:runtime[k] for k in ("nodeSha256","sdkTreeSha256","sdkLockSha256")},
               "cases":cases,"probes":checks,"passed":complete}
+    if args.formal:
+        report["archiveProbe"] = archived
     report["contractEvidence"] = conformance_evidence(report) if complete else None
     save(args.output,report)
     print(json.dumps({"passed":complete,"level":args.level,"sourceStable":start==finish,
                       "covered":[c["id"] for c in cases if c["status"]=="passed"],
                       "missing":[c["id"] for c in cases if c["status"]=="unverified"],
-                      "failed":[p["probe"] for p in checks if not p["passed"]]}))
+                      "failed":[p["probe"] for p in checks if not p["passed"]]
+                              + (["archive_worker"] if args.formal and archived is None else [])}))
     return 0 if complete else 1
 
 

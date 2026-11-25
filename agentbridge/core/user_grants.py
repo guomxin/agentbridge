@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from contextlib import closing
+from importlib.resources import files
 import json
 from pathlib import Path
 import sqlite3
 
 
-_CATALOG = json.loads(Path(__file__).with_name("user_permission_catalog.json").read_text(encoding="utf-8"))
+_CATALOG = json.loads(files(__package__).joinpath("user_permission_catalog.json").read_text(encoding="utf-8"))
 PERMISSIONS = {item["id"]: item for item in _CATALOG["permissions"] if not item["id"].startswith("database.")}
 CAPABILITY_PERMISSIONS = {
     capability: item["id"]

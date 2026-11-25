@@ -1,11 +1,38 @@
 import unittest
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from agentbridge.core.user_grants import UserGrantConflict, UserGrants
 
 
 class UserGrantTests(unittest.TestCase):
+    def test_permissions_load_from_a_compressed_wheel_on_the_host_import_path(self):
+        root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory() as temporary:
+            wheel = Path(temporary) / "agentbridge.whl"
+            with ZipFile(wheel, "w", compression=ZIP_DEFLATED) as archive:
+                for member in ("agentbridge/__init__.py", "agentbridge/core/__init__.py",
+                               "agentbridge/core/user_grants.py", "agentbridge/core/user_permission_catalog.json"):
+                    archive.write(root / member, member)
+            program = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from agentbridge.core import user_grants
+assert user_grants.__file__.startswith(sys.argv[1] + '/')
+assert user_grants.TOOL_PERMISSIONS['oa_workflow_pending_list'] == 'oa.workflow.read'
+grants = user_grants.UserGrants('grants.db')
+try:
+    grants.require_capability('unassigned', 'oa.workflow.pending.list')
+except PermissionError:
+    pass
+else:
+    raise AssertionError('Unassigned account obtained a business capability')
+"""
+            subprocess.run([sys.executable, "-I", "-B", "-c", program, wheel], cwd=temporary, check=True)
+
     def test_unconfigured_user_has_no_business_access_or_template_results(self):
         with TemporaryDirectory() as temporary:
             grants = UserGrants(Path(temporary) / "agentbridge.db")

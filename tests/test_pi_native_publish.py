@@ -82,6 +82,7 @@ def test_candidate_qualification_requires_own_observations_and_verified_wheel(tm
               "probes":[{"probe":"sdk","passed":True,"cases":{"H02":"read","H18":"isolated"},"evidenceSha256":"3"*64},
                         {"probe":"fixture-central","passed":True,"cases":{"H01":"version","H03":"scope"},"evidenceSha256":"8"*64}]}
     report["contractEvidence"] = pi.conformance_evidence(report)
+    report["archiveProbe"] = pi.expected_archive_probe(report)
     extend("subject_isolation", qualify.contract_measurement("subject_isolation",report))
     extend("real_model", {"execution":"tool_free_completion","model":"test/pi-fixture","toolCount":0,
                           "modelServiceOrigin":"https://fixture.invalid","challengeSha256":"6"*64})
@@ -110,6 +111,19 @@ def test_candidate_qualification_requires_own_observations_and_verified_wheel(tm
                     "contractEvidence":report["contractEvidence"],"conformance":report_ref})
     spec.update({"telegram":{"botId":88001,"allowedSenders":{"one":"501"}},"contractReceipt":pin("receipt",receipt)})
     assert pi.reviewed_contract(pub,spec,artifact)["approved"]
+    for index, change in enumerate((
+            None,
+            {**report["archiveProbe"],"wheelSha256":"9"*64},
+            {**report["archiveProbe"],"commit":"8"*40},
+            {**report["archiveProbe"],"measurements":{**report["archiveProbe"]["measurements"],"authorizedReads":True}},
+            {**report["archiveProbe"],"measurements":{**report["archiveProbe"]["measurements"],"completedRuns":1}},
+            {**report["archiveProbe"],"measurements":{**report["archiveProbe"]["measurements"],"runtime":"source_tree"}})):
+        other_report = {**report,"archiveProbe":change}
+        assert pi.conformance_evidence(other_report) == report["contractEvidence"]
+        copied = pin("archive-mismatch-"+str(index),other_report)
+        bad = pin("archive-qualification-"+str(index),{**receipt,"conformance":copied})
+        with pytest.raises(ValueError,match="archived worker"):
+            pi.reviewed_contract(pub,{**spec,"contractReceipt":bad},artifact)
     def rejects(case, override, message):
         original = observations[case]
         payload = json.loads((tmp_path/case).read_text())
@@ -339,3 +353,34 @@ def test_reviewed_transition_preserves_live_preimage_until_atomic_activation_the
         db.execute("DELETE FROM workspace_host_visibility WHERE instance_id='pi-next' AND user_subject='bob'")
     with pytest.raises(ValueError,match="administrator scope"):
         central.execute({**req,"action":"route_activate"})
+
+
+def test_predeployment_cache_retests_a_matching_contract_without_archive_evidence(tmp_path, monkeypatch):
+    runtime = tmp_path/"runtime"
+    runtime.mkdir(mode=0o700)
+    directory = pi.shared.owned_directory(runtime/"qualifications")
+    commit, wheel = "a"*40, "b"*64
+    report = {"schema":"agentbridge.pi-conformance.v1","implementation":"pi","adapterVersion":pi.ADAPTER,
+              "sdkVersion":pi.SDK_VERSION,"level":"L1","formal":True,"passed":True,"sourceStable":True,
+              "runtimeStable":True,"commit":commit,"wheelSha256":wheel,"engine":{"test":"engine"},
+              "nodeSha256":"1"*64,"sdkTreeSha256":"2"*64,"sdkLockSha256":"3"*64,
+              "adapterSourcesSha256":"4"*64,"cases":[],"probes":[]}
+    report["contractEvidence"] = pi.conformance_evidence(report)
+    qualification=tmp_path/"qualified.json"
+    pi.save(qualification,{"contractEvidence":report["contractEvidence"]})
+    spec = {"runtimeDir":str(runtime),"requiredLevel":"L1","enginePython":"/fixture/engine",
+            "contractReceipt":{"path":str(qualification),"sha256":pi.file_digest(qualification)},
+            "nodePath":"/fixture/node","sdkDir":"/fixture/sdk",
+            **{k:report[k] for k in ("nodeSha256","sdkTreeSha256","sdkLockSha256")}}
+    cache=directory/(commit+"-L1.json")
+    pi.save(cache,report)
+    monkeypatch.setattr(pi,"engine_identity",lambda path:report["engine"])
+    calls=[]
+    def run(argv, **kwargs):
+        calls.append(argv)
+        pi.save(argv[-1],{**report,"archiveProbe":pi.expected_archive_probe(report)})
+    monkeypatch.setattr(pi,"run",run)
+    for _ in range(2):
+        pi.verify_conformance(SimpleNamespace(commit=commit),spec,{"sha256":wheel})
+    assert len(calls)==1 and "--formal" in calls[0]
+    assert pi.archive_probe_matches(pi.read(cache))

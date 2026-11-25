@@ -296,6 +296,23 @@ def conformance_evidence(report):
     return "sha256:"+hashlib.sha256(json.dumps(values,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 
 
+def expected_archive_probe(report):
+    """Candidate packaging has separate evidence from the reusable version-level contract."""
+    keys = ("commit","wheelSha256","sdkVersion","adapterVersion","sdkTreeSha256","sdkLockSha256","nodeSha256","engine")
+    return {"schema":"agentbridge.pi-archive-probe.v1", **{key:report[key] for key in keys},
+            "probeSourceSha256":file_digest(ROOT/"tests/support/pi_archive_probe.py"),
+            "measurements":{"worker":"pi_agentbridge.server","launch":"native_worker_program_arguments",
+                            "runtime":"real_pi_sdk","central":"loopback_mcp","model":"synthetic_loopback",
+                            "downstream":"synthetic_oa","testedLevel":"L1","personalIdentities":2,
+                            "completedRuns":2,"authorizedReads":1,"deniedSubjectReads":0,
+                            "succeededOperations":1,"businessWrites":0}}
+
+
+def archive_probe_matches(report):
+    expected = json.dumps(expected_archive_probe(report),sort_keys=True)
+    return json.dumps(report.get("archiveProbe"),sort_keys=True) == expected
+
+
 def reviewed_contract(pub, spec, artifact=None):
     from agentbridge.core.host_contract import HostContractStore
     from pi_qualification import CONTRACT, PRODUCT, checked_report, contract_measurement, product_measurement, required_cases
@@ -360,6 +377,7 @@ def reviewed_contract(pub, spec, artifact=None):
                           **{k:spec[k] for k in ("nodeSha256","sdkTreeSha256","sdkLockSha256")}}
         approved = (all(higher.get(k) == v for k,v in same_candidate.items())
                     and all(higher.get(flag) is True for flag in ("passed","sourceStable","runtimeStable","formal"))
+                    and archive_probe_matches(higher)
                     and higher.get("contractEvidence") == row[1] == conformance_evidence(higher))
     return {"approved":approved,"required":level,"evidence":spec["contractReceipt"]["sha256"]}
 
@@ -379,7 +397,7 @@ def verify_conformance(pub, spec, artifact):
     def matches(report):
         if not all(report.get(k) == value for k,value in expected.items()):
             return False
-        return conformance_evidence(report) == expected["contractEvidence"]
+        return archive_probe_matches(report) and conformance_evidence(report) == expected["contractEvidence"]
     if receipt_file.exists() and matches(read(private_file(receipt_file))):
         return
     with tempfile.TemporaryDirectory(prefix="pi-release-conformance-") as directory:
