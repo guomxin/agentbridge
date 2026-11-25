@@ -32,6 +32,7 @@ from .telegram_presentation import (
     render_result_view_message,
 )
 from .telegram_text import split_telegram_text
+from .telegram_navigation import TelegramNavigation, command as navigation_command
 from .telegram_timeline import TelegramTimeline, telegram_answer, telegram_text_fits
 
 
@@ -157,6 +158,7 @@ class TelegramPilot:
             UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state='sending';
         """)
 
+        self.navigation = TelegramNavigation(self)
         self.timeline = TelegramTimeline(self)
         self.terminal = None
         if allow_pairing:
@@ -324,7 +326,8 @@ class TelegramPilot:
         if binding is None:
             return
         text = msg["text"].strip()
-        plain = not text.startswith("/") and "reply_to_message" not in msg
+        navigation = navigation_command(text, msg.get("reply_to_message"))
+        plain = not navigation and not text.startswith("/") and "reply_to_message" not in msg
         ordinary = plain and public_mirror_text(text) is not None
         with self.db:
             inserted = self.db.execute(
@@ -337,11 +340,13 @@ class TelegramPilot:
             return
         if not ordinary:
             # Buttons, replies and slash commands never authorize or resume a business task.
-            if plain:
+            if navigation:
+                self.navigation.handle(chat_id, message_id, binding, digest, msg.get("reply_to_message"), *navigation)
+            elif plain:
                 self.deliver(chat_id, message_id, "请在本人工作台的可信界面填写受保护的信息。")
             elif text == "/start":
                 self.deliver(
-                    chat_id, message_id, "已连接 NanoBot 助手，可以直接提问、查询待办或发起业务办理。"
+                    chat_id, message_id, "已连接 NanoBot 助手，可以直接提问、查询待办或发起业务办理。用 /pending 找回原卡，回复原消息并发送“继续”或“停止”可处理原任务。"
                 )
             elif text == "/status" and isinstance(msg.get("reply_to_message"), dict):
                 original = msg["reply_to_message"]
@@ -469,6 +474,12 @@ class TelegramPilot:
         except TelegramUnavailable:
             pass
         with self.db:
+            original = self._record(chat, message)
+            if original and original["run_id"]:
+                target = {"kind": "run", "id": original["run_id"], "requestKey": self._key(chat, message)}
+                if dedupe_key.startswith("result_view:"):
+                    target = {"kind": "result", "id": dedupe_key.split(":", 1)[1]}
+                self.navigation.remember(chat, receipt, binding_digest, target)
             self.db.execute(
                 "UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
                 (status, receipt, self.bot_id, chat, dedupe_key),

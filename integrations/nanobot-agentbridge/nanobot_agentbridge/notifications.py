@@ -435,7 +435,7 @@ class TerminalMessages:
         ).fetchone()
         return row["message"] if row else None
 
-    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None):
+    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None, task_id=None):
         from .telegram import TelegramUnavailable, numeric
 
         pilot = self.pilot
@@ -471,6 +471,9 @@ class TerminalMessages:
             except TelegramUnavailable:
                 pass
             with pilot.db:
+                if task_id:
+                    kind = "result" if dedupe_key.startswith("result_view:") else "task"
+                    pilot.navigation.remember(chat, receipt, digest, {"kind": kind, "id": task_id})
                 pilot.db.execute(
                     "UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
                     (status, receipt, pilot.bot_id, chat, dedupe_key),
@@ -528,6 +531,10 @@ class TerminalMessages:
                         == original_message
                     ):
                         status = "delivered"
+                        with pilot.db:
+                            pilot.navigation.remember(chat, result["message_id"], digest, {
+                                "kind": "run", "id": event["runId"], "requestKey": pilot._key(chat, original_message),
+                            })
             except TelegramUnavailable:
                 pass
             with pilot.db:
@@ -602,7 +609,7 @@ class TerminalMessages:
                 reply_to = self._reply_message_id(chat, binding, digest, event.get("replyRunId"))
                 delivered = self.send_once(
                     chat, binding, digest, f"interaction:{card['interactionId']}", params,
-                    delivery=event["deliveryId"], reply_to=reply_to,
+                    delivery=event["deliveryId"], reply_to=reply_to, task_id=event.get("taskId"),
                 )
                 self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
                 continue
@@ -616,7 +623,7 @@ class TerminalMessages:
                 )
                 delivered = self.send_once(
                     chat, binding, digest, f"result_view:{view['sourceTaskId']}", params,
-                    delivery=event["deliveryId"],
+                    delivery=event["deliveryId"], task_id=view["sourceTaskId"],
                 )
                 self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
                 continue
@@ -632,7 +639,7 @@ class TerminalMessages:
                 reply_to = self._reply_message_id(chat, binding, digest, event.get("replyRunId"))
                 delivered = self.send_once(
                     chat, binding, digest, f"status:{event['deliveryId']}", params,
-                    delivery=event["deliveryId"], reply_to=reply_to,
+                    delivery=event["deliveryId"], reply_to=reply_to, task_id=event.get("taskId"),
                 )
                 self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
                 continue
