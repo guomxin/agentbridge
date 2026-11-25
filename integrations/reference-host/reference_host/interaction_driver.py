@@ -20,10 +20,12 @@ class InteractionDriver:
         *,
         poll_interval_seconds: float = 2.0,
         maximum_wait_seconds: float = 900.0,
+        long_poll_seconds: float = 0.0,
     ) -> None:
         self.task_driver = task_driver
         self.poll_interval_seconds = max(float(poll_interval_seconds), 0.05)
         self.maximum_wait_seconds = max(float(maximum_wait_seconds), 1.0)
+        self.long_poll_seconds = min(max(float(long_poll_seconds), 0.0), 20.0)
         self._monitors: dict[str, asyncio.Task] = {}
         self._resume_started: set[str] = set()
 
@@ -52,10 +54,20 @@ class InteractionDriver:
         deadline = loop.time() + self.maximum_wait_seconds
         try:
             while loop.time() < deadline:
-                current = await self.task_driver.get_interaction(
-                    local_task_id,
-                    interaction_id,
-                )
+                started = loop.time()
+                if self.long_poll_seconds > 0:
+                    remaining = max(0.0, deadline - started)
+                    wait_seconds = min(self.long_poll_seconds, remaining)
+                    current = await self.task_driver.get_interaction(
+                        local_task_id,
+                        interaction_id,
+                        wait_seconds=wait_seconds if wait_seconds >= 0.25 else None,
+                    )
+                else:
+                    current = await self.task_driver.get_interaction(
+                        local_task_id,
+                        interaction_id,
+                    )
                 state = str(current.get("state") or "").lower()
                 resume = current.get("resume")
                 resume = resume if isinstance(resume, Mapping) else {}
@@ -89,7 +101,8 @@ class InteractionDriver:
                         current,
                     )
                     return
-                await asyncio.sleep(self.poll_interval_seconds)
+                if self.long_poll_seconds <= 0 or (loop.time() - started) < 0.5:
+                    await asyncio.sleep(self.poll_interval_seconds)
             await self.task_driver.mark_poll_deadline(
                 local_task_id,
                 interaction_id,

@@ -48,12 +48,25 @@ async def verify_subject(session, request) -> tuple[dict,str]:
     registration = await session.call_tool("agentbridge_host_register",{},meta={**meta,"io.agentbridge/host-profile":profile})
     if registration.isError:
         raise PermissionError("Central host registration failed")
-    result = await session.call_tool("agentbridge_host_identity_profile",{"agent_host":"nanobot"},meta=meta)
+    profile_meta = dict(meta)
+    tg_match = re.fullmatch(r"telegram:([0-9]+):([0-9]+)", str(request.get("endpointKey") or ""))
+    if tg_match:
+        profile_meta["io.agentbridge/telegram-identity"] = {
+            "botId": tg_match.group(1),
+            "senderId": tg_match.group(2),
+        }
+    result = await session.call_tool("agentbridge_host_identity_profile",{"agent_host":"nanobot"},meta=profile_meta)
     payload = result.structuredContent or {}
     if result.isError or payload.get("identity",{}).get("userSubject") != request["subject"]:
         raise PermissionError("Central token subject does not match the provisioned binding")
     accepted = payload.get("host",{}).get("acceptedLevel")
     request["controlledPrepares"] = payload.get("controlledPrepares",{}) if accepted=="L3" else {}
+    access = payload.get("agentToolAccess")
+    allowed = access.get("allowedToolNames") if isinstance(access, dict) else None
+    if isinstance(allowed, list) and all(isinstance(item, str) for item in allowed):
+        request["allowedToolNames"] = allowed
+    if tg_match:
+        request["telegramIdentityVerified"] = payload.get("telegramIdentityVerified") is True
     if accepted not in levels:
         raise PermissionError("Unexpected central host compatibility level")
     return meta,accepted
@@ -64,7 +77,8 @@ async def authenticated_session(request):
     token = private_text(Path(request["tokenFile"])).strip()
     tls = ssl.create_default_context(cafile=request.get("caFile"))
     async with httpx.AsyncClient(headers={"Authorization":"Bearer "+token},trust_env=False,
-                                 verify=tls,follow_redirects=False,timeout=30) as http:
+                                 verify=tls,follow_redirects=False,timeout=30,
+                                 limits=httpx.Limits(keepalive_expiry=3.5)) as http:
         async with streamable_http_client(request["mcpUrl"],http_client=http) as (read,write,_):
             async with ClientSession(read,write) as session:
                 await session.initialize()
@@ -91,8 +105,12 @@ async def run(request: dict) -> None:
         print(json.dumps({"kind":"delta","text":delta},ensure_ascii=False),flush=True)
     async with authenticated_session(request) as (session,meta,level):
         if channel=="telegram":
-            from nanobot_agentbridge.telegram_identity import verify_telegram_binding
-            if not await verify_telegram_binding(session,request["instance"],binding.subject,meta,request["endpointKey"]):
+            if "telegramIdentityVerified" in request:
+                verified = request["telegramIdentityVerified"] is True
+            else:
+                from nanobot_agentbridge.telegram_identity import verify_telegram_binding
+                verified = await verify_telegram_binding(session,request["instance"],binding.subject,meta,request["endpointKey"])
+            if not verified:
                 raise PermissionError("Telegram identity has no active central binding")
         async def deliver(target, card):
             if target!=binding:
@@ -118,7 +136,7 @@ async def run(request: dict) -> None:
                 skill_args["skill_run"] = SkillRun(session,context.get)
         answer = await run_readonly(config,session,binding,request["message"],emit,
                     channel=channel,media=request.get("media"),credential_login=can_present,coordinator_tool=coordinator_tool,deliver_private=deliver if can_present else None,
-                    trusted_origins=frozenset(request.get("trustedCardOrigins",[])),**skill_args)
+                    trusted_origins=frozenset(request.get("trustedCardOrigins",[])),allowed_tools=request.get("allowedToolNames"),**skill_args)
     print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
 
 

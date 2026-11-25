@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
+import hashlib
 import json
 import ssl
+import time
 from typing import Any, Callable, Mapping
 
 import httpx
@@ -59,6 +61,29 @@ class McpCallResult:
         return {}
 
 
+@dataclass
+class _OwnedMcpSession:
+    token_hash: str
+    session: Any
+    stop: asyncio.Event
+    task: asyncio.Task[None]
+    created_at: float
+    last_used: float
+
+    async def close(self) -> None:
+        self.stop.set()
+        if not self.task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self.task), timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+            except BaseException:
+                pass
+        else:
+            await asyncio.gather(self.task, return_exceptions=True)
+
+
 class AgentBridgeMcpClient:
     def __init__(
         self,
@@ -69,6 +94,8 @@ class AgentBridgeMcpClient:
         allow_insecure_tls: bool = False,
         private_transport: bool = False,
         request_timeout_seconds: float = 150,
+        idle_ttl_seconds: float = 120.0,
+        max_age_seconds: float = 300.0,
     ) -> None:
         self.mcp_url = _http_url(mcp_url)
         self.token_provider = token_provider
@@ -79,6 +106,98 @@ class AgentBridgeMcpClient:
             5.0,
             min(float(request_timeout_seconds), 600.0),
         )
+        self.idle_ttl_seconds = max(float(idle_ttl_seconds), 1.0)
+        self.max_age_seconds = max(float(max_age_seconds), 1.0)
+        self._lane_locks: dict[str, asyncio.Lock] = {}
+        self._sessions: dict[str, _OwnedMcpSession] = {}
+
+    async def close(self) -> None:
+        entries = list(self._sessions.values())
+        self._sessions.clear()
+        self._lane_locks.clear()
+        for entry in entries:
+            await entry.close()
+
+    def _lane_for_call(self, arguments: Mapping[str, Any]) -> str:
+        raw_wait = arguments.get("wait_seconds")
+        if isinstance(raw_wait, (int, float)) and not isinstance(raw_wait, bool) and raw_wait > 0:
+            return "long_poll"
+        return "default"
+
+    def _is_fresh(self, entry: _OwnedMcpSession, token_hash: str, now: float) -> bool:
+        return (
+            not entry.task.done()
+            and entry.token_hash == token_hash
+            and (now - entry.last_used) < self.idle_ttl_seconds
+            and (now - entry.created_at) < self.max_age_seconds
+        )
+
+    async def _open_session(self, token: str, token_hash: str, lane: str) -> _OwnedMcpSession:
+        headers = {"Authorization": f"Bearer {token}"}
+        factory = self._httpx_factory()
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[Any] = loop.create_future()
+        stop = asyncio.Event()
+
+        async def owner() -> None:
+            try:
+                async with streamablehttp_client(
+                    self.mcp_url,
+                    headers=headers,
+                    timeout=self.request_timeout_seconds,
+                    sse_read_timeout=max(self.request_timeout_seconds, 300),
+                    httpx_client_factory=factory,
+                ) as (read_stream, write_stream, _session_id):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        if not ready.done():
+                            ready.set_result(session)
+                        await stop.wait()
+            except BaseException as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+
+        task = asyncio.create_task(owner(), name=f"reference-host-mcp:{lane}")
+        try:
+            session = await ready
+        except BaseException:
+            stop.set()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        now = time.monotonic()
+        return _OwnedMcpSession(
+            token_hash=token_hash,
+            session=session,
+            stop=stop,
+            task=task,
+            created_at=now,
+            last_used=now,
+        )
+
+    async def _with_session(self, lane: str, action: Callable[[Any], Any]) -> Any:
+        token = self.token_provider()
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        lock = self._lane_locks.setdefault(lane, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            entry = self._sessions.get(lane)
+            if entry is not None and not self._is_fresh(entry, token_hash, now):
+                self._sessions.pop(lane, None)
+                await entry.close()
+                entry = None
+            if entry is None:
+                entry = await self._open_session(token, token_hash, lane)
+                self._sessions[lane] = entry
+            try:
+                outcome = await action(entry.session)
+            except BaseException:
+                popped = self._sessions.pop(lane, None)
+                if popped is not None:
+                    await popped.close()
+                raise
+            else:
+                entry.last_used = time.monotonic()
+                return outcome
 
     async def call_tool(
         self,
@@ -137,19 +256,7 @@ class AgentBridgeMcpClient:
                 await asyncio.sleep(delay)
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        token = self.token_provider()
-        headers = {"Authorization": f"Bearer {token}"}
-        factory = self._httpx_factory()
-        async with streamablehttp_client(
-            self.mcp_url,
-            headers=headers,
-            timeout=self.request_timeout_seconds,
-            sse_read_timeout=max(self.request_timeout_seconds, 300),
-            httpx_client_factory=factory,
-        ) as (read_stream, write_stream, _session_id):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                response = await session.list_tools()
+        response = await self._with_session("default", lambda session: session.list_tools())
         return [
             tool.model_dump(by_alias=True, exclude_none=True)
             for tool in response.tools
@@ -162,26 +269,18 @@ class AgentBridgeMcpClient:
         *,
         meta: dict[str, Any],
     ) -> McpCallResult:
-        token = self.token_provider()
-        headers = {"Authorization": f"Bearer {token}"}
-        factory = self._httpx_factory()
-        async with streamablehttp_client(
-            self.mcp_url,
-            headers=headers,
-            timeout=self.request_timeout_seconds,
-            sse_read_timeout=max(self.request_timeout_seconds, 300),
-            httpx_client_factory=factory,
-        ) as (read_stream, write_stream, _session_id):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                result = await session.call_tool(
-                    name,
-                    arguments,
-                    read_timeout_seconds=timedelta(
-                        seconds=self.request_timeout_seconds
-                    ),
-                    meta=meta,
-                )
+        lane = self._lane_for_call(arguments)
+        result = await self._with_session(
+            lane,
+            lambda session: session.call_tool(
+                name,
+                arguments,
+                read_timeout_seconds=timedelta(
+                    seconds=self.request_timeout_seconds
+                ),
+                meta=meta,
+            ),
+        )
         dumped = result.model_dump(by_alias=True, exclude_none=True)
         content = [
             item.model_dump(by_alias=True, exclude_none=True)
@@ -215,6 +314,7 @@ class AgentBridgeMcpClient:
             return httpx.AsyncClient(
                 headers=headers,
                 timeout=timeout or httpx.Timeout(self.request_timeout_seconds),
+                limits=httpx.Limits(keepalive_expiry=3.5),
                 auth=auth,
                 verify=verify,
                 follow_redirects=not self.private_transport,

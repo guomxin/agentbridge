@@ -50,6 +50,7 @@ class ReferenceTaskDriver:
         private_transport: bool = False,
         poll_interval_seconds: float = 2.0,
         maximum_interaction_wait_seconds: float = 900.0,
+        long_poll_seconds: float = 15.0,
     ) -> None:
         self.identities = identities
         self.state = state
@@ -79,11 +80,15 @@ class ReferenceTaskDriver:
             self,
             poll_interval_seconds=poll_interval_seconds,
             maximum_wait_seconds=maximum_interaction_wait_seconds,
+            long_poll_seconds=long_poll_seconds,
         )
         self.artifacts = ArtifactDriver(self)
 
     def host_context(self) -> dict[str, Any]:
         return host_context_meta(instance_id=self.instance_id, implementation=self.implementation)
+
+    def _identity_profile_meta(self) -> dict[str, Any]:
+        return self.host_context()
 
     async def initialize(self) -> dict[str, Any]:
         ready = []
@@ -109,6 +114,13 @@ class ReferenceTaskDriver:
             await asyncio.gather(*runs, return_exceptions=True)
         self._background_runs.clear()
         await self.interactions.stop()
+        closers = [
+            closer()
+            for client in self._clients.values()
+            if callable(closer := getattr(client, "close", None))
+        ]
+        if closers:
+            await asyncio.gather(*closers, return_exceptions=True)
 
     async def ensure_identity(self, identity_label: str) -> dict[str, Any]:
         if identity_label in self._identity_profiles:
@@ -129,7 +141,7 @@ class ReferenceTaskDriver:
             identity_result = await client.call_tool(
                 "agentbridge_host_identity_profile",
                 {"agent_host": self.implementation.name},
-                meta=self.host_context(),
+                meta=self._identity_profile_meta(),
                 recovery_class="read",
             )
             identity_profile = identity_result.payload()
@@ -559,11 +571,16 @@ class ReferenceTaskDriver:
         self,
         local_task_id: str,
         interaction_id: str,
+        *,
+        wait_seconds: float | None = None,
     ) -> dict[str, Any]:
         task = self.state.get_task(local_task_id)
+        arguments: dict[str, Any] = {"interaction_id": interaction_id}
+        if isinstance(wait_seconds, (int, float)) and not isinstance(wait_seconds, bool) and wait_seconds > 0:
+            arguments["wait_seconds"] = round(min(float(wait_seconds), 20.0), 3)
         result = await self.client(task["identity_label"]).call_tool(
             "agentbridge_interaction_get",
-            {"interaction_id": interaction_id},
+            arguments,
             meta=self.host_context(),
             recovery_class="read",
         )

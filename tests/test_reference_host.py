@@ -554,6 +554,145 @@ class ReferenceHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AgentBridge Reference Host", allowed.text)
         self.assertIn("frame-ancestors 'none'", allowed.headers["content-security-policy"])
 
+    async def test_mcp_client_reuses_sessions_per_lane_rotates_token_and_never_retries_unsafe(self) -> None:
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+
+        token_box = ["tok-1"]
+        opened: list[tuple[str, str]] = []
+        closed: list[int] = []
+        fail_next: list[Exception | None] = []
+
+        class FakeSession:
+            def __init__(self, idx: int) -> None:
+                self.idx = idx
+                self.calls: list[tuple[str, dict]] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            async def initialize(self) -> None:
+                return None
+
+            async def list_tools(self):
+                return SimpleNamespace(
+                    tools=[
+                        SimpleNamespace(
+                            model_dump=lambda **_kw: {
+                                "name": "oa_workflow_pending_list",
+                                "annotations": {"readOnlyHint": True},
+                            }
+                        )
+                    ]
+                )
+
+            async def call_tool(self, name, arguments, *, read_timeout_seconds=None, meta=None):
+                self.calls.append((name, dict(arguments or {})))
+                if fail_next:
+                    err = fail_next.pop(0)
+                    if err is not None:
+                        raise err
+                return SimpleNamespace(
+                    content=[],
+                    isError=False,
+                    model_dump=lambda **_kw: {"structuredContent": {"sessionIdx": self.idx, "tool": name}},
+                )
+
+        @asynccontextmanager
+        async def fake_stream(url, *, headers, **_kwargs):
+            idx = len(opened) + 1
+            opened.append((url, headers["Authorization"]))
+            try:
+                yield ("read", "write", f"sid-{idx}")
+            finally:
+                closed.append(idx)
+
+        def fake_client_session(_read, _write):
+            return FakeSession(len(opened))
+
+        with (
+            patch("reference_host.mcp_client.streamablehttp_client", fake_stream),
+            patch("reference_host.mcp_client.ClientSession", fake_client_session),
+        ):
+            client = AgentBridgeMcpClient(
+                mcp_url="https://agentbridge.invalid/mcp",
+                token_provider=lambda: token_box[0],
+            )
+            try:
+                # 1. list_tools and default call_tool reuse the same default session.
+                tools = await client.list_tools()
+                self.assertEqual("oa_workflow_pending_list", tools[0]["name"])
+                r1 = await client.call_tool("oa_session_status", {}, recovery_class="read")
+                self.assertEqual(1, r1.payload()["sessionIdx"])
+                self.assertEqual(1, len(opened))
+
+                # 2. Positive wait_seconds routes to isolated long_poll lane.
+                r_poll = await client.call_tool(
+                    "agentbridge_interaction_get",
+                    {"interaction_id": "inter-1234567890123456", "wait_seconds": 15.0},
+                    recovery_class="read",
+                )
+                self.assertEqual(2, r_poll.payload()["sessionIdx"])
+                self.assertEqual(2, len(opened))
+
+                # 3. Default lane stays warm while long_poll lane exists.
+                r2 = await client.call_tool("oa_session_status", {}, recovery_class="read")
+                self.assertEqual(1, r2.payload()["sessionIdx"])
+                self.assertEqual(2, len(opened))
+
+                # 4. Token rotation closes old session and opens a fresh one immediately.
+                token_box[0] = "tok-2"
+                r3 = await client.call_tool("oa_session_status", {}, recovery_class="read")
+                self.assertEqual(3, r3.payload()["sessionIdx"])
+                self.assertIn(1, closed)
+
+                # 5. Transient error on read evicts broken session and retries on a fresh session.
+                fail_next.append(httpx.RemoteProtocolError("stale"))
+                r4 = await client.call_tool("oa_session_status", {}, recovery_class="read")
+                self.assertEqual(4, r4.payload()["sessionIdx"])
+                self.assertEqual(2, r4.attempts)
+                self.assertIn(3, closed)
+
+                # 6. Transient error on unsafe evicts session and NEVER retries!
+                fail_next.append(httpx.RemoteProtocolError("lost-during-commit"))
+                with self.assertRaises(httpx.RemoteProtocolError):
+                    await client.call_tool("agentbridge_interaction_resume", {}, recovery_class="unsafe")
+                self.assertIn(4, closed)
+                self.assertEqual(4, len(opened))
+            finally:
+                await client.close()
+            self.assertEqual(len(opened), len(closed))
+
+    async def test_interaction_driver_passes_bounded_wait_seconds_and_collector_waits_initial(self) -> None:
+        client = ScriptedClient(interactive=True)
+        driver = self.driver(client)
+        collector = ReferenceHostRuntimeCollector(driver, interval_seconds=60)
+        collector.start()
+        await collector.wait_initial(timeout=2.0)
+        await collector.stop()
+        snapshot_calls = [c for c in client.calls if c[0] == "agentbridge_host_runtime_snapshot"]
+        self.assertEqual(1, len(snapshot_calls))
+
+        task = await driver.start_task(
+            identity_label=self.identity.label,
+            tool_name="oa_workflow_pending_list",
+            arguments={},
+        )
+        for _ in range(100):
+            current = driver.view_task(task["localTaskId"])
+            if current["status"] == "succeeded":
+                break
+            await asyncio.sleep(0.02)
+        self.assertEqual("succeeded", current["status"])
+        poll_call = next(c for c in client.calls if c[0] == "agentbridge_interaction_get")
+        self.assertIn("wait_seconds", poll_call[1])
+        self.assertGreater(poll_call[1]["wait_seconds"], 0.0)
+        self.assertLessEqual(poll_call[1]["wait_seconds"], 15.0)
+        await driver.close()
+
 
 if __name__ == "__main__":
     unittest.main()

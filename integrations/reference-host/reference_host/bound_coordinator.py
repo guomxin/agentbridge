@@ -89,19 +89,25 @@ class BoundDriver(ReferenceTaskDriver):
                 return
         await self._execute_plan(local_id, tool, arguments)
 
+    def _identity_profile_meta(self):
+        match = re.fullmatch(r"telegram:([0-9]+):([0-9]+)", self.req["endpointKey"])
+        if not match:
+            return self.host_context()
+        return {
+            **self.host_context(),
+            "io.agentbridge/telegram-identity": {
+                "botId": match.group(1),
+                "senderId": match.group(2),
+            },
+        }
+
     async def check_telegram(self):
         match = re.fullmatch(r"telegram:([0-9]+):([0-9]+)", self.req["endpointKey"])
         if match:
             result = await self.client("owner").call_tool(
                 "agentbridge_host_identity_profile",
                 {"agent_host": "nanobot"},
-                meta={
-                    **self.host_context(),
-                    "io.agentbridge/telegram-identity": {
-                        "botId": match.group(1),
-                        "senderId": match.group(2),
-                    },
-                },
+                meta=self._identity_profile_meta(),
                 recovery_class="read",
             )
             if (
@@ -390,7 +396,8 @@ async def run_locked(req):
     owns_run = False
     try:
         profile = await driver.ensure_identity("owner")
-        await driver.check_telegram()
+        if telegram and profile.get("telegramIdentityVerified") is not True:
+            raise PermissionError("Original Telegram pairing is no longer active")
         governed = profile.get("controlledPrepares") or {}
         if command:
             # A pre-created command reveals its exact governed capability only in the central result.
@@ -475,7 +482,6 @@ async def run_locked(req):
                     "UPDATE coordinated SET local_task=? WHERE run=?",
                     (local_id, run_id),
                 )
-            await collector.collect_once()
             collector.start()
             if command:
                 central_task, original = await command_snapshot(driver, local_id)
@@ -607,6 +613,8 @@ async def run_locked(req):
             return "waiting"
         return "unknown"
     finally:
+        if owns_run:
+            await collector.wait_initial(timeout=2.0)
         await collector.stop()
         await driver.close()
         if owns_run:

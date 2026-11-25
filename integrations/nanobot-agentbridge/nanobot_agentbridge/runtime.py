@@ -252,20 +252,24 @@ async def run_readonly(
     skill_run=None,
     business_context=None,
     observe: Callable[[str], Awaitable[None]] | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> str:
     """The worker owns both its NanoBot state directory and the user's MCP session."""
     session_key = binding.session_key
     if question.lstrip().startswith("/"):
         raise ValueError("NanoBot management commands are unavailable in Workspace")
-    profile = await session.call_tool("agentbridge_server_profile", {})
-    access = (profile.structuredContent or {}).get("agentToolAccess", {})
-    allowed = access.get("allowedToolNames") if isinstance(access, dict) else None
-    if (
-        profile.isError
-        or not isinstance(allowed, list)
-        or not all(isinstance(item, str) for item in allowed)
-    ):
-        raise ValueError("Central MCP did not confirm this user's tool access")
+    if isinstance(allowed_tools, list) and all(isinstance(item, str) for item in allowed_tools):
+        allowed = allowed_tools
+    else:
+        profile = await session.call_tool("agentbridge_server_profile", {})
+        access = (profile.structuredContent or {}).get("agentToolAccess", {})
+        allowed = access.get("allowedToolNames") if isinstance(access, dict) else None
+        if (
+            profile.isError
+            or not isinstance(allowed, list)
+            or not all(isinstance(item, str) for item in allowed)
+        ):
+            raise ValueError("Central MCP did not confirm this user's tool access")
     candidates = READ_TOOLS | {"oa_session_login"} if credential_login and deliver_private else READ_TOOLS
     if skill_run is not None:
         candidates=candidates | {"agentbridge_skill_get"}

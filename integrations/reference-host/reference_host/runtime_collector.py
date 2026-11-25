@@ -10,13 +10,23 @@ class ReferenceHostRuntimeCollector:
         self.task_driver = task_driver
         self.interval_seconds = max(float(interval_seconds), 15.0)
         self._task: asyncio.Task[None] | None = None
+        self._initial_done = asyncio.Event()
 
     def start(self) -> None:
         if self._task is None or self._task.done():
+            self._initial_done.clear()
             self._task = asyncio.create_task(
                 self._run(),
                 name="reference-host-runtime-collector",
             )
+
+    async def wait_initial(self, timeout: float = 2.0) -> None:
+        if self._task is None or self._initial_done.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._initial_done.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
 
     async def stop(self) -> None:
         task = self._task
@@ -68,6 +78,8 @@ class ReferenceHostRuntimeCollector:
                 # A runtime sample is evidence, not a business operation. A
                 # later cycle may recover without changing task outcomes.
                 pass
+            finally:
+                self._initial_done.set()
             await asyncio.sleep(self.interval_seconds)
 
 

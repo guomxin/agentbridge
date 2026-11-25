@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "66dd292209c2"
+    "4cc288ed4a13"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Add per-(subject, endpoint, token, lane) isolated MCP session pooling in NanoBot host routes, persistent keep-alive with non-replay sendMessage guard in TelegramAPI, cached paired route with live revocation verification, deferred terminal flush during active runs, wait_seconds notification pass-through, and early Result View delivery. Fully forward- and rollback-compatible without schema migration."
+  "reason": "Reuse per-lane MCP sessions with 3.5s keepalive expiry in Reference-Host coordinator, enable bounded wait_seconds interaction long-polling, eliminate blocking duplicate startup runtime snapshots and redundant Telegram identity/server-profile round-trips in bound_coordinator and NanoBot worker. Fully forward- and rollback-compatible without schema migration."
 }
