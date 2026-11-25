@@ -43,6 +43,10 @@ class Model(Scenario):
             if isinstance(content, str)
             else json.dumps(content, ensure_ascii=False)
         )
+        if "SYNTHETIC MATERIAL PAGE 01" in text and '"truncated":' in text:
+            return "合成 PDF 第 1 页已读。", None
+        if "MEDIA-SAMPLE-481" in text and '"truncated":' in text:
+            return "合成文档内容已读 481。", None
         if "合成长文私聊" in text:
             return "合成长文开始" + "甲🟢" * 2200 + "合成长文结束", None
         for question, answer in (("合成网页问答", "合成网页答复"), ("合成电报问答", "合成电报答复")):

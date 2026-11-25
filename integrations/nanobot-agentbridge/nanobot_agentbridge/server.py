@@ -19,7 +19,7 @@ from aiohttp import web
 
 from .private_files import private_directory, private_file, private_text
 from .cards import CredentialCards, coordinated_waiting, present_coordinated, present_credential
-from .media import clear_stale_images, staged_images, validate_images
+from .media import clear_stale_images, staged_attachments, validate_attachments
 from .runs import RunCoordinator
 from .session_pool import McpSessionPool, open_host_session
 from .worker import channel_for
@@ -200,7 +200,7 @@ class Host:
 
     async def execute(self, record, run_id, message, emit, *, trial=None, request_key=None, images=()) -> str:
         directory = Path(self.worker_payload(record, run_id)["userDir"])
-        with staged_images(directory, images) as media:
+        with staged_attachments(directory, images) as media:
             return await self._execute_worker(record, run_id, message, emit, trial=trial,
                                               request_key=request_key, media=media)
 
@@ -337,13 +337,14 @@ class Host:
             raise web.HTTPBadRequest()
         if action == "accept":
             message = body["message"]
-            images = validate_images(body.get("attachments"))
+            channel = channel_for(record["endpoint_key"])
+            images = validate_attachments(body.get("attachments"), telegram=channel == "telegram")
             if (
                 not isinstance(message, str)
                 or not message.strip()
                 or len(message) > 100_000
                 or message.lstrip().startswith("/")
-                or (images and (body.get("trial") is not None or channel_for(record["endpoint_key"]) != "workspace"))
+                or (images and (body.get("trial") is not None or channel not in {"workspace", "telegram"}))
                 or (body.get("trial") is not None and
                     (not self.skill_trials or channel_for(record["endpoint_key"])!="workspace" or not valid_trial(body["trial"],message)))
             ):

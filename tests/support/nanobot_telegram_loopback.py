@@ -55,6 +55,8 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
         "admissions": {},
         "timeline": {},
         "deliveries": [],
+        "files": {},
+        "downloads": [],
         "lost_accept": False,
         "lost_delivery": False,
         "pending": False,
@@ -64,6 +66,18 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
     }
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            item = next((f for f in state["files"].values()
+                         if self.path == "/file/bottest-token/" + f["file_path"]), None)
+            if item is None:
+                self.send_error(404)
+                return
+            state["downloads"].append(self.path)
+            self.send_response(item.get("status", 200))
+            self.send_header("Content-Length", str(len(item["bytes"])))
+            self.end_headers()
+            self.wfile.write(item["bytes"])
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state["calls"].append((self.path, body))
@@ -77,6 +91,12 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                     }
                 elif method == "getWebhookInfo":
                     result = {"url": state["webhook"]}
+                elif method == "getFile":
+                    item = state["files"].get(body["file_id"])
+                    if item is None:
+                        self.send_error(404)
+                        return
+                    result = {"file_id": body["file_id"], "file_size": len(item["bytes"]), "file_path": item["file_path"]}
                 elif method == "getUpdates":
                     assert body["allowed_updates"] == ["message"]
                     result = [
@@ -111,6 +131,13 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                     self.send_error(403)
                     return
                 assert body["instance"] == "nanobot-pilot"
+                if self.path == "/v1/ready":
+                    raw = json.dumps({"instance": "nanobot-pilot", "available": True, "capabilities": ["chat", "attachments"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 binding, key = body["binding"], body.get("requestKey")
                 if binding not in bindings.values():
                     self.send_error(403)

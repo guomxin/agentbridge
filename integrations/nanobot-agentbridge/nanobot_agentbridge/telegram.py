@@ -31,6 +31,7 @@ from .telegram_presentation import (
     render_interaction_message,
     render_result_view_message,
 )
+from . import telegram_media
 from .telegram_text import split_telegram_text
 from .telegram_navigation import TelegramNavigation, command as navigation_command
 from .telegram_timeline import TelegramTimeline, telegram_answer, telegram_text_fits
@@ -45,7 +46,7 @@ class TelegramUnavailable(RuntimeError):
 
 
 class TelegramAPI:
-    _SAFE_RECONNECT_METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "sendChatAction"})
+    _SAFE_RECONNECT_METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "getFile", "sendChatAction"})
 
     def __init__(self, token, connection_factory=None):
         if (
@@ -169,6 +170,9 @@ class TelegramPilot:
         """)
 
         self.navigation = TelegramNavigation(self)
+        # No host admission or bot send has started while in reading_media.
+        with self.db:
+            self.db.execute("DELETE FROM messages WHERE bot=? AND state='reading_media'", (self.bot_id,))
         self.timeline = TelegramTimeline(self)
         self.terminal = None
         if allow_pairing:
@@ -306,10 +310,13 @@ class TelegramPilot:
                     "message_thread_id",
                 )
             )
-            or not telegram_text_fits(msg.get("text"))
+            or (not any(k in msg for k in telegram_media.MEDIA_FIELDS) and not telegram_text_fits(msg.get("text")))
         ):
             return
         if self._record(chat_id,message_id):
+            return
+        if any(k in msg for k in telegram_media.MEDIA_FIELDS):
+            telegram_media.receive(self, msg, chat_id, message_id)
             return
         enrollment = re.fullmatch(r"/agentbridge link ([A-Z2-9]{8})", msg["text"].strip())
         if enrollment and "reply_to_message" not in msg:
@@ -375,11 +382,14 @@ class TelegramPilot:
             else:
                 self._state(chat_id, message_id, "unsupported")
             return
+        self._dispatch_ordinary(chat_id, message_id, binding, text, [])
+
+    def _dispatch_ordinary(self, chat_id, message_id, binding, text, attachments):
         key = self._key(chat_id, message_id)
         try:
             # The same accepted run continues in the host after this observer closes.
             generator = self.gateway.send_dispatch(
-                {"idempotency_key": key}, binding, text, [], None
+                {"idempotency_key": key}, binding, text, attachments, None
             )
             try:
                 accepted = next(generator)

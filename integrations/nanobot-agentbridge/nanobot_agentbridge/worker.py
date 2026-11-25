@@ -138,8 +138,18 @@ async def run(request: dict) -> None:
             if request.get("enableSkills") and (channel=="workspace" or request.get("workspaceEndpointId")):
                 from .skills import SkillRun
                 skill_args["skill_run"] = SkillRun(session,context.get)
-        answer = await run_readonly(config,session,binding,request["message"],emit,
-                    channel=channel,media=request.get("media"),credential_login=can_present,coordinator_tool=coordinator_tool,deliver_private=deliver if can_present else None,
+        message = request["message"]
+        media = request.get("media")
+        if channel == "telegram" and media:
+            from .media import telegram_document_context
+            try:
+                message, media = telegram_document_context(message, media)
+            except Exception:
+                # Parser errors can contain filenames or document bytes.
+                print(json.dumps({"kind": "final", "text": "无法读取附件正文，请发送含文字的 PDF、UTF-8 文本或清晰截图。"}, ensure_ascii=False), flush=True)
+                return
+        answer = await run_readonly(config,session,binding,message,emit,
+                    channel=channel,media=media,credential_login=can_present,coordinator_tool=coordinator_tool,deliver_private=deliver if can_present else None,
                     trusted_origins=frozenset(request.get("trustedCardOrigins",[])),allowed_tools=request.get("allowedToolNames"),**skill_args)
     print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
 
