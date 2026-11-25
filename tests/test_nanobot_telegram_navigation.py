@@ -16,6 +16,14 @@ def _quoted(number, *, who=BOT):
     return {"message_id": number, "from": {"id": who}}
 
 
+def test_navigation_names_every_central_task_state():
+    from agentbridge.core.task_state_rules import TASK_STATUSES
+    from nanobot_agentbridge.telegram_navigation import _STATES
+
+    assert TASK_STATUSES <= _STATES.keys()
+    assert "部分事项已完成" in _STATES["partially_succeeded"]
+
+
 def test_choices_are_bound_to_original_receipt_and_stop_exact_task_once(tmp_path, monkeypatch):
     tasks = [str(uuid4()), str(uuid4())]
     calls = []

@@ -21,7 +21,8 @@ _COMMANDS = {
 }
 _STATES = {
     "waiting_user": "等待本人操作", "active": "进行中", "running": "执行中",
-    "succeeded": "已完成", "failed": "未完成", "canceled": "已停止",
+    "succeeded": "已完成", "partially_succeeded": "部分事项已完成，请核对原任务",
+    "failed": "未完成", "canceled": "已停止",
     "superseded": "原入口已关闭", "expired": "已过期", "outcome_unknown": "业务结果待核实",
     "unknown": "业务结果待核实",
 }
