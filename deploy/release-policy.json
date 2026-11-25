@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "4cc288ed4a13"
+    "2f7bd8a7d64d"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Reuse per-lane MCP sessions with 3.5s keepalive expiry in Reference-Host coordinator, enable bounded wait_seconds interaction long-polling, eliminate blocking duplicate startup runtime snapshots and redundant Telegram identity/server-profile round-trips in bound_coordinator and NanoBot worker. Fully forward- and rollback-compatible without schema migration."
+  "dataCompatibility": "reviewed-forward-only",
+  "reason": "NanoBot explicitly selected OA digests and watch notifications carry a verified private pairing. The predecessor marks queued digests failed and cannot preserve these deliveries after candidate startup. The four central SQLite schemas stay unchanged. Recover with a compatible forward release and retain the pre-switch backup."
 }

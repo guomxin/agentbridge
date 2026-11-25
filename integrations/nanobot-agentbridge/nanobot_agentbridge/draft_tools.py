@@ -5,10 +5,9 @@ import json
 
 from nanobot.agent.tools.base import Tool, ToolResult
 
-from .chat_mirror import identifier
 from .skill_model import provider_completion
 from .skills import sample_resources
-from .telegram_identity import verify_telegram_binding
+from .telegram_identity import identifier, verify_telegram_binding
 
 
 AUTHORING = "agentbridge_skill_authoring"
