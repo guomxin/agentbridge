@@ -76,9 +76,25 @@ def on_watch_change(service, connection: sqlite3.Connection, event: dict, privat
                            "updated_at=?,finished_at=? WHERE task_id=?", (now, now, task_id))
     connection.execute("UPDATE task_subscriptions SET state='paused',updated_at=? WHERE task_id=?", (now, task_id))
     selected = set(private_watch.get("endpoints") or [])
+    pair_proofs = {}
     for endpoint in endpoints:
         if endpoint["endpoint_id"] not in selected or str(endpoint["client_type"]).lower() in {"web", "webchat"}:
             continue
+        if endpoint["agent_host"] == "nanobot":
+            from agentbridge.core.endpoint_instances import endpoint_instances
+            from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_pair_proof, mirror_sender_ids
+            ownership = endpoint_instances(connection, owner)
+            destination = ownership.get(endpoint["endpoint_id"])
+            if not destination or destination[0] != "nanobot" or endpoint["client_type"] != "telegram":
+                continue
+            binding = mirror_binding(connection, owner, destination[1], ownership)
+            if (not binding or endpoint["account_id"] != binding["bot"]
+                    or mirror_sender_ids(connection, owner, binding) != [endpoint["external_subject"]]):
+                continue
+            proof = mirror_pair_proof(connection, owner, binding, endpoint["external_subject"])
+            if not proof:
+                continue
+            pair_proofs[endpoint["endpoint_id"]] = proof
         connection.execute("INSERT INTO task_subscriptions "
             "(subscription_id,task_id,endpoint_id,user_subject,event_filters_json,state,created_at,updated_at) "
             "VALUES (?,?,?,?,?,'active',?,?) ON CONFLICT(task_id,endpoint_id) DO UPDATE SET "
@@ -86,7 +102,7 @@ def on_watch_change(service, connection: sqlite3.Connection, event: dict, privat
             (str(uuid4()), task_id, endpoint["endpoint_id"], owner, _json(sorted(WATCH_EVENT_TYPES)), now, now))
     service.tasks._append_event(connection, task_id=task_id, user_subject=owner,
         event_type=_EVENT_TYPES[event["event_type"]], payload={"watchId": watch_id, "sequence": sequence},
-        causation_ref=causation, created_at=now)
+        causation_ref=causation, created_at=now, watch_pair_proofs=pair_proofs)
 
 
 def _display(value, maximum):

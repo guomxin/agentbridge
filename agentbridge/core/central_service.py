@@ -1758,6 +1758,7 @@ class CentralCapabilityService:
         lease_seconds: int = 30,
         host_instance_id: str | None = None,
         include_workspace_chat: bool = False,
+        include_business_watch: bool = False,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1771,6 +1772,7 @@ class CentralCapabilityService:
             lease_seconds=lease_seconds,
             host_instance_id=host_instance_id,
             include_workspace_chat=include_workspace_chat,
+            **({"include_business_watch": True} if include_business_watch else {}),
         )
         notifications = []
         for delivery in deliveries:

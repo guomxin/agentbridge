@@ -139,7 +139,7 @@ async def notifications(host, record, action, body):
             with sqlite3.connect(path) as db:
                 db.execute("""CREATE TABLE IF NOT EXISTS notification_claims (
                     delivery TEXT PRIMARY KEY, endpoint TEXT NOT NULL, run TEXT NOT NULL, attempt INTEGER NOT NULL)""")
-        if action in {"telegram-artifact-file", "telegram-notification-receipt"}:
+        if action in {"telegram-artifact-file", "telegram-watch-validate", "telegram-notification-receipt"}:
             delivery, attempt, ok = (
                 body.get("deliveryId"),
                 body.get("attempt"),
@@ -172,6 +172,20 @@ async def notifications(host, record, action, body):
                 if reply.isError or result.get("allowed") is not True or claim[0] != f"artifact:{result.get('artifactId')}":
                     return {"allowed": False}
                 return {key: result[key] for key in ("allowed", "artifactId", "file") if key in result}
+            if action == "telegram-watch-validate":
+                watch_id = claim[0].removeprefix("watch:")
+                if not claim[0].startswith("watch:") or not identifier(watch_id):
+                    raise web.HTTPForbidden()
+                reply = await session.call_tool("agentbridge_host_notification_validate", {
+                    **endpoint_params, "delivery_id": delivery, "attempt_count": attempt}, meta=meta)
+                current = reply.structuredContent or {}
+                if reply.isError or type(current.get("allowed")) is not bool:
+                    raise web.HTTPServiceUnavailable()
+                if not current["allowed"]:
+                    return {"allowed": False, "stale": current.get("stale") is True}
+                if current.get("watchId") != watch_id or not isinstance(current.get("message"), str):
+                    raise web.HTTPForbidden()
+                return {"allowed": True, "message": current["message"]}
             outcome = body.get("artifactOutcome")
             if outcome is not None and (not claim[0].startswith("artifact:") or outcome not in ("attachment_sent", "delivery_unknown")
                                         or ok != (outcome == "attachment_sent")):
@@ -182,6 +196,7 @@ async def notifications(host, record, action, body):
             "limit": 32,
             "lease_seconds": 60,
             "include_workspace_chat": True,
+            "include_business_watch": True,
         }
         raw_wait = body.get("waitSeconds") if isinstance(body, dict) else None
         if isinstance(raw_wait, (int, float)) and not isinstance(raw_wait, bool) and raw_wait > 0:
@@ -203,6 +218,18 @@ async def notifications(host, record, action, body):
             if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
                 continue
             mode = item.get("deliveryMode")
+            if mode == "business_watch":
+                # System watch tasks can originate at another personal Workspace.
+                # Only a central, endpoint-scoped watch claim is eligible here.
+                watch_id = item.get("watchId")
+                event = item.get("event") or {}
+                if (identifier(watch_id) and (item.get("task") or {}).get("userSubject") == req["subject"]
+                        and (event.get("payload") or {}).get("watchId") == watch_id
+                        and event.get("eventType") in {"business_watch.changed", "business_watch.completed"}):
+                    run_ref = f"watch:{watch_id}"
+                    _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
+                    deliveries.append({"kind": "business_watch", "runId": run_ref, "deliveryId": delivery, "attempt": attempt})
+                continue
             if mode == "timeline_message":
                 message = projected_chat(item, req["workspaceEndpointId"])
                 if message and chat_claim(req["userDir"], req["endpoint"], delivery, attempt, register=True):
@@ -631,6 +658,10 @@ class TerminalMessages:
                 except (GatewayRequestError, TelegramUnavailable):
                     # Other files keep their own leases while this claim awaits reconciliation.
                     pass
+                continue
+            if kind == "business_watch":
+                from .watch_delivery import deliver_watch
+                deliver_watch(self, chat, binding, digest, event)
                 continue
             if kind == "workspace_chat":
                 self.chat.poll(chat, binding, digest, event)
