@@ -19,6 +19,7 @@ from .provider import CheckedProvider
 from .plans import PLAN,PlanTool
 from .watch_tools import WATCH_MUTATIONS, WatchTool
 from .business_reads import BUSINESS_READS, CONTEXT_FREE_READS
+from .file_generation import DESCRIPTIONS, FILE_TOOLS, SEARCH, TaskFiles, parameters
 
 
 READ_TOOLS = frozenset(
@@ -154,10 +155,14 @@ class CentralReadTool(Tool):
     def description(self) -> str:
         if self.definition.name == "agentbridge_server_profile":
             return "列出当前用户在此 NanoBot 会话可调用的工具。"
+        if self.registry.task_files and self.definition.name in DESCRIPTIONS:
+            return DESCRIPTIONS[self.definition.name]
         return self.definition.description or self.definition.name
 
     @property
     def parameters(self) -> dict:
+        if self.registry.task_files:
+            return parameters(self.definition.name, self.definition.inputSchema)
         return self.definition.inputSchema
 
     async def execute(self, **kwargs) -> str:
@@ -165,6 +170,11 @@ class CentralReadTool(Tool):
         receipt = None
         try:
             skill = self.registry.skill_run
+            if self.registry.task_files and self.definition.name in FILE_TOOLS | {SEARCH}:
+                receipt, public = await self.registry.task_files.execute(
+                    self.definition.name, kwargs, session=self.session, business_context=self.registry.business_context,
+                    skill=skill, binding=self.binding)
+                return json.dumps(public, ensure_ascii=False)
             if (self.definition.name=="oa_workflow_pending_list" and self.deliver_private is not None
                 and not self.registry.oa_checked and not (skill is not None and skill.selection)
                 and "mcp_ab_oa_session_login" in self.registry.tool_names):
@@ -213,12 +223,13 @@ class CentralReadTool(Tool):
 class CentralTools(ToolRegistry):
     """NanoBot also attempts to register built-in file, shell and agent tools."""
 
-    def __init__(self, skill_run=None, business_context=None, read_task=None):
+    def __init__(self, skill_run=None, business_context=None, read_task=None, task_files=None):
         super().__init__()
         self.skill_run=skill_run
         self.oa_checked=False
         self.business_context = business_context
         self.read_task = read_task
+        self.task_files = task_files
 
     def get_definitions(self):
         definitions=super().get_definitions()
@@ -231,7 +242,7 @@ class CentralTools(ToolRegistry):
             super().register(tool)
         elif isinstance(tool, CentralReadTool) and (
             tool.definition.name in READ_TOOLS | {"oa_session_login", "agentbridge_skill_get"}
-            or (self.business_context and tool.definition.name in BUSINESS_READS
+            or (self.business_context and (tool.definition.name in BUSINESS_READS or self.task_files and tool.definition.name in FILE_TOOLS)
                 and tool.definition.annotations and tool.definition.annotations.readOnlyHint is True)
         ):
             super().register(tool)
@@ -276,9 +287,12 @@ async def run_readonly(
         candidates=candidates | {"agentbridge_skill_get"}
     if business_context is not None:
         candidates = candidates | BUSINESS_READS
+    task_files = TaskFiles() if channel == "telegram" and coordinator_tool and business_context else None
+    if task_files is not None:
+        candidates = candidates | FILE_TOOLS
     projected = candidates.intersection(allowed) | {"agentbridge_server_profile"}
     read_task = coordinator_tool[1] if coordinator_tool else None
-    tools = CentralTools(skill_run, business_context, read_task)
+    tools = CentralTools(skill_run, business_context, read_task, task_files)
     governed = {}
     if coordinator_tool is not None:
         host_request, task_context = coordinator_tool

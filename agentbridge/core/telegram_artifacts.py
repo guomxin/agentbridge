@@ -37,6 +37,43 @@ def origin_pair_proof(db, subject, endpoint, ownership):
     return mirror_pair_proof(db, subject, binding, sender)
 
 
+def require_certificate_selection(
+    service, subject, task_id, endpoint_id, conversation, instance, download_ids
+):
+    """Accept only results from certificate searches actually observed by this private task."""
+    task = service.tasks.get_task(task_id, user_subject=subject)
+    if (
+        task["agent_host"] != "nanobot"
+        or task["origin_endpoint_id"] != endpoint_id
+        or task["active_conversation_ref"] != conversation
+    ):
+        raise PermissionError("Certificate selection requires its original task and conversation")
+    endpoint = service.tasks.get_endpoint(endpoint_id, user_subject=subject)
+    with service.tasks._connect() as db:
+        ownership = endpoint_instances(db, subject)
+        if ownership.get(endpoint_id) != ("nanobot", instance) or not origin_pair_proof(
+            db, subject, endpoint, ownership
+        ):
+            raise PermissionError("The original Telegram pairing is no longer available")
+    service.user_grants.require(subject, "oa.certificate.read")
+    service.user_grants.require(subject, "oa.certificate.download")
+    wanted = set(download_ids)
+    for operation_id in service.tasks.operation_ids_for_task(task_id=task_id, user_subject=subject):
+        operation = service.operations.get(operation_id)
+        if (
+            operation["user_subject"] != subject
+            or operation["status"] != "succeeded"
+            or operation["capability_name"] != "oa.document.certificate.search"
+        ):
+            continue
+        for item in (operation.get("result") or {}).get("items") or []:
+            if isinstance(item, dict) and item.get("document_type") in DOCUMENT_TYPES["certificate_scan"]:
+                wanted.discard(item.get("download_id"))
+        if not wanted:
+            return
+    raise PermissionError("Certificate not selected from this original task")
+
+
 def _database_csv(service, subject, task_id, artifact, with_body):
     from agentbridge.database.independent import IndependentDatabase
     from agentbridge.database.reports import Reports

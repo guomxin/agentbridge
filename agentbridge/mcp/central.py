@@ -1919,6 +1919,27 @@ def create_central_mcp_server(
             arguments,
             idempotency_key,
         )
+    async def certificate_task(ctx, identity, download_ids):
+        task_id = _request_task_id(ctx)
+        if not task_id:
+            if _request_runtime_context(ctx)["hostType"] == "nanobot":
+                raise PermissionError("NanoBot certificate preparation requires an original task")
+            return None
+        task = await asyncio.to_thread(service.tasks.get_task, task_id, user_subject=identity["user_subject"])
+        if task["agent_host"] == "nanobot":
+            host, _ = await _require_registered_host_call(ctx, service=service, identity=identity,
+                agent_host="nanobot", task_id=task_id, require_coordinator_lease=True)
+            endpoint = await asyncio.to_thread(service.tasks.get_endpoint, task["origin_endpoint_id"], user_subject=identity["user_subject"])
+            if endpoint["client_type"] == "telegram":
+                from agentbridge.core.telegram_artifacts import require_certificate_selection
+                await require_skill_context(ctx, identity, capability="oa.certificate.download")
+                runtime = _request_meta(ctx).get(TASK_CONTEXT_META_KEY) or {}
+                await asyncio.to_thread(require_certificate_selection, service, identity["user_subject"], task_id,
+                    runtime.get("endpointId"), runtime.get("conversationRef"), host["hostInstanceId"], download_ids)
+        await asyncio.to_thread(service.observe_host_task, user_subject=identity["user_subject"], task_id=task_id,
+                                operation_ids=[], interaction_ids=[])
+        return task_id
+
     @mcp.tool(
         name="oa_certificate_prepare_download",
         title="Prepare and Deliver One OA Certificate Scan",
@@ -1943,15 +1964,7 @@ def create_central_mcp_server(
             identity_store,
             required_scopes={"oa:read"},
         )
-        task_id = _request_task_id(ctx)
-        if task_id:
-            await asyncio.to_thread(
-                service.observe_host_task,
-                user_subject=identity["user_subject"],
-                task_id=task_id,
-                operation_ids=[],
-                interaction_ids=[],
-            )
+        task_id = await certificate_task(ctx, identity, [download_id])
         return await asyncio.to_thread(
             service.prepare_document_download,
             user_subject=identity["user_subject"],
@@ -1987,15 +2000,7 @@ def create_central_mcp_server(
             identity_store,
             required_scopes={"oa:read"},
         )
-        task_id = _request_task_id(ctx)
-        if task_id:
-            await asyncio.to_thread(
-                service.observe_host_task,
-                user_subject=identity["user_subject"],
-                task_id=task_id,
-                operation_ids=[],
-                interaction_ids=[],
-            )
+        task_id = await certificate_task(ctx, identity, download_ids)
         return await asyncio.to_thread(
             service.prepare_document_downloads,
             user_subject=identity["user_subject"],
