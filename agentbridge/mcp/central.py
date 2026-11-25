@@ -6537,20 +6537,22 @@ def create_central_mcp_server(
         )
 
     @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Endpoint Delivery Before Sending',
-        description='Host-private fresh authorization of one claimed notification immediately before sending.',
+        description='Check one claimed delivery before sending, or read its acknowledged terminal task for a private Telegram receipt.',
         annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False),
         structured_output=True)
     async def agentbridge_host_notification_validate(ctx:Context,
         agent_host:Annotated[str,Field(min_length=1,max_length=80)],
         endpoint_key:Annotated[str,Field(min_length=1,max_length=768)],
         delivery_id:Annotated[str,Field(min_length=16,max_length=128)],
-        attempt_count:Annotated[int,Field(ge=1,le=5)], include_artifact:bool=False) -> dict[str,Any]:
+        attempt_count:Annotated[int,Field(ge=1,le=5)], include_artifact:bool=False,
+        lookup_acknowledged_task:bool=False) -> dict[str,Any]:
         identity=_request_identity(identity_store)
         host, _ = await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
         return await _run_host_control('agentbridge_host_notification_validate',service.validate_host_notification,
             user_subject=identity['user_subject'],agent_host=agent_host,endpoint_key=endpoint_key,
             delivery_id=delivery_id,attempt_count=attempt_count,host_instance_id=host["hostInstanceId"],
-            **({"include_artifact":True} if include_artifact else {}))
+            **({"include_artifact":True} if include_artifact else {}),
+            **({"lookup_acknowledged_task":True} if lookup_acknowledged_task else {}))
 
     @mcp.tool(
         name="agentbridge_host_notification_ack",

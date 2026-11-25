@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from agentbridge.core.chat_mirror import public_mirror_text
 from agentbridge.workspace.gateway import GatewayRequestError
 
+from .chat_mirror import identifier
 from .telegram_presentation import render_interaction_message, render_result_view_message
 
 
@@ -64,9 +65,9 @@ class TelegramNavigation:
 
     def quoted(self, chat, digest, reply):
         pilot = self.pilot
-        if (not isinstance(reply, dict) or (reply.get("from") or {}).get("id") != pilot.bot_id
+        if (not isinstance(reply, dict) or not isinstance(reply.get("from"), dict) or reply["from"].get("id") != pilot.bot_id
                 or type(reply.get("message_id")) is not int
-                or ("chat" in reply and (reply["chat"].get("type"), reply["chat"].get("id")) != ("private", chat))
+                or ("chat" in reply and (not isinstance(reply["chat"], dict) or (reply["chat"].get("type"), reply["chat"].get("id")) != ("private", chat)))
                 or any(k in reply for k in ("forward_origin", "sender_chat", "via_bot"))):
             return None
         key = (pilot.bot_id, chat, reply["message_id"])
@@ -74,22 +75,37 @@ class TelegramNavigation:
             "SELECT digest,target_json FROM telegram_navigation_receipts WHERE bot=? AND chat=? AND receipt=?", key
         ).fetchone()
         if saved:
-            return json.loads(saved[1]) if saved[0] == digest else None
+            if saved[0] != digest:
+                return None
+            target = json.loads(saved[1])
+            if target.get("kind") == "run" and identifier(target.get("terminalTaskId")):
+                return {"kind": "history_task", "id": target["terminalTaskId"]}
+            return target
         # Older ordinary replies already have the binding digest and exact original run.
-        rows = pilot.db.execute("""SELECT DISTINCT m.message,m.run_id FROM messages m
+        rows = pilot.db.execute("""SELECT DISTINCT m.message,m.run_id,m.binding_hash FROM messages m
             LEFT JOIN telegram_reply_parts p ON (p.bot,p.chat,p.message)=(m.bot,m.chat,m.message)
-            WHERE m.bot=? AND m.chat=? AND (m.receipt=? OR p.receipt=?) AND m.binding_hash=? AND m.run_id IS NOT NULL""",
-            (*key, key[-1], digest)).fetchall()
-        if len(rows) == 1:
-            return {"kind": "run", "id": rows[0][1], "requestKey": pilot._key(chat, rows[0][0])}
+            WHERE m.bot=? AND m.chat=? AND (m.receipt=? OR p.receipt=?) AND m.run_id IS NOT NULL""",
+            (*key, key[-1])).fetchall()
         # Previously delivered cards have opaque IDs only. The host verifies original
         # endpoint, task identity, current binding and original conversation before use.
-        cards = pilot.db.execute("""SELECT dedupe_key FROM telegram_card_deliveries
-            WHERE bot=? AND chat=? AND receipt=? AND state='delivered'""", key).fetchall()
-        if len(cards) == 1:
+        cards = pilot.db.execute("""SELECT dedupe_key,delivery,state FROM telegram_card_deliveries
+            WHERE bot=? AND chat=? AND receipt=?""", key).fetchall()
+        if rows:
+            if len(rows) == 1 and not cards and rows[0][2] == digest:
+                return {"kind": "run", "id": rows[0][1], "requestKey": pilot._key(chat, rows[0][0])}
+            return None
+        if len(cards) == 1 and cards[0][2] == "delivered":
             prefix, _, ident = cards[0][0].partition(":")
+            if prefix == "status" and ident == cards[0][1] and identifier(ident):
+                return {"kind": "status_delivery", "id": ident}
             if prefix in {"interaction", "result_view"}:
                 return {"kind": "interaction" if prefix == "interaction" else "result", "id": ident}
+        if not cards and reply.get("chat", {}).get("id") == chat:
+            from .notifications import TerminalMessages
+            text = reply.get("text")
+            if isinstance(text, str) and (text in TerminalMessages.TEXT.values() or text.splitlines()[:1] == ["办理状态更新"]):
+                # Text merely opens a chooser. It cannot establish any task as the quoted one.
+                return {"kind": "legacy_history"}
         return None
 
     def handle(self, chat, message, binding, digest, reply, verb, ordinal):
@@ -113,7 +129,20 @@ class TelegramNavigation:
         if reply is not None and not target:
             send("无法核对这条机器人消息的原任务。发送 /pending 查看本人当前任务。")
             return
-        if target and target["kind"] == "choices":
+        kind = target.get("kind") if target else None
+        if kind in {"legacy_history", "history_choices", "history_task", "status_delivery"} and verb == "stop":
+            send("旧状态通知只可查看。要停止待处理任务，请发送 /pending 并核对原任务。")
+            return
+        if kind == "history_choices":
+            if time.time() >= target["expires"]:
+                send("这份历史任务列表已过期，请重新回复旧通知并发送“继续”。")
+                return
+            if verb not in {None, "continue"} or not ordinal or ordinal > len(target["ids"]):
+                send("请回复这份历史任务列表并输入要查看的编号。")
+                return
+            verb = "continue"
+            target = {"kind": "history_task", "id": target["ids"][ordinal - 1]}
+        elif target and target["kind"] == "choices":
             ids = target["ids"]
             if time.time() >= target["expires"]:
                 send("这份列表已过期，请重新发送 /pending 或“停止”获取当前任务。")
@@ -131,13 +160,15 @@ class TelegramNavigation:
             verb = "continue"
         request = {"binding": binding}
         try:
-            if not target:
-                reply_data = pilot.gateway._request("telegram-task", {**request, "operation": "list"})
+            if not target or kind == "legacy_history":
+                history = kind == "legacy_history"
+                reply_data = pilot.gateway._request("telegram-task", {**request, "operation": "history" if history else "list"})
                 choices = reply_data.get("candidates") or []
                 if not choices:
-                    send("当前私聊没有待处理的原任务。也可回复以前的机器人消息并发送“继续”查看原任务状态。")
+                    send("当前私聊没有可核验的历史任务。" if history else
+                         "当前私聊没有待处理的原任务。也可回复以前的机器人消息并发送“继续”查看原任务状态。")
                     return
-                if len(choices) > 1 or verb == "stop":
+                if history or len(choices) > 1 or verb == "stop":
                     shown = choices[:20]
                     lines = []
                     for i, task in enumerate(shown, 1):
@@ -145,8 +176,9 @@ class TelegramNavigation:
                         state = _STATES.get(task.get("status"), "待核对")
                         lines.append(f"{i}. {' '.join(title.split())[:60]} · {state}{_local_time(task.get('createdAt'))}")
                     action = "停止" if verb == "stop" else "继续查看"
-                    send(f"请选择要{action}的任务（列出 {len(shown)} 项）。回复本条消息并输入编号。\n" + "\n".join(lines),
-                         target={"kind": "choices", "action": verb, "ids": [task["taskId"] for task in shown],
+                    prompt = ("这条旧通知缺少可核对的消息回执。请选择要查看的本人历史任务" if history else f"请选择要{action}的任务")
+                    send(f"{prompt}（列出 {len(shown)} 项）。回复本条消息并输入编号。\n" + "\n".join(lines),
+                         target={"kind": "history_choices" if history else "choices", "action": verb, "ids": [task["taskId"] for task in shown],
                                  "expires": time.time() + 300})
                     return
                 target = {"kind": "task", "id": choices[0]["taskId"]}
@@ -154,7 +186,7 @@ class TelegramNavigation:
         except GatewayRequestError:
             send("暂时无法核对原任务，请在本人工作台查看最新状态。")
             return
-        if result.get("taskId") and target["kind"] != "result":
+        if result.get("taskId") and target["kind"] not in {"result", "history_task", "status_delivery"}:
             target = {"kind": "task", "id": result["taskId"]}
         params = None
         if card := result.get("interaction"):

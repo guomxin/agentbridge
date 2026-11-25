@@ -1959,11 +1959,34 @@ class CentralCapabilityService:
         }
 
     def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count,host_instance_id=None,
-                                   include_artifact=False):
+                                   include_artifact=False,lookup_acknowledged_task=False):
         endpoint=self.tasks.endpoint_for_key(user_subject=user_subject,agent_host=agent_host,endpoint_key=endpoint_key)
         delivery=self.tasks.get_delivery(delivery_id)
         if delivery['user_subject']!=user_subject or delivery['endpoint_id']!=endpoint['endpoint_id']:
             raise PermissionError('Notification does not belong to this endpoint')
+        if lookup_acknowledged_task:
+            from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
+
+            # Historical lookup never authorizes a send or exposes the old notification payload.
+            denied = {"allowed": False}
+            if (include_artifact or agent_host != "nanobot" or endpoint["client_type"] != "telegram"
+                    or not host_instance_id or type(attempt_count) is not int or not 1 <= attempt_count <= 5
+                    or delivery["attempt_count"] != attempt_count or delivery["state"] != "acknowledged"
+                    or not delivery.get("acknowledged_at") or delivery["payload_type"] != "task_event"
+                    or delivery["payload"].get("eventType") not in {
+                        "task.completed", "task.operation.succeeded", "task.failed", "task.operation.failed",
+                        "task.canceled", "task.operation.outcome_unknown", "task.interaction.expired",
+                        "task.interaction.superseded", "task.interaction.failed", "plan.completed",
+                        "plan.canceled", "plan.step.failed", "plan.outcome_unknown",
+                    } or not self.tasks.notification_route_allowed(user_subject=user_subject,
+                            endpoint_id=endpoint["endpoint_id"], delivery_id=delivery_id, host_instance_id=host_instance_id)):
+                return denied
+            task = self.tasks.get_task(delivery["task_id"], user_subject=user_subject)
+            if (task["status"] not in TERMINAL_TASK_STATUSES or task["agent_host"] != agent_host
+                    or task["origin_endpoint_id"] != endpoint["endpoint_id"]
+                    or task["active_conversation_ref"] != endpoint["conversation_ref"]):
+                return denied
+            return {**denied, "acknowledgedTaskId": task["task_id"]}
         if (type(attempt_count) is not int or delivery['state']!='delivering'
             or delivery['attempt_count']!=attempt_count
             or datetime.fromisoformat(delivery['next_attempt_at'])<=datetime.now(timezone.utc)):

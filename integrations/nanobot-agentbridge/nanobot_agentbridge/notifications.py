@@ -436,6 +436,7 @@ async def notifications(host, record, action, body):
                         "deliveryId": delivery,
                         "attempt": attempt,
                         "runId": local_run,
+                        "taskId": task["taskId"],
                         "status": TERMINAL[kind],
                     }
                 )
@@ -567,6 +568,7 @@ class TerminalMessages:
             ).rowcount
         if inserted:
             status = "delivery_unknown"
+            receipt = None
             try:
                 active, proof = pilot._binding(chat)
                 if active != binding or proof != digest:
@@ -586,17 +588,20 @@ class TerminalMessages:
                         and numeric(result.get("message_id"))
                         and (result.get("from") or {}).get("id") == pilot.bot_id
                         and (result.get("chat") or {}).get("id") == chat
+                        and (result.get("chat") or {}).get("type") == "private"
                         and (result.get("reply_to_message") or {}).get("message_id")
                         == original_message
                     ):
                         status = "delivered"
-                        with pilot.db:
-                            pilot.navigation.remember(chat, result["message_id"], digest, {
-                                "kind": "run", "id": event["runId"], "requestKey": pilot._key(chat, original_message),
-                            })
+                        receipt = result["message_id"]
             except TelegramUnavailable:
                 pass
             with pilot.db:
+                if receipt:
+                    target = {"kind": "run", "id": event["runId"], "requestKey": pilot._key(chat, original_message)}
+                    if identifier(event.get("taskId")):
+                        target["terminalTaskId"] = event["taskId"]
+                    pilot.navigation.remember(chat, receipt, digest, target)
                 pilot.db.execute(
                     "UPDATE notification_receipts SET state=? WHERE bot=? AND chat=? AND delivery=?",
                     (status, pilot.bot_id, chat, delivery),

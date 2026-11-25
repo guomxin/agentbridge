@@ -5,6 +5,8 @@ from pathlib import Path
 import sqlite3
 import re
 
+from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES
+
 from .chat_mirror import identifier
 from .session_pool import open_host_session
 from .telegram_identity import verify_telegram_binding
@@ -46,7 +48,7 @@ async def navigate(host, record, body):
     from aiohttp import web
 
     operation = body.get("operation")
-    if operation not in {"list", "continue", "stop"}:
+    if operation not in {"list", "history", "continue", "stop"}:
         raise web.HTTPBadRequest()
     request = host.worker_payload(record, None)
     if not host.coordinator or not request["endpointKey"].startswith("telegram:"):
@@ -64,14 +66,15 @@ async def navigate(host, record, body):
                 raise web.HTTPForbidden()
             return reply.structuredContent or {}
 
-        if operation == "list":
-            result = await read("agentbridge_host_task_list", {**endpoint, "active_only": True, "limit": 100})
+        if operation in {"list", "history"}:
+            result = await read("agentbridge_host_task_list", {**endpoint, "active_only": operation == "list", "limit": 100})
             if (result.get("endpoint") or {}).get("endpointId") != request["endpoint"]:
                 raise web.HTTPForbidden()
             return {"candidates": [
                 {"taskId": task["taskId"], "title": str(task.get("title") or "办公任务")[:80],
                  "status": task.get("status"), "createdAt": task.get("createdAt")}
                 for task in result.get("tasks", []) if _owned(task, request)
+                and (operation != "history" or task.get("status") in TERMINAL_TASK_STATUSES)
             ]}
         target = body.get("target") or {}
         kind, key = target.get("kind"), target.get("id")
@@ -107,6 +110,28 @@ async def navigate(host, record, body):
                     or card.get("interactionId") != key or not identifier(card.get("taskId"))):
                 return {"state": "unavailable"}
             task_id = card["taskId"]
+        elif kind == "status_delivery":
+            if operation != "continue":
+                return {"state": "unavailable"}
+            path = Path(request["userDir"]) / "coordinated-runs.sqlite3"
+            if not path.is_file():
+                return {"state": "unavailable"}
+            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+                if not db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='notification_claims'").fetchone():
+                    return {"state": "unavailable"}
+                claim = db.execute("SELECT attempt FROM notification_claims WHERE delivery=? AND endpoint=? AND run=?",
+                                   (key, request["endpoint"], "status:" + key)).fetchone()
+            if not claim or type(claim[0]) is not int or not 1 <= claim[0] <= 5:
+                return {"state": "unavailable"}
+            prior = await read("agentbridge_host_notification_validate", {**endpoint, "delivery_id": key,
+                               "attempt_count": claim[0], "lookup_acknowledged_task": True})
+            task_id = prior.get("acknowledgedTaskId")
+            if prior.get("allowed") is not False or not identifier(task_id):
+                return {"state": "unavailable"}
+        elif kind == "history_task":
+            if operation != "continue":
+                return {"state": "unavailable"}
+            task_id = key
         elif kind in {"task", "result"}:
             task_id = key
         else:
@@ -120,6 +145,8 @@ async def navigate(host, record, body):
             raise web.HTTPForbidden()
         state = task["status"]
         summary = {"taskId": task_id, "state": state}
+        if kind in {"history_task", "status_delivery"}:
+            return summary if state in TERMINAL_TASK_STATUSES else {"state": "unavailable"}
         if operation == "stop":
             if state not in {"active", "running", "waiting_user"}:
                 return summary
