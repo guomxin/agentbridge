@@ -111,6 +111,29 @@ def test_current_pi_recipient_and_ownership_across_digest_and_watch_forms(server
     assert status == 403 and error["error"]["code"] == "WATCH_ENDPOINT_DENIED"
 
 
+def test_watch_options_identify_generic_pi_private_chat_among_other_telegram_destinations(server):
+    ctx = server
+    path = "/api/business-watches/options"
+    target = request(ctx, "GET", path)[2]["endpoints"][0]["endpoint_id"]
+    other, _ = ctx.service.tasks.ensure_endpoint(
+        user_subject="user-a", token_id="old-host-test-token", agent_host="openclaw",
+        endpoint_key="telegram:default:777", client_type="telegram", external_subject="777",
+        conversation_ref="agent:main:telegram:direct:777", label="办公手机",
+    )
+    other_id = other["endpoint_id"]
+    for alias in (None, "Telegram", "Telegram 私聊", "办公手机"):
+        with ctx.service.tasks._connect() as db:
+            db.execute("UPDATE client_endpoints SET label=? WHERE endpoint_id=?", (alias, target))
+        status, _, options = request(ctx, "GET", path)
+        assert status == 200
+        labels = {e["endpoint_id"]: e["label"] for e in options["endpoints"]}
+        if alias == "办公手机":
+            assert labels == {endpoint: "Telegram · 办公手机 · " + endpoint[:8] for endpoint in (target, other_id)}
+        else:
+            assert labels == {target: "Pi · Telegram 私聊", other_id: "Telegram · 办公手机"}
+    assert request(ctx, "GET", path, subject="user-b")[2]["endpoints"] == []
+
+
 def test_owned_history_preview_and_download_keep_original_bytes_and_expiry(server, pi):
     import httpx
     from tests.support.pi_workspace_images_probe import solid_png

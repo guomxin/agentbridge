@@ -77,6 +77,11 @@ def check_batch(lines):
     return lines == [{"sameParent":True,"distinctCards":2,"distinctApprovals":2,
                       "verifiedOperations":2,"effects":2,"automaticRuntimeSignal":True}]
 
+def check_result_views(lines):
+    return lines == [{"completePrivateCards": 1, "refreshedPrivateCards": 1, "emptyCards": 0,
+                      "partialActionCards": 0, "permissionLossRejected": True, "sameRunReconciled": True,
+                      "otherEndpointsRejected": True, "modelCalls": 6, "writes": 0}]
+
 
 AUTHORITY_TESTS = {
     "test_exact_pi_review_is_needed_for_elevated_registration_and_downgrade":{"H01":"unreviewed version downgrades to L1"},
@@ -216,6 +221,8 @@ def main():
              ("credential",CREDENTIAL_CASES,"sdk","tests.support.pi_credential_probe",check_credential),
              ("authority",AUTHORITY_CASES,"central","tests.support.pi_authority_probe",check_authority),
              ("governed",GOVERNED_CASES,"governed","tests.support.pi_governed_probe",check_governed),
+             ("result_views", {"H18": "only the original private endpoint can receive the completed OA lookup and refresh cards"},
+              "governed", "tests.support.pi_result_view_probe", check_result_views),
              ("composite",{"H28":"scope-checked two-system plan executes two original read operations on one durable task"},
               "composite","tests.support.pi_batch_probe",check_composite),
              ("batch",{"H23":"two items independently approved then authoritatively verified on one parent",

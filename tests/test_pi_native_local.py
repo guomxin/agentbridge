@@ -99,7 +99,7 @@ def test_transaction_switch_resume_and_restore(tmp_path, monkeypatch, fail_worke
     assert json.loads((root / "native-release.json").read_text())["stage"] == "rolled_back"
 
 
-@pytest.mark.parametrize("enable_telegram", [True, False])
+@pytest.mark.parametrize("enable_telegram", [True, False, None])
 @pytest.mark.parametrize("fail_auth", [False, True])
 def test_reviewed_route_switch_and_rollback_recover_original_jobs(tmp_path, monkeypatch, enable_telegram, fail_auth):
     root, candidate, spec, mac, records = profile(tmp_path)
@@ -107,14 +107,18 @@ def test_reviewed_route_switch_and_rollback_recover_original_jobs(tmp_path, monk
     predecessor.mkdir(mode=0o700)
     bot = {"botId": 8801, "username": "pi_test_bot", "allowedSenders": {"one": "501"}, "botCredential": {"kind": "test"}}
     original = dict(spec)
-    if enable_telegram:
+    version_patch = enable_telegram is None
+    if enable_telegram or version_patch:
         spec["telegram"] = bot
-    else:
+    if not enable_telegram:
         original["telegram"] = bot
     local.configure(original, mac, root, predecessor, records)
     old_channel = json.loads((predecessor / "host.json").read_text()).get("telegramPilot")
     spec["routeTransition"] = {"fromRelease": predecessor.name, "toRelease": candidate.name,
         "beforeSha256": "c" * 64, "afterSha256": "d" * 64, "fromLevel": "L1", "fromTelegram": old_channel}
+    if version_patch:
+        spec["routeTransition"].update(fromAdapterVersion="0.1.0", fromRevision=1)
+        monkeypatch.setattr(local, "run", lambda cmd: '[project]\nversion="0.1.0"')
     local.lifecycle.set_current(root, predecessor)
     local.save(root / "native-release.json", {"stage": "confirmed", "candidate": predecessor.name})
     pub = SimpleNamespace(release=candidate.name, args=SimpleNamespace(resume=False))
@@ -168,8 +172,29 @@ def test_reviewed_route_switch_and_rollback_recover_original_jobs(tmp_path, monk
             local.admission(pub, spec, mac, {}, remote=remote)
     else:
         assert local.admission(pub, spec, mac, {}, remote=remote)["ready"]
-        assert (pid_prefix + "telegram" in loaded) == enable_telegram
+        assert (pid_prefix + "telegram" in loaded) == bool(enable_telegram or version_patch)
         local.restore(pub, spec, mac, remote=remote)
     assert route == ["predecessor"] and loaded == set(old_jobs)
     assert (root / "current").resolve() == predecessor
     assert actions.index("route_activate") < actions.index("route_restore") < actions.index("probe_predecessor")
+
+    if version_patch:
+        assert actions.index("route_activate") < actions.index("provision")
+
+
+def test_version_patch_accepts_verified_archive_after_first_native_rollback(tmp_path, monkeypatch):
+    root, candidate, spec, mac, records = profile(tmp_path)
+    predecessor = candidate.with_name("b" * 12)
+    predecessor.mkdir(mode=0o700)
+    local.configure(spec, mac, root, predecessor, records)
+    spec["routeTransition"] = {"fromRelease":predecessor.name,"toRelease":candidate.name,
+        "fromAdapterVersion":"0.1.0","fromRevision":2,"fromLevel":spec["requiredLevel"],"fromTelegram":None}
+    last = {"stage":"rolled_back","previous":None,"candidate":predecessor.name,"previousScopePresent":False}
+    pub = SimpleNamespace(release=candidate.name)
+    monkeypatch.setattr(local,"run",lambda cmd: '[project]\nversion="0.1.0"')
+    local.check_predecessor(pub,spec,None,last)
+    with pytest.raises(ValueError,match="reviewed predecessor"):
+        local.check_predecessor(pub,spec,None,{**last,"previousScopePresent":True})
+    monkeypatch.setattr(local,"run",lambda cmd: '[project]\nversion="0.1.9"')
+    with pytest.raises(ValueError,match="adapter version"):
+        local.check_predecessor(pub,spec,None,last)

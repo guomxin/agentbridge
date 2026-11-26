@@ -37,7 +37,7 @@ def route_document(config, spec):
 def transition_routes(config, spec, candidate):
     transition = spec["routeTransition"]
     if (host_type(spec) != "pi" or not isinstance(transition,dict)
-            or set(transition) != {"fromRelease","toRelease","beforeSha256","afterSha256","fromLevel","fromTelegram"}
+            or set(transition) - {"fromAdapterVersion","fromRevision"} != {"fromRelease","toRelease","beforeSha256","afterSha256","fromLevel","fromTelegram"}
             or not all(isinstance(transition[key],str) and re.fullmatch(r"[0-9a-f]{12}",transition[key])
                        for key in ("fromRelease","toRelease"))
             or transition["toRelease"] != candidate or transition["fromRelease"] == candidate
@@ -54,6 +54,12 @@ def transition_routes(config, spec, candidate):
                 or spec.get("telegram") and spec["telegram"] != telegram):
             raise ValueError("Pi transition cannot replace a bot or the reviewed first sender")
     predecessor = {**spec,"requiredLevel":transition["fromLevel"],"telegram":telegram}
+    if "fromAdapterVersion" in transition or "fromRevision" in transition:
+        if (transition.get("fromAdapterVersion") != "0.1.0" or spec["adapterVersion"] != "0.1.1"
+                or type(transition.get("fromRevision")) is not int or transition["fromRevision"] < 1
+                or transition["fromLevel"] != spec["requiredLevel"] or telegram != spec.get("telegram")):
+            raise ValueError("Pi patch transition requires the reviewed versions, directory revision and unchanged scope")
+        predecessor["adapterVersion"] = transition["fromAdapterVersion"]
     before, after = route_document(config,predecessor), route_document(config,spec)
     if (before == after or hashlib.sha256(before).hexdigest() != transition["beforeSha256"]
             or hashlib.sha256(after).hexdigest() != transition["afterSha256"]):
@@ -61,7 +67,126 @@ def transition_routes(config, spec, candidate):
     return before, after
 
 
-def transition_action(config, spec, candidate, action, uid, gid):
+def replace_route(active, contents, uid, gid):
+    fd, name = tempfile.mkstemp(dir=active.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            os.fchown(output.fileno(), uid, gid)
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(name, active)
+        directory = os.open(active.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+PATCH_FORWARD = "发布已审核的 Pi 适配器补丁"
+PATCH_RESTORE = "恢复原 Pi 适配器版本"
+PATCH_ACTION = "workspace.host.adapter-version"
+
+
+def patch_version(spec):
+    return (spec.get("routeTransition") or {}).get("fromAdapterVersion")
+
+
+def patch_audit_versions(event):
+    before, after = (json.loads(event[key]) for key in ("before_json","after_json"))
+    versions = ("0.1.0", "0.1.1") if event["reason"] == PATCH_FORWARD else ("0.1.1", "0.1.0")
+    if (event["reason"] not in (PATCH_FORWARD, PATCH_RESTORE) or before.get("version") != versions[0]
+            or after.get("version") != versions[1] or before.get("revision", -2) + 1 != after.get("revision")
+            or not re.fullmatch(r"[0-9a-f]{12}", str(after.get("candidate", "")))):
+        raise ValueError("Unexpected Pi adapter version audit")
+    return before, after
+
+
+def reviewed_patch_scope(db, spec, candidate):
+    instance = spec["instanceId"]
+    transition = spec["routeTransition"]
+    current = db.execute("SELECT instance_id,display_name,host_type,route_ref,adapter_version,state,all_subjects,revision "
+                         "FROM workspace_host_instances WHERE instance_id=?", (instance,)).fetchone()
+    subjects = {row[0] for row in db.execute("SELECT user_subject FROM workspace_host_visibility WHERE instance_id=?", (instance,))}
+    if (not current or current["host_type"] != "pi" or current["route_ref"] != spec["routeRef"]
+            or current["display_name"] != spec["displayName"] or current["all_subjects"] or subjects != set(spec["subjects"])
+            or current["state"] not in {"enabled","revoked"}):
+        raise ValueError("Pi patch cannot change administrator scope or ownership")
+    bindings = db.execute("SELECT a.user_subject,b.credential_ref FROM workspace_host_bindings b "
+                          "JOIN workspace_accounts a ON a.account_id=b.account_id AND a.state='active' "
+                          "JOIN client_endpoints e ON e.endpoint_id=b.endpoint_id AND e.user_subject=a.user_subject "
+                          "AND e.agent_host='pi' AND e.client_type='web' AND e.state='active' "
+                          "WHERE b.instance_id=?", (instance,)).fetchall()
+    if len(bindings) != len(subjects) or dict(bindings) != spec["subjects"]:
+        raise ValueError("Pi patch requires its original personal bindings")
+    if current["state"] == "enabled":
+        for subject, ref in spec["subjects"].items():
+            label = f"workspace-pi:{instance}:{ref}"
+            active = db.execute("SELECT count(*) FROM mcp_identity_tokens WHERE user_subject=? AND label=? "
+                                "AND state='active' AND julianday(expires_at)>julianday('now')", (subject,label)).fetchone()[0]
+            if active != 1:
+                raise ValueError("Pi patch requires each existing, active personal identity")
+    version = patch_version(spec)
+    expected = transition["fromRevision"]
+    if current["revision"] < expected:
+        raise ValueError("Pi directory is older than its reviewed revision")
+    later = db.execute("SELECT * FROM admin_audit_events WHERE target_type='workspace_host' AND target_id=? "
+                       "AND json_extract(after_json,'$.revision')>? ORDER BY rowid", (instance,expected))
+    for event in later:
+        expected += 1
+        detail = json.loads(event["after_json"])
+        if (event["actor_username"] != "native-publish" or event["actor_role"] != "admin"
+                or event["request_ip"] != "local-release" or event["result"] != "succeeded"
+                or detail.get("revision") != expected or detail.get("candidate") != candidate
+                or not db.execute("SELECT 1 FROM workspace_host_directory_audit WHERE instance_id=? "
+                                  "AND revision=? AND actor='native-publish' AND reason=?",
+                                  (instance,expected,event["reason"])).fetchone()):
+            raise ValueError("An administrator changed the reviewed Pi directory")
+        if event["action"] == PATCH_ACTION:
+            before, after = patch_audit_versions(event)
+            if before["version"] != version:
+                raise ValueError("Pi version audit chain changed")
+            version = after["version"]
+        elif (event["action"] != "workspace.host.configure" or event["reason"] not in (RETRY_OPEN,RETRY_CLOSE)
+              or not detail.get("attempt") or not detail.get("tokenIds")):
+            raise ValueError("Unexpected Pi patch directory change")
+    if current["revision"] != expected or current["adapter_version"] != version:
+        raise ValueError("Pi directory version or revision does not match its reviewed history")
+    if current["state"] == "revoked":
+        recovery_history(db, spec, current)
+
+    return version, expected
+
+
+@contextmanager
+def patch_directory(db_path, spec, candidate, forward):
+    from agentbridge.admin.stores import AdminAuditStore
+
+    instance = spec["instanceId"]
+    audit = AdminAuditStore(db_path)
+    with closing(sqlite3.connect(db_path, timeout=15)) as db, db:
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN IMMEDIATE")
+        version, expected = reviewed_patch_scope(db, spec, candidate)
+        wanted = spec["adapterVersion"] if forward else patch_version(spec)
+        if wanted != version:
+            reason = PATCH_FORWARD if forward else PATCH_RESTORE
+            changed = db.execute("UPDATE workspace_host_instances SET adapter_version=?,revision=revision+1 "
+                                 "WHERE instance_id=? AND adapter_version=? AND revision=?",(wanted,instance,version,expected))
+            if changed.rowcount != 1:
+                raise ValueError("Pi adapter directory changed during activation")
+            db.execute("INSERT INTO workspace_host_directory_audit(instance_id,revision,actor,reason) VALUES (?,?,?,?)",
+                       (instance,expected+1,"native-publish",reason))
+            audit.append(actor={"username":"native-publish","role":"admin"},request_ip="local-release",
+                         action=PATCH_ACTION,target_type="workspace_host",target_id=instance,result="succeeded",reason=reason,
+                         before={"revision":expected,"version":version},after={"revision":expected+1,"version":wanted,
+                         "candidate":candidate},connection=db)
+        yield
+
+
+def transition_action(config, spec, candidate, action, uid, gid, db_path=None):
     """Only replace the pinned active manifest after the old runtime has drained."""
     before, after = transition_routes(config,spec,candidate)
     old_file = config/("transition-"+candidate+"-before.json")
@@ -83,22 +208,15 @@ def transition_action(config, spec, candidate, action, uid, gid):
             raise ValueError("Unknown Pi route transition action")
         moving_forward = action == "route_activate"
         desired = after if moving_forward else before
-        if current != desired:
-            fd, name = tempfile.mkstemp(dir=config)
-            try:
-                with os.fdopen(fd,"wb") as output:
-                    os.fchown(output.fileno(),uid,gid)
-                    output.write(desired)
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.replace(name,active)
-                directory = os.open(config,os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
-            finally:
-                Path(name).unlink(missing_ok=True)
+        transaction = patch_directory(db_path,spec,candidate,moving_forward) if patch_version(spec) else nullcontext()
+        try:
+            with transaction:
+                if current != desired:
+                    replace_route(active,desired,uid,gid)
+        except BaseException:
+            if current != desired and credential_file(active,uid) == desired:
+                replace_route(active,current,uid,gid)
+            raise
         return {"routeState":"candidate" if moving_forward else "predecessor","changed":current != desired}
 
 
@@ -267,6 +385,11 @@ def recovery_history(db, spec, current):
             bindings.setdefault(detail.get("user_subject"), set()).add(
                 detail.get("endpoint_id")
             )
+        elif event["action"] == PATCH_ACTION:
+            _, patched = patch_audit_versions(event)
+            if patched["revision"] in names:
+                raise ValueError("Duplicate Pi version revision")
+            names[patched["revision"]] = event["reason"]
         elif event["action"] == "workspace.host.rename":
             _, rename = name_audit(event, instance)
             if rename["revision"] in names:
@@ -469,6 +592,9 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
     try:
         with store_transaction(provision.service.tasks) as db:
             current = provision.directory._admin_row(db, instance)
+            expected_version = spec["adapterVersion"]
+            if action in {"recovery_check","rollback_scope"} and patch_version(spec) == current["adapter_version"]:
+                expected_version = current["adapter_version"]
             if (
                 current["subjects"],
                 current["route_ref"],
@@ -478,7 +604,7 @@ def recover_scope(request, provision, actor, accounts, config, uid, gid):
             ) != (
                 sorted(accounts),
                 spec["routeRef"],
-                spec["adapterVersion"],
+                expected_version,
                 host_type(spec),
                 spec["displayName"],
             ):
@@ -653,8 +779,17 @@ def execute(request):
     subjects = spec["subjects"]
     user = pwd.getpwnam("agentbridge")
     db_path = root / "data/agentbridge.db"
+    config = root / "config" / (implementation + "-" + instance)
+    if "routeTransition" in spec:
+        transition_routes(config, spec, request["candidate"])
+    old_version = patch_version(spec)
     encoded = db_path.resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(encoded, uri=True)) as db:
+        if old_version and action in {"observe", "stage"}:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN")
+            reviewed_patch_scope(db, spec, request["candidate"])
+            db.row_factory = None
         accounts = account_snapshot(db, subjects)
         scope_table = db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='workspace_host_instances'"
@@ -670,15 +805,16 @@ def execute(request):
             conflict = db.execute(
                 "SELECT 1 FROM workspace_host_instances WHERE "
                 "(instance_id=? OR route_ref=?) AND NOT "
-                "(instance_id=? AND route_ref=? AND host_type=? AND adapter_version=?)",
-                (instance, spec["routeRef"], instance, spec["routeRef"], implementation, spec["adapterVersion"]),
+                "(instance_id=? AND route_ref=? AND host_type=? AND adapter_version IN (?,?))",
+                (instance, spec["routeRef"], instance, spec["routeRef"], implementation,
+                 spec["adapterVersion"], old_version or spec["adapterVersion"]),
             ).fetchone()
             if conflict:
                 raise ValueError("Pi candidate conflicts with an existing host assignment")
         if "routeTransition" in spec and action in {"stage","route_activate","route_restore"}:
             scoped = db.execute("SELECT state,all_subjects FROM workspace_host_instances WHERE instance_id=? AND host_type='pi'",
                                 (instance,)).fetchone() if present else None
-            if scoped != ("enabled",0):
+            if scoped != ("enabled",0) and not (old_version and scoped == ("revoked",0)):
                 raise ValueError("Pi route transition requires its existing enabled scoped deployment")
             assigned = {row[0] for row in db.execute("SELECT user_subject FROM workspace_host_visibility WHERE instance_id=?", (instance,))}
             if assigned != set(subjects):
@@ -697,7 +833,6 @@ def execute(request):
             )
 
         baseline = defaults(db) if preference_table else None
-    config = root / "config" / (implementation + "-" + instance)
     routes = config / "routes.json"
     if action in ("tunnel_enable", "tunnel_disable"):
         return restricted_tunnel(spec, action.removeprefix("tunnel_"))
@@ -731,7 +866,8 @@ def execute(request):
             "productionActions": False,
         }
     if action in {"stage","route_activate","route_restore"}:
-        if os.geteuid() != 0:
+        version_switch = old_version and action != "stage"
+        if os.geteuid() != (user.pw_uid if version_switch else 0):
             raise PermissionError(
                 "Publication privilege required to stage the controlled route"
             )
@@ -743,7 +879,7 @@ def execute(request):
         if info.st_uid not in {user.pw_uid, 0} or info.st_mode & 0o077:
             raise ValueError("Unexpected route directory ownership")
         if action != "stage":
-            return transition_action(config,spec,request["candidate"],action,user.pw_uid,user.pw_gid)
+            return transition_action(config,spec,request["candidate"],action,user.pw_uid,user.pw_gid,db_path=db_path)
         os.chown(config, user.pw_uid, user.pw_gid)
         store_private(config/"service.token",request["serviceSecret"].encode(),user.pw_uid,user.pw_gid)
         if "routeTransition" in spec:
@@ -817,6 +953,7 @@ def execute(request):
             return {"closed": True}
     if action in ("probe","probe_predecessor"):
         level = spec.get("requiredLevel")
+        version = spec["adapterVersion"]
         if "routeTransition" in spec:
             before, after = transition_routes(config,spec,request["candidate"])
             predecessor = action == "probe_predecessor"
@@ -824,6 +961,7 @@ def execute(request):
                 raise ValueError("Active Pi route does not match the release being probed")
             if predecessor:
                 level = spec["routeTransition"]["fromLevel"]
+                version = old_version or version
         elif action == "probe_predecessor":
             raise ValueError("A predecessor probe requires a reviewed Pi route transition")
         client = provision._routes()[spec["routeRef"]]["client"]
@@ -835,7 +973,7 @@ def execute(request):
             required.update(("skills", "skill_trial", "skill_model"))
         if (
             not result["available"]
-            or result.get("adapterVersion") != spec["adapterVersion"]
+            or result.get("adapterVersion") != version
             or not required.issubset(result.get("capabilities", ()))
             or implementation == "pi" and (result.get("acceptedLevel") != level or
                     any(type(result.get(key)) is not int or result[key] != 2 for key in ("configuredBindings","verifiedBindings")))

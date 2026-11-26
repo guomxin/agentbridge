@@ -70,12 +70,16 @@ def _owned_telegram_options(connection, subject):
     return routes
 
 
+def telegram_private_label(agent_host):
+    host = {"nanobot": "NanoBot", "openclaw": "OpenClaw", "pi": "Pi"}[agent_host]
+    return f"{host} · Telegram 私聊"
+
+
 def _options_view(routes):
     names = {}
     for endpoint_id, endpoint in routes.items():
         label = " ".join((endpoint.get("label") or "").split())[:100]
-        host = {"nanobot": "NanoBot", "openclaw": "OpenClaw", "pi": "Pi"}[endpoint["agent_host"]]
-        names[endpoint_id] = f"{host} · Telegram 私聊"
+        names[endpoint_id] = telegram_private_label(endpoint["agent_host"])
         if label and label != "Telegram 私聊":
             names[endpoint_id] += f" · {label}"
     counts = Counter(names.values())

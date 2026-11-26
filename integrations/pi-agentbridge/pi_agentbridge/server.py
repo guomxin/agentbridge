@@ -358,7 +358,13 @@ class Host:
         waiting = self.cards.waiting(row["id"]) if row and row["state"] == "accepted" else None
         governed = self.coordinator.waiting(record, row["id"]) if row and self.coordinator else None
         waiting = governed or waiting
-        flags = {"hasPrivateCard": bool(waiting), "cardRevision": waiting["revision"] if waiting else 0}
+        pending = None
+        if (row and row["state"] in {"accepted", "completed"} and action in {"lookup", "events", "result-view"}
+                and self.level == "L3" and self.coordinator and key[2].startswith("telegram:")):
+            from nanobot_agentbridge.task_context import pending_query_for_run
+            pending = pending_query_for_run(self.user_directory(record), row["id"], key[1])
+        flags = {"hasPrivateCard": bool(waiting), "cardRevision": waiting["revision"] if waiting else 0,
+                 "hasResultView": bool(pending)}
         if action == "lookup":
             if not row:
                 return {"runId": None}
@@ -381,21 +387,18 @@ class Host:
                         task=waiting["task"], kind=governed["kind"] if governed else "credential")
                     if card:
                         return {**card, "cardRevision": waiting["revision"]}
-        if action == "result-view" and key[2].startswith("telegram:") and self.coordinator and self.level == "L3":
-            from nanobot_agentbridge.task_context import pending_query_for_run
+        if action == "result-view" and pending:
             from nanobot_agentbridge.telegram_presentation import normalize_result_view
-            pending = pending_query_for_run(self.user_directory(record), row["id"], key[1])
-            if pending:
-                async with self.private_session(self.worker_payload(record, row["id"])) as (mcp, meta, level):
-                    if level != "L3":
-                        return {"available": False}
-                    issued = await mcp.call_tool("agentbridge_result_view", {"operation":"issue","task_id":pending["taskId"]},
-                        meta={**meta, "io.agentbridge/task":{"taskId":pending["taskId"],"coordinatorLeaseVersion":str(pending["version"]),
-                              "endpointId":key[1], "conversationRef":key[3],"hostRunId":row["id"]}})
-                    view = normalize_result_view((issued.structuredContent or {}).get("resultView"), source_task_id=pending["taskId"],
-                            endpoint_id=key[1], allowed_origins=self.cards.origins) if not issued.isError else None
-                if view:
-                    return {"available":True, "resultView":view, "count":pending["count"], "complete":pending["complete"]}
+            async with self.private_session(self.worker_payload(record, row["id"])) as (mcp, meta, level):
+                if level != "L3":
+                    return {"available": False}
+                issued = await mcp.call_tool("agentbridge_result_view", {"operation":"issue","task_id":pending["taskId"]},
+                    meta={**meta, "io.agentbridge/task":{"taskId":pending["taskId"],"coordinatorLeaseVersion":str(pending["version"]),
+                          "endpointId":key[1], "conversationRef":key[3],"hostRunId":row["id"]}})
+                view = normalize_result_view((issued.structuredContent or {}).get("resultView"), source_task_id=pending["taskId"],
+                        endpoint_id=key[1], allowed_origins=self.cards.origins) if not issued.isError else None
+            if view:
+                return {"available":True, "resultView":view, "count":pending["count"], "complete":pending["complete"]}
         if action in {"card", "result-view"}:
             return {"available": False}
         raise HTTPException(404)

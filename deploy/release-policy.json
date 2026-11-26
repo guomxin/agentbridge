@@ -1,14 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "e9737ba5716e"
+    "e528647ee756"
   ],
-  "dataCompatibility": "reviewed-schema-transition",
-  "schemaTransitions": {
-    "agentbridge.db": {
-      "beforeSha256": "19d726100ca3c94f279b1898c10637b067a42aa68ed2bb12d20a7ce44a41a8f0",
-      "afterSha256": "7beef332b3cf8511a6c1ec15caa70f441984e112b936b06e9150ec85638bec2f"
-    }
-  },
-  "reason": "Pi adds a per-pair Workspace image delivery table and its indexes. Production schema-only rehearsal preserved all existing objects and the other three databases. Stop the Pi consumer and retain outstanding delivery and coordination ledgers when recovering a failed activation."
+  "dataCompatibility": "no-migration",
+  "reason": "Pi exposes the result selection card for an existing authorized operation on its original run. This projection uses the existing database schema."
 }

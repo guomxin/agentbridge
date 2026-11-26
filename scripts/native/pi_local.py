@@ -173,16 +173,27 @@ def check_predecessor(pub, spec, old, last):
     change = spec.get("routeTransition")
     if not change:
         return
-    if not old or old.name != change["fromRelease"] or pub.release != change["toRelease"]:
+    source = old
+    first_closed = (not old and change.get("fromAdapterVersion") and last.get("stage") == "rolled_back"
+                    and last.get("previous") is None and last.get("previousScopePresent") is False
+                    and (last.get("candidate") == change["fromRelease"] or
+                         last.get("candidate") == pub.release and last.get("routeTransition") == change))
+    if first_closed:
+        source = Path(spec["runtimeDir"]) / "releases" / change["fromRelease"]
+    if not source or source.name != change["fromRelease"] or pub.release != change["toRelease"]:
         raise ValueError("Pi route transition requires its reviewed predecessor and candidate")
-    confirmed = last.get("stage") == "confirmed" and last.get("candidate") == old.name
+    confirmed = last.get("stage") == "confirmed" and last.get("candidate") == source.name
     reverted = (last.get("stage") == "rolled_back" and last.get("candidate") == pub.release
-                and last.get("previous") == old.name and last.get("routeTransition") == change)
-    if not confirmed and not reverted:
+                and last.get("previous") == source.name and last.get("routeTransition") == change)
+    if not confirmed and not reverted and not first_closed:
         raise ValueError("Pi predecessor has no matching confirmed or restored transaction")
-    host = read(private_file(old / "host.json"))
+    host = read(private_file(source / "host.json"))
     if host["requiredLevel"] != change["fromLevel"] or host.get("telegramPilot") != change["fromTelegram"]:
         raise ValueError("Previous Pi level or private channel differs from the approved transition")
+    if change.get("fromAdapterVersion"):
+        metadata = tomllib.loads(run(["git", "show", source.name + ":integrations/pi-agentbridge/pyproject.toml"]))
+        if metadata["project"]["version"] != change["fromAdapterVersion"] or source.resolve() != source:
+            raise ValueError("Previous Pi archive or adapter version differs from the approved transition")
 
 
 def drain(pub, spec, definitions, remote):
@@ -232,12 +243,17 @@ def admission(pub, spec, mac, artifact, *, remote):
         save(state, record)
         domain = f"gui/{os.getuid()}"
         try:
-            issued = remote(pub, spec, "provision", **({"recovery": recovery} if recovery else {}))
-            configure(spec, mac, root, release, issued["bindings"])
+            patch_switch = (record.get("routeTransition") or {}).get("fromAdapterVersion")
+            if not patch_switch:
+                issued = remote(pub, spec, "provision", **({"recovery": recovery} if recovery else {}))
+                configure(spec, mac, root, release, issued["bindings"])
             remote(pub, spec, "tunnel_enable")
             drain(pub, spec, definitions, remote)
             if record.get("routeTransition"):
                 remote(pub, spec, "route_activate")
+            if patch_switch:
+                issued = remote(pub, spec, "provision", **({"recovery": recovery} if recovery else {}))
+                configure(spec, mac, root, release, issued["bindings"])
             identities = verify_subjects(spec, release)
             lifecycle.set_current(root, release)
             for label, (path, body, _) in definitions.items():

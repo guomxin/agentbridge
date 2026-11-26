@@ -15,6 +15,7 @@ class Delivery:
         self.record = record
         self.instance = host.instance
         self.coordinator = host.coordinator
+        self.commands = host.commands
         self.card_origins = host.cards.origins
         self.runs = self
         self.binding = json.dumps(binding_key(record), ensure_ascii=False)

@@ -384,3 +384,90 @@ def test_predeployment_cache_retests_a_matching_contract_without_archive_evidenc
         pi.verify_conformance(SimpleNamespace(commit=commit),spec,{"sha256":wheel})
     assert len(calls)==1 and "--formal" in calls[0]
     assert pi.archive_probe_matches(pi.read(cache))
+
+
+@pytest.mark.parametrize("first_closed", [False, True])
+def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path, monkeypatch, first_closed):
+    import hashlib
+    import os
+
+    _, args, ws, identities, _, _ = synthetic_admission(tmp_path, monkeypatch)
+    old = {**args["spec"], "hostType":"pi", "instanceId":"pi-patch", "routeRef":"pi-patch",
+           "adapterVersion":"0.1.0", "requiredLevel":"L3", "subjects":{"alice":"pi-a","bob":"pi-b"},
+           "telegram":{"botId":97001,"username":"pi_patch_bot","allowedSenders":{"alice":"501"}}}
+    config = tmp_path/"config"/"pi-pi-patch"
+    config.mkdir(mode=0o700)
+    original = central.route_document(config,old)
+    manifest = private(config/"routes.json", original.decode())
+    private(config/"service.token","fixture-service")
+    previous = {**args,"spec":old}
+    initial = central.execute({**previous,"action":"bind"})["bindings"]
+    if first_closed:
+        central.execute({**previous,"action":"rollback_scope"})
+    version = lambda: next(x for x in ws.hosts.admin_list() if x["instance_id"]==old["instanceId"])
+    revision = version()["revision"]
+    current = {**old,"adapterVersion":pi.ADAPTER}
+    candidate = "2"*12
+    updated = central.route_document(config,current)
+    transition = {"fromRelease":"1"*12,"toRelease":candidate,"fromLevel":"L3","fromTelegram":old["telegram"],
+                  "beforeSha256":hashlib.sha256(original).hexdigest(),"afterSha256":hashlib.sha256(updated).hexdigest(),
+                  "fromAdapterVersion":"0.1.0","fromRevision":revision}
+    request = {**args,"spec":{**current,"routeTransition":transition},"candidate":candidate}
+    def invoke(action, **extra):
+        return central.execute({**request, "action":action, **extra})
+    def stage():
+        with monkeypatch.context() as root:
+            root.setattr(os,"geteuid",lambda:0)
+            return invoke("stage",serviceSecret="fixture-service")
+
+    assert stage()["routeState"]=="predecessor"
+    assert manifest.read_bytes()==original and version()["adapter_version"]=="0.1.0"
+    if not first_closed:
+        replace = central.replace_route
+        def interrupt_after_rename(path, data, uid, gid):
+            replace(path, data, uid, gid)
+            if data == updated:
+                raise OSError("simulated failure after manifest rename")
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(central, "replace_route", interrupt_after_rename)
+            with pytest.raises(OSError, match="after manifest rename"):
+                invoke("route_activate")
+        assert manifest.read_bytes()==original and version()["revision"]==revision
+        wrong = {**transition,"fromRevision":revision+1}
+        with pytest.raises(ValueError,match="reviewed revision"):
+            central.execute({**request,"spec":{**current,"routeTransition":wrong},"action":"route_activate"})
+        assert manifest.read_bytes()==original
+    recovery = {}
+    if first_closed:
+        proof = {"sourceCandidate":transition["fromRelease"],"candidate":candidate,"attempt":"a"*32,
+                 "previousAttempt":None,"subjects":{}}
+        for item in initial:
+            binding = item["binding"]
+            proof["subjects"][binding["user_subject"]] = {**binding,
+                "fileDigest":hashlib.sha256(item["personalCredential"].encode()).hexdigest()}
+        proof["baseRevision"] = invoke("recovery_check",recovery=proof)["baseRevision"]
+        recovery = {"recovery":proof}
+    assert invoke("route_activate")["changed"] is True
+    assert invoke("route_activate")["changed"] is False
+    assert manifest.read_bytes()==updated and version()["adapter_version"]==pi.ADAPTER
+    issued = invoke("bind", **recovery)["bindings"]
+    assert [r["binding"] for r in initial] == [r["binding"] for r in issued]
+    if first_closed:
+        assert all(identities.verify(r["personalCredential"]) is None for r in initial)
+        assert all(identities.verify(r["personalCredential"]) for r in issued)
+    else:
+        assert issued==initial
+
+    assert invoke("route_restore")["changed"] is True
+    assert manifest.read_bytes()==original and version()["adapter_version"]=="0.1.0"
+    if first_closed:
+        assert invoke("rollback_scope",**recovery)["reverted"]
+        assert version()["state"]=="revoked" and all(identities.verify(r["personalCredential"]) is None for r in issued)
+    else:
+        assert central.execute({**previous,"action":"bind"})["bindings"]==initial
+    assert invoke("route_restore")["changed"] is False
+    with ws._connect() as db:
+        db.execute("UPDATE workspace_host_instances SET revision=revision+1 WHERE instance_id=?",(old["instanceId"],))
+    with pytest.raises(ValueError, match="revision"):
+        invoke("route_activate")
+    assert manifest.read_bytes()==original

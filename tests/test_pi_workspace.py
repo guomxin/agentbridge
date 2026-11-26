@@ -39,7 +39,7 @@ def pi(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTBRIDGE_PI_ROUTES_FILE", str(route_file))
     spec = {
         "instanceId": "pi-office",
-        "adapterVersion": "0.1.0",
+        "adapterVersion": "0.1.1",
         "tokenFile": str(token),
         "url": "http://127.0.0.1:1",
         "subjects": {"user-a": "pi-a", "user-b": "pi-b"},
@@ -240,7 +240,7 @@ def test_stop_generation_follows_accepted_original_run(pi):
 def test_pi_authenticated_transport_progress_and_lookup(pi):
     answers = {
         "available": True,
-        "adapterVersion": "0.1.0",
+        "adapterVersion": "0.1.1",
         "capabilities": ["chat"],
         "hostType": "pi",
         "sdkVersion": "1.6.0",

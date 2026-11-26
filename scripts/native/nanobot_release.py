@@ -286,7 +286,9 @@ def remote_request(pub, remote_spec, action, **extra):
         + (ROOT / "scripts/native/nanobot_remote.py").read_text()
     )
     runner = "import base64,sys;exec(compile(base64.b64decode(sys.stdin.readline()),'<reviewed-nanobot-release>','exec'))"
-    if action in ("bind", "probe", "probe_predecessor", "rollback_scope", "recovery_check", "name_check", "name_apply", "name_restore"):
+    patch_switch = (remote_spec.get("hostType") == "pi" and (remote_spec.get("routeTransition") or {}).get("fromAdapterVersion")
+                    and action in {"route_activate","route_restore"})
+    if patch_switch or action in ("bind", "probe", "probe_predecessor", "rollback_scope", "recovery_check", "name_check", "name_apply", "name_restore"):
         args = [
             "sudo",
             "-u",

@@ -13,6 +13,7 @@ import time
 from agentbridge.core.business_content_identity import principal_binding
 from agentbridge.core.capability import CapabilitySpec
 from agentbridge.core.business_watches import BusinessWatchError, BusinessWatchStore, WATCH_STATES
+from agentbridge.core.oa_digest_settings import telegram_private_label
 
 STATE_CAPABILITY = 'oa.workflow.state.get'
 WATCH_PERMISSION = 'oa.workflow.watch'
@@ -83,8 +84,13 @@ class BusinessWatchService:
             name=endpoint.get('label')
             name=name.strip()[:120] if isinstance(name,str) else ''
             if name==channel: name=''
-            endpoint['_watch_display']=f'{channel} · {name}' if name else channel
-            endpoint['_watch_named']=bool(name)
+            if (endpoint['agent_host'] == 'pi' and endpoint['client_type'] == 'telegram'
+                    and name.casefold() in {'', 'telegram', 'telegram 私聊'}):
+                display = telegram_private_label(endpoint['agent_host'])
+            else:
+                display = f'{channel} · {name}' if name else channel
+            endpoint['_watch_display'] = display
+            endpoint['_watch_named'] = display != channel
             display_counts[endpoint['_watch_display']]=display_counts.get(endpoint['_watch_display'],0)+1
         endpoints=[]
         for endpoint in owned:
