@@ -27,7 +27,7 @@ IMPLEMENTATION = CoordinatorImplementation(
 )
 
 
-PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.6", ("web_private", "telegram_private"))
+PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.7", ("web_private", "telegram_private"))
 
 
 class PersonalIdentity(IdentityConfig):
@@ -205,7 +205,10 @@ class BoundDriver(ReferenceTaskDriver):
                 return
             self.journal.execute("UPDATE coordinated SET phase='resuming' WHERE run=?", (self.req["runId"],))
         try:
-            await super().resume_interaction(local_task_id, interaction_id)
+            fixed_pi = (self.implementation.name == "pi" and self.req.get("commandKind") == PREPARE
+                        and not self.req.get("boundPlanId") and not self.journal.execute(
+                            "SELECT 1 FROM batch_scope WHERE run=?", (self.req["runId"],)).fetchone())
+            await super().resume_interaction(local_task_id, interaction_id, with_observation=fixed_pi)
         except Exception:
             if self.req.get("commandKind") == QUERY:
                 with self.journal:
@@ -243,7 +246,7 @@ class BoundDriver(ReferenceTaskDriver):
         if not await finish_query(self, local_task_id, task, command):
             raise RuntimeError("Query closure has no terminal central receipt")
 
-    async def process_tool_result(self, local_task_id, result, *, resumed_from=None):
+    async def process_tool_result(self, local_task_id, result, *, resumed_from=None, resume_nonce=None):
         if self.req.get("boundPlanId"):
             from .bound_plans import current_plan_result
             result = await current_plan_result(self, local_task_id, result)
@@ -287,7 +290,7 @@ class BoundDriver(ReferenceTaskDriver):
                     (self.req["runId"], batch["batchId"]),
                 )
         await super().process_tool_result(
-            local_task_id, result, resumed_from=resumed_from
+            local_task_id, result, resumed_from=resumed_from, resume_nonce=resume_nonce
         )
         if not resumed_from:
             return

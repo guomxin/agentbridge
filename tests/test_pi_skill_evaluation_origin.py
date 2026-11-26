@@ -39,7 +39,7 @@ def evaluation(pi):
         return {
             "instance": "pi-office",
             "token_id": identity["token_id"],
-            "version": "0.1.6",
+            "version": "0.1.7",
             "source": {
                 k: value[k]
                 for k in ("endpointId", "endpointKey", "conversationRef", "pairingRef")
@@ -54,7 +54,7 @@ def evaluation(pi):
     )["profiles"][0]["value"]
     with service.workspace._connect() as db:
         db.execute(
-            "INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.6','L3','fixture','fixture','now')"
+            "INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.7','L3','fixture','fixture','now')"
         )
     assert (
         service.negotiate_host(
@@ -63,7 +63,7 @@ def evaluation(pi):
             profile={
                 **profile,
                 "hostInstanceId": "pi-office",
-                "implementation": {"name": "pi", "version": "0.1.6"},
+                "implementation": {"name": "pi", "version": "0.1.7"},
             },
         )["acceptedLevel"]
         == "L3"

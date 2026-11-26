@@ -58,6 +58,7 @@ class ReferenceTaskDriver:
         self.instance_id = instance_id or host_instance_id()
         self.implementation = implementation
         self._load_tool_catalog = load_tool_catalog
+        self._pi_task_versions: dict[str, int] = {}
         self._clients = {
             identity.label: AgentBridgeMcpClient(
                 mcp_url=mcp_url,
@@ -362,6 +363,7 @@ class ReferenceTaskDriver:
         host_run_id: str | None = None,
         tool_call_id: str | None = None,
         recovery_class: str = "unsafe",
+        resume_nonce: str | None = None,
     ) -> McpCallResult:
         task = self.state.get_task(local_task_id)
         if not task.get("task_id") or not task.get("endpoint_id"):
@@ -369,20 +371,16 @@ class ReferenceTaskDriver:
         lease_version = int(
             (lease or {}).get("version") or task.get("lease_version") or 0
         )
+        meta = task_call_meta(
+            implementation=self.implementation, task_id=task["task_id"], lease_version=lease_version,
+            host_run_id=host_run_id, tool_call_id=tool_call_id, endpoint_id=task["endpoint_id"],
+            conversation_ref=task["conversation_ref"], instance_id=self.instance_id,
+        )
+        if resume_nonce:
+            from agentbridge.core.pi_resume_observation import META_KEY
+            meta[META_KEY] = resume_nonce
         return await self.client(task["identity_label"]).call_tool(
-            tool_name,
-            dict(arguments),
-            meta=task_call_meta(
-                implementation=self.implementation,
-                task_id=task["task_id"],
-                lease_version=lease_version,
-                host_run_id=host_run_id,
-                tool_call_id=tool_call_id,
-                endpoint_id=task["endpoint_id"],
-                conversation_ref=task["conversation_ref"],
-                instance_id=self.instance_id,
-            ),
-            recovery_class=recovery_class,
+            tool_name, dict(arguments), meta=meta, recovery_class=recovery_class,
         )
 
     async def renew_coordinator_lease(
@@ -418,6 +416,7 @@ class ReferenceTaskDriver:
         result: McpCallResult,
         *,
         resumed_from: str | None = None,
+        resume_nonce: str | None = None,
     ) -> None:
         task = self.state.get_task(local_task_id)
         payload = result.payload()
@@ -432,7 +431,18 @@ class ReferenceTaskDriver:
         )
         if not isinstance(interaction, Mapping) and interaction_ids:
             interaction = {"interactionId": interaction_ids[-1]}
-        if operation_ids or interaction_ids:
+        observed = False
+        if resume_nonce and resumed_from and self.implementation.name == "pi" and not result.is_error:
+            from agentbridge.core.pi_resume_observation import META_KEY, matches
+            observed = matches(result.private_meta.get(META_KEY), result.structured, nonce=resume_nonce,
+                               private_interaction=result.private_meta.get(PRIVATE_INTERACTION_META_KEY),
+                               resumed_from=resumed_from, task_id=task["task_id"],
+                               subject=self.identities.get(task["identity_label"]).expected_subject,
+                               endpoint=task["endpoint_id"], conversation=task["conversation_ref"],
+                               minimum_version=self._pi_task_versions.get(local_task_id, 0))
+            if observed:
+                self._pi_task_versions[local_task_id] = result.private_meta[META_KEY]["taskVersion"]
+        if (operation_ids or interaction_ids) and not observed:
             await self.call_for_task(
                 local_task_id,
                 "agentbridge_host_task_observe",
@@ -612,7 +622,10 @@ class ReferenceTaskDriver:
         self,
         local_task_id: str,
         interaction_id: str,
+        *,
+        with_observation: bool = False,
     ) -> None:
+        options = {"resume_nonce": uuid4().hex} if with_observation else {}
         lease = await self.renew_coordinator_lease(local_task_id)
         result = await self.call_for_task(
             local_task_id,
@@ -623,12 +636,14 @@ class ReferenceTaskDriver:
             },
             lease=lease,
             recovery_class="unsafe",
+            **options,
         )
         self._interaction_urls.pop(local_task_id, None)
         await self.process_tool_result(
             local_task_id,
             result,
             resumed_from=interaction_id,
+            **options,
         )
 
     async def close_interaction(
@@ -735,6 +750,14 @@ class ReferenceTaskDriver:
             recovery_class="read",
         )
         snapshot = result.payload()
+        if self.implementation.name == "pi" and not result.is_error:
+            current = snapshot.get("task") or {}
+            version = current.get("version")
+            if (type(version) is int and current.get("taskId") == task["task_id"]
+                    and current.get("userSubject") == identity.expected_subject
+                    and current.get("originEndpointId") == task["endpoint_id"]
+                    and current.get("activeConversationRef") == task["conversation_ref"]):
+                self._pi_task_versions[local_task_id] = max(version, self._pi_task_versions.get(local_task_id, 0))
         events = snapshot.get("events") or []
         maximum_sequence = int(task.get("last_sequence") or 0)
         for event in events:

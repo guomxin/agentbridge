@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agentbridge.core import pi_resume_observation
 from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS
 from agentbridge.core.skill_contracts import SkillAuthoringData
 from agentbridge.core.skill_actions import SkillActionName
@@ -556,6 +557,35 @@ async def _require_registered_host_call(
         require_coordinator_lease=require_coordinator_lease,
     )
     return host_context, registration
+
+
+async def _pi_resume_receipt(ctx, service, identity_store, subject, task_id, interaction_id, response):
+    nonce = _request_meta(ctx).get(pi_resume_observation.META_KEY)
+    if (not isinstance(nonce, str) or len(nonce) != 32 or any(c not in "0123456789abcdef" for c in nonce)
+            or _request_task_id(ctx) != task_id or response.get("taskId") != task_id
+            or response.get("resumedFromInteractionId") != interaction_id):
+        return None
+    references = pi_resume_observation.fixed_references(response)
+    if not references:
+        return None
+
+    # Reauthorize exactly as a subsequent host_task_observe request would.
+    # A failure here cannot undo an already completed resume.
+    identity = _request_identity(identity_store)
+    if identity["user_subject"] != subject:
+        return None
+    await _require_registered_host_call(ctx, service=service, identity=identity, agent_host="pi",
+                                        task_id=task_id, require_coordinator_lease=True)
+    task = await asyncio.to_thread(service.tasks.get_task, task_id, user_subject=subject)
+    command = (task.get("summary") or {}).get("command") or {}
+    runtime = normalize_host_call_context(_request_meta(ctx).get(TASK_CONTEXT_META_KEY))
+    if (command.get("kind") != "oa_pending_prepare" or task["agent_host"] != "pi"
+            or task["origin_endpoint_id"] != runtime.get("endpointId")
+            or task["active_conversation_ref"] != runtime.get("conversationRef")):
+        return None
+    observed = await asyncio.to_thread(service.observe_host_task, user_subject=subject, task_id=task_id,
+                                       operation_ids=references[0], interaction_ids=references[1])
+    return pi_resume_observation.receipt_for(observed, nonce, interaction_id)
 
 
 @dataclass(frozen=True)
@@ -5675,7 +5705,20 @@ def create_central_mcp_server(
             interaction_id=interaction_id,
             idempotency_key=idempotency_key,
         )
-        return package_interaction_result(response)
+        packaged = package_interaction_result(response)
+        if task_id and registration.get("agentHost") == "pi" and pi_resume_observation.META_KEY in _request_meta(ctx):
+            try:
+                receipt = await _pi_resume_receipt(ctx, service, identity_store, identity["user_subject"],
+                                                   task_id, interaction_id, response)
+            except Exception:
+                # The consumer falls back to the original authenticated observation.
+                receipt = None
+            if receipt:
+                if not isinstance(packaged, CallToolResult):
+                    packaged = CallToolResult(content=[TextContent(type="text", text=json.dumps(response, ensure_ascii=False))],
+                                              structuredContent=response)
+                packaged.meta = {**(packaged.meta or {}), pi_resume_observation.META_KEY: receipt}
+        return packaged
 
     @mcp.tool(
         name="agentbridge_operation_get",
