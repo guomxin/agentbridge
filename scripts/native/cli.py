@@ -43,6 +43,8 @@ def main():
     rollback = publish.add_mutually_exclusive_group()
     rollback.add_argument('--rollback-nanobot', action='store_true', help='Restore the recorded NanoBot host after an approved publication')
     rollback.add_argument('--rollback-pi', action='store_true', help='Restore the recorded Pi host after an approved publication')
+    rollback.add_argument('--restore-pi-from', metavar='CHECKOUT',
+                          help='Recover the same published Pi host from its verified prior checkout')
     publish.add_argument('--reuse-validation', action='store_true')
     host = commands.add_parser('host')
     host.add_argument('action', choices=['render', 'review', 'register', 'status', 'start', 'stop', 'restart'])
@@ -62,9 +64,13 @@ def main():
         elif args.command == 'publish':
             if args.apply and (not args.host_profile or not args.authorization):
                 raise ValueError('--apply requires --host-profile and --authorization')
-            from publish import Publisher
-            publisher = Publisher(args)
-            result = publisher.execute() if args.apply else publisher.plan(offline=args.offline)
+            if args.restore_pi_from:
+                from pi_same_release import restore_published
+                result = restore_published(args)
+            else:
+                from publish import Publisher
+                publisher = Publisher(args)
+                result = publisher.execute() if args.apply else publisher.plan(offline=args.offline)
         else:
             import lifecycle
             config = lifecycle.settings(args.profile)
