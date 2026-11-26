@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/reference-host"))
-from reference_host.bound_commands import PENDING_LIST, QUERY, finish_query, query_result
+from reference_host.bound_commands import PENDING_LIST, PREPARE, QUERY, finish_query, query_result
 from reference_host.bound_coordinator import BoundDriver, IMPLEMENTATION, PI_IMPLEMENTATION
 
 
@@ -143,6 +143,63 @@ def test_lost_query_resume_reconciles_by_read_only_snapshot(bound, monkeypatch):
     resume.assert_awaited_once()
     assert b.driver.journal.execute("SELECT phase FROM coordinated").fetchone()[0]=="verified"
     assert b.api.call_tool.await_args.args[0]=="agentbridge_operation_get"
+
+
+@pytest.mark.parametrize(("host", "command", "plan", "batch", "optimized"), [
+    ("pi", PREPARE, False, False, True),
+    ("pi", None, False, False, False),
+    ("pi", QUERY, False, False, False),
+    ("pi", PREPARE, True, False, False),
+    ("pi", PREPARE, False, True, False),
+    ("nanobot", PREPARE, False, False, False),
+    ("nanobot", None, False, False, False),
+])
+def test_only_fixed_single_pi_resume_opts_into_observation(bound, monkeypatch, host, command, plan, batch, optimized):
+    from reference_host import bound_coordinator
+    from reference_host.task_driver import ReferenceTaskDriver
+
+    b = bound
+    b.driver.implementation = PI_IMPLEMENTATION if host == "pi" else IMPLEMENTATION
+    b.task.update(agentHost=host, status="waiting_user")
+    b.driver.req["commandKind"] = command
+    if plan:
+        b.driver.req["boundPlanId"] = "original-plan"
+    b.driver.journal.execute("CREATE TABLE batch_scope(run TEXT PRIMARY KEY,batch TEXT NOT NULL)")
+    if batch:
+        b.driver.journal.execute("INSERT INTO batch_scope VALUES('fixed','original-batch')")
+    b.driver.journal.execute("UPDATE coordinated SET interaction='login',kind='credential',phase='waiting'")
+    b.driver.check_telegram = AsyncMock()
+    skill = AsyncMock()
+    monkeypatch.setattr(bound_coordinator, "check_skill", skill)
+    driver = object.__new__(BoundDriver)
+    driver.__dict__.update(b.driver.__dict__)
+
+    def claimed_before_resume(local_task_id, interaction_id):
+        assert (local_task_id, interaction_id) == ("local", "login")
+        assert b.driver.journal.execute("SELECT interaction FROM resumes").fetchall() == [("login",)]
+        assert b.driver.journal.execute("SELECT phase FROM coordinated").fetchone() == ("resuming",)
+        driver.check_telegram.assert_awaited_once()
+        skill.assert_awaited_once_with(driver)
+
+    async def legacy_resume(local_task_id, interaction_id):
+        claimed_before_resume(local_task_id, interaction_id)
+
+    async def fixed_pi_resume(local_task_id, interaction_id, *, with_observation):
+        assert with_observation is True
+        claimed_before_resume(local_task_id, interaction_id)
+
+    resume = AsyncMock(side_effect=fixed_pi_resume if optimized else legacy_resume)
+    monkeypatch.setattr(ReferenceTaskDriver, "resume_interaction", resume)
+    asyncio.run(driver.resume_interaction("local", "login"))
+    if command == QUERY:
+        with pytest.raises(PermissionError):
+            asyncio.run(driver.resume_interaction("local", "login"))
+    else:
+        asyncio.run(driver.resume_interaction("local", "login"))
+    if optimized:
+        resume.assert_awaited_once_with("local", "login", with_observation=True)
+    else:
+        resume.assert_awaited_once_with("local", "login")
 
 
 @pytest.fixture

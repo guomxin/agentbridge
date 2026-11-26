@@ -361,7 +361,7 @@ class HostContractStore:
             ("pi", "0.1.4", "L3", "sha256:a9c4775f0f2d23052b831c18c66bf8de633b61583576df32029c3b81a59baeb5"),
             ("pi", "0.1.5", "L3", "sha256:b83707ad1dfe04f636d79bfa6ac43348c84e6d805e9c68b1f090b4093635d2e9"),
             ("pi", "0.1.6", "L3", "sha256:cb2c90bb19fcd1e85f707feed99f6ce6a4737250988c2a3e64bc68e43557b28d"),
-            ("pi", "0.1.7", "L3", "sha256:11c0f98b3b7b3664f2bf0fdbd35955eec8fc9768d2176384971f1b96c9e8b087"),
+            ("pi", "0.1.7", "L3", "sha256:7ce89797fea1904dd53e9e8c40d57686b4fe2fa1d23eeefb21b4e65de3039a48"),
             ("nanobot", "0.2.0", "L2", "nanobot-private-credential-poll-resume-v1"),
             ("nanobot", "0.3.0", "L3", "sha256:9046f611fd05c7a8ebafb4a3af979c77cdf12019d1309ca2be0c0e6b6d8beb34"),
             ("openclaw", "0.4.71", "L3", "shared-contract-h01-h29-task-plan-v1"),

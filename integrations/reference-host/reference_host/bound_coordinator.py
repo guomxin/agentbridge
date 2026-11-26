@@ -208,7 +208,10 @@ class BoundDriver(ReferenceTaskDriver):
             fixed_pi = (self.implementation.name == "pi" and self.req.get("commandKind") == PREPARE
                         and not self.req.get("boundPlanId") and not self.journal.execute(
                             "SELECT 1 FROM batch_scope WHERE run=?", (self.req["runId"],)).fetchone())
-            await super().resume_interaction(local_task_id, interaction_id, with_observation=fixed_pi)
+            if fixed_pi:
+                await super().resume_interaction(local_task_id, interaction_id, with_observation=True)
+            else:
+                await super().resume_interaction(local_task_id, interaction_id)
         except Exception:
             if self.req.get("commandKind") == QUERY:
                 with self.journal:
