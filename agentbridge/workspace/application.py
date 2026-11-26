@@ -1633,10 +1633,24 @@ class WorkspaceApplication:
         client = self.host_routes.get(binding["route_ref"])
         if not client:
             raise GatewayRequestError("HOST_NOT_CONFIGURED", "原宿主实例尚未配置连接。")
-        from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
+        from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient, WorkspacePiGatewayClient
         if isinstance(client, NanoBotGatewayClient) and (
                 client.host_type != binding["host_type"] or client.instance_id != binding["instance_id"]):
             raise GatewayRequestError("HOST_BINDING_UNAVAILABLE", "宿主连接与原实例绑定不符。")
+        if isinstance(client, WorkspacePiGatewayClient):
+            with self.store._connect() as db:
+                reviewed = db.execute(
+                    """SELECT h.adapter_version FROM workspace_host_instances h
+                       JOIN workspace_host_bindings b ON b.instance_id=h.instance_id
+                       JOIN workspace_accounts a ON a.account_id=b.account_id
+                       WHERE h.instance_id=:instance_id AND h.host_type='pi' AND h.route_ref=:route_ref
+                       AND h.state IN ('enabled','draining') AND a.state='active' AND a.user_subject=:user_subject
+                       AND b.endpoint_id=:endpoint_id AND b.endpoint_key=:endpoint_key
+                       AND b.session_key=:session_key AND b.credential_ref=:credential_ref""", binding,
+                ).fetchone()
+            if not reviewed:
+                raise GatewayRequestError("HOST_BINDING_UNAVAILABLE", "原 Pi 实例的登记已失效。")
+            return client.for_binding(binding, reviewed["adapter_version"])
         return client
 
     def _run_evidence(self, dispatch: dict, run_ref: str) -> dict:
@@ -2422,6 +2436,8 @@ def _may_have_reached_host(error: GatewayRequestError) -> bool:
     stage = _safe_text(error.details.get("stage"), 80)
     if stage in _HOST_SAFE_PRE_ACCEPT_STAGES:
         return False
+    if error.code == "PI_ADAPTER_VERSION_MISMATCH":
+        return stage == "request"
     return error.code in {
         "GATEWAY_CONNECTION_CLOSED",
         "GATEWAY_RESPONSE_INVALID",

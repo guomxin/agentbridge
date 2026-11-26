@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .gateway import GatewayRequestError
+from .host_instances import _alias, _label
 
 
 def _private_text(path: Path) -> str:
@@ -58,6 +59,18 @@ def route_specs_for(host_type: str) -> dict:
     if host_type == "pi":
         return load_pi_route_specs()
     return {}
+
+
+def route_subjects(spec: dict) -> dict:
+    subjects = spec.get("subjects", {})
+    if not isinstance(subjects, dict):
+        raise ValueError("invalid principal mapping")
+    for subject, ref in subjects.items():
+        _label(subject, "user subject", 256)
+        _alias(ref, "credential")
+    if len(set(subjects.values())) != len(subjects):
+        raise ValueError("each principal requires a distinct personal credential reference")
+    return subjects
 
 
 def pi_telegram_sender(spec: dict, subject: str, bot=None) -> str | None:
@@ -166,7 +179,8 @@ class NanoBotGatewayClient:
             if self.host_type == "pi" and result.get("hostType") != self.host_type:
                 raise ValueError("Unexpected host type")
             if self.host_type == "pi" and action != "ready" and result.get("adapterVersion") != self.adapter_version:
-                raise GatewayRequestError("PI_ADAPTER_VERSION_MISMATCH", "Pi 返回的适配器版本与部署配置不符。")
+                raise GatewayRequestError("PI_ADAPTER_VERSION_MISMATCH", "Pi 返回的适配器版本与部署配置不符。",
+                                          {"stage": "request"})
             return result
         except (TimeoutError, OSError, http.client.HTTPException, ValueError):
             raise GatewayRequestError(
@@ -459,11 +473,38 @@ class PiGatewayClient(NanoBotGatewayClient):
         return receipt["state"]
 
 
+class WorkspacePiGatewayClient(PiGatewayClient):
+    """Resolve a deployed Pi version at the point of using the original Workspace binding."""
+
+    def for_binding(self, binding, version):
+        try:
+            routes = load_pi_route_specs()
+            spec = routes[binding["route_ref"]]
+            subjects = route_subjects(spec)
+            if not isinstance(spec.get("url"), str):
+                raise ValueError("Pi route URL required")
+            current = PiGatewayClient.from_spec(spec)
+            if (
+                current.instance_id != self.instance_id
+                or current.adapter_version != version
+                or current.port != self.port
+                or current.token_file != self.token_file
+                or not current.token_file.is_absolute()
+                or subjects[binding["user_subject"]] != binding["credential_ref"]
+                or sum(row.get("instanceId") == self.instance_id for row in routes.values()) != 1
+            ):
+                raise ValueError("Pi route does not match the registered Workspace binding")
+        except (OSError, KeyError, TypeError, ValueError):
+            raise GatewayRequestError("HOST_BINDING_UNAVAILABLE", "原 Pi 实例的受控连接与账号绑定不符。",
+                                      {"stage": "bind"}) from None
+        return self if current.adapter_version == self.adapter_version else current
+
+
 def configured_adapters():
     """Yield the same reviewed manifest entries to both the runtime and admin catalog."""
     aliases = {"openclaw-default"}
     instances = {"openclaw-default"}
-    for client_type in (NanoBotGatewayClient, PiGatewayClient):
+    for client_type in (NanoBotGatewayClient, WorkspacePiGatewayClient):
         for alias, spec in route_specs_for(client_type.host_type).items():
             instance = spec["instanceId"]
             if alias in aliases or instance in instances:
