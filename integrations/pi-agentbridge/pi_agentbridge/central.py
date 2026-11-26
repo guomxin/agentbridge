@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import timedelta
+import hashlib
 import json
 import ssl
 
@@ -206,7 +207,7 @@ def declared_profile(spec):
 
 
 @asynccontextmanager
-async def connect(spec, record, token, *, catalog=True):
+async def registered_session(spec, token):
     tls = ssl.create_default_context(cafile=spec.get("caFile"))
     def client_factory(headers=None, timeout=None, auth=None):
         return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, verify=tls,
@@ -222,58 +223,111 @@ async def connect(spec, record, token, *, catalog=True):
             registered = await session.call_tool("agentbridge_host_register", {}, meta={**meta, "io.agentbridge/host-profile": profile})
             if registered.isError:
                 raise PermissionError("Pi registration failed")
-            identity = await session.call_tool("agentbridge_host_identity_profile", {"agent_host": "pi"}, meta=meta)
-            payload = identity.structuredContent or {}
-            host = payload.get("host") or {}
-            if (identity.isError or (payload.get("identity") or {}).get("userSubject") != record["user_subject"]
-                    or host.get("hostInstanceId") != instance or host.get("hostVersion") != VERSION
-                    or host.get("acceptedLevel") not in profile["levels"]
-                    or host.get("acceptedLevel") != spec.get("requiredLevel", "L1")):
-                raise PermissionError("Unexpected identity or Pi compatibility level")
-            allowed = payload.get("agentToolAccess", {}).get("allowedToolNames")
-            if not isinstance(allowed, list) or not all(isinstance(v, str) for v in allowed):
-                raise PermissionError("Missing current subject permissions")
-            level = host["acceptedLevel"]
-            if not catalog:
-                yield CentralTools(session, meta, {}, level, record["user_subject"])
-                return
-            candidates = L1_READS if level == "L1" else L1_READS | L2_BUSINESS_READS | LOGINS | {s + "_session_status" for s in SYSTEMS}
-            contextual_reads, governed, private_names, file_tools = set(), {}, set(), set()
-            if level == "L3":
-                from nanobot_agentbridge.business_reads import BUSINESS_READS, CONTEXT_FREE_READS
-                from nanobot_agentbridge.watch_actions import WATCH_MUTATIONS
-                contextual_reads = BUSINESS_READS - CONTEXT_FREE_READS
-                contracts = payload.get("controlledPrepares") or {}
-                governed = {k: v for k, v in contracts.items() if k in allowed and isinstance(v, dict)
-                            and v.get("prepareCapability") and v.get("commitCapability")}
-                candidates = candidates.union(BUSINESS_READS, governed, {PLAN, PLAN_CATALOG, "agentbridge_skill_catalog", "agentbridge_skill_get"})
-                private_names = set(WATCH_MUTATIONS)
-                if record["endpoint_key"].startswith("telegram:"):
-                    from nanobot_agentbridge.file_generation import FILE_TOOLS, SEARCH
-                    private_names.add("agentbridge_skill_authoring")
-                    file_tools = FILE_TOOLS | {SEARCH}
-                candidates = candidates.union(private_names, file_tools)
-            names = candidates.intersection(allowed) | {"agentbridge_server_profile"}
-            definitions, cursor, seen = {}, None, set()
-            while True:
-                page = await session.list_tools(cursor=cursor)
-                for tool in page.tools:
-                    if tool.name in names and (tool.name in LOGINS | private_names | file_tools or tool.name in governed or tool.name in {PLAN, "agentbridge_skill_get"} or tool.annotations and tool.annotations.readOnlyHint is True):
-                        schema = tool.inputSchema
-                        if tool.name in LOGINS:
-                            schema = {"type":"object", "properties":{}, "additionalProperties":False}
-                        elif tool.name in governed or tool.name == PLAN:
-                            schema = {**schema, "properties": {k:v for k,v in schema.get("properties", {}).items() if k not in PROTECTED},
-                                      "required": [k for k in schema.get("required", []) if k not in PROTECTED], "additionalProperties": False}
-                        definitions[tool.name] = {"name": tool.name, "description": tool.description or tool.name,
-                                                  "parameters": schema}
-                cursor = page.nextCursor
-                if cursor is None:
-                    break
-                if cursor in seen:
-                    raise ValueError("Repeated MCP catalog cursor")
-                seen.add(cursor)
-            tools = CentralTools(session, meta, definitions, level, record["user_subject"], governed, contextual_reads)
-            tools.origins = spec.get("trustedCardOrigins", [])
-            tools.file_tools = file_tools
-            yield tools
+            yield session, meta
+
+
+async def checked_identity(session, meta, spec, subject):
+    instance = spec["instanceId"]
+    profile = declared_profile(spec)
+    identity = await session.call_tool("agentbridge_host_identity_profile", {"agent_host": "pi"}, meta=meta)
+    payload = identity.structuredContent or {}
+    host = payload.get("host") or {}
+    if (identity.isError or (payload.get("identity") or {}).get("userSubject") != subject
+            or host.get("hostInstanceId") != instance or host.get("hostVersion") != VERSION
+            or host.get("acceptedLevel") not in profile["levels"]
+            or host.get("acceptedLevel") != spec.get("requiredLevel", "L1")):
+        raise PermissionError("Unexpected identity or Pi compatibility level")
+    allowed = payload.get("agentToolAccess", {}).get("allowedToolNames")
+    if not isinstance(allowed, list) or not all(isinstance(v, str) for v in allowed):
+        raise PermissionError("Missing current subject permissions")
+    return payload
+
+
+class ControlSessions:
+    """Reuse Pi MCP transports while checking the current identity on every checkout."""
+
+    def __init__(self, spec, read_bearer):
+        from nanobot_agentbridge.session_pool import McpSessionPool
+
+        self.spec = spec
+        self.read_bearer = read_bearer
+        self.pool = McpSessionPool(session_factory=self.open_transport)
+
+    @asynccontextmanager
+    async def open_transport(self, request):
+        token = self.read_bearer(request["tokenFile"])
+        async with registered_session(self.spec, token) as (session, meta):
+            # Kept only inside the pool. The digest never enters MCP metadata.
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            yield session, {**meta, "_pi_local_token_hash": token_hash}, self.spec.get("requiredLevel", "L1")
+
+    @asynccontextmanager
+    async def borrow(self, record, *, lane="control"):
+        spec = self.spec
+        request = {"subject": record["user_subject"], "endpointKey": record["endpoint_key"],
+                   "instance": spec["instanceId"], "mcpUrl": spec["mcpUrl"], "caFile": spec.get("caFile"),
+                   "tokenFile": record["tokenFile"]}
+        # A re-pair can retain the same textual Telegram endpoint. Keep different
+        # central endpoint IDs, conversation refs and pairing generations apart.
+        slot = json.dumps([lane, record["endpoint_id"], record["session_key"], record["credential_ref"]])
+        async with self.pool.session(request, lane=slot) as (session, meta, _):
+            token = self.read_bearer(record["tokenFile"])
+            if meta.pop("_pi_local_token_hash") != hashlib.sha256(token.encode()).hexdigest():
+                raise PermissionError("Pi credential changed while waiting for its session")
+            current = await checked_identity(session, meta, spec, record["user_subject"])
+            yield CentralTools(session, meta, {}, current["host"]["acceptedLevel"], record["user_subject"])
+
+    async def close(self):
+        await self.pool.close()
+
+
+@asynccontextmanager
+async def connect(spec, record, token, *, catalog=True):
+    async with registered_session(spec, token) as (session, meta):
+        payload = await checked_identity(session, meta, spec, record["user_subject"])
+        host = payload["host"]
+        allowed = payload["agentToolAccess"]["allowedToolNames"]
+        level = host["acceptedLevel"]
+        if not catalog:
+            yield CentralTools(session, meta, {}, level, record["user_subject"])
+            return
+        candidates = L1_READS if level == "L1" else L1_READS | L2_BUSINESS_READS | LOGINS | {s + "_session_status" for s in SYSTEMS}
+        contextual_reads, governed, private_names, file_tools = set(), {}, set(), set()
+        if level == "L3":
+            from nanobot_agentbridge.business_reads import BUSINESS_READS, CONTEXT_FREE_READS
+            from nanobot_agentbridge.watch_actions import WATCH_MUTATIONS
+            contextual_reads = BUSINESS_READS - CONTEXT_FREE_READS
+            contracts = payload.get("controlledPrepares") or {}
+            governed = {k: v for k, v in contracts.items() if k in allowed and isinstance(v, dict)
+                        and v.get("prepareCapability") and v.get("commitCapability")}
+            candidates = candidates.union(BUSINESS_READS, governed, {PLAN, PLAN_CATALOG, "agentbridge_skill_catalog", "agentbridge_skill_get"})
+            private_names = set(WATCH_MUTATIONS)
+            if record["endpoint_key"].startswith("telegram:"):
+                from nanobot_agentbridge.file_generation import FILE_TOOLS, SEARCH
+                private_names.add("agentbridge_skill_authoring")
+                file_tools = FILE_TOOLS | {SEARCH}
+            candidates = candidates.union(private_names, file_tools)
+        names = candidates.intersection(allowed) | {"agentbridge_server_profile"}
+        definitions, cursor, seen = {}, None, set()
+        while True:
+            page = await session.list_tools(cursor=cursor)
+            for tool in page.tools:
+                if tool.name in names and (tool.name in LOGINS | private_names | file_tools or tool.name in governed or tool.name in {PLAN, "agentbridge_skill_get"} or tool.annotations and tool.annotations.readOnlyHint is True):
+                    schema = tool.inputSchema
+                    if tool.name in LOGINS:
+                        schema = {"type":"object", "properties":{}, "additionalProperties":False}
+                    elif tool.name in governed or tool.name == PLAN:
+                        schema = {**schema, "properties": {k:v for k,v in schema.get("properties", {}).items() if k not in PROTECTED},
+                                  "required": [k for k in schema.get("required", []) if k not in PROTECTED], "additionalProperties": False}
+                    definitions[tool.name] = {"name": tool.name, "description": tool.description or tool.name,
+                                              "parameters": schema}
+            cursor = page.nextCursor
+            if cursor is None:
+                break
+            if cursor in seen:
+                raise ValueError("Repeated MCP catalog cursor")
+            seen.add(cursor)
+        tools = CentralTools(session, meta, definitions, level, record["user_subject"], governed, contextual_reads)
+        tools.origins = spec.get("trustedCardOrigins", [])
+        tools.file_tools = file_tools
+        yield tools

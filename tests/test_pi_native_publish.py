@@ -386,7 +386,7 @@ def test_predeployment_cache_retests_a_matching_contract_without_archive_evidenc
     assert pi.archive_probe_matches(pi.read(cache))
 
 
-@pytest.mark.parametrize(("old_version", "new_version"), [("0.1.0", "0.1.1"), ("0.1.1", pi.ADAPTER)])
+@pytest.mark.parametrize(("old_version", "new_version"), [("0.1.0", "0.1.1"), ("0.1.1", "0.1.2"), ("0.1.2", pi.ADAPTER)])
 @pytest.mark.parametrize("first_closed", [False, True])
 def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path, monkeypatch, first_closed, old_version, new_version):
     import hashlib
@@ -421,8 +421,9 @@ def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path
             root.setattr(os,"geteuid",lambda:0)
             return invoke("stage",serviceSecret="fixture-service")
 
-    if old_version == "0.1.0":
-        skipped = {**current, "adapterVersion": "0.1.2", "routeTransition": transition}
+    skipped_version = {"0.1.0": "0.1.2", "0.1.1": "0.1.3"}.get(old_version)
+    if skipped_version:
+        skipped = {**current, "adapterVersion": skipped_version, "routeTransition": transition}
         with pytest.raises(ValueError, match="reviewed versions"):
             central.transition_routes(config, skipped, candidate)
     assert stage()["routeState"]=="predecessor"

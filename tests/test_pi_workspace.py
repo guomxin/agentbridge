@@ -39,7 +39,7 @@ def pi(tmp_path, monkeypatch, request):
     monkeypatch.setenv("AGENTBRIDGE_PI_ROUTES_FILE", str(route_file))
     spec = {
         "instanceId": "pi-office",
-        "adapterVersion": "0.1.2",
+        "adapterVersion": "0.1.3",
         "tokenFile": str(token),
         "url": "http://127.0.0.1:1",
         "subjects": {"user-a": "pi-a", "user-b": "pi-b"},
@@ -245,7 +245,7 @@ def test_stop_generation_follows_accepted_original_run(pi):
 def pi_wire():
     answers = {
         "available": True,
-        "adapterVersion": "0.1.2",
+        "adapterVersion": "0.1.3",
         "capabilities": ["chat"],
         "hostType": "pi",
         "sdkVersion": "1.6.0",
@@ -358,7 +358,7 @@ def test_pi_authenticated_transport_progress_and_lookup(pi, pi_wire):
     assert not client.readiness()["available"]
 
 
-@pytest.mark.parametrize("pi", ["0.1.1"], indirect=True)
+@pytest.mark.parametrize("pi", ["0.1.2"], indirect=True)
 def test_live_directory_and_manifest_switch_both_ways_on_original_route(pi, pi_wire):
     app = pi.app
     for person in pi.accounts.values():
@@ -379,7 +379,7 @@ def test_live_directory_and_manifest_switch_both_ways_on_original_route(pi, pi_w
 
     assert any(e.get("text") == "原答复" for e in send("a", "before"))
     dispatch = app.store.list_host_dispatches(user_subject="user-a", instance_id="pi-office")[0]
-    for revision, version, key in [(1, "0.1.2", "upgraded"), (2, "0.1.1", "restored")]:
+    for revision, version, key in [(1, "0.1.3", "upgraded"), (2, "0.1.2", "restored")]:
         stage(version)
         count = len(pi_wire.requests)
         assert any(e.get("state") == "error" for e in send("b", "unapproved-" + key))
@@ -399,11 +399,11 @@ def test_live_directory_and_manifest_switch_both_ways_on_original_route(pi, pi_w
     assert accepted == [("before", "user-a", "pi-a"), ("upgraded", "user-b", "pi-b"), ("restored", "user-b", "pi-b")]
 
 
-@pytest.mark.parametrize("pi", ["0.1.1"], indirect=True)
+@pytest.mark.parametrize("pi", ["0.1.2"], indirect=True)
 def test_version_switch_during_accept_checks_original_without_replaying(pi, pi_wire):
     app, account = pi.app, pi.accounts["a"]
     app.hosts.set_default(account["account_id"], "pi-office", expected_revision=1)
-    pi_wire.switch_on_accept["uncertain"] = "0.1.2"
+    pi_wire.switch_on_accept["uncertain"] = "0.1.3"
 
     def same_request():
         return list(app.send_chat_stream(account, message="查询", idempotency_key="uncertain"))
@@ -411,7 +411,7 @@ def test_version_switch_during_accept_checks_original_without_replaying(pi, pi_w
     assert any(e.get("safeToRetry") is False for e in same_request())
     dispatch = app.store.list_host_dispatches(user_subject="user-a", instance_id="pi-office")[0]
     assert dispatch["state"] == "acceptance_unknown"
-    pi.spec["adapterVersion"] = "0.1.2"
+    pi.spec["adapterVersion"] = "0.1.3"
     private_json(pi.route_file, pi.manifest)
     pi.provision.save(pi.admin, "", {**pi.config, "expected_revision": 1})
     assert app.gateway_status(account)["available"]

@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "e33706b8df54"
+    "906889e97f20"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "The central databases keep their existing schemas. Pi records pending result cards in an additive table in its private Telegram delivery database. Workspace reloads reviewed route manifests when dispatching or reconciling a run."
+  "reason": "Pi 0.1.3 uses the existing Workspace and Telegram delivery tables. The reviewed adjacent route upgrade and stored receipts require no data migration."
 }

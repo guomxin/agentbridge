@@ -48,7 +48,7 @@ def central_fixture(directory, *, host_url, token_file, central_options=None, co
         alias = "pi-office"
         refs = {subject: f"pi-credential-{label}" for label, subject in central.subjects.items()}
         bot, username, first_sender = desk_bot or ("8801", "fixture_pi_bot", "501")
-        route = {"url": host_url, "instanceId": alias, "adapterVersion": "0.1.2", "tokenFile": str(token_file),
+        route = {"url": host_url, "instanceId": alias, "adapterVersion": "0.1.3", "tokenFile": str(token_file),
                  "subjects": refs, "telegram": {"botId": str(bot), "username": username,
                                                "allowedSenders": {central.subjects["a"]: first_sender}}}
         route["requiredLevel"] = maximum_level

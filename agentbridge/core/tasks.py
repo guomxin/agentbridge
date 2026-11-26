@@ -5236,18 +5236,28 @@ class TaskHubStore:
         if not binding or binding["endpoint_id"] != source:
             return
         if role == "assistant":
-            # A final text can follow a card, trial, attachment or explicit continuation. Require
-            # this very dispatch's admitted plain question and exclude a run that presented a card.
+            # Require the original admitted plain question and keep private interactions
+            # on their original endpoint. A verified OA read can finish after a login card.
             run_id = entry["dedupe_key"].removeprefix("message:workspace:assistant:")
-            original = db.execute("""SELECT u.entry_id FROM agent_host_dispatches d JOIN user_timeline u
+            original = db.execute("""SELECT u.entry_id, d.conversation_ref, d.dispatch_id,
+                (EXISTS (SELECT 1 FROM agent_host_dispatch_events e
+                  WHERE e.dispatch_id=d.dispatch_id AND e.event_name='host_progress'
+                    AND json_extract(e.payload_json,'$.kind')='private_interaction')
+                OR (d.agent_host='pi' AND EXISTS (SELECT 1 FROM agent_tasks t
+                  JOIN task_interactions c ON c.task_id=t.task_id AND c.user_subject=t.user_subject
+                  WHERE t.user_subject=d.user_subject AND t.agent_host=d.agent_host
+                    AND t.host_task_key=d.accepted_run_id AND t.origin_endpoint_id=d.origin_endpoint_id
+                    AND t.active_conversation_ref=d.conversation_ref))) AS had_card
+                FROM agent_host_dispatches d JOIN user_timeline u
                 ON u.user_subject=d.user_subject AND u.dedupe_key='message:'||d.message_key
                 AND u.source_endpoint_id=d.origin_endpoint_id AND u.role='user'
                 WHERE d.user_subject=? AND d.origin_endpoint_id=? AND d.agent_host=?
-                AND d.accepted_run_id=? AND NOT EXISTS (SELECT 1 FROM agent_host_dispatch_events e
-                  WHERE e.dispatch_id=d.dispatch_id AND e.event_name='host_progress'
-                  AND json_extract(e.payload_json,'$.kind')='private_interaction')""",
+                AND d.accepted_run_id=?""",
                 (subject, source, host, run_id)).fetchone()
             if not original:
+                return
+            if original["had_card"] and (host != "pi" or not self._pi_workspace_oa_read_after_login(
+                    db, subject, source, original, run_id)):
                 return
         payload = {"mirrorKind": mirror_kind, "entryId": entry["entry_id"],
             "sequence": entry["sequence"], "role": role, "text": text, "createdAt": entry["created_at"],
@@ -5264,6 +5274,45 @@ class TaskHubStore:
                 VALUES (?,?,'',?,?,'timeline_message',?,'pending',0,?,?,?)""",
                 (str(uuid4()), entry["entry_id"], endpoint_id, subject, _canonical_json({**payload, "pairProof": proof}),
                  entry["created_at"], entry["created_at"], entry["created_at"]))
+
+    @staticmethod
+    def _pi_workspace_oa_read_after_login(db, subject, endpoint, original, run_id):
+        card_events = db.execute("""
+            SELECT json_extract(payload_json,'$.status') AS status,
+                   json_extract(payload_json,'$.cardRevision') AS revision
+            FROM agent_host_dispatch_events
+            WHERE dispatch_id=? AND event_name='host_progress'
+                AND json_extract(payload_json,'$.kind')='private_interaction'
+            ORDER BY sequence
+            """, (original["dispatch_id"],)).fetchall()
+        # Recovery can read the final reply without first observing card progress.
+        # When progress was observed, require the same card to have been closed.
+        if card_events and (len(card_events) != 2 or card_events[0]["status"] != "waiting_private"
+                or card_events[1]["status"] != "closed" or not card_events[0]["revision"]
+                or card_events[0]["revision"] != card_events[1]["revision"]):
+            return False
+        return db.execute("""
+            SELECT 1 FROM agent_tasks t
+            JOIN task_operations l ON l.task_id=t.task_id AND l.user_subject=t.user_subject
+                AND l.operation_id=t.current_operation_id
+            JOIN operations o ON o.operation_id=l.operation_id AND o.user_subject=t.user_subject
+            JOIN task_interactions c ON c.task_id=t.task_id AND c.user_subject=t.user_subject
+            JOIN interactions i ON i.interaction_id=c.interaction_id AND i.user_subject=t.user_subject
+            JOIN auth_challenges a ON a.challenge_id=json_extract(i.resume_json,'$.challengeId')
+                AND a.user_subject=i.user_subject AND a.system_id=i.system_id AND a.session_id=i.session_id
+            WHERE t.user_subject=? AND t.agent_host='pi' AND t.host_task_key=?
+                AND t.origin_endpoint_id=? AND t.active_conversation_ref=? AND t.status='succeeded'
+                AND o.capability_name='oa.workflow.pending.list' AND o.status='succeeded'
+                AND i.interaction_type='credential' AND i.system_id='oa' AND c.last_state='completed'
+                AND json_extract(i.resume_json,'$.kind')='session_ready'
+                AND json_type(i.resume_json,'$.continueAfterLogin')='true'
+                AND json_extract(i.resume_json,'$.taskId')=t.task_id
+                AND a.state='succeeded' AND julianday(a.completed_at)<=julianday(o.created_at)
+                AND NOT EXISTS (SELECT 1 FROM task_interactions other
+                    WHERE other.task_id=t.task_id AND other.interaction_id<>c.interaction_id)
+                AND NOT EXISTS (SELECT 1 FROM task_operations other
+                    WHERE other.task_id=t.task_id AND other.operation_id<>o.operation_id)
+            """, (subject, run_id, endpoint, original["conversation_ref"])).fetchone() is not None
 
     def _select_owned_batch_for_task(
         self,

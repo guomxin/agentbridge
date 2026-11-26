@@ -21,7 +21,7 @@ import uvicorn
 
 from . import SDK_VERSION, VERSION
 from .cards import Cards
-from .central import connect, PLAN
+from .central import connect, ControlSessions, PLAN
 from .coordinator import Coordinator
 from .ledger import Conflict, Ledger, UnconfirmedOperation
 from .runtime import PiRuntime, private_dir, private_file
@@ -72,6 +72,7 @@ class Host:
             tokens[personal] = key[0]
             self.bindings[key] = record
         from .telegram_routes import PiTelegramRoutes
+        self.control_sessions = ControlSessions(spec, bearer)
         self.telegram = PiTelegramRoutes(self)
         state = private_dir(spec["stateDir"])
         self.state = state
@@ -448,6 +449,7 @@ def create_app(spec):
                 await asyncio.gather(recovery, return_exceptions=True)
             if host.commands:
                 await host.commands.close()
+            await host.control_sessions.close()
             await host.ledger.close()
 
     app = Starlette(routes=[Route("/v1/{action}", host.handle, methods=["POST"])], lifespan=lifespan)

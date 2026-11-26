@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT/"integrations/reference-host"))
 from reference_host.host_profile import CoordinatorImplementation, host_context_meta, registration_meta, task_call_meta
 from reference_host.mcp_client import AgentBridgeMcpClient
 
-PI = CoordinatorImplementation("pi", "0.1.2")
+PI = CoordinatorImplementation("pi", "0.1.3")
 
 
 async def exercise(meta, binding, principal, fixture):
@@ -141,7 +141,7 @@ def main():
             service = fixture.service
             assert service.home.resolve().is_relative_to(directory)
             with service.workspace._connect() as db:
-                db.execute("INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.2','L3','fixture-only','probe','now')")
+                db.execute("INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.3','L3','fixture-only','probe','now')")
                 fixture.account_id = db.execute("SELECT account_id FROM workspace_accounts WHERE user_subject=?",
                                                 (fixture.subjects["a"],)).fetchone()[0]
             grant_permissions(service.user_grants,fixture.subjects["a"],PERMISSIONS)

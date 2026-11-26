@@ -102,7 +102,7 @@ def exercise(node,sdk,engine,case):
             captured.append(central)
             assert central.service.home == directory/"central"
             with sqlite3.connect(central.service.db_path) as db:
-                db.execute("INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.2','L3','fixture-only','batch','now')")
+                db.execute("INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.3','L3','fixture-only','batch','now')")
             for affair,kind in zip(AFFAIRS,("attendance_confirmation","weekly_report")):
                 central.matrix.oa.add_affair(affair,profile=kind)
         def account(service,*,user_subject,**kwargs):
@@ -164,7 +164,7 @@ def exercise(node,sdk,engine,case):
                 signals = [json.loads(row[0]) for row in db.execute(
                     "SELECT value_json FROM runtime_signals WHERE signal_type='host.runtime.snapshot' "
                     "AND source='agent_host_contract' AND user_subject=? AND host_type='pi'",(OWNER,))]
-            assert any(s.get("hostInstanceId") == "pi-office" and s.get("hostVersion") == "0.1.2"
+            assert any(s.get("hostInstanceId") == "pi-office" and s.get("hostVersion") == "0.1.3"
                        and s.get("snapshotId") for s in signals)
             return {"sameParent":True,"distinctCards":len(decided),"distinctApprovals":auths,
                     "verifiedOperations":snapshot["batchVerification"]["verifiedCount"],"effects":len(central.matrix.oa.writes),

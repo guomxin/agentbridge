@@ -5,14 +5,14 @@ import json
 from aiohttp import web
 from starlette.exceptions import HTTPException
 
-from .central import connect
-from .server import bearer, binding_key
+from .server import binding_key
 
 
 class Delivery:
-    def __init__(self, host, record):
+    def __init__(self, host, record, action):
         self.host = host
         self.record = record
+        self.lane = "notifications" if action == "telegram-notifications" else "control"
         self.instance = host.instance
         self.coordinator = host.coordinator
         self.commands = host.commands
@@ -39,7 +39,7 @@ class Delivery:
     async def private_session(self, request):
         if request["endpointKey"] != self.record["endpoint_key"]:
             raise HTTPException(403)
-        async with connect(self.host.spec, self.record, bearer(self.record["tokenFile"])) as central:
+        async with self.host.control_sessions.borrow(self.record, lane=self.lane) as central:
             yield central.session, central.meta, central.level
 
     async def standalone_card(self, run, request_key):
@@ -50,7 +50,7 @@ class Delivery:
 async def dispatch(host, record, action, body):
     from nanobot_agentbridge import artifacts, notifications, telegram_tasks, telegram_timeline
 
-    delivery = Delivery(host, record)
+    delivery = Delivery(host, record, action)
     try:
         if action == "artifact-reissue":
             key, run = body.get("requestKey"), body.get("runId")
@@ -63,7 +63,7 @@ async def dispatch(host, record, action, body):
         if action == "telegram-workspace-media":
             if set(body) - {"instance", "binding", "action", "delivery_id", "attempt", "receipt"}:
                 raise HTTPException(400)
-            async with connect(host.spec, record, bearer(record["tokenFile"])) as central:
+            async with host.control_sessions.borrow(record, lane="workspace-media") as central:
                 if central.level != "L3":
                     raise HTTPException(403)
                 reply = await central.session.call_tool("agentbridge_host_telegram_workspace_media", {

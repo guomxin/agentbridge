@@ -7,7 +7,6 @@ from starlette.exceptions import HTTPException
 
 from agentbridge.workspace.telegram_pilot_links import telegram_conversation_ref
 
-from .central import connect
 
 
 def digital(value):
@@ -36,9 +35,9 @@ class PiTelegramRoutes:
             raise HTTPException(403)
         if action != "telegram-mirror-peers" and body.get("senderId") != self.sender:
             raise HTTPException(403)
-        from .server import BINDING_FIELDS, bearer
+        from .server import BINDING_FIELDS
 
-        async with connect(self.host.spec, self.web, bearer(self.web["tokenFile"])) as central:
+        async with self.host.control_sessions.borrow(self.web) as central:
             ids = {"bot_id": self.bot, "sender_id": self.sender}
             if action == "telegram-present":
                 code = body.get("code")
@@ -103,8 +102,8 @@ class PiTelegramRoutes:
     async def verified(self, key):
         if not self.web or key[0] != self.web["user_subject"] or key[2] != f"telegram:{self.bot}:{self.sender}":
             return None
-        from .server import bearer, binding_key
+        from .server import binding_key
 
-        async with connect(self.host.spec, self.web, bearer(self.web["tokenFile"])) as central:
+        async with self.host.control_sessions.borrow(self.web) as central:
             record = await self.current(central)
             return record if record and binding_key(record) == key else None
