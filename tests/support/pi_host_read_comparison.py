@@ -424,7 +424,7 @@ def comparison(args):
         pi = PiGatewayClient(
             url=f"http://127.0.0.1:{port}",
             instance_id="pi-office",
-            adapter_version="0.1.5",
+            adapter_version="0.1.6",
             token_file=Path(token),
         )
         probes = {

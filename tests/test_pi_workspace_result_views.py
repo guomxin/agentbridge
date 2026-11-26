@@ -194,6 +194,10 @@ def test_registered_pi_mcp_controls_are_private_and_require_level_three(pi):
             return response.json()["result"]
         assert call(first, "agentbridge_host_register")["structuredContent"]["acceptedLevel"] == "L1"
         assert call(first, tool, args)["isError"]
+        claim = "agentbridge_host_notification_claim"
+        claim_args = {"agent_host": "pi", "endpoint_key": scope["endpoint_key"], "include_workspace_chat": True}
+        automatic = {**meta, "io.agentbridge/pi-quiet-ack": scope["pairing_ref"]}
+        assert call(first, claim, claim_args, automatic)["isError"]
         pi.spec["requiredLevel"] = "L3"
         private_json(pi.route_file, pi.manifest)
         for user in (first, second):
@@ -206,6 +210,12 @@ def test_registered_pi_mcp_controls_are_private_and_require_level_three(pi):
         assert issued["available"] and issued["resultView"]["sourceTaskId"] == item["sourceTaskId"]
         assert call(first, tool, {**args, "action": "ack", "outcome": "delivery_unknown"})["structuredContent"]["recorded"]
         assert call(first, tool, args)["structuredContent"] == {"available": False}
+        source = service.tasks.get_task(item["sourceTaskId"], user_subject="user-a")
+        service.tasks.ensure_task(user_subject="user-a", agent_host="pi", origin_endpoint_id=source["origin_endpoint_id"],
+            active_conversation_ref=source["active_conversation_ref"], host_task_key=uuid4().hex, title="隔离静默事件")
+        assert call(second, claim, claim_args, automatic)["isError"]
+        assert call(first, claim, claim_args, {**meta, "io.agentbridge/pi-quiet-ack": "bad"})["isError"]
+        assert call(first, claim, claim_args, automatic)["structuredContent"]["quietAcknowledged"] == 1
 
 
 def test_reclaim_and_changed_source_cannot_resign_or_confirm_an_old_attempt(pi):

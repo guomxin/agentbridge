@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
@@ -4525,7 +4525,12 @@ class TaskHubStore:
         include_task_files: bool = False,
         include_oa_digest: bool = False,
         include_workspace_result_views: bool = False,
+        quiet_pairing_ref: str | None = None,
+        quiet_token_id: str | None = None,
+        audit_quiet: Callable[[sqlite3.Connection, sqlite3.Row, sqlite3.Row], None] | None = None,
     ) -> list[dict]:
+        if quiet_pairing_ref is not None and audit_quiet is None:
+            raise ValueError("A quiet claim requires its transactional delivery audit")
         limit = min(max(int(limit), 1), 100)
         lease_seconds = min(max(int(lease_seconds), 5), 300)
         now = _utc_now()
@@ -4634,33 +4639,37 @@ class TaskHubStore:
                 """,
                 (user_subject, endpoint_id, now, *consumer_params, limit),
             ).fetchall()
+            quiet = set()
+            if quiet_pairing_ref is not None:
+                from agentbridge.core.pi_quiet_notifications import quiet_claims
+                quiet = quiet_claims(connection, rows, endpoint=endpoint, ownership=ownership, subject=user_subject,
+                    instance=host_instance_id, token_id=quiet_token_id, pairing_ref=quiet_pairing_ref)
             claimed = []
             for row in rows:
+                silent = row["delivery_id"] in quiet
                 cursor = connection.execute(
                     """
                     UPDATE notification_outbox
-                    SET state = 'delivering',
+                    SET state = ?, acknowledged_at = ?,
                         attempt_count = attempt_count + 1,
                         next_attempt_at = ?, updated_at = ?
-                    WHERE delivery_id = ?
+                    WHERE delivery_id = ? AND attempt_count = ?
                       AND attempt_count < 5
                       AND (
                         state IN ('pending', 'delivering')
                         AND next_attempt_at <= ?
                       )
                     """,
-                    (lease_until, now, row["delivery_id"], now),
+                    ("acknowledged" if silent else "delivering", now if silent else row["acknowledged_at"], lease_until,
+                     now, row["delivery_id"], row["attempt_count"], now),
                 )
                 if cursor.rowcount == 1:
-                    claimed.append(
-                        connection.execute(
-                            """
-                            SELECT * FROM notification_outbox
-                            WHERE delivery_id = ?
-                            """,
-                            (row["delivery_id"],),
-                        ).fetchone()
-                    )
+                    updated = connection.execute(
+                        "SELECT * FROM notification_outbox WHERE delivery_id = ?", (row["delivery_id"],)
+                    ).fetchone()
+                    if silent:
+                        audit_quiet(connection, updated, endpoint)
+                    claimed.append(updated)
         return [_outbox_from_row(row) for row in claimed]
 
     def notification_route_allowed(self, *, user_subject, endpoint_id, delivery_id, host_instance_id=None):

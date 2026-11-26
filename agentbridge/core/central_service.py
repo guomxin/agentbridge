@@ -1803,6 +1803,20 @@ class CentralCapabilityService:
             "endpoint": endpoint_response(endpoint),
         }
 
+    def _audit_quiet_claim(self, connection, delivery, endpoint):
+        """The quiet ACK cannot be claimed again after commit. Record its evidence in the same transaction."""
+        trace = self.runtime_governance.trace_for_task(delivery["task_id"], user_subject=delivery["user_subject"],
+                                                       connection=connection)
+        if trace is None:
+            return
+        metadata = {"endpointId": endpoint["endpoint_id"], "clientType": endpoint["client_type"],
+                    "attemptCount": delivery["attempt_count"]}
+        for stage, details in (("delivery.claimed", {"payloadType": delivery["payload_type"]}),
+                               ("delivery.result", {"deliveryState": "acknowledged"})):
+            self.runtime_governance.record_stage_once(trace_id=trace["trace_id"], stage=stage, status="succeeded",
+                delivery_id=delivery["delivery_id"], delivery_attempt=delivery["attempt_count"], connection=connection,
+                side_effect_boundary=trace["side_effect_boundary"], metadata={**metadata, **details})
+
     def claim_host_notifications(
         self,
         *,
@@ -1817,6 +1831,8 @@ class CentralCapabilityService:
         include_task_files: bool = False,
         include_oa_digest: bool = False,
         include_workspace_result_views: bool = False,
+        quiet_pairing_ref: str | None = None,
+        quiet_token_id: str | None = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1834,9 +1850,15 @@ class CentralCapabilityService:
             **({"include_task_files": True} if include_task_files else {}),
             **({"include_oa_digest": True} if include_oa_digest else {}),
             **({"include_workspace_result_views": True} if include_workspace_result_views else {}),
+            **({"quiet_pairing_ref": quiet_pairing_ref, "quiet_token_id": quiet_token_id, "audit_quiet": self._audit_quiet_claim}
+               if quiet_pairing_ref is not None else {}),
         )
         notifications = []
+        quiet_count = 0
         for delivery in deliveries:
+            if quiet_pairing_ref is not None and delivery["state"] == "acknowledged":
+                quiet_count += 1
+                continue
             if delivery["payload_type"] == "workspace_result_view":
                 notifications.append({"deliveryMode": "workspace_result_view", "sourceTaskId": delivery["task_id"],
                     "deliveryId": delivery["delivery_id"], "attemptCount": delivery["attempt_count"]})
@@ -2015,6 +2037,7 @@ class CentralCapabilityService:
             "protocolVersion": "0.1",
             "status": "succeeded",
             "count": len(notifications),
+            **({"quietAcknowledged": quiet_count} if quiet_pairing_ref is not None else {}),
             "endpoint": endpoint_response(endpoint),
             "notifications": [{**item, "requiresRouteCheck": True} for item in notifications],
         }

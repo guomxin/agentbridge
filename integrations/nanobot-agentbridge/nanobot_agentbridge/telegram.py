@@ -13,9 +13,11 @@ import http.client
 import json
 import os
 import re
+import socket
 import sqlite3
 import threading
 import time
+from functools import partial
 from pathlib import Path
 
 from urllib.parse import urlsplit
@@ -63,6 +65,18 @@ class TelegramAPI:
         self._lock = threading.Lock()
         self._conn = None
         self._last_used = 0.0
+        self._updates_stopped = False
+
+    def interrupt_updates(self):
+        # Only the dedicated getUpdates transport calls this. Its reader holds
+        # _lock while waiting, so shutdown the socket before joining the worker.
+        self._updates_stopped = True
+        stream = getattr(self._conn, "sock", None)
+        if stream is not None:
+            try:
+                stream.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _close_conn(self) -> None:
         conn = self._conn
@@ -93,6 +107,8 @@ class TelegramAPI:
         path = f"/bot{self._token}/{method}"
         with self._lock:
             for attempt in range(2):
+                if method == "getUpdates" and self._updates_stopped:
+                    raise TelegramUnavailable("Update reader stopped")
                 if (self._private_sender is not None and method not in {"getMe", "getWebhookInfo", "getUpdates", "getFile"}
                         and not self._private_sender(chat)):
                     raise TelegramUnavailable("Private channel destination is no longer authorized")
@@ -147,13 +163,16 @@ class TelegramAPI:
 class TelegramPilot:
     def __init__(
         self, database, *, api, bot_id, instance, gateway, bindings, bot_username=None,
-        allow_pairing=False, sender_subject=None
+        allow_pairing=False, sender_subject=None, update_reader=None
     ):
         self.api, self.bot_id, self.instance = api, bot_id, instance
         self.gateway, self.bindings = gateway, bindings
         self.host_type = getattr(gateway, "host_type", "nanobot")
         if self.host_type not in {"nanobot", "pi"} or (self.host_type == "pi" and not callable(sender_subject)):
             raise ValueError("Pi Telegram requires a reviewed private sender")
+        if update_reader is not None and self.host_type != "pi":
+            raise ValueError("Independent update reads require the Pi channel")
+        self.update_reader = update_reader
         self.sender_subject = sender_subject
         self.bot_username = bot_username
         self.allow_pairing = allow_pairing
@@ -704,8 +723,10 @@ class TelegramPilot:
                 (self.bot_id,),
             ).fetchone()
         )
-        updates = self.api.call(
-            "getUpdates",
+        # The next read is submitted only on a later owner tick, after the
+        # previous page has been processed and its durable offset committed.
+        fetch = self.update_reader.poll if self.update_reader is not None else partial(self.api.call, "getUpdates")
+        updates = fetch(
             offset=offset,
             timeout=0 if has_active else 1,
             limit=100,
@@ -861,6 +882,13 @@ def main():
         )
         try:
             consumer.verify()
+            if host_type == "pi":
+                from .pi_telegram_updates import PiUpdateReader
+                # getUpdates holds a TLS connection for the whole poll. Keep all
+                # sends on the original checked connection and ledger-owning thread.
+                inbound_api = TelegramAPI(token, private_sender=lambda _: False)
+                consumer.update_reader = PiUpdateReader(partial(inbound_api.call, "getUpdates"),
+                                                        interrupt=inbound_api.interrupt_updates)
             while True:
                 started = time.monotonic()
                 try:
@@ -872,6 +900,9 @@ def main():
                 if elapsed < 0.25:
                     time.sleep(0.25 - elapsed)
         finally:
+            if consumer.update_reader is not None:
+                consumer.update_reader.close()
+                inbound_api.close()
             consumer.api.close()
             consumer.db.close()
 

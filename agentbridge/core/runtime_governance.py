@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -401,8 +401,9 @@ class RuntimeGovernanceStore:
             raise KeyError(f"runtime trace not found: {trace_id}")
         return _trace_from_row(row)
 
-    def trace_for_task(self, task_id: str, *, user_subject: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+    def trace_for_task(self, task_id: str, *, user_subject: str,
+                       connection: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+        with (nullcontext(connection) if connection is not None else self._connect()) as connection:
             row = connection.execute(
                 """
                 SELECT * FROM runtime_traces
@@ -719,6 +720,8 @@ class RuntimeGovernanceStore:
         started_at: str | None = None,
         finished_at: str | None = None,
         duration_ms: int | None = None,
+        connection: sqlite3.Connection | None = None,
+        delivery_attempt: int | None = None,
     ) -> dict[str, Any]:
         # Omitted association keys retain their existing wildcard semantics.
         # A read-only hit avoids taking the writer lock; a miss is checked again
@@ -734,18 +737,26 @@ class RuntimeGovernanceStore:
             if value:
                 filters.append(f"{column} = ?")
                 values.append(value)
+        if delivery_attempt is not None:
+            if not delivery_id or type(delivery_attempt) is not int or delivery_attempt < 1:
+                raise ValueError("A delivery attempt must identify the original delivery")
+            filters.append("json_extract(metadata_json, '$.attemptCount') = ?")
+            values.append(delivery_attempt)
         query = (
             f"SELECT * FROM runtime_spans WHERE {' AND '.join(filters)} "
             "ORDER BY started_at DESC LIMIT 1"
         )
-        with self._connect() as connection:
+        if connection is not None and not connection.in_transaction:
+            raise ValueError("A caller-owned audit connection requires an active transaction")
+        with (nullcontext(connection) if connection is not None else self._connect()) as connection:
             existing = connection.execute(query, values).fetchone()
             if existing is not None:
                 return _span_from_row(existing)
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(query, values).fetchone()
-            if existing is not None:
-                return _span_from_row(existing)
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(query, values).fetchone()
+                if existing is not None:
+                    return _span_from_row(existing)
             _validate_boundary(side_effect_boundary)
             trace = connection.execute(
                 "SELECT * FROM runtime_traces WHERE trace_id = ?", (trace_id,)
@@ -765,7 +776,7 @@ class RuntimeGovernanceStore:
                     operation_id, interaction_id, artifact_id, delivery_id,
                     system_id, capability_name, attempt, side_effect_boundary,
                     error_code, started_at, finished_at, duration_ms, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     span_id, trace_id, _bounded_text(stage, 120, required=True),
@@ -774,7 +785,7 @@ class RuntimeGovernanceStore:
                     _bounded_text(artifact_id, 256), _bounded_text(delivery_id, 256),
                     _bounded_text(system_id or trace["system_id"], 80),
                     _bounded_text(capability_name or trace["capability_name"], 200),
-                    side_effect_boundary, _bounded_text(error_code, 120),
+                    delivery_attempt or 1, side_effect_boundary, _bounded_text(error_code, 120),
                     effective_started, effective_finished, max(int(effective_duration), 0),
                     _canonical_json(_safe_metadata(metadata)),
                 ),

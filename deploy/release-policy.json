@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "8416b6d19edb"
+    "bd962f4c13f7"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Pi 0.1.5 reuses authenticated fixed-command transport and avoids redundant tool-catalog initialization within the existing original-task, pairing-generation and authorization boundaries. The reviewed adjacent route upgrade uses existing records."
+  "reason": "Pi 0.1.6 keeps one durable Telegram consumer and sender while separating its bounded inbound wait. Current paired Pi consumers retire only verified silent events in the original claim transaction. Existing records and the reviewed adjacent route upgrade are preserved."
 }

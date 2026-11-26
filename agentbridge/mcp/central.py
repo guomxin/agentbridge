@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import ipaddress
 import json
 import logging
+import re
 from pathlib import Path
 import sysconfig
 import threading
@@ -479,10 +480,20 @@ async def _claim_host_notifications_with_wait(service, *, wait_seconds=0, **kwar
     deadline = started + wait_seconds
     subject = kwargs["user_subject"]
     version = current_version(service.db_path, user_subject=subject, topic="notifications")
+    quiet_count = 0
+    quiet_pages = 0
     while True:
         response = await _run_host_control("agentbridge_host_notification_claim", service.claim_host_notifications, **kwargs)
+        quiet = response.get("quietAcknowledged", 0)
+        quiet_count += quiet
+        if quiet:
+            quiet_pages += 1
+            if not response.get("count") and quiet == kwargs.get("limit", 10) and quiet_pages < 3:
+                continue
+        if quiet_count:
+            response = {**response, "quietAcknowledged": quiet_count}
         remaining = deadline - perf_counter()
-        if response.get("count") or remaining <= 0:
+        if response.get("count") or quiet_count or remaining <= 0:
             return {**response, "waitSupported": True, "waitSeconds": wait_seconds,
                 "waitedMs": round((perf_counter() - started) * 1000)}
         await wait_for_change_async(service.db_path, user_subject=subject, topic="notifications",
@@ -6596,6 +6607,10 @@ def create_central_mcp_server(
             identity=identity,
             agent_host=agent_host,
         )
+        quiet_pairing_ref = _request_meta(ctx).get("io.agentbridge/pi-quiet-ack")
+        if quiet_pairing_ref is not None and (agent_host != "pi" or not isinstance(quiet_pairing_ref, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", quiet_pairing_ref)):
+            raise HostContractError("Invalid Pi quiet acknowledgement pairing")
         return await _claim_host_notifications_with_wait(
             service,
             user_subject=identity["user_subject"],
@@ -6610,6 +6625,8 @@ def create_central_mcp_server(
             **({"include_task_files": True} if include_task_files else {}),
             **({"include_oa_digest": True} if include_oa_digest else {}),
             **({"include_workspace_result_views": True} if include_workspace_result_views and agent_host == "pi" else {}),
+            **({"quiet_pairing_ref": quiet_pairing_ref, "quiet_token_id": identity["token_id"]}
+               if quiet_pairing_ref is not None else {}),
         )
 
     @mcp.tool(name="agentbridge_host_workspace_result_view", title="Deliver an Original Pi Workspace Selection Card",

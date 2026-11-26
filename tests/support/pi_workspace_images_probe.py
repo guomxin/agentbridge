@@ -114,7 +114,7 @@ def fixture(directory, node, sdk, engine, *, notification_settings=False):
                 seed(SimpleNamespace(service=central.service), subject=subject, number=number)
         with sqlite3.connect(central.service.db_path) as db:
             db.execute(
-                "INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.5','L3','isolated-web-image-test','isolated-fixture',CURRENT_TIMESTAMP)"
+                "INSERT OR REPLACE INTO agent_host_compatibility VALUES ('pi','0.1.6','L3','isolated-web-image-test','isolated-fixture',CURRENT_TIMESTAMP)"
             )
 
     token = private(directory / "route.token", secrets.token_urlsafe(40))

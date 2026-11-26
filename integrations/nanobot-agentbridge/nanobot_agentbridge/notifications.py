@@ -7,6 +7,8 @@ from pathlib import Path
 import time
 from typing import ClassVar
 
+from agentbridge.core.task_state_rules import QUIET_COMPANION_EVENTS
+
 from .chat_mirror import ChatMirrors, chat_claim, identifier, projected_chat
 from .telegram_presentation import (
     interaction_can_open,
@@ -24,14 +26,6 @@ TERMINAL = {
     "task.failed": "failed",
     "task.canceled": "canceled",
 }
-
-QUIET_COMPANION_EVENTS = frozenset({
-    "task.created",
-    "task.operation.linked",
-    "task.operation.running",
-    "task.interaction.completed",
-})
-
 
 def _record_claim(path: Path, delivery: str, endpoint: str, run: str, attempt: int) -> None:
     with sqlite3.connect(path) as db:
@@ -206,15 +200,19 @@ async def notifications(host, record, action, body, *, paired_session=None):
             "include_task_files": True,
             "include_oa_digest": True,
         }
+        claim_meta = meta
         if req.get("hostType") == "pi":
             claim_args["include_workspace_result_views"] = True
+            # Older central servers ignore this opt-in and keep returning the
+            # quiet events for the original per-delivery acknowledgement below.
+            claim_meta = {**meta, "io.agentbridge/pi-quiet-ack": req["pairingRef"]}
         raw_wait = body.get("waitSeconds") if isinstance(body, dict) else None
         if isinstance(raw_wait, (int, float)) and not isinstance(raw_wait, bool) and raw_wait > 0:
             claim_args["wait_seconds"] = min(float(raw_wait), 15.0)
         reply = await session.call_tool(
             "agentbridge_host_notification_claim",
             claim_args,
-            meta=meta,
+            meta=claim_meta,
         )
         payload = reply.structuredContent or {}
         if (

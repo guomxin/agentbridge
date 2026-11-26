@@ -23,6 +23,9 @@ TASK_STATUSES = {
 }
 
 ACTIVE_TASK_STATUSES = {"active", "waiting_user", "running"}
+QUIET_COMPANION_EVENTS = frozenset({
+    "task.created", "task.operation.linked", "task.operation.running", "task.interaction.completed",
+})
 TERMINAL_TASK_STATUSES = TASK_STATUSES - ACTIVE_TASK_STATUSES
 BATCH_STATES = {
     "running",
