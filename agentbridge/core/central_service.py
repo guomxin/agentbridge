@@ -1816,6 +1816,7 @@ class CentralCapabilityService:
         include_business_watch: bool = False,
         include_task_files: bool = False,
         include_oa_digest: bool = False,
+        include_workspace_result_views: bool = False,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
@@ -1832,9 +1833,14 @@ class CentralCapabilityService:
             **({"include_business_watch": True} if include_business_watch else {}),
             **({"include_task_files": True} if include_task_files else {}),
             **({"include_oa_digest": True} if include_oa_digest else {}),
+            **({"include_workspace_result_views": True} if include_workspace_result_views else {}),
         )
         notifications = []
         for delivery in deliveries:
+            if delivery["payload_type"] == "workspace_result_view":
+                notifications.append({"deliveryMode": "workspace_result_view", "sourceTaskId": delivery["task_id"],
+                    "deliveryId": delivery["delivery_id"], "attemptCount": delivery["attempt_count"]})
+                continue
             trace = (
                 self.runtime_governance.trace_for_task(
                     delivery["task_id"], user_subject=user_subject
@@ -2048,6 +2054,8 @@ class CentralCapabilityService:
         if not self.tasks.notification_route_allowed(user_subject=user_subject,endpoint_id=endpoint["endpoint_id"],
                                                     delivery_id=delivery_id,host_instance_id=host_instance_id):
             return {"allowed":False,"stale":True}
+        if delivery["payload_type"] == "workspace_result_view":
+            return {"allowed": False}
         if delivery["payload"].get("artifactPairProof"):
             from agentbridge.core.telegram_artifacts import authorized_artifact
             return authorized_artifact(self, delivery, endpoint, host_instance_id, with_body=include_artifact)
@@ -2096,6 +2104,8 @@ class CentralCapabilityService:
                 user_subject=user_subject, endpoint_id=endpoint["endpoint_id"], delivery_id=delivery_id,
                 host_instance_id=host_instance_id):
             raise PermissionError("Notification does not belong to this host instance")
+        if pending["payload_type"] == "workspace_result_view":
+            raise PermissionError("A Workspace result card requires its dedicated paired endpoint receipt")
         if pending["payload"].get("artifactPairProof") and succeeded and artifact_outcome is None:
             raise ValueError("Task file requires a confirmed Telegram receipt")
         if artifact_outcome is not None:

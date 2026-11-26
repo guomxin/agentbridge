@@ -17,6 +17,9 @@ class PiTelegramRoutes:
     def __init__(self, host):
         self.host = host
         self.web = self.sender = self.bot = None
+        # A route hint only selects a transport slot. Each delivery authenticates
+        # its token and resolves the exact live pairing inside that same request.
+        self._last_routed = None
         pilot = host.spec.get("telegramPilot")
         if pilot is None:
             return
@@ -67,19 +70,14 @@ class PiTelegramRoutes:
                 return {"senderIds": [self.sender] if not result.isError and peers == [self.sender] else []}
             if action != "telegram-route":
                 raise HTTPException(404)
-            record = await self.current(central)
+            record = await self.current(central.session, central.meta)
             return {"binding": {k: record[k] for k in BINDING_FIELDS} if record else None}
 
-    async def current(self, central):
-        identity = await central.session.call_tool("agentbridge_host_identity_profile", {"agent_host": "pi"},
-                   meta={**central.meta, "io.agentbridge/telegram-identity": {"botId": self.bot, "senderId": self.sender}})
-        proof = identity.structuredContent or {}
-        if (identity.isError or proof.get("telegramIdentityVerified") is not True
-                or proof.get("identity", {}).get("userSubject") != self.web["user_subject"]
-                or proof.get("host", {}).get("hostInstanceId") != self.host.instance):
-            return None
-        result = await central.session.call_tool("agentbridge_host_telegram_endpoint",
-                  {"bot_id": self.bot, "sender_id": self.sender}, meta=central.meta)
+    async def current(self, session, meta):
+        # This RPC checks the bearer, registered Pi instance, current personal
+        # grant and Telegram pairing before returning its exact generation.
+        result = await session.call_tool("agentbridge_host_telegram_endpoint",
+                  {"bot_id": self.bot, "sender_id": self.sender}, meta=meta)
         value = result.structuredContent or {}
         key = f"telegram:{self.bot}:{self.sender}"
         if (result.isError or value.get("endpointKey") != key or value.get("workspaceEndpointId") != self.web["endpoint_id"]
@@ -95,9 +93,18 @@ class PiTelegramRoutes:
                 return None
         except (KeyError, TypeError, ValueError, AttributeError):
             return None
-        return {**self.web, "endpoint_id": endpoint, "endpoint_key": key, "session_key": conversation,
+        self._last_routed = {**self.web, "endpoint_id": endpoint, "endpoint_key": key, "session_key": conversation,
                 "credential_ref": "tg-" + value["pairingRef"], "workspaceEndpointId": self.web["endpoint_id"],
                 "workspaceEndpointKey": self.web["endpoint_key"]}
+        return self._last_routed
+
+    async def delivery_hint(self, key):
+        from .server import binding_key
+
+        record = self._last_routed
+        if record and binding_key(record) == key:
+            return record
+        return await self.verified(key)
 
     async def verified(self, key):
         if not self.web or key[0] != self.web["user_subject"] or key[2] != f"telegram:{self.bot}:{self.sender}":
@@ -105,5 +112,5 @@ class PiTelegramRoutes:
         from .server import binding_key
 
         async with self.host.control_sessions.borrow(self.web) as central:
-            record = await self.current(central)
+            record = await self.current(central.session, central.meta)
             return record if record and binding_key(record) == key else None

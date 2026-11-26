@@ -2,7 +2,6 @@
 from contextlib import asynccontextmanager
 import json
 
-from aiohttp import web
 from starlette.exceptions import HTTPException
 
 from .server import binding_key
@@ -12,7 +11,11 @@ class Delivery:
     def __init__(self, host, record, action):
         self.host = host
         self.record = record
-        self.lane = "notifications" if action == "telegram-notifications" else "control"
+        self.lane = {
+            "telegram-notifications": "notifications",
+            "telegram-workspace-media": "workspace-media",
+            "telegram-workspace-result-view": "workspace-result-view",
+        }.get(action, "control")
         self.instance = host.instance
         self.coordinator = host.coordinator
         self.commands = host.commands
@@ -42,12 +45,23 @@ class Delivery:
         async with self.host.control_sessions.borrow(self.record, lane=self.lane) as central:
             yield central.session, central.meta, central.level
 
+    @asynccontextmanager
+    async def paired_notification_session(self, request):
+        async with self.private_session(request) as (session, meta, level):
+            if level != "L3":
+                raise HTTPException(403)
+            current = await self.host.telegram.current(session, meta)
+            if not current or binding_key(current) != binding_key(self.record):
+                raise HTTPException(403)
+            yield session, meta, level
+
     async def standalone_card(self, run, request_key):
         result = await self.host.action("card", {"binding": self.record, "runId": run, "requestKey": request_key})
         return {"interaction": result["interaction"]} if result.get("available") else {"state": "unavailable"}
 
 
 async def dispatch(host, record, action, body):
+    from aiohttp import web
     from nanobot_agentbridge import artifacts, notifications, telegram_tasks, telegram_timeline
 
     delivery = Delivery(host, record, action)
@@ -63,13 +77,11 @@ async def dispatch(host, record, action, body):
         if action == "telegram-workspace-media":
             if set(body) - {"instance", "binding", "action", "delivery_id", "attempt", "receipt"}:
                 raise HTTPException(400)
-            async with host.control_sessions.borrow(record, lane="workspace-media") as central:
-                if central.level != "L3":
-                    raise HTTPException(403)
-                reply = await central.session.call_tool("agentbridge_host_telegram_workspace_media", {
+            async with delivery.paired_notification_session(delivery.worker_payload(record, None)) as (session, meta, _):
+                reply = await session.call_tool("agentbridge_host_telegram_workspace_media", {
                     **{k: body[k] for k in ("action", "delivery_id", "attempt", "receipt") if k in body},
                     "endpoint_key": record["endpoint_key"], "pairing_ref": record["credential_ref"].removeprefix("tg-"),
-                }, meta=central.meta)
+                }, meta=meta)
                 if reply.isError or not isinstance(reply.structuredContent, dict):
                     raise HTTPException(403)
                 return reply.structuredContent
@@ -77,6 +89,7 @@ async def dispatch(host, record, action, body):
             return await telegram_tasks.navigate(delivery, record, body)
         if action == "telegram-timeline":
             return await telegram_timeline.publish_timeline(delivery, record, body)
-        return await notifications.notifications(delivery, record, action, body)
+        return await notifications.notifications(delivery, record, action, body,
+                                                 paired_session=delivery.paired_notification_session)
     except web.HTTPException as exc:
         raise HTTPException(exc.status) from None

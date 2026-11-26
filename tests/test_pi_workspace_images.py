@@ -154,3 +154,41 @@ def test_image_claim_rechecks_binding_and_keeps_unknown_send_closed(pi, paired):
     links.revoke(pi.accounts["a"]["account_id"], "pi-office", "8801")
     with pytest.raises(PermissionError):
         call("read", **fresh)
+
+
+@pytest.mark.parametrize("text_unavailable", [False, True])
+def test_pi_polls_text_before_images_and_an_unavailable_text_queue_does_not_starve_images(
+    tmp_path, monkeypatch, text_unavailable
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "integrations/nanobot-agentbridge"))
+    from nanobot_agentbridge import pi_workspace_images
+    from nanobot_agentbridge.telegram import TelegramPilot, TelegramUnavailable
+    from tests.test_nanobot_telegram_chat_mirror import Api, BOT, Gateway
+
+    gateway = Gateway()
+    gateway.host_type = "pi"
+    pilot = TelegramPilot(
+        tmp_path / "channel.db", api=Api(), bot_id=BOT, instance="pi-test", gateway=gateway,
+        bindings=dict, allow_pairing=True, sender_subject=lambda chat: "first" if chat == 501 else None,
+    )
+    observed = []
+
+    def poll_text(chat, binding, digest, **kwargs):
+        observed.append(("text", chat, binding, digest))
+        if text_unavailable:
+            raise TelegramUnavailable("Unavailable during this synthetic poll")
+
+    def poll_images(pilot, chat, binding, digest):
+        observed.append(("images", chat, binding, digest))
+
+    monkeypatch.setattr(pilot.terminal, "poll", poll_text)
+    monkeypatch.setattr(pi_workspace_images, "poll", poll_images)
+    try:
+        pilot.poll_once()
+        text, images = observed
+        assert (text[0], images[0]) == ("text", "images")
+        assert text[1:] == images[1:]
+        assert text[1:3] == (501, gateway.binding) and text[3]
+    finally:
+        pilot.terminal.workspace_results.executor.shutdown()
+        pilot.db.close()

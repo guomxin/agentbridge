@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "906889e97f20"
+    "9b93e860c155"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Pi 0.1.3 uses the existing Workspace and Telegram delivery tables. The reviewed adjacent route upgrade and stored receipts require no data migration."
+  "reason": "Pi 0.1.4 uses the existing central outbox, task and operation records. The reviewed adjacent route upgrade preserves the existing two web identities and first Telegram pairing."
 }

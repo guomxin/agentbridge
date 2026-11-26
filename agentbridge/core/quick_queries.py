@@ -84,14 +84,16 @@ def queue_endpoint_query(service, subject, endpoint_id, body, *, binding_hash, s
         actions._fail("ACTION_REQUEST_INVALID", "原查询入口标识无效。")
     with store_transaction(service.tasks) as connection:
         endpoint = actions._telegram_endpoint(connection, subject, endpoint_id)
-        source = actions._owned_task(connection, subject, source_task_id)
-        if endpoint["_binding_hash"] != binding_hash or source["origin_endpoint_id"] != endpoint_id \
-                or source["active_conversation_ref"] != endpoint["conversation_ref"]:
+        if endpoint["_binding_hash"] != binding_hash:
             actions._fail("ACTION_ENDPOINT_INVALID", "查询请求必须来自原 Telegram 私聊。")
+        from agentbridge.core.workspace_result_views import validate_ticket_source
+        source = validate_ticket_source(connection, subject, endpoint, source_task_id, view_hash)
         workspace = {"endpoint_id": endpoint_id, "endpoint_key": endpoint["endpoint_key"],
             "openclaw_session_key": endpoint["conversation_ref"], "agent_host": endpoint["agent_host"],
             "_telegram": True, "_binding_hash": binding_hash, "_request_scope": endpoint_id,
             "_source_task_id": source_task_id, "_view_hash": view_hash}
+        if source:
+            workspace["_workspace_result_delivery_id"] = source["deliveryId"]
         if endpoint.get("_instance_id"):
             workspace["instance_id"] = endpoint["_instance_id"]
         if remaining_context is not None:
@@ -157,6 +159,8 @@ def _queue(service, subject, workspace, body, connection, *, directory=None, sel
     if workspace.get("_telegram"):
         command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"],
             sourceTaskId=workspace["_source_task_id"], viewHash=workspace["_view_hash"])
+        if workspace.get("_workspace_result_delivery_id"):
+            command["workspaceResultDeliveryId"] = workspace["_workspace_result_delivery_id"]
     command["intentHash"] = actions._hash(actions._intent(command))
     task, _ = service.tasks.ensure_task(user_subject=subject, agent_host=workspace.get("agent_host", "openclaw"), host_task_key=host_key,
         origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],

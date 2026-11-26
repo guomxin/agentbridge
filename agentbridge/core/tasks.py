@@ -138,7 +138,12 @@ def _delivery_scope(db, ownership, endpoint):
             AND json_extract(d.payload_json,'$.watchPairProof')=?
             AND EXISTS (SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
                 AND json_extract(t.summary_json,'$.businessWatchId')=json_extract(d.payload_json,'$.payload.watchId'))"""
-        return f"""({original_task}) OR ({companion_task}) OR ({watch}) OR ({digest}) OR (d.payload_type='timeline_message' AND d.task_id=''
+        result_view = """d.payload_type='workspace_result_view' AND ?='pi'
+            AND json_extract(d.payload_json,'$.pairProof')=?
+            AND json_extract(d.payload_json,'$.sourceEndpointId')=?
+            AND EXISTS(SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
+                AND t.agent_host='pi' AND t.origin_endpoint_id=json_extract(d.payload_json,'$.sourceEndpointId'))"""
+        return f"""({original_task}) OR ({companion_task}) OR ({watch}) OR ({digest}) OR ({result_view}) OR (d.payload_type='timeline_message' AND d.task_id=''
             AND json_extract(d.payload_json,'$.mirrorKind')=? AND json_extract(d.payload_json,'$.pairProof')=? AND EXISTS (
                 SELECT 1 FROM user_timeline u WHERE u.entry_id=d.event_id AND u.user_subject=d.user_subject
                 AND u.source_endpoint_id=? AND u.task_id IS NULL AND u.entry_type='chat_message'
@@ -153,6 +158,7 @@ def _delivery_scope(db, ownership, endpoint):
                 AND u.entry_id=json_extract(d.payload_json,'$.entryId')
                 AND u.text=json_extract(d.payload_json,'$.text')))""", (endpoint["agent_host"], True, endpoint["agent_host"], binding["endpoint_id"], proof,
                     private_bot_digest_kind(endpoint["agent_host"]), proof, binding["endpoint_id"],
+                    endpoint["agent_host"], proof, binding["endpoint_id"],
                     private_bot_chat_kind(endpoint["agent_host"]), proof, binding["endpoint_id"])
     marks = ",".join("?" for _ in source_ids) or "NULL"
     # Digest-only rows carry an explicit destination binding and have no public
@@ -4518,6 +4524,7 @@ class TaskHubStore:
         include_business_watch: bool = False,
         include_task_files: bool = False,
         include_oa_digest: bool = False,
+        include_workspace_result_views: bool = False,
     ) -> list[dict]:
         limit = min(max(int(limit), 1), 100)
         lease_seconds = min(max(int(lease_seconds), 5), 300)
@@ -4537,6 +4544,8 @@ class TaskHubStore:
             # types before both the cheap pending probe and the durable lease reservation.
             consumer_clause = ""
             consumer_params = []
+            if not include_workspace_result_views or endpoint["agent_host"] != "pi":
+                consumer_clause += " AND payload_type <> 'workspace_result_view'"
             if endpoint["agent_host"] in PRIVATE_BOT_HOSTS:
                 if not include_task_files:
                     consumer_clause += " AND json_type(payload_json, '$.artifactPairProof') IS NULL"
@@ -4552,6 +4561,7 @@ class TaskHubStore:
                         (payload_type <> 'timeline_message' AND EXISTS (
                              SELECT 1 FROM agent_tasks t WHERE t.task_id=notification_outbox.task_id
                              AND t.origin_endpoint_id=notification_outbox.endpoint_id))
+                        OR payload_type='workspace_result_view'
                         OR json_extract(payload_json, '$.mirrorKind')=?
                         OR json_type(payload_json, '$.watchPairProof')='text')"""
                     consumer_params.append(private_bot_digest_kind(endpoint["agent_host"]))
@@ -5274,6 +5284,9 @@ class TaskHubStore:
                 VALUES (?,?,'',?,?,'timeline_message',?,'pending',0,?,?,?)""",
                 (str(uuid4()), entry["entry_id"], endpoint_id, subject, _canonical_json({**payload, "pairProof": proof}),
                  entry["created_at"], entry["created_at"], entry["created_at"]))
+            if host == "pi" and role == "assistant":
+                from agentbridge.core.workspace_result_views import enqueue
+                enqueue(db, entry, original, run_id, endpoint_id, proof)
 
     @staticmethod
     def _pi_workspace_oa_read_after_login(db, subject, endpoint, original, run_id):

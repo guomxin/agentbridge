@@ -28,9 +28,10 @@ from .runtime import PiRuntime, private_dir, private_file
 
 
 BINDING_FIELDS = ("user_subject", "endpoint_id", "endpoint_key", "session_key", "credential_ref")
-DELIVERY_ACTIONS = {"telegram-task", "telegram-timeline", "telegram-notifications", "telegram-notification-receipt",
-    "telegram-chat-validate", "telegram-chat-receipt", "telegram-artifact-file", "telegram-watch-validate", "artifact-reissue",
-    "telegram-workspace-media"}
+PAIRED_DELIVERY_ACTIONS = {"telegram-notifications", "telegram-notification-receipt", "telegram-chat-validate",
+    "telegram-chat-receipt", "telegram-artifact-file", "telegram-watch-validate", "telegram-workspace-media",
+    "telegram-workspace-result-view"}
+DELIVERY_ACTIONS = PAIRED_DELIVERY_ACTIONS | {"telegram-task", "telegram-timeline", "artifact-reissue"}
 
 
 def text_field(value, maximum):
@@ -129,7 +130,7 @@ class Host:
         if not web:
             raise HTTPException(403)
         async with self.bound_session(web) as central:
-            record = await self.telegram.current(central) if request["endpointKey"].startswith("telegram:") else web
+            record = await self.telegram.current(central.session, central.meta) if request["endpointKey"].startswith("telegram:") else web
             if not record or (record["endpoint_key"], record["endpoint_id"], record["session_key"]) != (
                     request["endpointKey"], request["endpoint"], request["conversation"]):
                 raise HTTPException(403)
@@ -179,7 +180,7 @@ class Host:
         async with self.bound_session(record) as central:
             if record["endpoint_key"].startswith("telegram:"):
                 async def original_pair():
-                    fresh = await self.telegram.current(central)
+                    fresh = await self.telegram.current(central.session, central.meta)
                     return fresh is not None and binding_key(fresh) == binding_key(record)
                 central.binding_check = original_pair
             if trial is not None:
@@ -289,7 +290,10 @@ class Host:
         if action in {"telegram-route", "telegram-present", "telegram-enroll", "telegram-mirror-peers"}:
             return await self.telegram.action(action, body)
         key = binding_key(body["binding"])
-        record = self.bindings.get(key) or await self.telegram.verified(key)
+        if action in PAIRED_DELIVERY_ACTIONS:
+            record = await self.telegram.delivery_hint(key)
+        else:
+            record = self.bindings.get(key) or await self.telegram.verified(key)
         if action == "telegram-binding":
             return {"verified": bool(record and key[2].startswith("telegram:"))}
         if not record:

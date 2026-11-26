@@ -401,6 +401,7 @@ HOST_COORDINATION_TOOL_NAMES = (
     "agentbridge_host_notification_claim",
     "agentbridge_host_notification_validate",
     "agentbridge_host_telegram_workspace_media",
+    "agentbridge_host_workspace_result_view",
     "agentbridge_host_notification_ack",
     "agentbridge_host_artifact_delivery_report",
     "agentbridge_host_artifact_reissue",
@@ -6586,6 +6587,7 @@ def create_central_mcp_server(
         include_business_watch: bool = False,
         include_task_files: bool = False,
         include_oa_digest: bool = False,
+        include_workspace_result_views: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6607,7 +6609,27 @@ def create_central_mcp_server(
             **({"include_business_watch": True} if include_business_watch else {}),
             **({"include_task_files": True} if include_task_files else {}),
             **({"include_oa_digest": True} if include_oa_digest else {}),
+            **({"include_workspace_result_views": True} if include_workspace_result_views and agent_host == "pi" else {}),
         )
+
+    @mcp.tool(name="agentbridge_host_workspace_result_view", title="Deliver an Original Pi Workspace Selection Card",
+        description="Host-private issuance and receipt for a claimed original Workspace OA result, bound to its current paired Pi Telegram endpoint.",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_host_workspace_result_view(ctx: Context, action: Literal["issue","ack"],
+        endpoint_key: Annotated[str, Field(min_length=1,max_length=768)],
+        pairing_ref: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
+        delivery_id: Annotated[str, Field(min_length=36,max_length=36)],
+        attempt_count: Annotated[int, Field(ge=1,le=5)],
+        outcome: Literal["sent","unavailable","delivery_unknown"] | None = None,
+        receipt: Annotated[int, Field(gt=0,lt=2**53)] | None = None) -> dict[str,Any]:
+        from agentbridge.core.workspace_result_views import delivery
+        identity = _request_identity(identity_store)
+        host, _ = await _require_registered_host_call(ctx, service=service, identity=identity, agent_host="pi", minimum_level="L3")
+        return await _run_host_control("agentbridge_host_workspace_result_view", delivery, service=service,
+            subject=identity["user_subject"], token_id=identity["token_id"], instance=host["hostInstanceId"],
+            endpoint_key=endpoint_key, pairing_ref=pairing_ref, delivery_id=delivery_id, attempt_count=attempt_count,
+            action=action, outcome=outcome, receipt=receipt)
 
     @mcp.tool(name="agentbridge_host_telegram_workspace_media", title="Deliver an Original Workspace Image",
         description="Host-private Pi delivery of one original image to its currently paired private endpoint.",

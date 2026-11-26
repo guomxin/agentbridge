@@ -79,7 +79,7 @@ async def _issue_task_result_view(session, req: dict, meta: dict, task_id: str, 
     )
 
 
-async def notifications(host, record, action, body):
+async def notifications(host, record, action, body, *, paired_session=None):
     from aiohttp import web
 
     from .session_pool import open_host_session
@@ -94,10 +94,11 @@ async def notifications(host, record, action, body):
     req = host.worker_payload(record, None)
     origins = frozenset(getattr(host, "card_origins", None) or req.get("trustedCardOrigins") or ())
     lane = "notifications" if action == "telegram-notifications" else "control"
-    async with open_host_session(host, req, lane=lane) as (session, meta, level):
-        if level != "L3" or not await verify_telegram_binding(
+    context = paired_session(req) if paired_session is not None else open_host_session(host, req, lane=lane)
+    async with context as (session, meta, level):
+        if level != "L3" or (paired_session is None and not await verify_telegram_binding(
             session, req["instance"], req["subject"], meta, req["endpointKey"], host_type=req.get("hostType", "nanobot")
-        ):
+        )):
             raise web.HTTPForbidden()
         endpoint_params = {"agent_host": req.get("hostType", "nanobot"), "endpoint_key": req["endpointKey"]}
 
@@ -122,6 +123,9 @@ async def notifications(host, record, action, body):
             )
 
         path = Path(req["userDir"]) / "coordinated-runs.sqlite3"
+        if action == "telegram-workspace-result-view":
+            from .pi_workspace_result_cards import handle_request
+            return await handle_request(session, meta, req, path, body, origins)
         if action in ("telegram-chat-validate", "telegram-chat-receipt"):
             delivery, attempt = body.get("deliveryId"), body.get("attempt")
             if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
@@ -160,6 +164,8 @@ async def notifications(host, record, action, body):
                     (delivery, req["endpoint"], attempt),
                 ).fetchone()
             if not claim or claim[0] != body.get("runId"):
+                raise web.HTTPForbidden()
+            if claim[0].startswith("workspace_result_view:"):
                 raise web.HTTPForbidden()
             if action == "telegram-artifact-file":
                 with_body = body.get("withBody")
@@ -200,6 +206,8 @@ async def notifications(host, record, action, body):
             "include_task_files": True,
             "include_oa_digest": True,
         }
+        if req.get("hostType") == "pi":
+            claim_args["include_workspace_result_views"] = True
         raw_wait = body.get("waitSeconds") if isinstance(body, dict) else None
         if isinstance(raw_wait, (int, float)) and not isinstance(raw_wait, bool) and raw_wait > 0:
             claim_args["wait_seconds"] = min(float(raw_wait), 15.0)
@@ -220,6 +228,12 @@ async def notifications(host, record, action, body):
             if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
                 continue
             mode = item.get("deliveryMode")
+            if mode == "workspace_result_view":
+                task = item.get("sourceTaskId")
+                if req.get("hostType") == "pi" and identifier(task):
+                    _record_claim(path, delivery, req["endpoint"], "workspace_result_view:" + task, attempt)
+                    deliveries.append({"kind": mode, "sourceTaskId": task, "deliveryId": delivery, "attempt": attempt})
+                continue
             if mode == "business_watch":
                 # System watch tasks can originate at another personal Workspace.
                 # Only a central, endpoint-scoped watch claim is eligible here.
@@ -466,6 +480,10 @@ class TerminalMessages:
     def __init__(self, pilot):
         self.pilot = pilot
         self.chat = ChatMirrors(pilot)
+        self.workspace_results = None
+        if getattr(pilot, "host_type", "nanobot") == "pi":
+            from .pi_workspace_result_cards import WorkspaceResultCards
+            self.workspace_results = WorkspaceResultCards(self)
         self._deferred_terminal: dict[tuple[int, str], tuple[dict, str, dict, float]] = {}
         with pilot.db:
             pilot.db.executescript("""
@@ -495,10 +513,14 @@ class TerminalMessages:
         ).fetchone()
         return row["message"] if row else None
 
-    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None, task_id=None):
+    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None, task_id=None, send_before=None):
         from .telegram import TelegramUnavailable, numeric
 
         pilot = self.pilot
+        if send_before is not None:
+            active, proof = pilot._binding(chat)
+            if active != binding or proof != digest or time.time() >= send_before:
+                return False
         with pilot.db:
             inserted = pilot.db.execute(
                 "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,?,'sending',NULL)",
@@ -508,9 +530,15 @@ class TerminalMessages:
             status = "delivery_unknown"
             receipt = None
             try:
-                active, proof = pilot._binding(chat)
+                if send_before is None:
+                    active, proof = pilot._binding(chat)
                 if active != binding or proof != digest:
                     status = "binding_changed"
+                elif send_before is not None and time.time() >= send_before:
+                    with pilot.db:
+                        pilot.db.execute("DELETE FROM telegram_card_deliveries WHERE bot=? AND chat=? AND dedupe_key=? AND state='sending'",
+                                         (pilot.bot_id, chat, dedupe_key))
+                    return False
                 else:
                     call_params = {"chat_id": chat, **params}
                     if reply_to is not None:
@@ -614,6 +642,8 @@ class TerminalMessages:
             self._ack_receipt(binding, delivery, event["runId"], event["attempt"], row[0] == "delivered")
 
     def flush_deferred(self, *, chat=None, run_id=None):
+        if self.workspace_results:
+            self.workspace_results.drain()
         from agentbridge.workspace.gateway import GatewayRequestError
 
         if not self._deferred_terminal:
@@ -656,6 +686,10 @@ class TerminalMessages:
             reply = pilot.gateway._request("telegram-notifications", payload)
         for event in reply.get("deliveries", []):
             kind = event.get("kind")
+            if kind == "workspace_result_view":
+                if self.workspace_results:
+                    self.workspace_results.claim(chat, binding, digest, event)
+                continue
             if kind == "artifact":
                 from .telegram_files import deliver_file
                 from .telegram import TelegramUnavailable

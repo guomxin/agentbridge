@@ -754,17 +754,21 @@ class TelegramPilot:
             for chat in sorted_recipients:
                 try:
                     route, digest = self._binding(chat)
-                    if route:
-                        if self.host_type == "pi" and time.monotonic() >= self.next_workspace_images:
-                            from .pi_workspace_images import poll as poll_workspace_images
-                            self.next_workspace_images = time.monotonic() + 2
-                            try:
-                                poll_workspace_images(self, chat, route, digest)
-                            except (TelegramUnavailable, GatewayRequestError):
-                                pass
-                        self.terminal.poll(chat, route, digest, wait_seconds=1 if use_long_poll else 0)
-                except (TelegramUnavailable,GatewayRequestError):
+                except (TelegramUnavailable, GatewayRequestError):
                     continue
+                if not route:
+                    continue
+                try:
+                    self.terminal.poll(chat, route, digest, wait_seconds=1 if use_long_poll else 0)
+                except (TelegramUnavailable, GatewayRequestError):
+                    pass
+                if self.host_type == "pi" and time.monotonic() >= self.next_workspace_images:
+                    from .pi_workspace_images import poll as poll_workspace_images
+                    self.next_workspace_images = time.monotonic() + 2
+                    try:
+                        poll_workspace_images(self, chat, route, digest)
+                    except (TelegramUnavailable, GatewayRequestError):
+                        pass
 
 
 def main():

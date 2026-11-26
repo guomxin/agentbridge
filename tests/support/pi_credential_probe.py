@@ -55,7 +55,7 @@ def exercise(directory, node, sdk, expire=False, *, serve=False, desktop=None):
         assert service.home.resolve().is_relative_to(directory.resolve())
         with sqlite3.connect(service.db_path) as db:
             db.execute("""INSERT OR REPLACE INTO agent_host_compatibility VALUES
-                ('pi','0.1.3','L2','isolated-pi-l2-check','isolated-fixture',CURRENT_TIMESTAMP)""")
+                ('pi','0.1.4','L2','isolated-pi-l2-check','isolated-fixture',CURRENT_TIMESTAMP)""")
         session = service.sessions.find(user_subject=central.subjects["a"], system_id="oa")
         service.sessions.mark_expired(session["session_id"])
         state["central"] = central

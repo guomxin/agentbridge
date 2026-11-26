@@ -735,6 +735,12 @@ def _load_command(connection, subject, task_id, command_key):
     if len(events) != 1 or command.get("intentHash") != _hash(_intent(command)) \
         or json.loads(events[0][0]).get("intentHash") != command["intentHash"]:
         _fail("ACTION_COMMAND_INVALID", "办理请求的冻结记录不完整。")
+    if "workspaceResultDeliveryId" in command:
+        from agentbridge.core.workspace_result_views import check_command_pair
+        endpoint = _telegram_endpoint(connection, subject, task["origin_endpoint_id"])
+        if command.get("endpointBindingHash") != endpoint["_binding_hash"]:
+            _fail("ACTION_ENDPOINT_INVALID", "原私聊的身份已变化。")
+        check_command_pair(connection, subject, endpoint, command["workspaceResultDeliveryId"])
     return task, command
 
 
@@ -841,6 +847,10 @@ def queue_endpoint_preparation(service, subject, endpoint_id, source_task_id, bo
         endpoint = _telegram_endpoint(connection, subject, endpoint_id)
         if endpoint["_binding_hash"] != binding_hash:
             _fail("ACTION_ENDPOINT_INVALID", "Telegram 会话已变化，请从聊天重新打开。")
+        from agentbridge.core.workspace_result_views import validate_ticket_source
+        workspace_source = validate_ticket_source(connection, subject, endpoint, source_task_id, view_hash)
+        if workspace_source and "operationId" in workspace_source and workspace_source["operationId"] != body["operationId"]:
+            _fail("ACTION_SOURCE_CHANGED", "所选事项与原工作台查询不一致。")
         _, pending = _source(connection, subject, source_task_id, body["operationId"], fresh=False)
         if _hash(pending) != source_hash:
             _fail("ACTION_SOURCE_CHANGED", "原查询内容已变化，请重新查询。")
@@ -849,6 +859,8 @@ def queue_endpoint_preparation(service, subject, endpoint_id, source_task_id, bo
             "_request_scope": endpoint_id, "_telegram": True, "_binding_hash": binding_hash}
         if endpoint.get("_instance_id"):
             binding["instance_id"] = endpoint["_instance_id"]
+        if workspace_source:
+            binding["_workspace_result_delivery_id"] = workspace_source["deliveryId"]
         result = _queue_preparation(service, subject, source_task_id, body, binding, connection)
         previous = connection.execute("SELECT 1 FROM task_events WHERE task_id=? AND user_subject=? "
             "AND event_type='task.result_view.prepared' AND causation_ref=?", (result["taskId"], subject, view_hash)).fetchone()
@@ -947,6 +959,8 @@ def _queue_preparation(service, subject, source_task_id, body, workspace, connec
         "instructionsHash": _hash(bundle["content"]), "requestedAt": _now().isoformat(), "state": "pending", "oaIdentity": identity}
     if workspace.get("_telegram"):
         command.update(originKind="telegram", endpointBindingHash=workspace["_binding_hash"])
+        if workspace.get("_workspace_result_delivery_id"):
+            command["workspaceResultDeliveryId"] = workspace["_workspace_result_delivery_id"]
     command["intentHash"] = _hash(_intent(command))
     task, _ = service.tasks.ensure_task(user_subject=subject, agent_host=host_type, host_task_key=host_key,
         origin_endpoint_id=workspace["endpoint_id"], active_conversation_ref=workspace["openclaw_session_key"],

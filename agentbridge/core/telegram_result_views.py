@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit, urlencode
 
 from agentbridge.core import actionable_results as actions
 from agentbridge.core.store_transactions import store_transaction
+from agentbridge.core.workspace_result_views import checked_source, direct_source
 from agentbridge.core.trusted_flow_presentation import continuous_flow_presentation
 from agentbridge.core.task_state_rules import TERMINAL_TASK_STATUSES, BATCH_STATES, ACTIVE_BATCH_STATES
 from agentbridge.core.task_projections import trusted_batch_projection
@@ -37,24 +38,29 @@ class ResultViewService:
     def __init__(self, service):
         self.service = service
 
-    def issue(self, subject, task_id, endpoint_id, host_context=None):
+    def issue(self, subject, task_id, endpoint_id, host_context=None, *, workspace_delivery_id=None, connection=None):
         """Host-only issuer. The MCP boundary validates the L3 registration."""
         service = self.service
         token = secrets.token_urlsafe(32)
         token_hash = _digest(token)
-        with store_transaction(service.tasks) as connection:
+        with store_transaction(service.tasks, connection) as connection:
             endpoint = actions._telegram_endpoint(connection, subject, endpoint_id)
             task = actions._owned_task(connection, subject, task_id)
-            if (task["agent_host"] not in {"openclaw", "nanobot", "pi"} or task["agent_host"] != endpoint["agent_host"]
-                    or task["origin_endpoint_id"] != endpoint_id
-                    or task["active_conversation_ref"] != endpoint["conversation_ref"]):
-                actions._fail("ACTION_ENDPOINT_INVALID", "查询任务与原 Telegram 私聊不一致。")
+            workspace_source = None
+            if workspace_delivery_id:
+                workspace_source = checked_source(connection, subject, endpoint, task_id, workspace_delivery_id)
+            else:
+                direct_source(connection, subject, endpoint, task)
             if host_context and (host_context.get("endpointId") != endpoint_id
                     or host_context.get("tokenId") != endpoint["token_id"]):
                 actions._fail("ACTION_ENDPOINT_INVALID", "宿主身份与办理入口不一致。")
             groups = self._groups(subject, task_id)
+            if workspace_source:
+                groups = [group for group in groups if group["operationId"] == workspace_source["operationId"]]
             selection_available = any(item["enabled"] for group in groups for item in group["targets"])
             existing = self._preparation_ids(connection, subject, endpoint, groups)
+            if workspace_source and not selection_available:
+                actions._fail("ACTION_SOURCE_UNAVAILABLE", "原工作台查询没有可办理的完整待办。")
             if not groups or not (selection_available or existing or any(group.get("remaining") for group in groups)):
                 actions._fail("ACTION_SOURCE_UNAVAILABLE", "当前查询没有可直接办理的完整待办，请重新查询或通过对话继续。")
             if len(groups) > 16:
@@ -75,6 +81,8 @@ class ResultViewService:
             payload = {"version": "1", "tokenHash": token_hash, "endpointId": endpoint_id,
                 "endpointBindingHash": endpoint["_binding_hash"], "sourceTaskId": task_id,
                 "sources": sources, "sourceExpiresAt": source_expires, "expiresAt": expires}
+            if workspace_source:
+                payload["workspaceDeliveryId"] = workspace_delivery_id
             service.tasks._append_event(connection, task_id=task_id, user_subject=subject,
                 event_type=_EVENT, payload=payload, causation_ref=token_hash, created_at=created.isoformat())
         base = str(service.trusted_card_base_url or "").rstrip("/")
@@ -106,8 +114,10 @@ class ResultViewService:
             if endpoint["_binding_hash"] != payload.get("endpointBindingHash"):
                 actions._fail("ACTION_ENDPOINT_INVALID", "Telegram 会话已变化，请从原聊天重新打开。")
             task = actions._owned_task(connection, subject, event["task_id"])
-            if task["origin_endpoint_id"] != endpoint["endpoint_id"] or task["active_conversation_ref"] != endpoint["conversation_ref"]:
-                actions._fail("ACTION_ENDPOINT_INVALID", "原查询会话绑定已变化。")
+            if "workspaceDeliveryId" in payload:
+                checked_source(connection, subject, endpoint, task["task_id"], payload["workspaceDeliveryId"])
+            else:
+                direct_source(connection, subject, endpoint, task)
             sources = payload.get("sources")
             if sources is None and payload.get("operationId"):
                 sources = [{key: payload[key] for key in ("operationId", "sourceHash", "sourceExpiresAt")}]
