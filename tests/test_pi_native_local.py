@@ -18,7 +18,7 @@ def profile(tmp_path):
             "serviceTokenFile": str(root / "service.token"), "centralMcpUrl": "https://synthetic.invalid/mcp",
             "trustedCardOrigins": ["https://synthetic.invalid"], "requiredLevel": "L1", "runtimeDir": str(root),
             "instanceId": "pi-office", "listenPort": 49179, "nodePath": "/synthetic/node",
-            "sdkDir": "/synthetic/deps", "adapterVersion": "0.1.0"}
+            "sdkDir": "/synthetic/deps", "adapterVersion": "0.1.1"}
     records = [{"binding": {"instance_id": "pi-office", "user_subject": subject, "credential_ref": ref,
                 "endpoint_key": "workspace:pi-office:" + subject, "endpoint_id": subject, "session_key": "s-" + subject},
                 "personalCredential": "synthetic-secret-for-" + ref} for subject, ref in spec["subjects"].items()]
@@ -117,8 +117,8 @@ def test_reviewed_route_switch_and_rollback_recover_original_jobs(tmp_path, monk
     spec["routeTransition"] = {"fromRelease": predecessor.name, "toRelease": candidate.name,
         "beforeSha256": "c" * 64, "afterSha256": "d" * 64, "fromLevel": "L1", "fromTelegram": old_channel}
     if version_patch:
-        spec["routeTransition"].update(fromAdapterVersion="0.1.0", fromRevision=1)
-        monkeypatch.setattr(local, "run", lambda cmd: '[project]\nversion="0.1.0"')
+        spec["routeTransition"].update(fromAdapterVersion="0.1.1", fromRevision=1)
+        monkeypatch.setattr(local, "run", lambda cmd: '[project]\nversion="0.1.1"')
     local.lifecycle.set_current(root, predecessor)
     local.save(root / "native-release.json", {"stage": "confirmed", "candidate": predecessor.name})
     pub = SimpleNamespace(release=candidate.name, args=SimpleNamespace(resume=False))
@@ -188,10 +188,10 @@ def test_version_patch_accepts_verified_archive_after_first_native_rollback(tmp_
     predecessor.mkdir(mode=0o700)
     local.configure(spec, mac, root, predecessor, records)
     spec["routeTransition"] = {"fromRelease":predecessor.name,"toRelease":candidate.name,
-        "fromAdapterVersion":"0.1.0","fromRevision":2,"fromLevel":spec["requiredLevel"],"fromTelegram":None}
+        "fromAdapterVersion":"0.1.1","fromRevision":2,"fromLevel":spec["requiredLevel"],"fromTelegram":None}
     last = {"stage":"rolled_back","previous":None,"candidate":predecessor.name,"previousScopePresent":False}
     pub = SimpleNamespace(release=candidate.name)
-    monkeypatch.setattr(local,"run",lambda cmd: '[project]\nversion="0.1.0"')
+    monkeypatch.setattr(local,"run",lambda cmd: '[project]\nversion="0.1.1"')
     local.check_predecessor(pub,spec,None,last)
     with pytest.raises(ValueError,match="reviewed predecessor"):
         local.check_predecessor(pub,spec,None,{**last,"previousScopePresent":True})

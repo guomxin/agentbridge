@@ -27,7 +27,7 @@ IMPLEMENTATION = CoordinatorImplementation(
 )
 
 
-PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.1", ("web_private", "telegram_private"))
+PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.2", ("web_private", "telegram_private"))
 
 
 class PersonalIdentity(IdentityConfig):

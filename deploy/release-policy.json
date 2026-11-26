@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "e528647ee756"
+    "e33706b8df54"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Pi exposes the result selection card for an existing authorized operation on its original run. This projection uses the existing database schema."
+  "reason": "The central databases keep their existing schemas. Pi records pending result cards in an additive table in its private Telegram delivery database. Workspace reloads reviewed route manifests when dispatching or reconciling a run."
 }

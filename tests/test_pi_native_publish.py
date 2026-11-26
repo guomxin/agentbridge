@@ -386,14 +386,15 @@ def test_predeployment_cache_retests_a_matching_contract_without_archive_evidenc
     assert pi.archive_probe_matches(pi.read(cache))
 
 
+@pytest.mark.parametrize(("old_version", "new_version"), [("0.1.0", "0.1.1"), ("0.1.1", pi.ADAPTER)])
 @pytest.mark.parametrize("first_closed", [False, True])
-def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path, monkeypatch, first_closed):
+def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path, monkeypatch, first_closed, old_version, new_version):
     import hashlib
     import os
 
     _, args, ws, identities, _, _ = synthetic_admission(tmp_path, monkeypatch)
     old = {**args["spec"], "hostType":"pi", "instanceId":"pi-patch", "routeRef":"pi-patch",
-           "adapterVersion":"0.1.0", "requiredLevel":"L3", "subjects":{"alice":"pi-a","bob":"pi-b"},
+           "adapterVersion":old_version, "requiredLevel":"L3", "subjects":{"alice":"pi-a","bob":"pi-b"},
            "telegram":{"botId":97001,"username":"pi_patch_bot","allowedSenders":{"alice":"501"}}}
     config = tmp_path/"config"/"pi-pi-patch"
     config.mkdir(mode=0o700)
@@ -406,12 +407,12 @@ def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path
         central.execute({**previous,"action":"rollback_scope"})
     version = lambda: next(x for x in ws.hosts.admin_list() if x["instance_id"]==old["instanceId"])
     revision = version()["revision"]
-    current = {**old,"adapterVersion":pi.ADAPTER}
+    current = {**old,"adapterVersion":new_version}
     candidate = "2"*12
     updated = central.route_document(config,current)
     transition = {"fromRelease":"1"*12,"toRelease":candidate,"fromLevel":"L3","fromTelegram":old["telegram"],
                   "beforeSha256":hashlib.sha256(original).hexdigest(),"afterSha256":hashlib.sha256(updated).hexdigest(),
-                  "fromAdapterVersion":"0.1.0","fromRevision":revision}
+                  "fromAdapterVersion":old_version,"fromRevision":revision}
     request = {**args,"spec":{**current,"routeTransition":transition},"candidate":candidate}
     def invoke(action, **extra):
         return central.execute({**request, "action":action, **extra})
@@ -420,8 +421,12 @@ def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path
             root.setattr(os,"geteuid",lambda:0)
             return invoke("stage",serviceSecret="fixture-service")
 
+    if old_version == "0.1.0":
+        skipped = {**current, "adapterVersion": "0.1.2", "routeTransition": transition}
+        with pytest.raises(ValueError, match="reviewed versions"):
+            central.transition_routes(config, skipped, candidate)
     assert stage()["routeState"]=="predecessor"
-    assert manifest.read_bytes()==original and version()["adapter_version"]=="0.1.0"
+    assert manifest.read_bytes()==original and version()["adapter_version"]==old_version
     if not first_closed:
         replace = central.replace_route
         def interrupt_after_rename(path, data, uid, gid):
@@ -449,7 +454,7 @@ def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path
         recovery = {"recovery":proof}
     assert invoke("route_activate")["changed"] is True
     assert invoke("route_activate")["changed"] is False
-    assert manifest.read_bytes()==updated and version()["adapter_version"]==pi.ADAPTER
+    assert manifest.read_bytes()==updated and version()["adapter_version"]==new_version
     issued = invoke("bind", **recovery)["bindings"]
     assert [r["binding"] for r in initial] == [r["binding"] for r in issued]
     if first_closed:
@@ -459,7 +464,7 @@ def test_pi_patch_upgrades_original_scope_and_restores_only_its_version(tmp_path
         assert issued==initial
 
     assert invoke("route_restore")["changed"] is True
-    assert manifest.read_bytes()==original and version()["adapter_version"]=="0.1.0"
+    assert manifest.read_bytes()==original and version()["adapter_version"]==old_version
     if first_closed:
         assert invoke("rollback_scope",**recovery)["reverted"]
         assert version()["state"]=="revoked" and all(identities.verify(r["personalCredential"]) is None for r in issued)

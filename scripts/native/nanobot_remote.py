@@ -34,6 +34,9 @@ def route_document(config, spec):
     return json.dumps({"routes":{spec["routeRef"]:row}},sort_keys=True).encode()
 
 
+PI_PATCH_STEPS = (("0.1.0", "0.1.1"), ("0.1.1", "0.1.2"))
+
+
 def transition_routes(config, spec, candidate):
     transition = spec["routeTransition"]
     if (host_type(spec) != "pi" or not isinstance(transition,dict)
@@ -55,7 +58,7 @@ def transition_routes(config, spec, candidate):
             raise ValueError("Pi transition cannot replace a bot or the reviewed first sender")
     predecessor = {**spec,"requiredLevel":transition["fromLevel"],"telegram":telegram}
     if "fromAdapterVersion" in transition or "fromRevision" in transition:
-        if (transition.get("fromAdapterVersion") != "0.1.0" or spec["adapterVersion"] != "0.1.1"
+        if ((transition.get("fromAdapterVersion"), spec["adapterVersion"]) not in PI_PATCH_STEPS
                 or type(transition.get("fromRevision")) is not int or transition["fromRevision"] < 1
                 or transition["fromLevel"] != spec["requiredLevel"] or telegram != spec.get("telegram")):
             raise ValueError("Pi patch transition requires the reviewed versions, directory revision and unchanged scope")
@@ -96,9 +99,10 @@ def patch_version(spec):
 
 def patch_audit_versions(event):
     before, after = (json.loads(event[key]) for key in ("before_json","after_json"))
-    versions = ("0.1.0", "0.1.1") if event["reason"] == PATCH_FORWARD else ("0.1.1", "0.1.0")
-    if (event["reason"] not in (PATCH_FORWARD, PATCH_RESTORE) or before.get("version") != versions[0]
-            or after.get("version") != versions[1] or before.get("revision", -2) + 1 != after.get("revision")
+    versions = (before.get("version"), after.get("version"))
+    if event["reason"] == PATCH_RESTORE:
+        versions = versions[::-1]
+    if (event["reason"] not in (PATCH_FORWARD, PATCH_RESTORE) or versions not in PI_PATCH_STEPS or before.get("revision", -2) + 1 != after.get("revision")
             or not re.fullmatch(r"[0-9a-f]{12}", str(after.get("candidate", "")))):
         raise ValueError("Unexpected Pi adapter version audit")
     return before, after
@@ -146,7 +150,8 @@ def reviewed_patch_scope(db, spec, candidate):
             raise ValueError("An administrator changed the reviewed Pi directory")
         if event["action"] == PATCH_ACTION:
             before, after = patch_audit_versions(event)
-            if before["version"] != version:
+            if (before["version"] != version
+                    or {before["version"], after["version"]} != {patch_version(spec), spec["adapterVersion"]}):
                 raise ValueError("Pi version audit chain changed")
             version = after["version"]
         elif (event["action"] != "workspace.host.configure" or event["reason"] not in (RETRY_OPEN,RETRY_CLOSE)

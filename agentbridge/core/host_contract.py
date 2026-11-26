@@ -356,6 +356,7 @@ class HostContractStore:
         builtins = (
             ("pi", "0.1.0", "L3", "sha256:3221655a79a9254a93e2735121780fb019ecd659bb05e1f639dd1c3020de7a9b"),
             ("pi", "0.1.1", "L3", "sha256:8c88d47782d3284755f7155b54b4474852d36691ad57acefe9bd1b5e597d3224"),
+            ("pi", "0.1.2", "L3", "sha256:b25a4b3481c3eecde28380b1b7af26830415c43d754b7c9d93b1e23979ae095c"),
             ("nanobot", "0.2.0", "L2", "nanobot-private-credential-poll-resume-v1"),
             ("nanobot", "0.3.0", "L3", "sha256:9046f611fd05c7a8ebafb4a3af979c77cdf12019d1309ca2be0c0e6b6d8beb34"),
             ("openclaw", "0.4.71", "L3", "shared-contract-h01-h29-task-plan-v1"),
