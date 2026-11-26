@@ -80,6 +80,7 @@ def synthetic_admission(tmp_path, monkeypatch):
     monkeypatch.setattr(central.pwd, "getpwnam", lambda _: user)
     # The only paths and identities seen by the helper are in this pytest directory.
     monkeypatch.setenv("AGENTBRIDGE_NANOBOT_ROUTES_FILE", "")
+    monkeypatch.setenv("AGENTBRIDGE_PI_ROUTES_FILE", "")
     tasks = TaskHubStore(db_path, maintain_on_startup=False)
     ws = WorkspaceStore(db_path)
     ids = McpIdentityTokenStore(db_path)
