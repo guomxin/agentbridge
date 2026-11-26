@@ -179,6 +179,11 @@ class TelegramPilot:
             UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state='sending';
         """)
 
+        self.result_cards = None
+        if self.host_type == "pi":
+            from .telegram_result_cards import PiResultCards
+            self.result_cards = PiResultCards(self)
+
         self.navigation = TelegramNavigation(self)
         # No host admission or bot send has started while in reading_media.
         with self.db:
@@ -491,19 +496,24 @@ class TelegramPilot:
         receipt = self._confirmed_send(chat, message, answer)
         self._state(chat, message, "delivered" if receipt else "delivery_unknown", receipt=receipt)
 
-    def _deliver_card_once(self, chat, message, binding, binding_digest, dedupe_key, params):
+    def _deliver_card_once(self, chat, message, binding, binding_digest, dedupe_key, params, *, result_deadline=None):
+        if result_deadline is not None:
+            # A slow or failed authority check is still before the durable Bot send boundary.
+            if self._binding(chat) != (binding, binding_digest):
+                return "binding_changed"
+            if time.time() >= result_deadline:
+                return "expired"
         with self.db:
             inserted = self.db.execute(
                 "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,NULL,'sending',NULL)",
                 (self.bot_id, chat, dedupe_key),
             ).rowcount
         if not inserted:
-            return
+            return "handled"
         status = "delivery_unknown"
         receipt = None
         try:
-            active, digest = self._binding(chat)
-            if active != binding or digest != binding_digest:
+            if result_deadline is None and self._binding(chat) != (binding, binding_digest):
                 status = "binding_changed"
             else:
                 receipt = self._confirmed_send(
@@ -528,6 +538,7 @@ class TelegramPilot:
                 "UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
                 (status, receipt, self.bot_id, chat, dedupe_key),
             )
+        return "handled"
 
     def _send_public_reply(self, chat, message, answer, binding_digest):
         key = (self.bot_id, chat, message)
@@ -584,6 +595,10 @@ class TelegramPilot:
         view = rv.get("resultView") if rv.get("available") else None
         if not isinstance(view, dict) or not view.get("sourceTaskId"):
             return
+        self._send_result_view(chat, message, binding, digest, rv)
+
+    def _send_result_view(self, chat, message, binding, digest, rv, *, deadline=None):
+        view = rv["resultView"]
         count = rv.get("count")
         if type(count) is int and count > 0:
             summary = (
@@ -594,7 +609,8 @@ class TelegramPilot:
         else:
             summary = "OA 待办已查询，可从下方进入选择与办理。"
         rendered = render_result_view_message(view, summary=summary)
-        self._deliver_card_once(chat, message, binding, digest, f"result_view:{view['sourceTaskId']}", rendered)
+        return self._deliver_card_once(chat, message, binding, digest, f"result_view:{view['sourceTaskId']}",
+                                       rendered, result_deadline=deadline)
 
     def reconcile(self):
         # Only the single owning consumer calls this. A surviving sending row
@@ -632,20 +648,25 @@ class TelegramPilot:
                 self._state(chat, message, "admission_unknown")
                 continue
             self._state(chat, message, "working", run=run_id)
+            has_view = evidence.get("has_result_view")
+            if self.result_cards and has_view and evidence["state"] in {"accepted", "completed"}:
+                self.result_cards.remember(chat, message, run_id, digest)
             if evidence["state"] == "accepted":
                 self._typing(chat)
                 if evidence.get("has_private_card"):
                     self._deliver_active_card(chat, message, binding, digest, key, run_id)
-                if evidence.get("has_result_view"):
+                if has_view and not self.result_cards:
                     self._deliver_result_view(chat, message, binding, digest, key, run_id)
             elif evidence["state"] == "completed":
                 self.deliver(chat, message, telegram_answer(evidence.get("final_text")), ordinary=True)
-                if evidence.get("has_result_view"):
+                if has_view and not self.result_cards:
                     self._deliver_result_view(chat, message, binding, digest, key, run_id)
                 if self.terminal:
                     self.terminal.flush_deferred(chat=chat, run_id=run_id)
             elif evidence["state"] in {"stopped", "unknown"}:
                 self.deliver(chat, message, "原请求已停止或结果待核对。")
+        if self.result_cards:
+            self.result_cards.flush_one()
         if self.terminal:
             self.terminal.flush_deferred()
         self.timeline.flush()

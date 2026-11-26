@@ -11,6 +11,7 @@ import tempfile
 from threading import Event
 from time import monotonic, sleep
 from urllib.parse import urlsplit
+from unittest.mock import patch
 from uuid import uuid4
 
 from agentbridge.core.telegram_result_views import ResultViewService
@@ -167,7 +168,16 @@ class ResultViews:
                     assert post("result-view", **request, runId=run).json()["available"] is False
                 return len(cards)
 
-            issued = read(11, {}, True)
+            # Signing succeeded centrally before the HTTP response was readable.
+            # Exceed the ordinary eight-second timeout on the real private route.
+            issue = ResultViewService.issue
+            def slow_issue(issuer, *args, **kwargs):
+                view = issue(issuer, *args, **kwargs)
+                sleep(9.5)
+                return view
+
+            with patch.object(ResultViewService, "issue", slow_issue):
+                issued = read(11, {}, True)
             key = {"binding": tg, "requestKey": channel._key(501, 11), "runId": channel._record(501, 11)["run_id"]}
             first_view = next(item for item in bot.messages if item.get("reply_markup"))
             ticket = first_view["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"].rsplit("/", 1)[1]
