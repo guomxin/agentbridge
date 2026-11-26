@@ -73,6 +73,8 @@ def control(tmp_path, monkeypatch, channel_grant):
                     "conversationRef": telegram_conversation_ref("pi-test", "first", "test-id", bot_id, sender_id),
                     "pairingRef": channel_grant["generation"]}
 
+        if "install" in channel_grant:
+            channel_grant["install"](api)
         server = api._mcp_server
         async with create_client_server_memory_streams() as (client, peer), anyio.create_task_group() as tasks:
             tasks.start_soon(server.run, *peer, server.create_initialization_options())

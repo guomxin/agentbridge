@@ -18,7 +18,7 @@ from nanobot_remote import transition_routes
 
 SDK = "@earendil-works/pi-coding-agent"
 SDK_VERSION = "1.6.0"
-ADAPTER = "0.1.4"
+ADAPTER = "0.1.5"
 LEVELS = ("L1", "L2", "L3")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 

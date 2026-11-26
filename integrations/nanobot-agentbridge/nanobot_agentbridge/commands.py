@@ -1,6 +1,7 @@
 """Durable host-private delivery of a central source-bound preparation command."""
 
 import asyncio
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sqlite3
@@ -22,7 +23,7 @@ class CommandQueue:
             db.execute("""CREATE TABLE IF NOT EXISTS commands (command TEXT PRIMARY KEY, subject TEXT NOT NULL,
                 endpoint TEXT NOT NULL, session TEXT NOT NULL, task TEXT NOT NULL, phase TEXT NOT NULL)""")
 
-    async def accept(self, record, body):
+    async def accept(self, record, body, *, verified_session=None):
         task, command = body["taskId"], body["commandKey"]
         try:
             if any(str(UUID(v)) != v for v in (task, command)):
@@ -46,7 +47,9 @@ class CommandQueue:
         if previous and previous[:4] != scope:
             raise web.HTTPForbidden()
         if not previous or previous[4] == "queued":
-            async with open_host_session(self.host, request, lane="control") as (mcp, meta, level):
+            context = (nullcontext(verified_session) if verified_session is not None
+                       else open_host_session(self.host, request, lane="control"))
+            async with context as (mcp, meta, level):
                 if level != "L3":
                     raise web.HTTPForbidden()
                 result = await mcp.call_tool(

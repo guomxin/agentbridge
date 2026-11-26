@@ -262,7 +262,7 @@ class ControlSessions:
             yield session, {**meta, "_pi_local_token_hash": token_hash}, self.spec.get("requiredLevel", "L1")
 
     @asynccontextmanager
-    async def borrow(self, record, *, lane="control"):
+    async def checkout(self, record, *, lane):
         spec = self.spec
         request = {"subject": record["user_subject"], "endpointKey": record["endpoint_key"],
                    "instance": spec["instanceId"], "mcpUrl": spec["mcpUrl"], "caFile": spec.get("caFile"),
@@ -271,11 +271,21 @@ class ControlSessions:
         # central endpoint IDs, conversation refs and pairing generations apart.
         slot = json.dumps([lane, record["endpoint_id"], record["session_key"], record["credential_ref"]])
         async with self.pool.session(request, lane=slot) as (session, meta, _):
-            token = self.read_bearer(record["tokenFile"])
-            if meta.pop("_pi_local_token_hash") != hashlib.sha256(token.encode()).hexdigest():
-                raise PermissionError("Pi credential changed while waiting for its session")
-            current = await checked_identity(session, meta, spec, record["user_subject"])
-            yield CentralTools(session, meta, {}, current["host"]["acceptedLevel"], record["user_subject"])
+            transport_hash = meta.pop("_pi_local_token_hash")
+
+            async def check_identity():
+                token = self.read_bearer(record["tokenFile"])
+                if transport_hash != hashlib.sha256(token.encode()).hexdigest():
+                    raise PermissionError("Pi credential changed while waiting for its session")
+                current = await checked_identity(session, meta, spec, record["user_subject"])
+                return CentralTools(session, meta, {}, current["host"]["acceptedLevel"], record["user_subject"])
+
+            yield check_identity
+
+    @asynccontextmanager
+    async def borrow(self, record, *, lane="control"):
+        async with self.checkout(record, lane=lane) as check_identity:
+            yield await check_identity()
 
     async def close(self):
         await self.pool.close()

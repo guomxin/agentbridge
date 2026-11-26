@@ -303,7 +303,17 @@ class Host:
                 raise HTTPException(403)
             from aiohttp import web
             try:
-                return await self.commands.accept(record, body)
+                # The authenticated route selected this exact local record. A fixed
+                # command only needs current authority, its task snapshot and lease.
+                async with self.control_sessions.borrow(record, lane="prepare-command") as central:
+                    if central.level != "L3":
+                        raise HTTPException(403)
+                    if record["endpoint_key"].startswith("telegram:"):
+                        current = await self.telegram.current(central.session, central.meta)
+                        if current != record:
+                            raise HTTPException(403)
+                    return await self.commands.accept(record, body,
+                        verified_session=(central.session, central.meta, central.level))
             except web.HTTPException as exc:
                 raise HTTPException(exc.status) from None
         if action in DELIVERY_ACTIONS:

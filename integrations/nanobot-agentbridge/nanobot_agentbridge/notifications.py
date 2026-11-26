@@ -279,7 +279,14 @@ async def notifications(host, record, action, body, *, paired_session=None):
                 ):
                     continue
                 try:
-                    await commands.accept(record, {"taskId": task["taskId"], "commandKey": command_key})
+                    command = {"taskId": task["taskId"], "commandKey": command_key}
+                    if paired_session is not None and req.get("hostType") == "pi":
+                        # A long poll may outlive the original token or pairing. Recheck both
+                        # on the claimed transport before using it for the snapshot and lease.
+                        async with paired_session(req) as current:
+                            await commands.accept(record, command, verified_session=current)
+                    else:
+                        await commands.accept(record, command)
                 except Exception:
                     continue
                 await ack(delivery, attempt, True)

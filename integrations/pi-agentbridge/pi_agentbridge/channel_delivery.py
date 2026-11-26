@@ -46,14 +46,26 @@ class Delivery:
             yield central.session, central.meta, central.level
 
     @asynccontextmanager
+    async def notification_transport(self):
+        async with self.host.control_sessions.checkout(self.record, lane=self.lane) as check_identity:
+            @asynccontextmanager
+            async def paired_session(request):
+                if request["endpointKey"] != self.record["endpoint_key"]:
+                    raise HTTPException(403)
+                central = await check_identity()
+                if central.level != "L3":
+                    raise HTTPException(403)
+                current = await self.host.telegram.current(central.session, central.meta)
+                if not current or current != self.record:
+                    raise HTTPException(403)
+                yield central.session, central.meta, central.level
+
+            yield paired_session
+
+    @asynccontextmanager
     async def paired_notification_session(self, request):
-        async with self.private_session(request) as (session, meta, level):
-            if level != "L3":
-                raise HTTPException(403)
-            current = await self.host.telegram.current(session, meta)
-            if not current or binding_key(current) != binding_key(self.record):
-                raise HTTPException(403)
-            yield session, meta, level
+        async with self.notification_transport() as paired_session, paired_session(request) as opened:
+            yield opened
 
     async def standalone_card(self, run, request_key):
         result = await self.host.action("card", {"binding": self.record, "runId": run, "requestKey": request_key})
@@ -89,7 +101,7 @@ async def dispatch(host, record, action, body):
             return await telegram_tasks.navigate(delivery, record, body)
         if action == "telegram-timeline":
             return await telegram_timeline.publish_timeline(delivery, record, body)
-        return await notifications.notifications(delivery, record, action, body,
-                                                 paired_session=delivery.paired_notification_session)
+        async with delivery.notification_transport() as paired_session:
+            return await notifications.notifications(delivery, record, action, body, paired_session=paired_session)
     except web.HTTPException as exc:
         raise HTTPException(exc.status) from None

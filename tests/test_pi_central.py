@@ -27,9 +27,9 @@ def test_pi_personal_registration_and_tool_scope_through_mcp(pi):
     app = create_central_mcp_server(service=service, identity_store=identities, config=configs,
                                     auth_card_base_url="http://127.0.0.1:8780")
     vector = json.loads((Path(__file__).parents[1] / "schemas/agent-host/v1/test-vectors.json").read_text())
-    profile = {**vector["profiles"][0]["value"], "implementation": {"name": "pi", "version": "0.1.4"},
+    profile = {**vector["profiles"][0]["value"], "implementation": {"name": "pi", "version": "0.1.5"},
                "hostInstanceId": "pi-office"}
-    context = {"version": "1", "hostInstanceId": "pi-office", "agentHost": "pi", "hostVersion": "0.1.4"}
+    context = {"version": "1", "hostInstanceId": "pi-office", "agentHost": "pi", "hostVersion": "0.1.5"}
     meta = {"io.agentbridge/host-context": context, "io.agentbridge/host-profile": profile}
     def issue(subject, label):
         return identities.issue(user_subject=subject, expected_principal_ref=subject, label=label)["token"]
@@ -72,7 +72,7 @@ def test_pi_personal_registration_and_tool_scope_through_mcp(pi):
                 assert call(first,name)["isError"]
             business.assert_not_called()
         with service.workspace._connect() as db:
-            db.execute("INSERT INTO agent_host_compatibility VALUES ('pi','0.1.4','L2','isolated','fixture','now')")
+            db.execute("INSERT INTO agent_host_compatibility VALUES ('pi','0.1.5','L2','isolated','fixture','now')")
         assert call(first,"agentbridge_host_register")["structuredContent"]["acceptedLevel"] == "L1"
         pi.spec["requiredLevel"] = "L2"
         private_json(pi.route_file,pi.manifest)
@@ -266,22 +266,22 @@ def test_exact_pi_review_is_needed_for_elevated_registration_and_downgrade(pi):
     with service.workspace._connect() as db:
         db.execute("DELETE FROM agent_host_compatibility WHERE implementation_name='pi'")
     vector = json.loads((Path(__file__).parents[1] / "schemas/agent-host/v1/test-vectors.json").read_text())
-    profile = {**vector["profiles"][0]["value"], "implementation":{"name":"pi","version":"0.1.4"},
+    profile = {**vector["profiles"][0]["value"], "implementation":{"name":"pi","version":"0.1.5"},
                "hostInstanceId":"pi-office"}
     def negotiate():
         return service.negotiate_host(user_subject="user-a", token_id="fixture", profile=profile)["acceptedLevel"]
-    args = {"user_subject":"user-a","agent_host":"pi","host_instance_id":"pi-office","host_version":"0.1.4"}
+    args = {"user_subject":"user-a","agent_host":"pi","host_instance_id":"pi-office","host_version":"0.1.5"}
     assert negotiate() == "L1"
     with service.workspace._connect() as db:
         db.execute("INSERT INTO agent_host_compatibility VALUES ('pi','another-version','L3','test-only','fixture','now')")
     assert negotiate() == "L1"
     with service.workspace._connect() as db:
-        db.execute("INSERT INTO agent_host_compatibility VALUES ('pi','0.1.4','L2','test-only','fixture','now')")
+        db.execute("INSERT INTO agent_host_compatibility VALUES ('pi','0.1.5','L2','test-only','fixture','now')")
     assert negotiate() == "L2"
     with pytest.raises(HostRegistrationRequired):
         service.require_host_registration(**args,minimum_level="L3")
     with service.workspace._connect() as db:
-        db.execute("UPDATE agent_host_compatibility SET accepted_level='L3' WHERE implementation_name='pi' AND implementation_version='0.1.4'")
+        db.execute("UPDATE agent_host_compatibility SET accepted_level='L3' WHERE implementation_name='pi' AND implementation_version='0.1.5'")
     assert negotiate() == "L3"
     assert service.require_host_registration(**args,minimum_level="L3")["acceptedLevel"] == "L3"
     pi.spec["requiredLevel"] = "L1"
@@ -293,7 +293,7 @@ def test_exact_pi_review_is_needed_for_elevated_registration_and_downgrade(pi):
     private_json(pi.route_file,pi.manifest)
     assert negotiate() == "L3"
     with service.workspace._connect() as db:
-        db.execute("DELETE FROM agent_host_compatibility WHERE implementation_name='pi' AND implementation_version='0.1.4'")
+        db.execute("DELETE FROM agent_host_compatibility WHERE implementation_name='pi' AND implementation_version='0.1.5'")
     with pytest.raises(HostRegistrationRequired):
         service.require_host_registration(**args,minimum_level="L3")
     assert negotiate() == "L1"

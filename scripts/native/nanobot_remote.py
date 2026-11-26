@@ -34,7 +34,7 @@ def route_document(config, spec):
     return json.dumps({"routes":{spec["routeRef"]:row}},sort_keys=True).encode()
 
 
-PI_PATCH_STEPS = (("0.1.0", "0.1.1"), ("0.1.1", "0.1.2"), ("0.1.2", "0.1.3"), ("0.1.3", "0.1.4"))
+PI_PATCH_STEPS = (("0.1.0", "0.1.1"), ("0.1.1", "0.1.2"), ("0.1.2", "0.1.3"), ("0.1.3", "0.1.4"), ("0.1.4", "0.1.5"))
 
 
 def transition_routes(config, spec, candidate):

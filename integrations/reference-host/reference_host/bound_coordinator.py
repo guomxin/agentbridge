@@ -27,7 +27,7 @@ IMPLEMENTATION = CoordinatorImplementation(
 )
 
 
-PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.4", ("web_private", "telegram_private"))
+PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.5", ("web_private", "telegram_private"))
 
 
 class PersonalIdentity(IdentityConfig):
@@ -413,6 +413,7 @@ async def run_locked(req, implementation=IMPLEMENTATION):
         implementation=implementation,
         instance_id=req["instance"],
         private_transport=True,
+        load_tool_catalog=not (implementation.name == "pi" and command),
         poll_interval_seconds=0.35,
         maximum_interaction_wait_seconds=238,
     )

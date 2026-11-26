@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "9b93e860c155"
+    "8416b6d19edb"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Pi 0.1.4 uses the existing central outbox, task and operation records. The reviewed adjacent route upgrade preserves the existing two web identities and first Telegram pairing."
+  "reason": "Pi 0.1.5 reuses authenticated fixed-command transport and avoids redundant tool-catalog initialization within the existing original-task, pairing-generation and authorization boundaries. The reviewed adjacent route upgrade uses existing records."
 }

@@ -48,6 +48,7 @@ class ReferenceTaskDriver:
         instance_id: str | None = None,
         allow_insecure_tls: bool = False,
         private_transport: bool = False,
+        load_tool_catalog: bool = True,
         poll_interval_seconds: float = 2.0,
         maximum_interaction_wait_seconds: float = 900.0,
         long_poll_seconds: float = 15.0,
@@ -56,6 +57,7 @@ class ReferenceTaskDriver:
         self.state = state
         self.instance_id = instance_id or host_instance_id()
         self.implementation = implementation
+        self._load_tool_catalog = load_tool_catalog
         self._clients = {
             identity.label: AgentBridgeMcpClient(
                 mcp_url=mcp_url,
@@ -151,7 +153,7 @@ class ReferenceTaskDriver:
                 raise PermissionError("Central credential does not belong to the configured subject")
             require_accepted_level(identity_profile.get("host") or {}, "L3")
             identity_profile["planning"] = profile.get("planning")
-            listed_tools = await client.list_tools()
+            listed_tools = await client.list_tools() if self._load_tool_catalog else []
             allowed = set(
                 (identity_profile.get("agentToolAccess") or {}).get(
                     "allowedToolNames"
