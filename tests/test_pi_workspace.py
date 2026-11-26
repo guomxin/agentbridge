@@ -26,7 +26,7 @@ def private_json(path, data):
 
 
 @pytest.fixture
-def pi(tmp_path, monkeypatch):
+def pi(tmp_path, monkeypatch, request):
     monkeypatch.delenv("AGENTBRIDGE_NANOBOT_ROUTES_FILE", raising=False)
     session_key = tmp_path / "workspace.key"
     session_key.write_bytes(os.urandom(32))
@@ -45,6 +45,10 @@ def pi(tmp_path, monkeypatch):
         "subjects": {"user-a": "pi-a", "user-b": "pi-b"},
         "telegram": {"botId": "8801", "username": "pi_test_bot", "allowedSenders": {"user-a": "501"}},
     }
+    if hasattr(request, "param"):
+        wire = request.getfixturevalue("pi_wire")
+        wire.answers["adapterVersion"] = request.param
+        spec.update(url=wire.url, adapterVersion=request.param)
     manifest = {"routes": {"pi-route": spec}}
     private_json(route_file, manifest)
     service = _service(str(tmp_path))
@@ -237,7 +241,8 @@ def test_stop_generation_follows_accepted_original_run(pi):
         app.stop_chat_generation(account, dispatch_id)
 
 
-def test_pi_authenticated_transport_progress_and_lookup(pi):
+@pytest.fixture
+def pi_wire():
     answers = {
         "available": True,
         "adapterVersion": "0.1.1",
@@ -252,6 +257,7 @@ def test_pi_authenticated_transport_progress_and_lookup(pi):
         "verifiedBindings": 2,
     }
     requests = []
+    switch_on_accept = {}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -261,8 +267,11 @@ def test_pi_authenticated_transport_progress_and_lookup(pi):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             assert self.headers["Authorization"] == "Bearer " + "k" * 40
             requests.append((self.path, body))
+            run_id = "run-" + body.get("requestKey", "")
             if self.path == "/v1/accept":
-                reply = {"runId": "r1", "state": "accepted"}
+                if body["requestKey"] in switch_on_accept:
+                    answers["adapterVersion"] = switch_on_accept.pop(body["requestKey"])
+                reply = {"runId": run_id, "state": "accepted"}
             elif self.path == "/v1/events":
                 reply = {
                     "answer": "原答复",
@@ -274,7 +283,7 @@ def test_pi_authenticated_transport_progress_and_lookup(pi):
                     ],
                 }
             elif self.path == "/v1/lookup":
-                reply = {"runId": "r1", "state": "completed", "answer": "原答复"}
+                reply = {"runId": run_id, "state": "completed", "answer": "原答复"}
             else:
                 reply = answers
             data = json.dumps(
@@ -293,51 +302,161 @@ def test_pi_authenticated_transport_progress_and_lookup(pi):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        pi.spec["url"] = f"http://127.0.0.1:{server.server_port}"
-        private_json(pi.route_file, pi.manifest)
-        client = PiGatewayClient.from_environment()["pi-route"]
-        app, account = pi.app, pi.accounts["a"]
-        probe = pi.provision.probe({"instance_id": "pi-office"})
-        assert (probe["configuredBindings"], probe["verifiedBindings"]) == (2, 2)
-        answers.update(verifiedBindings=1, centralConnection="partial")
-        degraded = client.readiness()
-        assert degraded["available"] and degraded["verifiedBindings"] == 1 and degraded["centralConnection"] == "partial"
-        answers.update(verifiedBindings=True)
-        assert "verifiedBindings" not in client.readiness()
-        answers.update(available=False, verifiedBindings=0, centralConnection="unavailable")
-        offline = client.readiness()
-        assert not offline["available"] and offline["verifiedBindings"] == 0 and offline["centralConnection"] == "unavailable"
-        answers.update(available=True, verifiedBindings=2, centralConnection="verified")
-        assert (probe["capabilities"], probe["modelInvocation"], probe["centralConnection"]) == (
-            ["chat"],
-            "unverified",
-            "verified",
-        )
-        route = next(item for item in pi.provision.catalog()["routes"] if item["host_type"] == "pi")
-        assert route["telegram_subjects"] == ["user-a"] and "501" not in str(route)
-        app.host_routes["pi-route"] = client
-        selected = app.hosts.set_default(account["account_id"], "pi-office", expected_revision=1)
-        events = list(
-            app.send_chat_stream(
-                account,
-                message="原问题",
-                idempotency_key="original",
-                instance_id="pi-office",
-                expected_revision=selected["revision"],
-            )
-        )
-        assert "private-marker" not in str(events)
-        assert any(e.get("state") == "final" and e.get("text") == "原答复" for e in events)
-        assert [e["phase"] for e in events if e.get("kind") == "tool"] == ["start", "result"]
-        dispatch = app.store.list_host_dispatches(user_subject="user-a", instance_id="pi-office")[0]
-        assert app._run_evidence(dispatch, "r1")["final_text"] == "原答复"
-        assert sum(path == "/v1/accept" for path, _ in requests) == 1
-        answers["adapterVersion"] = "other"
-        assert client.readiness()["code"] == "PI_ADAPTER_VERSION_MISMATCH"
-        with pytest.raises(GatewayRequestError, match="版本"):
-            app._run_evidence(dispatch, "r1")
-        answers["hostType"] = "nanobot"
-        assert not client.readiness()["available"]
+        yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}", answers=answers, requests=requests,
+                              switch_on_accept=switch_on_accept)
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_pi_authenticated_transport_progress_and_lookup(pi, pi_wire):
+    pi.spec["url"] = pi_wire.url
+    answers, requests = pi_wire.answers, pi_wire.requests
+    private_json(pi.route_file, pi.manifest)
+    client = PiGatewayClient.from_environment()["pi-route"]
+    app, account = pi.app, pi.accounts["a"]
+    probe = pi.provision.probe({"instance_id": "pi-office"})
+    assert (probe["configuredBindings"], probe["verifiedBindings"]) == (2, 2)
+    answers.update(verifiedBindings=1, centralConnection="partial")
+    degraded = client.readiness()
+    assert degraded["available"] and degraded["verifiedBindings"] == 1 and degraded["centralConnection"] == "partial"
+    answers.update(verifiedBindings=True)
+    assert "verifiedBindings" not in client.readiness()
+    answers.update(available=False, verifiedBindings=0, centralConnection="unavailable")
+    offline = client.readiness()
+    assert not offline["available"] and offline["verifiedBindings"] == 0 and offline["centralConnection"] == "unavailable"
+    answers.update(available=True, verifiedBindings=2, centralConnection="verified")
+    assert (probe["capabilities"], probe["modelInvocation"], probe["centralConnection"]) == (
+        ["chat"],
+        "unverified",
+        "verified",
+    )
+    route = next(item for item in pi.provision.catalog()["routes"] if item["host_type"] == "pi")
+    assert route["telegram_subjects"] == ["user-a"] and "501" not in str(route)
+    app.host_routes["pi-route"] = client
+    selected = app.hosts.set_default(account["account_id"], "pi-office", expected_revision=1)
+    events = list(
+        app.send_chat_stream(
+            account,
+            message="原问题",
+            idempotency_key="original",
+            instance_id="pi-office",
+            expected_revision=selected["revision"],
+        )
+    )
+    assert "private-marker" not in str(events)
+    assert any(e.get("state") == "final" and e.get("text") == "原答复" for e in events)
+    assert [e["phase"] for e in events if e.get("kind") == "tool"] == ["start", "result"]
+    dispatch = app.store.list_host_dispatches(user_subject="user-a", instance_id="pi-office")[0]
+    assert app._run_evidence(dispatch, dispatch["accepted_run_id"])["final_text"] == "原答复"
+    assert sum(path == "/v1/accept" for path, _ in requests) == 1
+    answers["adapterVersion"] = "other"
+    assert client.readiness()["code"] == "PI_ADAPTER_VERSION_MISMATCH"
+    with pytest.raises(GatewayRequestError, match="版本"):
+        app._run_evidence(dispatch, dispatch["accepted_run_id"])
+    answers["hostType"] = "nanobot"
+    assert not client.readiness()["available"]
+
+
+@pytest.mark.parametrize("pi", ["0.1.0"], indirect=True)
+def test_live_directory_and_manifest_switch_both_ways_on_original_route(pi, pi_wire):
+    app = pi.app
+    for person in pi.accounts.values():
+        app.hosts.set_default(person["account_id"], "pi-office", expected_revision=1)
+
+    def send(account, key):
+        return list(app.send_chat_stream(pi.accounts[account], message="原查询", idempotency_key=key))
+
+    def stage(version):
+        pi.spec["adapterVersion"] = version
+        replacement = pi.route_file.with_suffix(".next")
+        private_json(replacement, pi.manifest)
+        replacement.replace(pi.route_file)
+        pi_wire.answers["adapterVersion"] = version
+
+    def approve(revision):
+        pi.provision.save(pi.admin, "", {**pi.config, "expected_revision": revision})
+
+    assert any(e.get("text") == "原答复" for e in send("a", "before"))
+    dispatch = app.store.list_host_dispatches(user_subject="user-a", instance_id="pi-office")[0]
+    for revision, version, key in [(1, "0.1.1", "upgraded"), (2, "0.1.0", "restored")]:
+        stage(version)
+        count = len(pi_wire.requests)
+        assert any(e.get("state") == "error" for e in send("b", "unapproved-" + key))
+        assert len(pi_wire.requests) == count
+        with pytest.raises(GatewayRequestError):
+            app._run_evidence(dispatch, dispatch["accepted_run_id"])
+        approve(revision)
+        assert app.gateway_status(pi.accounts["b"])["adapterVersion"] == version
+        assert any(e.get("text") == "原答复" for e in send("b", key))
+        assert app._run_evidence(dispatch, dispatch["accepted_run_id"])["final_text"] == "原答复"
+        assert pi_wire.requests[-1][0] == "/v1/lookup"
+        assert pi_wire.requests[-1][1]["requestKey"] == "before"
+        assert any(e.get("state") == "error" for e in send("b", "unapproved-" + key))
+        assert any(e.get("text") == "原答复" for e in send("a", "before"))
+    accepted = [(body["requestKey"], body["binding"]["user_subject"], body["binding"]["credential_ref"])
+                for path, body in pi_wire.requests if path == "/v1/accept"]
+    assert accepted == [("before", "user-a", "pi-a"), ("upgraded", "user-b", "pi-b"), ("restored", "user-b", "pi-b")]
+
+
+@pytest.mark.parametrize("pi", ["0.1.0"], indirect=True)
+def test_version_switch_during_accept_checks_original_without_replaying(pi, pi_wire):
+    app, account = pi.app, pi.accounts["a"]
+    app.hosts.set_default(account["account_id"], "pi-office", expected_revision=1)
+    pi_wire.switch_on_accept["uncertain"] = "0.1.1"
+
+    def same_request():
+        return list(app.send_chat_stream(account, message="查询", idempotency_key="uncertain"))
+
+    assert any(e.get("safeToRetry") is False for e in same_request())
+    dispatch = app.store.list_host_dispatches(user_subject="user-a", instance_id="pi-office")[0]
+    assert dispatch["state"] == "acceptance_unknown"
+    pi.spec["adapterVersion"] = "0.1.1"
+    private_json(pi.route_file, pi.manifest)
+    pi.provision.save(pi.admin, "", {**pi.config, "expected_revision": 1})
+    assert app.gateway_status(account)["available"]
+    assert any(e.get("safeToRetry") is False for e in same_request())
+    assert [path for path, body in pi_wire.requests if body.get("requestKey") == "uncertain"] == [
+        "/v1/accept", "/v1/lookup"]
+
+
+def test_deployed_pi_refuses_malformed_manifest_or_changed_authority(pi, tmp_path):
+    app = pi.app
+    account = pi.accounts["b"]
+    app.hosts.set_default(account["account_id"], "pi-office", expected_revision=1)
+    binding = app.store.view_host(account)
+    assert app._bound_client(binding) is app.host_routes["pi-route"]
+    with pytest.raises(GatewayRequestError):
+        app._bound_client({**binding, "user_subject": "user-a", "credential_ref": "pi-a"})
+    cases = [
+        {"routes": {"renamed": pi.spec}},
+        {"routes": {"pi-route": pi.spec, "duplicate": pi.spec}},
+        {"routes": {"pi-route": {**pi.spec, "instanceId": "other-pi"}}},
+        {"routes": {"pi-route": {**pi.spec, "url": "http://127.0.0.1:3"}}},
+        {"routes": {"pi-route": {**pi.spec, "url": 34}}},
+        {"routes": {"pi-route": {**pi.spec, "tokenFile": str(tmp_path / "other-token")}}},
+        {"routes": {"pi-route": {**pi.spec, "subjects": {"user-a": "pi-a"}}}},
+        {"routes": {"pi-route": {**pi.spec, "subjects": {"user-b": "pi-a", "user-a": "pi-b"}}}},
+        {"routes": {"pi-route": {**pi.spec, "subjects": {"user-b": "pi-b", "user-a": "pi-b"}}}},
+        {"routes": {"pi-route": {**pi.spec, "subjects": []}}},
+    ]
+    for document in cases:
+        private_json(pi.route_file, document)
+        with pytest.raises(GatewayRequestError, match="绑定"):
+            app._bound_client(binding)
+    private_json(pi.route_file, pi.manifest)
+    pi.route_file.chmod(0o644)
+    with pytest.raises(GatewayRequestError):
+        app._bound_client(binding)
+    target = pi.route_file.rename(tmp_path / "saved")
+    target.chmod(0o600)
+    pi.route_file.symlink_to(target)
+    with pytest.raises(GatewayRequestError):
+        app._bound_client(binding)
+    pi.route_file.unlink()
+    with pytest.raises(GatewayRequestError):
+        app._bound_client(binding)
+    pi.route_file.write_text("{")
+    pi.route_file.chmod(0o600)
+    with pytest.raises(GatewayRequestError):
+        app._bound_client(binding)

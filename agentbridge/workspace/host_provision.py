@@ -9,7 +9,7 @@ from agentbridge.workspace.gateway import GatewayRequestError
 from agentbridge.workspace.host_instances import (
     HostInstanceConflict, LEGACY_INSTANCE_ID, WorkspaceHostInstances, _alias, _label,
 )
-from agentbridge.workspace.nanobot_gateway import configured_adapters, pi_telegram_sender
+from agentbridge.workspace.nanobot_gateway import configured_adapters, pi_telegram_sender, route_subjects
 
 
 class WorkspaceHostProvision:
@@ -26,14 +26,7 @@ class WorkspaceHostProvision:
             for alias, spec, client in configured_adapters():
                 _alias(alias, "route")
                 instance = _alias(spec["instanceId"], "instance")
-                credentials = spec.get("subjects", {})
-                if not isinstance(credentials, dict):
-                    raise ValueError("invalid principal mapping")
-                for subject, ref in credentials.items():
-                    _label(subject, "user subject", 256)
-                    _alias(ref, "credential")
-                if len(set(credentials.values())) != len(credentials):
-                    raise ValueError("each principal requires a distinct personal credential reference")
+                credentials = route_subjects(spec)
                 routes[alias] = {"host_type": client.host_type, "instance_id": instance,
                                  "adapter_version": _label(spec["adapterVersion"], "version", 80),
                                  "subjects": credentials, "client": client}
