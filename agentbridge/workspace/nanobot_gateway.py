@@ -410,12 +410,14 @@ class NanoBotGatewayClient:
             **({"interaction": result["interaction"]} if isinstance(result.get("interaction"), dict) else {}),
         }
 
+    result_view_timeout = 8
+
     def result_view(self, dispatch: dict, binding: dict, run_ref: str) -> dict:
         result = self._request("result-view", {
             "binding": self._binding(binding),
             "requestKey": dispatch["idempotency_key"],
             "runId": run_ref,
-        })
+        }, timeout=self.result_view_timeout)
         if result.get("available") is not True or not isinstance(result.get("resultView"), dict):
             return {"available": False}
         view = result["resultView"]
@@ -432,6 +434,8 @@ class NanoBotGatewayClient:
 
 class PiGatewayClient(NanoBotGatewayClient):
     host_type = "pi"
+    # Result issuance verifies the original central task and may take longer than normal host reads.
+    result_view_timeout = 45
 
     def __init__(self, *, url, token_file, instance_id, adapter_version):
         super().__init__(url=url, token_file=token_file, instance_id=instance_id)
