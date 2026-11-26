@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def candidate(tmp_path):
+def candidate(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
     (root / "tracked.txt").write_text("fixed candidate\n")
@@ -48,7 +48,10 @@ def candidate(tmp_path):
                        "testFiles": ["fixture/test.py"] if report else [], "report": report,
                        "reportKind": kind, "timeoutSeconds": 5})
     plan = {"schema": "agentbridge.validation-plan.v1", "stages": stages, "groups": {}}
-    with mock.patch.object(validation, "plan", return_value=plan), \
+    # The CLI and package entry points can both be imported by other tests.
+    # Make the runner use the same artifact module as this isolated fixture.
+    monkeypatch.setitem(sys.modules, "agentbridge_artifact", artifact)
+    with mock.patch.object(artifact.validation_plan, "plan", return_value=plan), \
          mock.patch.object(artifact, "inputs", return_value={"commit": commit}):
         artifact.begin(root, receipt)
         yield root, receipt, plan
