@@ -296,3 +296,15 @@ def test_offline_receipt_plan_never_observes_launchd(maintenance, monkeypatch):
     m.stop_and_replace()
     monkeypatch.setattr(gm, 'command', lambda *_: pytest.fail('offline plan observed runtime'))
     assert gm.check(m.host, m.authorization, CANDIDATE, m.receipt, runtime=False)['phase'] == 'stopped'
+
+
+def test_failed_receipt_directory_sync_prevents_enable(maintenance, monkeypatch):
+    m = maintenance
+    m.stop_and_replace()
+    def fail(_):
+        raise OSError('injected receipt directory sync failure')
+    monkeypatch.setattr(gm, 'sync_directory', fail)
+    with pytest.raises(OSError):
+        gm.start(m.host, m.authorization, CANDIDATE, m.receipt)
+    assert m.state['calls'] == ['disable', 'bootout']
+    assert common.read(m.receipt)['phase'] == 'starting'

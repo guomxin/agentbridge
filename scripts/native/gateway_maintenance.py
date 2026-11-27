@@ -21,6 +21,19 @@ import lifecycle
 SCHEMA = 'agentbridge.gateway-publish-maintenance.v1'
 
 
+def sync_directory(path):
+    fd = os.open(Path(path).parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def persist(path, value):
+    save(path, value)
+    sync_directory(path)
+
+
 def command(argv):
     try:
         return subprocess.run([str(x) for x in argv], capture_output=True,
@@ -125,6 +138,7 @@ def stop(config, authorization, candidate, replacement, destination):
             json.dump(receipt, stream, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
+        sync_directory(destination)
         lifecycle.run(['/bin/launchctl', 'disable', lifecycle.service_target('gateway')])
         lifecycle.run(['/bin/launchctl', 'bootout', lifecycle.service_target('gateway')])
         deadline = time.monotonic() + 45
@@ -137,7 +151,7 @@ def stop(config, authorization, candidate, replacement, destination):
                     raise ValueError('Maintenance stop is incomplete; inspect the original receipt') from None
                 time.sleep(0.25)
         receipt.update(phase='stopped', stoppedAt=timestamp())
-        save(destination, receipt)
+        persist(destination, receipt)
     return {'status': 'stopped-for-publish', 'maintenanceReceipt': str(destination),
             'candidate': candidate, 'configurationChanged': False}
 
@@ -174,7 +188,7 @@ def start(config, authorization, candidate, path):
         # Seal before enable: an interruption cannot silently grant a second
         # start. Unknown outcomes require inspection, never an automatic retry.
         receipt.update(phase='starting', startAttemptedAt=timestamp())
-        save(path, receipt)
+        persist(path, receipt)
         root = Path(config['runtimeDir'])
         current = receipt['targetFingerprint']
         save(root / 'warmup.pending.json', {'fingerprint': current})
@@ -194,5 +208,5 @@ def start(config, authorization, candidate, path):
             raise ValueError('Gateway inputs changed during maintenance start')
         save(root / 'gateway-baseline.json', {'fingerprint': current, 'runtime': observed})
         receipt.update(phase='started', startedRuntime=observed, startedAt=timestamp())
-        save(path, receipt)
+        persist(path, receipt)
     return {'status': 'started-awaiting-acceptance', 'kind': 'gateway'}
