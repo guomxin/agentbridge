@@ -120,6 +120,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     fetchImpl: dependencies.documentFetchImpl || globalThis.fetch,
     saveMediaBufferImpl: dependencies.saveMediaBufferImpl,
     artifactReceiptStore: dependencies.artifactReceiptStore,
+    nativeCardStore: dependencies.nativeCardStore,
+    nativeEndpointKeyResolver: identityRouter.enabled ? sessionKey => identityRouter.endpointKeyForSession(sessionKey) : null,
     interactionPresenter: identityRouter.enabled
       ? (interaction, sessionKey) =>
           presentInteractionForSession({
@@ -480,6 +482,23 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       );
     }
     const interactions = coordinator.takeForDelivery({ sessionKey });
+    const nativeInteractions = interactions.filter(interaction => coordinator.nativeCardCanHandle(sessionKey, interaction));
+    if (nativeInteractions.length) {
+      return coordinator.deliverNativeInteractionCards(sessionKey, nativeInteractions).then(outcomes => {
+        const legacyInteractions = interactions.filter(interaction => !nativeInteractions.includes(interaction) ||
+          outcomes[nativeInteractions.indexOf(interaction)] === "unclaimed");
+        const legacyPresentation = presentationForRecords(legacyInteractions, channel);
+        const resultPresentation = coordinator.takeResultViewPresentation(sessionKey, channel);
+        const presentation = legacyPresentation && resultPresentation ? mergePresentations(resultPresentation, legacyPresentation)
+          : legacyPresentation || resultPresentation;
+        const payload = presentation ? { ...event.payload,
+          presentation: mergePresentations(event.payload.presentation, presentation) } : { ...event.payload };
+        if (outcomes.some(value => !["sent", "unclaimed"].includes(value))) {
+          payload.text = [payload.text, "安全卡片发送尚未确认，请在本人工作台查看原任务；系统不会自动重复发送未知消息。"].filter(Boolean).join("\n\n");
+        }
+        return { payload };
+      });
+    }
     const interactionPresentation = presentationForRecords(interactions, channel);
     const resultPresentation = coordinator.takeResultViewPresentation(sessionKey, channel);
     const presentation = interactionPresentation && resultPresentation

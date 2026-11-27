@@ -91,7 +91,7 @@ export function openTimelineLocalStore(api) {
 export function openProjectionLocalStore(api,namespace) {
   const resolve=api?.runtime?.state?.resolveStateDir;
   if(typeof resolve!=='function')return null;
-  if(!['timeline-projection-v2','telegram-media-v2','telegram-artifact-v2'].includes(namespace))throw new Error('TIMELINE_STORAGE_CONFIG_INVALID');
+  if(!['timeline-projection-v2','telegram-media-v2','telegram-artifact-v2','telegram-native-cards-v1'].includes(namespace))throw new Error('TIMELINE_STORAGE_CONFIG_INVALID');
   const directory=path.join(resolve(),'agentbridge',namespace);
   if(!opened.has(directory))opened.set(directory,new TimelineLocalStore(directory));
   return opened.get(directory);

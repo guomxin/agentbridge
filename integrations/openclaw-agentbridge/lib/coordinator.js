@@ -11,6 +11,7 @@ import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identi
 import { taskNotificationMode } from "./task-notification.js";
 import { WorkspaceQueryDelivery } from "./workspace-query-delivery.js";
 import { TelegramArtifactDelivery } from "./telegram-artifact-delivery.js";
+import { TelegramNativeCards } from "./telegram-native-cards.js";
 
 import {
   appendPresentationLinks,
@@ -119,6 +120,8 @@ export class InteractionCoordinator {
     toolIdentityResolver = null,
     workspaceQueryDelivery = null,
     artifactReceiptStore = undefined,
+    nativeCardStore = undefined,
+    nativeEndpointKeyResolver = null,
   }) {
     this.api = api;
     this.config = config;
@@ -135,6 +138,12 @@ export class InteractionCoordinator {
     this.artifactDelivery = new TelegramArtifactDelivery({api,store:artifactReceiptStore,now,sleep,
       identityScope:sessionKey=>this.toolIdentityResolver?.(sessionKey),
       routeFor:sessionKey=>this.sessionRoutes.get(sessionKey),clientFor:sessionKey=>this.clientForSession(sessionKey)});
+    this.nativeCards = new TelegramNativeCards({ api, config, store: nativeCardStore, now,
+      identityScope: toolIdentityResolver,
+      endpointFor: nativeEndpointKeyResolver,
+      routeFor: sessionKey => this.sessionRoutes.get(sessionKey),
+      restoreRoute: (sessionKey, route) => this.bindDeliveryRoute({ sessionKey, ...route }),
+      clientFor: sessionKey => this.clientForSession(sessionKey) });
     this.sharedStateId = sharedState.id || "isolated";
     this.records = sharedState.records;
     this.resultViews = sharedState.resultViews || (sharedState.resultViews = new Map());
@@ -597,6 +606,20 @@ export class InteractionCoordinator {
       (await this.presentInteractions(processed.interactions, sessionKey)) ||
       processed.interactions;
     this.captureInteractions(interactions, binding, context, taskIdFromToolResult(event.result));
+    // A task-free login has no central task-origin proof. Admit only the actual
+    // identity-routed native login result whose original call is still current;
+    // arbitrary legacy metadata and historical booleans do not mint this proof.
+    const source = event.planningContext;
+    if (!taskIdFromToolResult(event.result) && /^(?:oa|taihua|yuque|smartlight)_session_login$/u.test(event.toolName || "") &&
+        trustedAgentBridgeStructuredContent(event.result, this.config.mcpServerName) &&
+        source?.sessionKey === sessionKey && this.planningCalls.get(source.toolCallId) === source &&
+        this.planningCallCurrent(source) && source.identityScope === this.toolIdentityResolver?.(sessionKey)) {
+      for (const interaction of interactions) {
+        const record = this.records.get(interaction.interactionId);
+        if (interaction.type === "credential" && record?.sessionKey === sessionKey && !record.taskId)
+          record.nativeCardIdentityScope = source.identityScope;
+      }
+    }
     return processed.result;
   }
 
@@ -1507,6 +1530,8 @@ export class InteractionCoordinator {
     const notifications = Array.isArray(response?.notifications)
       ? response.notifications
       : [];
+    await this.nativeCards.recover({ binding, client, endpoint, identityRouter, signal,
+      withDirectDelivery: (sessionKey, send) => this.withNativeDirectDelivery(sessionKey, send) });
     for (const notification of notifications) {
       const eventType = safeRoutePart(notification?.event?.eventType);
       if (TERMINAL_TASK_EVENTS.has(eventType)) {
@@ -2178,6 +2203,8 @@ export class InteractionCoordinator {
     ) {
       return;
     }
+    const nativeClose = ["completed", "declined", "expired", "failed", "superseded"].includes(status) &&
+      nextInteractions.length === 0 && this.nativeCards.owns(record);
     if (resumeOriginalRequest && this.config.wakeAgentOnComplete) {
       if (record.continuationQueued) {
         return;
@@ -2199,7 +2226,7 @@ export class InteractionCoordinator {
       ) {
         return;
       }
-      await this.deliverStatusDirect(record.sessionKey, status, errorCode, response);
+      if (!nativeClose) await this.deliverStatusDirect(record.sessionKey, status, errorCode, response);
       const pendingAfterStatus = this.undeliveredPendingFor(record);
       if (
         pendingAfterStatus.length > 0 &&
@@ -2243,6 +2270,9 @@ export class InteractionCoordinator {
       );
       return;
     }
+    // Suppress only the duplicate public close. Original read continuation and
+    // authorized model wake above retain their existing execution semantics.
+    if (nativeClose) return;
     if (
       nextInteractions.length === 0 &&
       (await this.deliverStatusDirect(record.sessionKey, status, errorCode, response))
@@ -2725,6 +2755,31 @@ export class InteractionCoordinator {
     }
   }
 
+  async withNativeDirectDelivery(sessionKey, send) {
+    this.directDeliveries.set(sessionKey, (this.directDeliveries.get(sessionKey) || 0) + 1);
+    try { return await send(); }
+    finally { this.finishDirectDelivery(sessionKey); }
+  }
+
+  nativeCardCanHandle(sessionKey, interaction) {
+    const record = this.records.get(interaction.interactionId);
+    return record?.sessionKey === sessionKey && this.nativeCards.canHandle(sessionKey, interaction, record.taskId,
+      Boolean(record.nativeCardIdentityScope && record.nativeCardIdentityScope === this.toolIdentityResolver?.(sessionKey)));
+  }
+
+  async deliverNativeInteractionCards(sessionKey, interactions) {
+    const results = [];
+    for (const interaction of interactions) {
+      const record = this.records.get(interaction.interactionId);
+      const outcome = await this.nativeCards.deliver({ sessionKey, interaction, taskId: record?.taskId,
+        standalone: Boolean(record?.nativeCardIdentityScope && record.nativeCardIdentityScope === this.toolIdentityResolver?.(sessionKey)),
+        withDirectDelivery: send => this.withNativeDirectDelivery(sessionKey, send) });
+      if (outcome !== "unclaimed" && record?.sessionKey === sessionKey) record.delivered = true;
+      results.push(outcome);
+    }
+    return results;
+  }
+
   async deliverInteractionsDirect(sessionKey, interactions) {
     const route = this.sessionRoutes.get(sessionKey);
     if (!route) {
@@ -2749,6 +2804,14 @@ export class InteractionCoordinator {
         `AgentBridge trusted card is available through the pull-based task stream (channel=${route.channel}, count=${interactions.length})`,
       );
       return true;
+    }
+    const native = interactions.filter(interaction => this.nativeCardCanHandle(sessionKey, interaction));
+    if (native.length) {
+      const outcomes = await this.deliverNativeInteractionCards(sessionKey, native);
+      interactions = interactions.filter(interaction => !native.includes(interaction) || outcomes[native.indexOf(interaction)] === "unclaimed");
+      // Only an intent proven absent may use the existing presentation path.
+      // Prepared/sending/unknown are owned by the durable consumer.
+      if (!interactions.length) return true;
     }
     try {
       const presentation = buildPresentation(interactions, route.channel);
