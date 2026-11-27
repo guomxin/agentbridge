@@ -111,16 +111,27 @@ class TelegramNavigation:
     def handle(self, chat, message, binding, digest, reply, verb, ordinal):
         pilot = self.pilot
 
-        def send(text, *, target=None, formatted=None):
+        def send(text, *, target=None, formatted=None, native_source=None):
             active, proof = pilot._binding(chat)
             if active != binding or proof != digest:
                 pilot._state(chat, message, "binding_changed")
                 return
             pilot._state(chat, message, "sending")
             params = formatted or {}
+            key = "interaction:" + str((native_source or {}).get("interactionId"))
+            inserted = False
+            if native_source:
+                with pilot.db:
+                    inserted = pilot.db.execute("INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,NULL,'sending',NULL)",
+                                                (pilot.bot_id, chat, key)).rowcount
+                    if inserted:
+                        pilot.native_card_closures.arm(chat, digest, key, native_source)
             receipt = pilot._confirmed_send(chat, message, text, parse_mode=params.get("parse_mode"),
                                             reply_markup=params.get("reply_markup"))
             with pilot.db:
+                if inserted:
+                    pilot.db.execute("UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
+                                     ("delivered" if receipt else "delivery_unknown",receipt,pilot.bot_id,chat,key))
                 self.remember(chat, receipt, digest, target)
                 pilot.db.execute("UPDATE messages SET state=?, receipt=? WHERE bot=? AND chat=? AND message=?",
                                  ("delivered" if receipt else "delivery_unknown", receipt, pilot.bot_id, chat, message))
@@ -212,7 +223,7 @@ class TelegramNavigation:
             params = render_result_view_message(view)
             target = {"kind": "result", "id": view["sourceTaskId"]}
         if params:
-            send(params["text"], target=target, formatted=params)
+            send(params["text"], target=target, formatted=params, native_source=result.get("nativeCardSource"))
             return
         state = result.get("state")
         if state in {"stop_unconfirmed", "unavailable"}:

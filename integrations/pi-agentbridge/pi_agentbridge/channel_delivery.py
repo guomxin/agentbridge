@@ -76,7 +76,8 @@ class Delivery:
 
     async def standalone_card(self, run, request_key):
         result = await self.host.action("card", {"binding": self.record, "runId": run, "requestKey": request_key})
-        return {"interaction": result["interaction"]} if result.get("available") else {"state": "unavailable"}
+        return {"interaction": result["interaction"], **({"nativeCardSource": result["nativeCardSource"]}
+            if result.get("nativeCardSource") else {})} if result.get("available") else {"state": "unavailable"}
 
 
 async def dispatch(host, record, action, body):

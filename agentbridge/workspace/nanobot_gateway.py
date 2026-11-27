@@ -428,6 +428,7 @@ class NanoBotGatewayClient:
             "kind": result["kind"],
             "url": result["url"],
             "cardRevision": result.get("cardRevision", 1),
+            **({"nativeCardSource": result["nativeCardSource"]} if isinstance(result.get("nativeCardSource"), dict) else {}),
             **({"interaction": result["interaction"]} if isinstance(result.get("interaction"), dict) else {}),
         }
 

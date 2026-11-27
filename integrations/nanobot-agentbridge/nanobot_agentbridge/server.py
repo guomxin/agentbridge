@@ -443,7 +443,11 @@ class Host:
                         card = None
             except Exception:
                 raise web.HTTPServiceUnavailable() from None
-            return {**card,"cardRevision":card_revision} if card else {"available":False}
+            if card:
+                from .native_card_state import remember
+                source = remember(self, record, card["interaction"], run=entry["run_id"], request_key=request_key)
+                return {**card, "cardRevision": card_revision, **({"nativeCardSource": source} if source else {})}
+            return {"available":False}
         if action == "result-view":
             if channel_for(record["endpoint_key"]) != "telegram" or not pending_query:
                 return {"available": False}

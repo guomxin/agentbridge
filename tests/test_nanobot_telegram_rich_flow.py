@@ -1023,7 +1023,7 @@ def test_notifications_handler_dispatches_prepared_command_waiting_card_result_v
             "trustedCardOrigins": [HTTPS_ORIGIN],
         },
     )
-    record = {"workspaceEndpointId": "ws-ep-1"}
+    record = {"workspaceEndpointId": "ws-ep-1", "credential_ref": "synthetic-original-pair"}
 
     @asynccontextmanager
     async def fake_auth(_req):

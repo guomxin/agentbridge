@@ -361,12 +361,16 @@ class Host:
             except web.HTTPException as exc:
                 raise HTTPException(exc.status) from None
         if action in DELIVERY_ACTIONS:
+            if action == "telegram-task" and body.get("operation") == "card_state" and self.level in {"L2", "L3"}:
+                from .channel_delivery import dispatch
+                return await dispatch(self, record, action, body)
             if action == "telegram-task" and self.level == "L2" and key[2].startswith("telegram:"):
                 target = body.get("target") or {}
                 if body.get("operation") != "continue" or target.get("kind") != "run":
                     return {"state": "unavailable"}
                 current = await self.action("card", {"requestKey": target.get("requestKey"), "runId": target.get("id"), "binding": record})
-                return {"interaction": current["interaction"]} if current.get("available") else {"state": "unavailable"}
+                return {"interaction": current["interaction"], **({"nativeCardSource": current["nativeCardSource"]}
+                    if current.get("nativeCardSource") else {})} if current.get("available") else {"state": "unavailable"}
             if self.level != "L3" or not self.coordinator:
                 raise HTTPException(403)
             from .channel_delivery import dispatch
@@ -453,7 +457,9 @@ class Host:
                     card = await self.cards.present(central, record, waiting["interaction"],
                         task=waiting["task"], kind=governed["kind"] if governed else "credential")
                     if card:
-                        return {**card, "cardRevision": waiting["revision"]}
+                        from nanobot_agentbridge.native_card_state import remember
+                        source = remember(self, record, card["interaction"], run=row["id"], request_key=request_key)
+                        return {**card, "cardRevision": waiting["revision"], **({"nativeCardSource": source} if source else {})}
         if action == "result-view" and pending:
             from nanobot_agentbridge.telegram_presentation import normalize_result_view
             async with self.private_session(self.worker_payload(record, row["id"])) as (mcp, meta, level):

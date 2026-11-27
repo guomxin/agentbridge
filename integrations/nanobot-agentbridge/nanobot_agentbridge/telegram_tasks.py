@@ -48,6 +48,9 @@ async def navigate(host, record, body):
     from aiohttp import web
 
     operation = body.get("operation")
+    if operation == "card_state":
+        from .native_card_state import read
+        return await read(host, record, body)
     if operation not in {"list", "history", "continue", "stop", "public_reference"}:
         raise web.HTTPBadRequest()
     request = host.worker_payload(record, None)
@@ -124,7 +127,9 @@ async def navigate(host, record, body):
                         waiting = CredentialCards(Path(request["userDir"])).waiting(key, request["endpoint"])
                         card = await present_credential(session, request, meta, waiting) if waiting else None
                         if card and _valid_until(card["interaction"].get("expiresAt")):
-                            return {"interaction": card["interaction"]}
+                            from .native_card_state import remember
+                            source = remember(host, record, card["interaction"], run=key, request_key=target["requestKey"])
+                            return {"interaction": card["interaction"], **({"nativeCardSource": source} if source else {})}
                 return {"state": "unavailable"}
             if operation == "continue":
                 from .task_context import pending_query_for_run
@@ -189,7 +194,9 @@ async def navigate(host, record, body):
                 and card.get("taskId") == task_id and _valid_until(card.get("expiresAt"))):
             normalized = normalize_interaction(card, frozenset(host.card_origins))
             if normalized and interaction_can_open(normalized):
-                return {**summary, "interaction": normalized}
+                from .native_card_state import remember
+                source = remember(host, record, card)
+                return {**summary, "interaction": normalized, **({"nativeCardSource": source} if source else {})}
         if query_result or (task.get("summary") or {}).get("command", {}).get("kind") == "oa_pending_query":
             from .notifications import _issue_task_result_view
             view = await _issue_task_result_view(session, request, meta, task_id, frozenset(host.card_origins))

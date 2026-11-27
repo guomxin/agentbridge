@@ -114,7 +114,8 @@ def test_live_task_lookup_and_cancel_rejects_expiry_foreign_origin_and_unknown(t
     host = SimpleNamespace(coordinator=True, instance="office", card_origins=[ORIGIN],
                            worker_payload=lambda _rec, _run: route)
     def run(action):
-        return asyncio.run(telegram_tasks.navigate(host, {}, {"operation": action, "target": {"kind": "task","id": task}}))
+        return asyncio.run(telegram_tasks.navigate(host, {"credential_ref": "synthetic-original-pair"},
+            {"operation": action, "target": {"kind": "task","id": task}}))
     import pytest
     assert run("continue")["interaction"]["interactionId"] == card_id
     card["expiresAt"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()

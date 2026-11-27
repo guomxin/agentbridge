@@ -223,6 +223,8 @@ class TelegramPilot:
             UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state='sending';
         """)
 
+        from .native_card_closures import NativeCardClosures
+        self.native_card_closures = NativeCardClosures(self)
         self.result_cards = None
         if self.host_type == "pi":
             from .telegram_result_cards import PiResultCards
@@ -551,7 +553,7 @@ class TelegramPilot:
         receipt = self._confirmed_send(chat, message, answer)
         self._state(chat, message, "delivered" if receipt else "delivery_unknown", receipt=receipt)
 
-    def _deliver_card_once(self, chat, message, binding, binding_digest, dedupe_key, params, *, result_deadline=None):
+    def _deliver_card_once(self, chat, message, binding, binding_digest, dedupe_key, params, *, result_deadline=None, native_source=None):
         # Authority checks must not consume a send reservation.
         if self._binding(chat) != (binding, binding_digest):
             return "binding_changed"
@@ -563,6 +565,8 @@ class TelegramPilot:
                 "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,NULL,'sending',NULL)",
                 (self.bot_id, chat, dedupe_key),
             ).rowcount
+            if inserted:
+                self.native_card_closures.arm(chat, binding_digest, dedupe_key, native_source)
         if not inserted:
             return "handled"
         status = "delivery_unknown"
@@ -639,7 +643,8 @@ class TelegramPilot:
         origins = frozenset({f"https://{parsed.netloc}"}) if parsed.scheme == "https" and parsed.netloc else frozenset()
         rendered = render_interaction_message(card, origins)
         if rendered:
-            self._deliver_card_once(chat, message, binding, digest, f"interaction:{card['interactionId']}", rendered)
+            self._deliver_card_once(chat, message, binding, digest, f"interaction:{card['interactionId']}", rendered,
+                                    native_source=card_resp.get("nativeCardSource"))
 
     def _deliver_result_view(self, chat, message, binding, digest, key, run_id):
         try:
@@ -667,6 +672,7 @@ class TelegramPilot:
                                        rendered, result_deadline=deadline)
 
     def reconcile(self):
+        self.native_card_closures.poll()
         # Only the single owning consumer calls this. A surviving sending row
         # is from a prior process and may already have reached Telegram.
         with self.db:

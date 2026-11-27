@@ -399,6 +399,8 @@ async def notifications(host, record, action, body, *, paired_session=None):
                     await ack(delivery, attempt, True)
                     continue
                 run_ref = f"interaction:{card['interactionId']}"
+                from .native_card_state import remember
+                source = remember(host, record, {**card, "taskId": task["taskId"]})
                 _record_claim(path, delivery, req["endpoint"], run_ref, attempt)
                 deliveries.append({
                     "kind": "trusted_interaction",
@@ -407,6 +409,7 @@ async def notifications(host, record, action, body, *, paired_session=None):
                     "runId": run_ref,
                     "replyRunId": local_run,
                     "interaction": card,
+                    **({"nativeCardSource": source} if source else {}),
                     "taskId": task.get("taskId"),
                 })
                 continue
@@ -542,7 +545,7 @@ class TerminalMessages:
         ).fetchone()
         return row["message"] if row else None
 
-    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None, task_id=None, send_before=None):
+    def send_once(self, chat, binding, digest, dedupe_key, params, *, delivery=None, reply_to=None, task_id=None, send_before=None, native_source=None):
         from .telegram import TelegramUnavailable, numeric
 
         pilot = self.pilot
@@ -554,6 +557,8 @@ class TerminalMessages:
                 "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,?,'sending',NULL)",
                 (pilot.bot_id, chat, dedupe_key, delivery),
             ).rowcount
+            if inserted and native_source:
+                pilot.native_card_closures.arm(chat, digest, dedupe_key, native_source)
         if inserted:
             status = "delivery_unknown"
             receipt = None
@@ -749,6 +754,7 @@ class TerminalMessages:
                 delivered = self.send_once(
                     chat, binding, digest, f"interaction:{card['interactionId']}", params,
                     delivery=event["deliveryId"], reply_to=reply_to, task_id=event.get("taskId"),
+                    native_source=event.get("nativeCardSource"),
                 )
                 self._ack_receipt(binding, event["deliveryId"], event["runId"], event["attempt"], delivered)
                 continue
