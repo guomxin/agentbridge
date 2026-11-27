@@ -64,6 +64,14 @@ class Model:
 class Bot:
     def __init__(self):
         self.images = []
+        self.documents = []
+        self.messages = []
+        self.sequence = 100
+
+    def receipt(self):
+        self.sequence += 1
+        return {"message_id": self.sequence, "chat": {"type": "private", "id": 501},
+                "from": {"id": 8801}}
 
     def call(self, method, **params):
         if method == "getUpdates":
@@ -74,17 +82,86 @@ class Bot:
             return {"url": ""}
         if method == "sendChatAction":
             return True
+        if method == "sendMessage":
+            assert params["chat_id"] == 501 and isinstance(params["text"], str) and params["text"]
+            result = self.receipt()
+            self.messages.append({"text": params["text"], "receipt": result["message_id"]})
+            return result
         raise AssertionError("Unexpected Telegram action " + method)
 
-    def send_document(self, chat, name, mime, body):
-        assert chat == 501 and mime == "image/png"
-        self.images.append(hashlib.sha256(body).hexdigest())
-        return {
-            "message_id": 100 + len(self.images),
-            "chat": {"type": "private", "id": chat},
-            "from": {"id": 8801},
-            "document": {"file_id": str(len(self.images)), "file_size": len(body)},
-        }
+    def send_document(self, chat, filename, content_type, data):
+        # The public API permits positional legacy calls and v2 keyword calls.
+        assert chat == 501 and content_type == "image/png"
+        digest = hashlib.sha256(data).hexdigest()
+        result = self.receipt()
+        self.images.append(digest)
+        self.documents.append({"filename": filename, "sha256": digest,
+                               "byteSize": len(data), "receipt": result["message_id"]})
+        return {**result, "document": {"file_id": str(len(self.images)), "file_size": len(data)}}
+
+
+def assert_delivery_receipts(service, directory, bot, paths, expected):
+    """Each original has one physical receipt and exactly one owning protocol."""
+    assert bot.images == expected
+    documents, messages = list(bot.documents), list(bot.messages)
+    assert len(documents) == len(paths) == 2
+    assert [m["text"] for m in messages] == [
+        "工作台提问\n请数一下原图", "工作台回复\n本次模型收到 2 张原图。"]
+    physical = [item["receipt"] for item in documents + messages]
+    assert len(set(physical)) == 4 and all(type(r) is int and r > 0 for r in physical)
+    with service.workspace._connect() as db:
+        old = [dict(r) for r in db.execute("SELECT * FROM pi_workspace_image_deliveries ORDER BY ordinal")]
+        media = [dict(r) for r in db.execute("SELECT * FROM workspace_media_deliveries ORDER BY ordinal")]
+        texts = [dict(r) for r in db.execute("SELECT * FROM workspace_text_deliveries ORDER BY kind DESC")]
+    assert len(old) == 2 and [r["ordinal"] for r in old] == [0, 1]
+    assert len({r["dispatch_id"] for r in old}) == 1
+    assert len({r["destination"] for r in old}) == 1
+    assert len(media) in (0, 2) and len({r["ordinal"] for r in media}) == len(media)
+    assert len(texts) == 2 and {r["kind"] for r in texts} == {"user", "assistant"}
+    with sqlite3.connect((directory / "telegram.sqlite").as_uri() + "?mode=ro", uri=True) as host:
+        host.row_factory = sqlite3.Row
+        for ordinal, (legacy, document, path) in enumerate(zip(old, documents, paths, strict=True)):
+            current = next((r for r in media if r["ordinal"] == ordinal), None)
+            assert document["sha256"] == expected[ordinal] and document["byteSize"] == path.stat().st_size
+            if current:
+                assert (current["dispatch_id"], current["attachment_id"], current["question_id"]) == (
+                    legacy["dispatch_id"], legacy["attachment_id"], legacy["entry_id"])
+                manifest = json.loads(current["resource_json"])
+                assert (manifest["sha256"], manifest["byteSize"], manifest["fileName"]) == (
+                    expected[ordinal], path.stat().st_size, path.name)
+            if legacy["state"] == "sent":
+                assert legacy["attempt"] == 1 and legacy["receipt"] == document["receipt"]
+                assert document["filename"] == f"workspace-{ordinal + 1}.png"
+                assert not current or (current["state"] != "sent" and current["attempt"] == 0 and current["receipt"] is None)
+                local = host.execute("SELECT * FROM pi_workspace_image_receipts WHERE delivery=?",
+                                     (legacy["delivery_id"],)).fetchone()
+                assert local and (local["bot"], local["chat"], local["attempt"], local["receipt"], local["acknowledged"]) == (
+                    8801, 501, 1, document["receipt"], 1)
+                if current:
+                    assert not host.execute("SELECT 1 FROM telegram_card_deliveries WHERE delivery=?",
+                                            (current["delivery_id"],)).fetchone()
+            else:
+                assert (legacy["state"], legacy["attempt"], legacy["receipt"]) == ("superseded", 0, None)
+                assert current and (current["state"], current["attempt"], current["receipt"]) == (
+                    "sent", 1, document["receipt"])
+                assert document["filename"] == path.name
+                assert not host.execute("SELECT 1 FROM pi_workspace_image_receipts WHERE delivery=?",
+                                        (legacy["delivery_id"],)).fetchone()
+                assert_v2_receipt(host, current, "workspace_media:" + current["delivery_id"])
+        for row in texts:
+            index = 0 if row["kind"] == "user" else 1
+            assert (row["state"], row["attempt"], row["part_index"], row["part_count"], row["receipt"]) == (
+                "sent", 1, 1, 1, messages[index]["receipt"])
+            assert row["question_id"] == old[0]["entry_id"]
+            assert_v2_receipt(host, row, "workspace_text:" + row["entry_id"] + ":1")
+
+
+def assert_v2_receipt(host, row, key):
+    local = host.execute("SELECT * FROM telegram_card_deliveries WHERE delivery=?", (row["delivery_id"],)).fetchall()
+    assert len(local) == 1 and (local[0]["bot"], local[0]["chat"], local[0]["dedupe_key"],
+        local[0]["state"], local[0]["receipt"]) == (8801, 501, key, "delivered", row["receipt"])
+    attempt = host.execute("SELECT * FROM telegram_workspace_query_attempts WHERE delivery=?", (row["delivery_id"],)).fetchone()
+    assert attempt and (attempt["attempt"], attempt["acknowledged"]) == (1, 1)
 
 
 @contextmanager
@@ -277,21 +354,19 @@ def main():
                     time.sleep(0.25)
                 assert not failed and bot.images == expected and model.seen == [expected], (
                     failed,
-                    len(bot.images),
-                    len(model.seen),
+                    bot.images,
+                    expected,
+                    model.seen,
                 )
-                with service.workspace._connect() as db:
-                    for _ in range(150):
-                        states = [
-                            r[0]
-                            for r in db.execute(
-                                "SELECT state FROM pi_workspace_image_deliveries ORDER BY ordinal"
-                            )
-                        ]
-                        if states == ["sent", "sent"]:
-                            break
+                # The poller may finish physical sends before its final central ACK.
+                for attempt in range(150):
+                    try:
+                        assert_delivery_receipts(service, Path(tmp), bot, paths, expected)
+                        break
+                    except AssertionError:
+                        if attempt == 149:
+                            raise
                         time.sleep(0.1)
-                assert states == ["sent", "sent"]
                 print(
                     json.dumps(
                         {
