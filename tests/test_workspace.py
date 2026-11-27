@@ -1373,7 +1373,7 @@ class WorkspaceApplicationTests(unittest.TestCase):
             )
             self.assertIn("\u5b89\u5168\u4e2d\u6b62", timeline[-1]["text"])
 
-    def test_terminal_abort_keeps_tool_aware_text_in_the_timeline(self) -> None:
+    def test_terminal_abort_projects_safe_tool_aware_status_in_the_timeline(self) -> None:
         class AbortedGateway(FakeGateway):
             def send_stream(self, **kwargs):
                 self.calls.append(("send_stream", kwargs))
@@ -1416,10 +1416,10 @@ class WorkspaceApplicationTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(
-                app.list_timeline(account)[-1]["text"],
-                "Run stopped after a business tool call.",
-            )
+            terminal = app.list_timeline(account)[-1]
+            self.assertIn("停止生成不代表撤销", terminal["text"])
+            self.assertNotIn("Run stopped after", terminal["text"])
+            self.assertEqual(terminal["payload"]["workspaceDispatch"]["state"], "stopped")
 
     def test_second_workspace_run_waits_in_durable_account_order(self) -> None:
         entered = threading.Event()

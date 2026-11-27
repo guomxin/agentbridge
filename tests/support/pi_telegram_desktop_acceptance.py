@@ -66,7 +66,7 @@ class DesktopChannel:
 
     @contextmanager
     def consumer(self, directory, port, token, accounts):
-        channel = {"hostType": "pi", "adapterVersion": "0.1.7", "enabled": True, "preparationOnly": False,
+        channel = {"hostType": "pi", "adapterVersion": "0.1.8", "enabled": True, "preparationOnly": False,
                    "botId": self.bot, "botUsername": self.username, "botCredential": self.credential,
                    "instanceId": "pi-office", "hostUrl": f"http://127.0.0.1:{port}", "hostTokenFile": token,
                    "dataDir": str(directory / "channel"), "bindings": {}, "allowWorkspacePairing": True,

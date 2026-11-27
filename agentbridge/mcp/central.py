@@ -6642,6 +6642,7 @@ def create_central_mcp_server(
         include_task_files: bool = False,
         include_oa_digest: bool = False,
         include_workspace_result_views: bool = False,
+        include_workspace_query_v2: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6663,6 +6664,7 @@ def create_central_mcp_server(
             lease_seconds=lease_seconds,
             wait_seconds=wait_seconds,
             host_instance_id=host["hostInstanceId"],
+            **({"query_token_id":identity["token_id"]} if include_workspace_query_v2 else {}),
             **({"include_workspace_chat": True} if include_workspace_chat else {}),
             **({"include_business_watch": True} if include_business_watch else {}),
             **({"include_task_files": True} if include_task_files else {}),
@@ -6672,20 +6674,32 @@ def create_central_mcp_server(
                if quiet_pairing_ref is not None else {}),
         )
 
-    @mcp.tool(name="agentbridge_host_workspace_result_view", title="Deliver an Original Pi Workspace Selection Card",
-        description="Host-private issuance and receipt for a claimed original Workspace OA result, bound to its current paired Pi Telegram endpoint.",
+    @mcp.tool(name="agentbridge_host_workspace_result_view", title="Deliver a Paired Workspace Message or OA Result",
+        description="Host-private issuance, single-use send permission and receipt for a claimed Workspace delivery to its original Telegram chat.",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False),
         structured_output=True)
-    async def agentbridge_host_workspace_result_view(ctx: Context, action: Literal["issue","ack"],
+    async def agentbridge_host_workspace_result_view(ctx: Context, action: Literal["issue","begin","ack"],
         endpoint_key: Annotated[str, Field(min_length=1,max_length=768)],
         pairing_ref: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")],
         delivery_id: Annotated[str, Field(min_length=36,max_length=36)],
         attempt_count: Annotated[int, Field(ge=1,le=5)],
-        outcome: Literal["sent","unavailable","delivery_unknown"] | None = None,
+        agent_host: Literal["openclaw","nanobot","pi"] = "pi",
+        retry_after_seconds: Annotated[int, Field(ge=1,le=86400)] | None = None,
+        outcome: Literal["sent","unavailable","delivery_unknown","rejected","retry_after"] | None = None,
         receipt: Annotated[int, Field(gt=0,lt=2**53)] | None = None) -> dict[str,Any]:
         from agentbridge.core.workspace_result_views import delivery
         identity = _request_identity(identity_store)
-        host, _ = await _require_registered_host_call(ctx, service=service, identity=identity, agent_host="pi", minimum_level="L3")
+        host, _ = await _require_registered_host_call(ctx, service=service, identity=identity, agent_host=agent_host, minimum_level="L3")
+        from agentbridge.core.workspace_query_delivery import handle
+        query = await _run_host_control("agentbridge_host_workspace_result_view", handle, service=service,
+            subject=identity["user_subject"],token_id=identity["token_id"],instance=host["hostInstanceId"],host=agent_host,
+            endpoint_key=endpoint_key,pairing_ref=pairing_ref,delivery_id=delivery_id,attempt_count=attempt_count,
+            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds)
+        if query is not None:
+            return query
+        if agent_host != "pi" or action == "begin" or retry_after_seconds is not None:
+            field = {"issue": "available", "begin": "allowed", "ack": "recorded"}[action]
+            return {field: False}
         return await _run_host_control("agentbridge_host_workspace_result_view", delivery, service=service,
             subject=identity["user_subject"], token_id=identity["token_id"], instance=host["hostInstanceId"],
             endpoint_key=endpoint_key, pairing_ref=pairing_ref, delivery_id=delivery_id, attempt_count=attempt_count,

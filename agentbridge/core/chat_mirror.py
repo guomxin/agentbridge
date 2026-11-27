@@ -30,8 +30,8 @@ _PRIVATE = re.compile(
 )
 
 
-def public_mirror_text(text: object) -> str | None:
-    if not isinstance(text, str) or len(text) > 50_000 or "\0" in text:
+def public_mirror_text(text: object, *, maximum: int = 50_000) -> str | None:
+    if not isinstance(text, str) or len(text) > maximum or "\0" in text:
         return None
     try:
         text.encode("utf-8")

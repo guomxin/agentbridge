@@ -106,6 +106,11 @@ def active_claimants(db, sender):
     return {row["user_subject"] for row in rows}
 
 
+def _revocation(db, subject, instance, bot):
+    return db.execute("""SELECT generation FROM workspace_telegram_pilot_revocations
+        WHERE instance=? AND bot=? AND owner=?""", (instance, bot, subject)).fetchone()
+
+
 def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
     # Conservatively reject two active owners even if one older row is malformed.
     claimed = active_claimants(db, sender)
@@ -115,6 +120,12 @@ def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
     if host_type == "pi":
         if sender != allowed_sender or claimed - {subject}:
             return False
+    elif _revocation(db, subject, instance, bot):
+        # Revocation permanently disables implicit inheritance for this host/Bot.
+        # Only a fresh two-endpoint proof may restore an explicit grant.
+        return bool(allow_new_pair and not claimed - {subject} and db.execute(
+            "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND owner=? AND sender=?",
+            (instance, bot, subject, sender)).fetchone())
     elif claimed:
         return claimed == {subject} and (subject, sender) in old_peers(
             db, sender=sender
@@ -166,7 +177,11 @@ def mirror_sender_ids(db, subject, binding):
 
 def mirror_pair_proof(db, subject, binding, sender):
     """Pin a delivery to the same grant that authorized its creation."""
-    if binding["host_type"] == "nanobot" and active_claimants(db, sender):
+    if not verified_pair(db, subject, binding["instance_id"], binding["bot"], sender,
+                         allow_new_pair=not binding.get("all_subjects", False)):
+        return None
+    revoked = _revocation(db, subject, binding["instance_id"], binding["bot"])
+    if binding["host_type"] == "nanobot" and active_claimants(db, sender) and not revoked:
         grants = []
         for row in db.execute("""SELECT endpoint_id FROM client_endpoints WHERE user_subject=? AND agent_host='openclaw'
                 AND lower(client_type)='telegram' AND state='active' AND external_subject=? ORDER BY endpoint_id""",
@@ -185,6 +200,8 @@ def mirror_pair_proof(db, subject, binding, sender):
             return None
         grants = [row[0]]
     basis = [binding["instance_id"], binding["endpoint_id"], binding["credential_ref"], binding["bot"], subject, sender, grants]
+    if revoked:
+        basis.append(revoked[0])
     return hashlib.sha256(json.dumps(basis, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -239,6 +256,9 @@ def initialize_telegram_pilot_links(connection):
                     challenge_id TEXT PRIMARY KEY, instance TEXT NOT NULL, bot TEXT NOT NULL, owner TEXT NOT NULL,
                     code_hash TEXT NOT NULL UNIQUE,expires_at REAL NOT NULL,sender TEXT,confirm_hash TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,UNIQUE(instance,bot,owner));
+                CREATE TABLE IF NOT EXISTS workspace_telegram_pilot_revocations(
+                    instance TEXT NOT NULL, bot TEXT NOT NULL, owner TEXT NOT NULL,
+                    generation TEXT NOT NULL, PRIMARY KEY(instance,bot,owner));
             """)
 
 
@@ -270,7 +290,8 @@ class TelegramPilotLinks:
             "sender_hint": None,
         }
         host_type, _ = _channel_assignment(db, owner, instance, bot)
-        candidates = old_peers(db, subject=owner) if host_type == "nanobot" else set()
+        candidates = old_peers(db, subject=owner) if (
+            host_type == "nanobot" and not _revocation(db, owner, instance, bot)) else set()
         for _, sender in candidates:
             if active_claimants(db, sender) == {owner}:
                 return {**view, "state": "linked", "source": "existing"}
@@ -281,8 +302,7 @@ class TelegramPilotLinks:
         if (
             row
             and not candidates
-            and (verified_pair(db, owner, instance, bot, row["sender"], allow_new_pair=True)
-                 if host_type == "pi" else not active_claimants(db, row["sender"]))
+            and verified_pair(db, owner, instance, bot, row["sender"], allow_new_pair=True)
             and eligible(self.service, db, owner, instance, new_link=True)
         ):
             return {**view, "state": "linked", "source": "workspace"}
@@ -362,9 +382,10 @@ class TelegramPilotLinks:
                 return None
             host_type, allowed_sender = _channel_assignment(db, subject, instance_id, bot)
             claimed = active_claimants(db, sender)
+            revoked = _revocation(db, subject, instance_id, bot)
             if (
                 not host_type or (host_type == "pi" and (sender != allowed_sender or claimed - {subject}))
-                or (host_type == "nanobot" and claimed)
+                or (host_type == "nanobot" and (claimed - {subject} if revoked else claimed))
                 or db.execute(
                     "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND sender=?",
                     (instance_id, bot, sender),
@@ -412,9 +433,11 @@ class TelegramPilotLinks:
             else:
                 host_type, allowed_sender = _channel_assignment(db, owner, instance_id, bot)
                 claimed = active_claimants(db, row["sender"])
+                revoked = _revocation(db, owner, instance_id, bot)
                 if (
                     not host_type or (host_type == "pi" and (row["sender"] != allowed_sender or claimed - {owner}))
-                    or (host_type == "nanobot" and (old_peers(db, subject=owner) or claimed))
+                    or (host_type == "nanobot" and (
+                        claimed - {owner} if revoked else old_peers(db, subject=owner) or claimed))
                     or db.execute(
                         "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND (owner=? OR sender=?)",
                         (instance_id, bot, owner, row["sender"]),
@@ -438,6 +461,9 @@ class TelegramPilotLinks:
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             owner = self._owner(db, account_id, instance_id, bot)
+            db.execute("""INSERT INTO workspace_telegram_pilot_revocations VALUES(?,?,?,?)
+                ON CONFLICT(instance,bot,owner) DO UPDATE SET generation=excluded.generation""",
+                (instance_id, bot, owner, secrets.token_hex(32)))
             for table in (
                 "workspace_telegram_pilot_links",
                 "workspace_telegram_pilot_challenges",
@@ -497,17 +523,14 @@ class TelegramPilotLinks:
             )
             endpoint = _ensure_telegram_endpoint(db, self.service.tasks, subject, binding, bot, sender,
                                                  token_id, refresh=True)
-            pairing = {}
-            if binding["host_type"] == "pi":
-                proof = mirror_pair_proof(db, subject, {**binding, "bot": bot}, sender)
-                if not proof:
-                    raise PermissionError("未取得当前 Pi 私聊配对证明。")
-                pairing = {"pairingRef": proof}
+            proof = mirror_pair_proof(db, subject, {**binding, "bot": bot}, sender)
+            if not proof:
+                raise PermissionError("未取得当前私聊配对证明。")
             return {
                 "endpointId": endpoint,
                 "endpointKey": key,
                 "conversationRef": conversation,
                 "workspaceEndpointId": binding["endpoint_id"],
                 "workspaceEndpointKey": binding["endpoint_key"],
-                **pairing,
+                "pairingRef": proof,
             }

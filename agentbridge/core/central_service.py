@@ -1831,6 +1831,7 @@ class CentralCapabilityService:
         include_task_files: bool = False,
         include_oa_digest: bool = False,
         include_workspace_result_views: bool = False,
+        query_token_id: str | None = None,
         quiet_pairing_ref: str | None = None,
         quiet_token_id: str | None = None,
     ) -> dict:
@@ -2033,6 +2034,15 @@ class CentralCapabilityService:
                 item["deliveryMode"] = "status"
                 item["message"] = _task_notification_message(task, event)
             notifications.append(item)
+        if query_token_id and host_instance_id and len(deliveries) < limit:
+            from . import workspace_query_delivery, workspace_text_delivery
+            space = limit - len(deliveries)
+            text_items = workspace_text_delivery.claim(self, user_subject, agent_host, host_instance_id,
+                                                      endpoint_key, query_token_id, space, lease_seconds)
+            notifications.extend(text_items)
+            if space > len(text_items):
+                notifications.extend(workspace_query_delivery.claim(self, user_subject, agent_host, host_instance_id,
+                    endpoint_key, query_token_id, space - len(text_items), lease_seconds))
         return {
             "protocolVersion": "0.1",
             "status": "succeeded",

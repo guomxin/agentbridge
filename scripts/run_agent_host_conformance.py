@@ -80,7 +80,12 @@ def main() -> int:
                 "tests.test_workspace",
             ],
             "cwd": ROOT,
-        }
+        },
+        {
+            "name": "reference-host-pi-observation-contract",
+            "command": [sys.executable, "-m", "pytest", "-q", "tests/test_pi_resume_observation.py"],
+            "cwd": ROOT,
+        },
     ]
     if not arguments.skip_openclaw:
         npm = shutil.which("npm")

@@ -68,7 +68,7 @@ def checked_profile(path, environment, host_profile, units, remote_root):
         "tunnelPublicKey",
     }
     if (
-        set(spec) - {"telegram", "coordinatorPython", "requiredLevel", "displayNameChange"} != flags
+        set(spec) - {"telegram", "coordinatorPython", "requiredLevel", "displayNameChange", "routeTransition"} != flags
         or spec["schema"] != "agentbridge.nanobot-mac-pilot.v1"
     ):
         raise ValueError("Unexpected NanoBot pilot configuration fields")
@@ -226,6 +226,13 @@ def checked_profile(path, environment, host_profile, units, remote_root):
         raise ValueError(
             "The reviewed central unit must load this exact private route file"
         )
+    if "routeTransition" in spec:
+        from nanobot_remote import transition_routes
+        if "displayNameChange" in spec:
+            raise ValueError("NanoBot version and display-name transitions must be reviewed separately")
+        change = spec["routeTransition"]
+        transition_routes(Path(remote_root)/"config"/("nanobot-"+spec["instanceId"]),
+                          metadata(spec), change.get("toRelease") if isinstance(change,dict) else None)
     return spec
 
 
@@ -244,6 +251,8 @@ def metadata(spec):
     }
     if "displayNameChange" in spec:
         result["displayNameChange"] = spec["displayNameChange"]
+    if "routeTransition" in spec:
+        result["routeTransition"] = spec["routeTransition"]
     result["requiredLevel"] = spec.get("requiredLevel", "L2")
     if spec.get("telegram"):
         result["telegram"] = {k: spec["telegram"][k] for k in ("botId", "username")}
@@ -286,7 +295,7 @@ def remote_request(pub, remote_spec, action, **extra):
         + (ROOT / "scripts/native/nanobot_remote.py").read_text()
     )
     runner = "import base64,sys;exec(compile(base64.b64decode(sys.stdin.readline()),'<reviewed-nanobot-release>','exec'))"
-    patch_switch = (remote_spec.get("hostType") == "pi" and (remote_spec.get("routeTransition") or {}).get("fromAdapterVersion")
+    patch_switch = ((remote_spec.get("routeTransition") or {}).get("fromAdapterVersion")
                     and action in {"route_activate","route_restore"})
     if patch_switch or action in ("bind", "probe", "probe_predecessor", "rollback_scope", "recovery_check", "name_check", "name_apply", "name_restore"):
         args = [
@@ -816,6 +825,8 @@ def configure_release(pub, spec, mac, root, archive, recovery=None):
         bot = spec["telegram"]
         config["telegramPilot"] = {k: bot[k] for k in ("botId", "username")}
         channel = {
+            "hostType": "nanobot",
+            "adapterVersion": spec["adapterVersion"],
             "botId": bot["botId"],
             "botUsername": bot["username"],
             "botCredential": bot["botCredential"],
@@ -928,6 +939,25 @@ def retry_proof(pub, spec, root, old, last, definitions, prior, *, recovery_remo
     return proof
 
 
+def check_patch_predecessor(pub, spec, old, last):
+    change = spec.get("routeTransition")
+    if not change:
+        return
+    confirmed = last.get("stage") == "confirmed" and last.get("candidate") == change["fromRelease"]
+    restored = (last.get("stage") == "rolled_back" and last.get("candidate") == pub.release
+                and last.get("previous") == change["fromRelease"] and last.get("routeTransition") == change)
+    if (not old or old.resolve() != old or old.name != change["fromRelease"]
+            or pub.release != change["toRelease"] or not (confirmed or restored)):
+        raise ValueError("NanoBot patch requires its reviewed running predecessor and candidate")
+    import tomllib
+    previous = tomllib.loads(run(["git", "show", old.name + ":integrations/nanobot-agentbridge/pyproject.toml"]))
+    original = read(private_file(old / "host.json"))
+    if (previous["project"]["version"] != change["fromAdapterVersion"]
+            or not original.get("coordinatorProgram")
+            or original.get("telegramPilot") != change["fromTelegram"]):
+        raise ValueError("Previous NanoBot archive, level or channel differs from the reviewed transition")
+
+
 def _admit(pub, spec, mac, artifact):
     root = owned_directory(spec["runtimeDir"])
     definitions = managed_jobs(jobs(spec, mac))
@@ -940,7 +970,8 @@ def _admit(pub, spec, mac, artifact):
     release_state = root / "native-release.json"
     last = read(private_file(release_state)) if release_state.exists() else {}
     if pub.args.resume:
-        if last.get("stage") != "confirmed" or last.get("candidate") != pub.release:
+        if (last.get("stage") != "confirmed" or last.get("candidate") != pub.release
+                or last.get("routeTransition") != spec.get("routeTransition")):
             raise ValueError("Resume requires a confirmed NanoBot host transaction")
         if old != root / "releases" / pub.release or not all(
             v[2] for v in definitions.values()
@@ -962,6 +993,11 @@ def _admit(pub, spec, mac, artifact):
             "An interrupted NanoBot switch requires explicit host rollback"
         )
     archive = archive_bridge(pub, spec, artifact)
+    if old != archive:
+        check_patch_predecessor(pub, spec, old, last)
+    elif spec.get("routeTransition") and (last.get("stage") != "confirmed"
+            or last.get("candidate") != pub.release or last.get("routeTransition") != spec["routeTransition"]):
+        raise ValueError("NanoBot patch repeat requires its confirmed candidate and recorded transition")
     prior = remote(pub, spec, "observe")
     recovery = retry_proof(pub, spec, root, old, last, definitions, prior)
     name_proof = None
@@ -987,6 +1023,8 @@ def _admit(pub, spec, mac, artifact):
             for label, (path, _, loaded) in definitions.items()
         },
     }
+    if spec.get("routeTransition"):
+        record["routeTransition"] = spec["routeTransition"]
     if name_proof:
         record["displayNameChange"] = name_proof
     if recovery:
@@ -1000,10 +1038,16 @@ def _admit(pub, spec, mac, artifact):
         return remote(pub, spec, "probe")
     save(release_state, record)
     try:
-        configure_release(pub, spec, mac, root, archive, recovery)
-        identities = verify_subjects(spec, archive)
+        change = spec.get("routeTransition")
+        if not change:
+            configure_release(pub, spec, mac, root, archive, recovery)
+            identities = verify_subjects(spec, archive)
         remote(pub, spec, "tunnel_enable")
         drain_jobs(pub, spec, definitions)
+        if change:
+            remote(pub, spec, "route_activate")
+            configure_release(pub, spec, mac, root, archive, recovery)
+            identities = verify_subjects(spec, archive)
         set_current(root, archive)
         for label, (target, body, _) in definitions.items():
             if label.endswith(".telegram"):
@@ -1058,10 +1102,10 @@ def ctl(*args):
     return run(["/bin/launchctl", *args], timeout=15)
 
 
-def wait_for_route(pub, spec):
+def wait_for_route(pub, spec, *, action="probe"):
     for _ in range(15):
         try:
-            return remote(pub, spec, "probe")
+            return remote(pub, spec, action)
         except RuntimeError:
             time.sleep(1)
     raise RuntimeError(
@@ -1093,10 +1137,16 @@ def restore(pub, spec, mac, record=None):
     defs = managed_jobs(jobs(spec, mac))
     if set(defs) != set(record["jobs"]):
         raise ValueError("The configured NanoBot jobs changed outside this transaction")
+    if record.get("routeTransition") != spec.get("routeTransition"):
+        raise ValueError("NanoBot route restoration differs from its recorded configuration")
     record["stage"] = "restoring"
     save(state_file, record)
     domain = f"gui/{os.getuid()}"
     drain_jobs(pub, spec, defs)
+    change = record.get("routeTransition")
+    if change:
+        remote(pub, spec, "route_restore")
+    probe_action = "probe_predecessor" if change else "probe"
     for label, (path, _, _) in reversed(list(defs.items())):
         if not record["jobs"][label]["existed"]:
             ctl("disable", domain + "/" + label)
@@ -1105,7 +1155,7 @@ def restore(pub, spec, mac, record=None):
     for label, (path, _, _) in defs.items():
         if record["jobs"][label]["loaded"]:
             if label.endswith(".telegram") and record["previousScopePresent"]:
-                wait_for_route(pub, spec)
+                wait_for_route(pub, spec, action=probe_action)
             ctl("bootstrap", domain, str(path))
     if not record["previousTunnelAuthorized"]:
         remote(pub, spec, "tunnel_disable")
@@ -1117,7 +1167,7 @@ def restore(pub, spec, mac, record=None):
     elif not record["previousScopePresent"]:
         remote(pub, spec, "rollback_scope")
     elif old:
-        wait_for_route(pub, spec)
+        wait_for_route(pub, spec, action=probe_action)
     restored = [label for label in defs if record["jobs"][label]["loaded"]]
     if restored:
         wait_for_running_jobs(restored, spec)

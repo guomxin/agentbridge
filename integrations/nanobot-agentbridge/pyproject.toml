@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentbridge-nanobot-host"
-version = "0.3.0"
+version = "0.3.1"
 description = "Workspace host adapter for HKUDS NanoBot"
 requires-python = ">=3.12"
 dependencies = ["nanobot-ai==0.4.2"]

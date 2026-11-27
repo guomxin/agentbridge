@@ -1552,11 +1552,6 @@ class WorkspaceApplication:
             dispatch_id,
             user_subject=account["user_subject"],
         )
-        self._append_workspace_failure(
-            self._dispatch_account(dispatch),
-            effective_key=dispatch["idempotency_key"],
-            text="已取消等待，本次请求未进入业务系统。",
-        )
         return {
             "dispatchId": dispatch["dispatch_id"],
             "state": dispatch["state"],
@@ -1813,8 +1808,10 @@ class WorkspaceApplication:
             if not accepted:
                 self._reconcile_host_acceptance(dispatch)
         except PermissionError:
-            self._fail_dispatch_before_accept(dispatch, account, code="HOST_BINDING_UNAVAILABLE",
-                                              text="原实例的授权或账号绑定已变更，请核对设置。")
+            if accepted:
+                self._finish_result_unknown(dispatch, account)
+            else:
+                self._finish_acceptance_unknown(dispatch, account)
         except GatewayRequestError as exc:
             _LOG.warning(
                 "Workspace durable Gateway failure dispatch_id=%s run_id=%s "
@@ -1901,21 +1898,12 @@ class WorkspaceApplication:
         delay = _HOST_DISPATCH_RETRY_DELAYS[
             min(retry_count, len(_HOST_DISPATCH_RETRY_DELAYS) - 1)
         ]
-        updated = self.store.mark_host_dispatch_waiting(
+        self.store.mark_host_dispatch_waiting(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
             error_code=error_code,
             delay_seconds=delay,
         )
-        if updated["state"] == "expired":
-            account = self._dispatch_account(updated)
-            self._append_workspace_failure(
-                account,
-                effective_key=updated["idempotency_key"],
-                text=(
-                    "连接暂未恢复，本次请求未进入业务系统，请稍后重试。"
-                ),
-            )
 
     def _reconcile_host_acceptance(self, dispatch: dict) -> None:
         account = self._dispatch_account(dispatch)
@@ -1968,21 +1956,12 @@ class WorkspaceApplication:
         account: dict,
         error_code: str,
     ) -> None:
-        updated = self.store.defer_host_dispatch_reconciliation(
+        self.store.defer_host_dispatch_reconciliation(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
             error_code=error_code,
             delay_seconds=2,
         )
-        if updated["state"] == "acceptance_unknown":
-            self._append_workspace_failure(
-                account,
-                effective_key=dispatch["idempotency_key"],
-                text=(
-                    "无法确认智能体是否已接收，已停止重发，"
-                    "请等待系统核对。"
-                ),
-            )
 
     def _finish_acceptance_unknown(
         self,
@@ -1990,11 +1969,6 @@ class WorkspaceApplication:
         account: dict,
     ) -> None:
         text = "无法确认智能体是否已接收，已停止重发，请等待系统核对。"
-        self._append_workspace_failure(
-            account,
-            effective_key=dispatch["idempotency_key"],
-            text=text,
-        )
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
@@ -2019,18 +1993,24 @@ class WorkspaceApplication:
             return
         try:
             evidence = self._run_evidence(dispatch, run_id)
+        except PermissionError:
+            self._finish_result_unknown(dispatch, account)
+            return
         except (AttributeError, GatewayRequestError):
             pass
-        if evidence and evidence.get("final_text"):
+        if evidence and evidence.get("state") == "stopped":
+            self._finish_accepted_dispatch(dispatch, account, {"type": "chat", "runId": run_id, "state": "aborted",
+                "text": "已停止生成回复。可在原任务中查看业务状态。", "safeToRetry": False})
+            return
+        if evidence and evidence.get("state") == "failed":
+            self._finish_accepted_dispatch(dispatch, account, {"type": "chat", "runId": run_id, "state": "error"})
+            return
+        if evidence and evidence.get("final_text") and evidence.get("state") != "unknown":
             self._finish_accepted_dispatch(
                 dispatch, account,
                 {"type": "chat", "runId": run_id, "state": "final",
                  "text": evidence["final_text"], "recovered": True},
             )
-            return
-        if evidence and evidence.get("state") == "stopped" and dispatch["agent_host"] == "pi":
-            self._finish_accepted_dispatch(dispatch, account, {"type": "chat", "runId": run_id, "state": "aborted",
-                "text": "已停止生成回复。可在原任务中查看业务状态。", "safeToRetry": False})
             return
         if not (evidence and evidence.get("state") == "unknown") and not self.store.host_dispatch_result_deadline_passed(dispatch):
             self.store.defer_host_dispatch_result(
@@ -2048,6 +2028,10 @@ class WorkspaceApplication:
             self._finish_accepted_dispatch(dispatch, account, {
                 'type': 'chat', 'runId': run_id, 'state': 'final', 'text': sample['output'], 'recovered': True})
             return
+        self._finish_result_unknown(dispatch, account, evidence)
+
+    def _finish_result_unknown(self, dispatch: dict, account: dict, evidence: dict | None = None) -> None:
+        run_id = dispatch["accepted_run_id"] or dispatch["idempotency_key"]
         text = (
             "请求已接收，但在结果恢复时限内未能确认最终结果。"
             "这不代表后台任务失败；请核对任务状态，系统不会自动重发。"
@@ -2057,13 +2041,6 @@ class WorkspaceApplication:
         verified = self._verified_trial_event(dispatch, {'state': 'error', 'text': text})
         text = verified['text']
         trial_payload = {'skillTrial': verified['skillTrial']} if verified.get('skillTrial') else {}
-        self._append_workspace_message(
-            account,
-            role="assistant",
-            text=text,
-            message_key=f"workspace:assistant:error:{run_id}",
-            payload=trial_payload,
-        )
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
@@ -2114,11 +2091,10 @@ class WorkspaceApplication:
         item = self._verified_trial_event(dispatch, item)
         trial_payload = {'skillTrial': item['skillTrial']} if item.get('skillTrial') else {}
         state = item.get("state")
-        run_id = (
-            _safe_text(item.get("runId"), 256)
-            or dispatch["accepted_run_id"]
-            or dispatch["idempotency_key"]
-        )
+        run_id = dispatch["accepted_run_id"] or dispatch["idempotency_key"]
+        supplied_run = _safe_text(item.get("runId"), 256)
+        if dispatch["accepted_run_id"] and supplied_run and supplied_run != run_id:
+            raise GatewayRequestError("GATEWAY_RESPONSE_INVALID", "宿主终态不属于原运行。")
         if state == "final":
             text = _safe_text(item.get("text"), WORKSPACE_RESPONSE_MAX_CHARACTERS)
             if text:
@@ -2133,14 +2109,7 @@ class WorkspaceApplication:
             terminal_state = "completed"
         else:
             text = item['text'] if trial_payload else _terminal_chat_failure_text(item)
-            self._append_workspace_message(
-                account,
-                role="assistant",
-                text=text,
-                message_key=f"workspace:assistant:error:{run_id}",
-                payload=trial_payload,
-            )
-            terminal_state = "stopped" if state == "aborted" and dispatch["agent_host"] == "pi" else "failed"
+            terminal_state = "stopped" if state == "aborted" else "failed"
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
@@ -2159,11 +2128,6 @@ class WorkspaceApplication:
         code: str,
         text: str,
     ) -> None:
-        self._append_workspace_failure(
-            account,
-            effective_key=dispatch["idempotency_key"],
-            text=text,
-        )
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
@@ -2186,11 +2150,6 @@ class WorkspaceApplication:
         account: dict,
     ) -> None:
         text = "连接暂未恢复，本次请求未进入业务系统，请稍后重试。"
-        self._append_workspace_failure(
-            account,
-            effective_key=dispatch["idempotency_key"],
-            text=text,
-        )
         self.store.finish_host_dispatch(
             dispatch["dispatch_id"],
             claim_token=dispatch["claim_token"],
@@ -2388,29 +2347,6 @@ class WorkspaceApplication:
                 raise
             # Chat remains available if the optional cross-end projection fails.
             return
-
-    def _append_workspace_failure(
-        self,
-        account: dict,
-        *,
-        effective_key: str,
-        text: str,
-    ) -> None:
-        trial = self.store.skill_trial_for_turn(account_id=account['account_id'],
-                                                user_subject=account['user_subject'], turn_ref=effective_key)
-        payload = {}
-        if trial:
-            dispatch = self.store.get_host_dispatch(trial['dispatch_id'], user_subject=account['user_subject'])
-            event = self._verified_trial_event(dispatch, {'state': 'error', 'text': text})
-            text = event['text']
-            payload = {'skillTrial': event['skillTrial']}
-        self._append_workspace_message(
-            account,
-            role="assistant",
-            text=text,
-            message_key=f"workspace:assistant:error:{effective_key}",
-            payload=payload,
-        )
 
     def _gateway(self) -> OpenClawGatewayClient:
         if self.gateway is None:

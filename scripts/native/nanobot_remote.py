@@ -34,12 +34,18 @@ def route_document(config, spec):
     return json.dumps({"routes":{spec["routeRef"]:row}},sort_keys=True).encode()
 
 
-PI_PATCH_STEPS = (("0.1.0", "0.1.1"), ("0.1.1", "0.1.2"), ("0.1.2", "0.1.3"), ("0.1.3", "0.1.4"), ("0.1.4", "0.1.5"), ("0.1.5", "0.1.6"), ("0.1.6", "0.1.7"))
+PI_PATCH_STEPS = (("0.1.0", "0.1.1"), ("0.1.1", "0.1.2"), ("0.1.2", "0.1.3"), ("0.1.3", "0.1.4"), ("0.1.4", "0.1.5"), ("0.1.5", "0.1.6"), ("0.1.6", "0.1.7"), ("0.1.7", "0.1.8"))
+
+NANOBOT_PATCH_STEPS = (("0.3.0", "0.3.1"),)
+
+
+def patch_steps(spec):
+    return PI_PATCH_STEPS if host_type(spec) == "pi" else NANOBOT_PATCH_STEPS
 
 
 def transition_routes(config, spec, candidate):
     transition = spec["routeTransition"]
-    if (host_type(spec) != "pi" or not isinstance(transition,dict)
+    if (not isinstance(transition,dict)
             or set(transition) - {"fromAdapterVersion","fromRevision"} != {"fromRelease","toRelease","beforeSha256","afterSha256","fromLevel","fromTelegram"}
             or not all(isinstance(transition[key],str) and re.fullmatch(r"[0-9a-f]{12}",transition[key])
                        for key in ("fromRelease","toRelease"))
@@ -47,7 +53,15 @@ def transition_routes(config, spec, candidate):
             or transition["fromLevel"] not in {"L1","L2","L3"} or spec["requiredLevel"] not in {"L1","L2","L3"}):
         raise ValueError("Unexpected Pi route transition or candidate")
     telegram = transition["fromTelegram"]
-    if telegram is not None:
+    if host_type(spec) == "nanobot":
+        if (set(transition) != {"fromRelease","toRelease","beforeSha256","afterSha256","fromLevel","fromTelegram","fromAdapterVersion","fromRevision"}
+                or transition["fromLevel"] != "L3" or spec["requiredLevel"] != "L3"
+                or telegram != spec.get("telegram")
+                or telegram is not None and (not isinstance(telegram,dict) or set(telegram) != {"botId","username"}
+                    or type(telegram["botId"]) is not int or not 0 < telegram["botId"] < 2**53
+                    or not isinstance(telegram["username"],str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}",telegram["username"]))):
+            raise ValueError("NanoBot patch transition requires unchanged reviewed L3 channel and scope")
+    elif telegram is not None:
         if (not isinstance(telegram,dict) or set(telegram) != {"botId","username","allowedSenders"}
                 or type(telegram["botId"]) is not int or not 0 < telegram["botId"] < 2**53
                 or not isinstance(telegram["username"],str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}",telegram["username"])
@@ -58,7 +72,7 @@ def transition_routes(config, spec, candidate):
             raise ValueError("Pi transition cannot replace a bot or the reviewed first sender")
     predecessor = {**spec,"requiredLevel":transition["fromLevel"],"telegram":telegram}
     if "fromAdapterVersion" in transition or "fromRevision" in transition:
-        if ((transition.get("fromAdapterVersion"), spec["adapterVersion"]) not in PI_PATCH_STEPS
+        if ((transition.get("fromAdapterVersion"), spec["adapterVersion"]) not in patch_steps(spec)
                 or type(transition.get("fromRevision")) is not int or transition["fromRevision"] < 1
                 or transition["fromLevel"] != spec["requiredLevel"] or telegram != spec.get("telegram")):
             raise ValueError("Pi patch transition requires the reviewed versions, directory revision and unchanged scope")
@@ -97,12 +111,19 @@ def patch_version(spec):
     return (spec.get("routeTransition") or {}).get("fromAdapterVersion")
 
 
-def patch_audit_versions(event):
+def patch_reasons(spec):
+    if host_type(spec) == "pi":
+        return PATCH_FORWARD, PATCH_RESTORE
+    return "发布已审核的 NanoBot 适配器补丁", "恢复原 NanoBot 适配器版本"
+
+
+def patch_audit_versions(event, spec):
+    forward_reason, restore_reason = patch_reasons(spec)
     before, after = (json.loads(event[key]) for key in ("before_json","after_json"))
     versions = (before.get("version"), after.get("version"))
-    if event["reason"] == PATCH_RESTORE:
+    if event["reason"] == restore_reason:
         versions = versions[::-1]
-    if (event["reason"] not in (PATCH_FORWARD, PATCH_RESTORE) or versions not in PI_PATCH_STEPS or before.get("revision", -2) + 1 != after.get("revision")
+    if (event["reason"] not in (forward_reason, restore_reason) or versions not in patch_steps(spec) or before.get("revision", -2) + 1 != after.get("revision")
             or not re.fullmatch(r"[0-9a-f]{12}", str(after.get("candidate", "")))):
         raise ValueError("Unexpected Pi adapter version audit")
     return before, after
@@ -110,24 +131,25 @@ def patch_audit_versions(event):
 
 def reviewed_patch_scope(db, spec, candidate):
     instance = spec["instanceId"]
+    implementation = host_type(spec)
     transition = spec["routeTransition"]
     current = db.execute("SELECT instance_id,display_name,host_type,route_ref,adapter_version,state,all_subjects,revision "
                          "FROM workspace_host_instances WHERE instance_id=?", (instance,)).fetchone()
     subjects = {row[0] for row in db.execute("SELECT user_subject FROM workspace_host_visibility WHERE instance_id=?", (instance,))}
-    if (not current or current["host_type"] != "pi" or current["route_ref"] != spec["routeRef"]
+    if (not current or current["host_type"] != implementation or current["route_ref"] != spec["routeRef"]
             or current["display_name"] != spec["displayName"] or current["all_subjects"] or subjects != set(spec["subjects"])
-            or current["state"] not in {"enabled","revoked"}):
+            or current["state"] not in ({"enabled","revoked"} if implementation == "pi" else {"enabled"})):
         raise ValueError("Pi patch cannot change administrator scope or ownership")
     bindings = db.execute("SELECT a.user_subject,b.credential_ref FROM workspace_host_bindings b "
                           "JOIN workspace_accounts a ON a.account_id=b.account_id AND a.state='active' "
                           "JOIN client_endpoints e ON e.endpoint_id=b.endpoint_id AND e.user_subject=a.user_subject "
-                          "AND e.agent_host='pi' AND e.client_type='web' AND e.state='active' "
-                          "WHERE b.instance_id=?", (instance,)).fetchall()
+                          "AND e.agent_host=? AND e.client_type='web' AND e.state='active' "
+                          "WHERE b.instance_id=?", (implementation,instance)).fetchall()
     if len(bindings) != len(subjects) or dict(bindings) != spec["subjects"]:
         raise ValueError("Pi patch requires its original personal bindings")
     if current["state"] == "enabled":
         for subject, ref in spec["subjects"].items():
-            label = f"workspace-pi:{instance}:{ref}"
+            label = f"workspace-{implementation}:{instance}:{ref}"
             active = db.execute("SELECT count(*) FROM mcp_identity_tokens WHERE user_subject=? AND label=? "
                                 "AND state='active' AND julianday(expires_at)>julianday('now')", (subject,label)).fetchone()[0]
             if active != 1:
@@ -149,7 +171,7 @@ def reviewed_patch_scope(db, spec, candidate):
                                   (instance,expected,event["reason"])).fetchone()):
             raise ValueError("An administrator changed the reviewed Pi directory")
         if event["action"] == PATCH_ACTION:
-            before, after = patch_audit_versions(event)
+            before, after = patch_audit_versions(event, spec)
             if (before["version"] != version
                     or {before["version"], after["version"]} != {patch_version(spec), spec["adapterVersion"]}):
                 raise ValueError("Pi version audit chain changed")
@@ -177,7 +199,7 @@ def patch_directory(db_path, spec, candidate, forward):
         version, expected = reviewed_patch_scope(db, spec, candidate)
         wanted = spec["adapterVersion"] if forward else patch_version(spec)
         if wanted != version:
-            reason = PATCH_FORWARD if forward else PATCH_RESTORE
+            reason = patch_reasons(spec)[0 if forward else 1]
             changed = db.execute("UPDATE workspace_host_instances SET adapter_version=?,revision=revision+1 "
                                  "WHERE instance_id=? AND adapter_version=? AND revision=?",(wanted,instance,version,expected))
             if changed.rowcount != 1:
@@ -391,7 +413,7 @@ def recovery_history(db, spec, current):
                 detail.get("endpoint_id")
             )
         elif event["action"] == PATCH_ACTION:
-            _, patched = patch_audit_versions(event)
+            _, patched = patch_audit_versions(event, spec)
             if patched["revision"] in names:
                 raise ValueError("Duplicate Pi version revision")
             names[patched["revision"]] = event["reason"]
@@ -806,7 +828,7 @@ def execute(request):
                 (instance,),
             ).fetchone()
         )
-        if implementation == "pi" and scope_table:
+        if scope_table:
             conflict = db.execute(
                 "SELECT 1 FROM workspace_host_instances WHERE "
                 "(instance_id=? OR route_ref=?) AND NOT "
@@ -817,8 +839,8 @@ def execute(request):
             if conflict:
                 raise ValueError("Pi candidate conflicts with an existing host assignment")
         if "routeTransition" in spec and action in {"stage","route_activate","route_restore"}:
-            scoped = db.execute("SELECT state,all_subjects FROM workspace_host_instances WHERE instance_id=? AND host_type='pi'",
-                                (instance,)).fetchone() if present else None
+            scoped = db.execute("SELECT state,all_subjects FROM workspace_host_instances WHERE instance_id=? AND host_type=?",
+                                (instance,implementation)).fetchone() if present else None
             if scoped != ("enabled",0) and not (old_version and scoped == ("revoked",0)):
                 raise ValueError("Pi route transition requires its existing enabled scoped deployment")
             assigned = {row[0] for row in db.execute("SELECT user_subject FROM workspace_host_visibility WHERE instance_id=?", (instance,))}

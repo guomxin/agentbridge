@@ -248,8 +248,21 @@ class WorkspaceSkillTrialTests(unittest.TestCase):
         self.app.cancel_chat_dispatch(self.account, dispatch['dispatch_id'])
         events = list(self.app._stream_host_dispatch(user_subject='user-a', dispatch_id=dispatch['dispatch_id']))
         self.assertEqual(events[-1]['skillTrial']['status'], 'not_reported')
-        entry = self.service.tasks.get_timeline_message(user_subject='user-a', message_key='workspace:assistant:error:trial-1')
+        entry = self.service.tasks.get_timeline_message(user_subject='user-a', message_key='workspace:assistant:error:' + dispatch['dispatch_id'])
         self.assertEqual(entry['payload']['skillTrial']['status'], 'not_reported')
+
+    def test_failed_trial_keeps_verified_sample_and_diagnostic_only_on_workspace(self):
+        dispatch = self.accept()
+        sample = self.sample(self.binding()['skillTrial'])
+        event = self.finish(dispatch, state='error', text='私有试用诊断：本地模型输出未完成。')
+        entry = self.service.tasks.get_timeline_message(user_subject='user-a',
+            message_key='workspace:assistant:error:' + dispatch['dispatch_id'])
+        self.assertEqual(entry['text'], event['text'])
+        self.assertEqual(entry['payload']['skillTrial']['status'], 'reported')
+        self.assertEqual(entry['payload']['skillTrial']['test_id'], sample['test_id'])
+        with sqlite3.connect(self.service.db_path) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM workspace_text_deliveries WHERE kind='status'").fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM notification_outbox WHERE event_id=?', (entry['entry_id'],)).fetchone()[0], 0)
 
     def test_receipt_from_another_test_cannot_mark_this_dispatch_reported(self):
         dispatch = self.accept()

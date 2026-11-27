@@ -88,15 +88,25 @@ def run(home):
                 "instanceId": "nanobot-office", "expectedRevision": selected.json()["revision"]}).raise_for_status()
 
         with sqlite3.connect(home / "mcp/central/agentbridge.db") as db:
-            destinations = db.execute("""SELECT e.agent_host,e.client_type,o.state,u.role
+            destinations = db.execute("""SELECT e.agent_host,e.client_type,o.state,u.role,o.attempt_count
                 FROM notification_outbox o JOIN user_timeline u ON o.event_id=u.entry_id
                 JOIN client_endpoints e ON e.endpoint_id=o.endpoint_id
                 WHERE o.payload_type='timeline_message' AND u.text IN (?,?,?,?) ORDER BY u.sequence""",
                 (*web_text, *telegram_text)).fetchall()
-            assert destinations == [("nanobot", "telegram", "acknowledged", role) for role in ("user", "assistant")]
+            # The upgraded pairing has one sender: the old mirror must never
+            # send, and each new ordered text delivery needs its platform receipt.
+            assert destinations == [("nanobot", "telegram", "superseded", role, 0) for role in ("user", "assistant")], destinations
+            deliveries = db.execute("""SELECT e.agent_host,e.client_type,d.state,u.role,d.attempt,d.receipt
+                FROM workspace_text_deliveries d JOIN workspace_query_destinations p USING(question_id)
+                JOIN user_timeline u ON u.entry_id=d.entry_id
+                JOIN client_endpoints e ON e.endpoint_id=p.endpoint_id
+                WHERE u.text IN (?,?,?,?) ORDER BY u.sequence,d.part_index""", (*web_text, *telegram_text)).fetchall()
+            assert [row[:5] for row in deliveries] == [
+                ("nanobot", "telegram", "sent", role, 1) for role in ("user", "assistant")], deliveries
+            assert all(type(row[5]) is int and row[5] > 0 for row in deliveries), deliveries
             original = db.execute("""SELECT e.agent_host,e.external_subject FROM notification_outbox o
                 JOIN user_timeline u ON o.event_id=u.entry_id JOIN client_endpoints e ON e.endpoint_id=o.endpoint_id
                 WHERE o.payload_type='timeline_message' AND u.text=?""", (legacy,)).fetchall()
             assert original == [("openclaw", "501")], original
         return {"webToTelegramRoles": 2, "telegramToWebRoles": 2, "ordinaryHostRuns": 2, "longReplyParts": 2,
-                "crossAccountOrOpenClaw": 0, "duplicateSends": 0}
+                "crossAccountOrOpenClaw": 0, "duplicateSends": 0, "durableTextReceipts": 2, "legacyMirrorSends": 0}

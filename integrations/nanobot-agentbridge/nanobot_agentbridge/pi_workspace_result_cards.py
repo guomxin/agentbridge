@@ -41,7 +41,7 @@ async def handle_request(session, meta, req, path, body, origins):
         raise web.HTTPForbidden()
 
     action = body.get("action")
-    args = {"action": action, "endpoint_key": req["endpointKey"], "pairing_ref": pairing,
+    args = {"agent_host": "pi", "action": action, "endpoint_key": req["endpointKey"], "pairing_ref": pairing,
             "delivery_id": delivery, "attempt_count": attempt}
     if action == "ack":
         outcome, receipt = body.get("outcome"), body.get("receipt")

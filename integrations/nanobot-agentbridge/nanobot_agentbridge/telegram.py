@@ -47,6 +47,15 @@ class TelegramUnavailable(RuntimeError):
     """The request or its acknowledgement failed. Never report the Bot API URL."""
 
 
+class TelegramRejected(TelegramUnavailable):
+    """An authenticated Bot API response explicitly refused this request."""
+
+    def __init__(self, error_code, retry_after=None):
+        super().__init__("Telegram rejected the request")
+        self.error_code = error_code
+        self.retry_after = retry_after
+
+
 class TelegramAPI:
     _SAFE_RECONNECT_METHODS = frozenset({"getMe", "getWebhookInfo", "getUpdates", "getFile", "sendChatAction"})
 
@@ -131,9 +140,21 @@ class TelegramAPI:
                         self._close_conn()
                     else:
                         self._last_used = time.monotonic()
-                    if response.status != 200 or len(raw) > 1_048_576:
+                    if len(raw) > 1_048_576:
                         raise TelegramUnavailable("Telegram request was not confirmed")
                     data = json.loads(raw)
+                    # Only a complete, consistent Bot API rejection proves that no
+                    # message was accepted. HTTP errors or broken receipts alone do not.
+                    if (isinstance(data, dict) and data.get("ok") is False
+                            and type(data.get("error_code")) is int
+                            and 400 <= data["error_code"] < 500
+                            and response.status == data["error_code"]):
+                        parameters = data.get("parameters")
+                        delay = parameters.get("retry_after") if isinstance(parameters, dict) else None
+                        delay = delay if type(delay) is int and 1 <= delay <= 86400 else None
+                        raise TelegramRejected(data["error_code"], delay)
+                    if response.status != 200:
+                        raise TelegramUnavailable("Telegram request was not confirmed")
                     if (
                         not isinstance(data, dict)
                         or data.get("ok") is not True

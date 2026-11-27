@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agentbridge.core import workspace_query_delivery, workspace_text_delivery
 from agentbridge.core.chat_mirror import private_bot_digest_kind, private_bot_chat_kind
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS, endpoint_instances, instance_key
@@ -147,7 +148,10 @@ def _delivery_scope(db, ownership, endpoint):
             AND json_extract(d.payload_json,'$.mirrorKind')=? AND json_extract(d.payload_json,'$.pairProof')=? AND EXISTS (
                 SELECT 1 FROM user_timeline u WHERE u.entry_id=d.event_id AND u.user_subject=d.user_subject
                 AND u.source_endpoint_id=? AND u.task_id IS NULL AND u.entry_type='chat_message'
-                AND u.dedupe_key LIKE 'message:workspace:'||u.role||':%'
+                AND (u.dedupe_key LIKE 'message:workspace:'||u.role||':%' OR
+                    (u.role='user' AND u.dedupe_key LIKE 'message:workspace:quick-query:user:%'
+                     AND EXISTS (SELECT 1 FROM workspace_query_destinations p WHERE p.question_id=u.entry_id
+                        AND p.endpoint_id=d.endpoint_id AND p.pair_proof=json_extract(d.payload_json,'$.pairProof'))))
                 AND json_extract(d.payload_json,'$.source.clientType')='web'
                 AND NOT EXISTS (SELECT 1 FROM json_each(d.payload_json)
                   WHERE key NOT IN ('mirrorKind','pairProof','entryId','sequence','role','text','createdAt','source'))
@@ -204,6 +208,8 @@ class TaskHubStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            workspace_query_delivery.initialize(connection)
+            workspace_text_delivery.initialize(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS client_endpoints (
@@ -3098,6 +3104,10 @@ class TaskHubStore:
                 target_endpoint_binding=target_endpoint_binding,
                 workspace_chat=_workspace_chat or _workspace_response,
             )
+            if role == "user" and _workspace_chat:
+                workspace_query_delivery.pin(connection, entry_id, user_subject, source_endpoint_id)
+            if _workspace_chat or _workspace_response:
+                workspace_text_delivery.enqueue_message(connection, row)
         else:
             mark_transaction_change(connection, user_subject=user_subject, topics=("timeline",))
         return _timeline_from_row(row), False
@@ -5128,6 +5138,9 @@ class TaskHubStore:
                     created_at,
                 ),
             )
+        if event_type in {"task.completed", "task.failed", "task.operation.succeeded",
+                          "task.operation.failed", "task.operation.outcome_unknown","task.canceled"}:
+            workspace_query_delivery.project(connection, self._select_owned_task(connection, task_id, user_subject))
         mark_transaction_change(connection, user_subject=user_subject)
         return event_id
 
@@ -5245,14 +5258,18 @@ class TaskHubStore:
         mirror_kind = private_bot_chat_kind(host)
         role, subject, source = entry["role"], entry["user_subject"], entry["source_endpoint_id"]
         metadata = json.loads(entry["payload_json"])
+        quick_question = role == "user" and entry["dedupe_key"].startswith("message:workspace:quick-query:user:")
         if (role not in {"user", "assistant"} or entry["task_id"] or set(metadata) - {"attachments"}
-                or metadata.get("attachments") or not entry["dedupe_key"].startswith(f"message:workspace:{role}:")):
+                or metadata.get("attachments")
+                or not (entry["dedupe_key"].startswith(f"message:workspace:{role}:") or quick_question)):
             return
         text = public_mirror_text(entry["text"])
         if not text or text != entry["text"]:
             return
         binding = mirror_binding(db, subject, instance, ownership)
         if not binding or binding["endpoint_id"] != source:
+            return
+        if quick_question and not workspace_query_delivery.registered(db, subject, host, scope, binding["token_id"]):
             return
         if role == "assistant":
             # Require the original admitted plain question and keep private interactions
@@ -5275,8 +5292,8 @@ class TaskHubStore:
                 (subject, source, host, run_id)).fetchone()
             if not original:
                 return
-            if original["had_card"] and (host != "pi" or not self._pi_workspace_oa_read_after_login(
-                    db, subject, source, original, run_id)):
+            if original["had_card"] and (host != "pi" or not self._workspace_oa_read_after_login(
+                    db, subject, source, original, run_id, host)):
                 return
         payload = {"mirrorKind": mirror_kind, "entryId": entry["entry_id"],
             "sequence": entry["sequence"], "role": role, "text": text, "createdAt": entry["created_at"],
@@ -5293,12 +5310,13 @@ class TaskHubStore:
                 VALUES (?,?,'',?,?,'timeline_message',?,'pending',0,?,?,?)""",
                 (str(uuid4()), entry["entry_id"], endpoint_id, subject, _canonical_json({**payload, "pairProof": proof}),
                  entry["created_at"], entry["created_at"], entry["created_at"]))
-            if host == "pi" and role == "assistant":
+            if host == "pi" and role == "assistant" and not db.execute(
+                    "SELECT 1 FROM workspace_query_destinations WHERE question_id=?", (original[0],)).fetchone():
                 from agentbridge.core.workspace_result_views import enqueue
                 enqueue(db, entry, original, run_id, endpoint_id, proof)
 
     @staticmethod
-    def _pi_workspace_oa_read_after_login(db, subject, endpoint, original, run_id):
+    def _workspace_oa_read_after_login(db, subject, endpoint, original, run_id, host):
         card_events = db.execute("""
             SELECT json_extract(payload_json,'$.status') AS status,
                    json_extract(payload_json,'$.cardRevision') AS revision
@@ -5322,7 +5340,7 @@ class TaskHubStore:
             JOIN interactions i ON i.interaction_id=c.interaction_id AND i.user_subject=t.user_subject
             JOIN auth_challenges a ON a.challenge_id=json_extract(i.resume_json,'$.challengeId')
                 AND a.user_subject=i.user_subject AND a.system_id=i.system_id AND a.session_id=i.session_id
-            WHERE t.user_subject=? AND t.agent_host='pi' AND t.host_task_key=?
+            WHERE t.user_subject=? AND t.agent_host=? AND t.host_task_key=?
                 AND t.origin_endpoint_id=? AND t.active_conversation_ref=? AND t.status='succeeded'
                 AND o.capability_name='oa.workflow.pending.list' AND o.status='succeeded'
                 AND i.interaction_type='credential' AND i.system_id='oa' AND c.last_state='completed'
@@ -5334,7 +5352,7 @@ class TaskHubStore:
                     WHERE other.task_id=t.task_id AND other.interaction_id<>c.interaction_id)
                 AND NOT EXISTS (SELECT 1 FROM task_operations other
                     WHERE other.task_id=t.task_id AND other.operation_id<>o.operation_id)
-            """, (subject, run_id, endpoint, original["conversation_ref"])).fetchone() is not None
+            """, (subject, host, run_id, endpoint, original["conversation_ref"])).fetchone() is not None
 
     def _select_owned_batch_for_task(
         self,

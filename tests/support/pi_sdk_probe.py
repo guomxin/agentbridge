@@ -182,7 +182,7 @@ def verify(post, model, accounts):
     assert (second["state"], second["answer"], model.history_checks) == ("completed", "只读对话。", 1), (second["state"],model.history_checks)
     assert post("skill-model", binding=accounts["a"], system="文本试用", prompt="模型样例").json()["execution"] == "tool_free_completion"
     assert not model.failures and not model.builtins and model.business_calls == 1
-    return {"passed": True, "sdk": "1.6.0", "adapter": "0.1.7", "subjects": 2, "businessReads": model.business_calls,
+    return {"passed": True, "sdk": "1.6.0", "adapter": "0.1.8", "subjects": 2, "businessReads": model.business_calls,
             "syntheticModel": True, "syntheticDownstream": True}
 
 

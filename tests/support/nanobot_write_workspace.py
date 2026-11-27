@@ -35,7 +35,7 @@ def configure_workspace(root, fixture, instance, host_port, token_map):
                     instance: {
                         "url": f"http://127.0.0.1:{host_port}",
                         "instanceId": instance,
-                        "adapterVersion": "0.3.0",
+                        "adapterVersion": "0.3.1",
                         "telegram":{"botId":"8001","username":"fixture_bot"},
                         "tokenFile": str(root / "service.token"),
                         "subjects": {

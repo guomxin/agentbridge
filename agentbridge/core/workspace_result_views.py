@@ -44,6 +44,10 @@ def enqueue(db, entry, original, run_id, endpoint_id, proof):
 def checked_source(db, subject, target, source_task_id, delivery_id):
     from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_pair_proof, mirror_sender_ids
 
+    from .workspace_query_delivery import checked_card
+    candidate = checked_card(db, subject, target, source_task_id, delivery_id)
+    if candidate is not None:
+        return candidate
     row = db.execute("""SELECT d.payload_json, o.result_json, o.finished_at FROM notification_outbox d
         JOIN user_timeline reply ON reply.entry_id=d.event_id AND reply.user_subject=d.user_subject AND reply.role='assistant'
         JOIN agent_tasks t ON t.task_id=d.task_id AND t.user_subject=d.user_subject AND t.agent_host='pi'
@@ -86,6 +90,10 @@ def checked_source(db, subject, target, source_task_id, delivery_id):
 
 
 def check_command_pair(db, subject, endpoint, delivery_id):
+    query = db.execute("SELECT task_id FROM workspace_query_deliveries WHERE delivery_id=?", (delivery_id,)).fetchone()
+    if query:
+        checked_source(db,subject,endpoint,query[0],delivery_id)
+        return
     original = db.execute("""SELECT task_id FROM notification_outbox WHERE delivery_id=?
         AND user_subject=? AND endpoint_id=? AND payload_type=?""",
         (delivery_id, subject, endpoint["endpoint_id"], DELIVERY)).fetchone()

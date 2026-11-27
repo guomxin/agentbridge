@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable, Iterator
 from uuid import uuid4
 
 from agentbridge.core.timeline_attachments import public_attachment
+from agentbridge.core.commit_notifications import track_transaction, transaction_closed, transaction_committed
 from agentbridge.workspace.host_instances import LEGACY_INSTANCE_ID, WorkspaceHostInstances
 
 if TYPE_CHECKING:
@@ -93,13 +94,16 @@ class WorkspaceStore:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        track_transaction(connection, self.db_path)
         try:
             yield connection
             connection.commit()
+            transaction_committed(connection)
         except Exception:
             connection.rollback()
             raise
         finally:
+            transaction_closed(connection)
             connection.close()
 
     def _initialize(self) -> None:
@@ -1905,6 +1909,18 @@ class WorkspaceStore:
                 },
                 created_at=now,
             )
+            # A fast worker can finish an OA read before the gateway's acceptance arrives.
+            # Join on the original run once it is authoritative; either event order may project it.
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_query_destinations'").fetchone():
+                terminal = connection.execute("""SELECT t.* FROM agent_tasks t
+                    JOIN workspace_query_destinations p ON p.subject=t.user_subject AND p.source=t.origin_endpoint_id
+                    JOIN user_timeline q ON q.entry_id=p.question_id AND q.dedupe_key='message:'||?
+                    WHERE t.user_subject=? AND t.agent_host=? AND t.origin_endpoint_id=? AND
+                        t.active_conversation_ref=? AND t.host_task_key=?""", (row["message_key"], row["user_subject"],
+                        row["agent_host"], row["origin_endpoint_id"], row["conversation_ref"], run_id)).fetchone()
+                if terminal:
+                    from agentbridge.core.workspace_query_delivery import project
+                    project(connection, terminal)
             updated = connection.execute(
                 "SELECT * FROM agent_host_dispatches WHERE dispatch_id = ?",
                 (dispatch_id,),
@@ -2101,6 +2117,8 @@ class WorkspaceStore:
                 row["dispatch_id"],
             ),
         )
+        from agentbridge.workspace.workspace_dispatch_terminal import record
+        event = record(connection, row, state, event, now)
         self._append_host_dispatch_event(
             connection,
             dispatch_id=row["dispatch_id"],

@@ -182,10 +182,13 @@ def _queue(service, subject, workspace, body, connection, *, directory=None, sel
             event_type="task.result_view.refreshed", payload={"viewTokenHash": workspace["_view_hash"],
                 "sourceTaskId": workspace["_source_task_id"]}, causation_ref=workspace["_view_hash"],
             created_at=command["requestedAt"])
-    service.tasks._append_event(connection, task_id=task["task_id"], user_subject=subject,
+    event_id = service.tasks._append_event(connection, task_id=task["task_id"], user_subject=subject,
         event_type="task.prepare.requested", payload={"commandKey": command["commandKey"],
             "intentHash": command["intentHash"], "requestKeyHash": request_hash, "requestIdentityHash": identity_hash,
             "queryOnly": True}, causation_ref=command["commandKey"], created_at=command["requestedAt"])
+    if message is None and not workspace.get("_telegram") and remaining is None:
+        from .workspace_query_delivery import pin_button
+        pin_button(connection, service.tasks, event_id, subject, workspace["endpoint_id"])
     return {"taskId": task["task_id"], "commandKey": command["commandKey"], "status": "queued",
         **({"userMessageKey": message_key} if message_key else {})}
 
@@ -194,7 +197,7 @@ def _append_user_message(service, subject, workspace, message, request_hash, con
     message_key = "workspace:quick-query:user:" + request_hash
     entry, _ = service.tasks._append_timeline_message_in_connection(connection,
         user_subject=subject, source_endpoint_id=workspace["endpoint_id"], message_key=message_key,
-        role="user", text=message)
+        role="user", text=message, _workspace_chat=True)
     if (entry["role"] != "user" or entry["text"] != message.strip()
             or entry["source_endpoint_id"] != workspace["endpoint_id"] or entry.get("task_id") is not None
             or entry.get("payload") != {}):

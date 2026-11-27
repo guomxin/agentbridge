@@ -27,7 +27,7 @@ import { createHostPerformance, observeHostSync } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.133";
+export const PLUGIN_VERSION = "0.4.134";
 
 // Only fixed host guidance enters system context. Catalogs, trial material and
 // task history keep their existing data context and do not gain authority.

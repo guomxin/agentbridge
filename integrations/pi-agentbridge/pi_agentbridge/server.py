@@ -271,6 +271,13 @@ class Host:
         return event
 
     async def action(self, action, body):
+        if action == "telegram-workspace-result-view" and body.get("action") == "ack" and "pairingRef" in body:
+            from aiohttp import web
+            from nanobot_agentbridge.workspace_query_delivery import acknowledge_receipt
+            try:
+                return await acknowledge_receipt(self, body, host_type="pi")
+            except web.HTTPException as exc:
+                raise HTTPException(exc.status) from None
         if action == "ready":
             await self.refresh_bindings()
             verified, configured = len(self.verified_bindings), len(self.bindings)

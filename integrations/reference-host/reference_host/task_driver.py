@@ -377,7 +377,7 @@ class ReferenceTaskDriver:
             conversation_ref=task["conversation_ref"], instance_id=self.instance_id,
         )
         if resume_nonce:
-            from agentbridge.core.pi_resume_observation import META_KEY
+            from .pi_resume_observation import META_KEY
             meta[META_KEY] = resume_nonce
         return await self.client(task["identity_label"]).call_tool(
             tool_name, dict(arguments), meta=meta, recovery_class=recovery_class,
@@ -433,7 +433,7 @@ class ReferenceTaskDriver:
             interaction = {"interactionId": interaction_ids[-1]}
         observed = False
         if resume_nonce and resumed_from and self.implementation.name == "pi" and not result.is_error:
-            from agentbridge.core.pi_resume_observation import META_KEY, matches
+            from .pi_resume_observation import META_KEY, matches
             observed = matches(result.private_meta.get(META_KEY), result.structured, nonce=resume_nonce,
                                private_interaction=result.private_meta.get(PRIVATE_INTERACTION_META_KEY),
                                resumed_from=resumed_from, task_id=task["task_id"],

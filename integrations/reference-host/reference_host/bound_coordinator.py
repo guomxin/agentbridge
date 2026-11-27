@@ -23,11 +23,11 @@ from .state import ReferenceHostState
 from .task_driver import ReferenceTaskDriver
 
 IMPLEMENTATION = CoordinatorImplementation(
-    "nanobot", "0.3.0", ("web_private", "telegram_private")
+    "nanobot", "0.3.1", ("web_private", "telegram_private")
 )
 
 
-PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.7", ("web_private", "telegram_private"))
+PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.8", ("web_private", "telegram_private"))
 
 
 class PersonalIdentity(IdentityConfig):

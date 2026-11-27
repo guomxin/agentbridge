@@ -17,7 +17,8 @@ from agentbridge.mcp.central import create_central_mcp_server, validate_central_
 from tests.test_pi_workspace import private_json, pi  # noqa: F401
 
 
-def paired_query(pi, *, items=None, coverage="complete", identity=None, extra_result=None, mixed=False):
+def paired_query(pi, *, items=None, coverage="complete", identity=None, extra_result=None, mixed=False,
+                 query_v2=False):
     svc = pi.service
     owner, instance, bot, sender = "user-a", "pi-office", "8801", "501"
     account = pi.accounts["a"]["account_id"]
@@ -65,7 +66,8 @@ def paired_query(pi, *, items=None, coverage="complete", identity=None, extra_re
             message_key="workspace:assistant:"+run,text="已查询本人待办。")
     scope = {"user_subject":owner,"agent_host":"pi","host_instance_id":instance,"endpoint_key":"telegram:8801:501"}
     normal = svc.claim_host_notifications(**scope,include_workspace_chat=True)["notifications"]
-    assert [line["timeline"]["role"] for line in normal if line["deliveryMode"]=="timeline_message"]==["user","assistant"]
+    roles = [line["timeline"]["role"] for line in normal if line["deliveryMode"]=="timeline_message"]
+    assert roles == ([] if query_v2 else ["user","assistant"])
     assert not any(item["deliveryMode"]=="workspace_result_view" for item in normal)
     claimed = svc.claim_host_notifications(**scope,include_workspace_result_views=True)["notifications"]
     cards = [x for x in claimed if x["deliveryMode"]=="workspace_result_view"]

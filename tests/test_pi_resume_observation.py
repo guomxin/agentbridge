@@ -43,6 +43,7 @@ def test_consumer_falls_back_to_authenticated_observe(monkeypatch, change, expec
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "integrations/reference-host"))
     from reference_host.host_profile import PRIVATE_INTERACTION_META_KEY
     from reference_host.mcp_client import McpCallResult
+    from reference_host import pi_resume_observation as client_proof
     from reference_host.task_driver import ReferenceTaskDriver
 
     terminal = change.startswith("terminal")
@@ -93,6 +94,15 @@ def test_consumer_falls_back_to_authenticated_observe(monkeypatch, change, expec
     else:
         content, structured = [], payload
 
+    # The external coordinator owns an independent wire validator. Neither a
+    # valid issuer receipt nor any mutation may change meaning across packages.
+    assert (client_proof.META_KEY, client_proof.SCHEMA) == (proof.META_KEY, proof.SCHEMA)
+    check = {**SCOPE, "minimum_version": 0 if change == "no-original-version" else 7,
+             "private_interaction": private.get(PRIVATE_INTERACTION_META_KEY)}
+    assert client_proof.matches(private.get(proof.META_KEY), structured, **check) == proof.matches(
+        private.get(proof.META_KEY), structured, **check
+    )
+
     driver = Mock(spec=ReferenceTaskDriver)
     driver._pi_task_versions = {} if change == "no-original-version" else {"local": 7}
     driver.implementation = SimpleNamespace(name="nanobot" if change == "nanobot" else "pi")
@@ -114,6 +124,36 @@ def test_consumer_falls_back_to_authenticated_observe(monkeypatch, change, expec
         driver.refresh_task_snapshot.assert_awaited_once_with("local")
     else:
         driver.present_interaction.assert_awaited_once()
+
+
+def test_reference_host_observation_contract_runs_without_the_central_package():
+    import json
+    import subprocess
+    import sys
+
+    payload, observation = response()
+    receipt = proof.receipt_for(observation, NONCE, "original")
+    program = """
+import importlib.abc, json, sys
+class DenyCentral(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'agentbridge', 'bscli'}:
+            raise AssertionError('Reference Host must not import the central package')
+sys.meta_path.insert(0, DenyCentral())
+sys.path.insert(0, sys.argv[1])
+from reference_host.task_driver import ReferenceTaskDriver
+from reference_host.pi_resume_observation import matches
+data = json.load(sys.stdin)
+assert matches(data['receipt'], data['payload'], private_interaction=data['private'], **data['scope'])
+print('independent protocol accepted')
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program,
+         str(Path(__file__).resolve().parents[1] / "integrations/reference-host")],
+        input=json.dumps({"payload": payload, "receipt": receipt, "private": SUCCESSOR, "scope": SCOPE}),
+        text=True, capture_output=True, check=True, timeout=15,
+    )
+    assert result.stdout.strip() == "independent protocol accepted"
 
 
 @pytest.mark.parametrize("change", ["none", "subject", "lease", "endpoint", "conversation", "kind", "source", "bad-nonce"])

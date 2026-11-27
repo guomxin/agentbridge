@@ -168,7 +168,7 @@ def exercise(node, sdk, engine, case, *, serve=False, scenario=None, desktop=Non
             assert central.service.home == directory / "central"
             with sqlite3.connect(central.service.db_path) as db:
                 db.execute("""INSERT OR REPLACE INTO agent_host_compatibility VALUES
-                    ('pi','0.1.7','L3','isolated-pi-proof','isolated-fixture',CURRENT_TIMESTAMP)""")
+                    ('pi','0.1.8','L3','isolated-pi-proof','isolated-fixture',CURRENT_TIMESTAMP)""")
             if serve or scenario:
                 settings = central.service.skills.config("user:" + OWNER)
                 central.service.skills.save("user:" + OWNER, {"oa-work-log":{"profiles":["preview"]}},
@@ -303,9 +303,9 @@ def exercise(node, sdk, engine, case, *, serve=False, scenario=None, desktop=Non
                             JOIN agent_host_runtime_snapshots s ON json_extract(r.value_json,'$.snapshotId')=s.snapshot_id
                             WHERE r.signal_type='host.runtime.snapshot' AND r.source='agent_host_contract'
                             AND r.user_subject=? AND r.host_type='pi' AND s.user_subject=r.user_subject
-                            AND s.host_type='pi' AND s.host_instance_id='pi-office' AND s.host_version='0.1.7'""", (OWNER,)).fetchall()
+                            AND s.host_type='pi' AND s.host_instance_id='pi-office' AND s.host_version='0.1.8'""", (OWNER,)).fetchall()
                     assert evidence and all((json.loads(value)["hostInstanceId"], json.loads(value)["hostVersion"]) ==
-                                            ("pi-office","0.1.7") for value, _ in evidence)
+                                            ("pi-office","0.1.8") for value, _ in evidence)
                     proof.update(automaticSnapshotSignals=len(evidence))
                     from tests.support.pi_notification_failure import check_failed_delivery
                     proof.update(check_failed_delivery(central, accounts["a"]))

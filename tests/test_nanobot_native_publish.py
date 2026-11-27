@@ -51,6 +51,71 @@ def spec_for(root):
     }
 
 
+def test_reviewed_nanobot_patch_keeps_identity_and_restores_original_route(tmp_path, monkeypatch):
+    import hashlib
+
+    spec, args, workspace, identities, _, config = synthetic_admission(tmp_path, monkeypatch)
+    original_spec = {**args["spec"], "adapterVersion": "0.3.0", "requiredLevel": "L3"}
+    original = central.route_document(config, original_spec)
+    manifest = private(config / "routes.json", original.decode())
+    old_request = {**args, "spec": original_spec}
+    issued = central.execute({**old_request, "action": "bind"})["bindings"]
+    current = lambda: next(row for row in workspace.hosts.admin_list() if row["instance_id"] == spec["instanceId"])
+    revision = current()["revision"]
+    candidate = "2" * 12
+    new_spec = {**original_spec, "adapterVersion": "0.3.1"}
+    updated = central.route_document(config, new_spec)
+    transition = {"fromRelease": "1" * 12, "toRelease": candidate,
+                  "beforeSha256": hashlib.sha256(original).hexdigest(),
+                  "afterSha256": hashlib.sha256(updated).hexdigest(),
+                  "fromLevel": "L3", "fromTelegram": original_spec["telegram"],
+                  "fromAdapterVersion": "0.3.0", "fromRevision": revision}
+    new_spec["routeTransition"] = transition
+    request = {**args, "spec": new_spec, "candidate": candidate}
+    invoke = lambda action, **extra: central.execute({**request, "action": action, **extra})
+
+    # No unreviewed route rewrite can precede a failed directory-version check.
+    with monkeypatch.context() as root:
+        root.setattr(os, "geteuid", lambda: 0)
+        with pytest.raises(ValueError, match="existing host assignment"):
+            central.execute({**request, "spec": {k: v for k, v in new_spec.items() if k != "routeTransition"},
+                             "action": "stage", "serviceSecret": "fixture-service"})
+        assert invoke("stage", serviceSecret="fixture-service")["routeState"] == "predecessor"
+    assert manifest.read_bytes() == original and current()["adapter_version"] == "0.3.0"
+    for changed, pattern in (({"adapterVersion": "0.3.2"}, "reviewed versions"),
+                             ({"telegram": {**new_spec["telegram"], "botId": 12345}}, "unchanged reviewed"),
+                             ({"subjects": {"alice": "pilot-alice", "mallory": "pilot-bob"}}, "hashes")):
+        with pytest.raises(ValueError, match=pattern):
+            central.transition_routes(config, {**new_spec, **changed}, candidate)
+    with pytest.raises(ValueError, match="reviewed revision"):
+        central.execute({**request, "spec": {**new_spec, "routeTransition": {**transition, "fromRevision": revision + 1}},
+                         "action": "route_activate"})
+    replace = central.replace_route
+    def interrupt_after_replace(path, contents, uid, gid):
+        replace(path, contents, uid, gid)
+        if contents == updated:
+            raise OSError("synthetic interruption after route replace")
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(central, "replace_route", interrupt_after_replace)
+        with pytest.raises(OSError, match="synthetic interruption"):
+            invoke("route_activate")
+    assert manifest.read_bytes() == original and current()["revision"] == revision
+    assert invoke("route_activate")["changed"]
+    assert not invoke("route_activate")["changed"]
+    assert manifest.read_bytes() == updated and current()["adapter_version"] == "0.3.1"
+    assert invoke("bind")["bindings"] == issued
+    assert all(identities.verify(row["personalCredential"]) for row in issued)
+    assert invoke("route_restore")["changed"]
+    assert not invoke("route_restore")["changed"]
+    assert manifest.read_bytes() == original and current()["adapter_version"] == "0.3.0"
+    assert central.execute({**old_request, "action": "bind"})["bindings"] == issued
+    with workspace._connect() as db:
+        db.execute("UPDATE workspace_host_instances SET revision=revision+1 WHERE instance_id=?", (spec["instanceId"],))
+    with pytest.raises(ValueError, match="revision"):
+        invoke("route_activate")
+    assert manifest.read_bytes() == original
+
+
 def mac_for():
     return {
         "port": 18789,
@@ -350,8 +415,9 @@ def test_archive_reuses_exact_reviewed_sources_wheel_and_coordinator(
         host.archive_bridge(pub, spec, artifact)
 
 
+@pytest.mark.parametrize("patch", [False, True])
 def test_mid_switch_failure_restores_previous_host_and_keeps_user_data(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, patch
 ):
     root = tmp_path.resolve()
     root.chmod(0o700)
@@ -361,6 +427,18 @@ def test_mid_switch_failure_restores_previous_host_and_keeps_user_data(
     for rel in (previous, candidate):
         rel.mkdir(mode=0o700, parents=True)
         private(rel / "host.json", "{}")
+    route_version = "0.3.0"
+    route_actions = []
+    if patch:
+        telegram = {k: spec["telegram"][k] for k in ("botId", "username")}
+        spec.update(adapterVersion="0.3.1", requiredLevel="L3", routeTransition={
+            "fromRelease": previous.name, "toRelease": candidate.name,
+            "fromAdapterVersion": "0.3.0", "fromLevel": "L3", "fromTelegram": telegram,
+        })
+        private(previous / "host.json", json.dumps({"coordinatorProgram": str(previous / "coordinator"),
+                                                    "telegramPilot": telegram}))
+        host.save(root / "native-release.json", {"stage": "confirmed", "candidate": previous.name})
+        monkeypatch.setattr(host, "run", lambda *_: '[project]\nversion="0.3.0"\n')
     host.set_current(root, previous)
     state_db = root / "user-state"
     state_db.write_text("retained")
@@ -384,19 +462,33 @@ def test_mid_switch_failure_restores_previous_host_and_keeps_user_data(
         if action == "bootstrap":
             loaded.add(label)
 
-    def probe(pub, spec):
+    def probe(pub, spec, *, action="probe"):
         if (root / "current").resolve() == candidate:
+            assert action == "probe" and (not patch or route_version == "0.3.1")
             raise RuntimeError("synthetic route loss")
+        assert action == ("probe_predecessor" if patch else "probe")
+        assert route_version == "0.3.0"
         return {"ready": True}
+
+    def remote(pub, spec, action, **kwargs):
+        nonlocal route_version
+        if action in {"route_activate", "route_restore"}:
+            assert patch and not loaded, "Both route changes must happen after the consumer and worker drain"
+            route_version = "0.3.1" if action == "route_activate" else "0.3.0"
+            route_actions.append(action)
+        return {"scopePresent": True, "portOccupied": False, "tunnelAuthorized": True}
+
+    def configure(*_):
+        assert not patch or route_version == "0.3.1"
 
     monkeypatch.setattr(host, "managed_jobs", supervised)
     monkeypatch.setattr(host, "ctl", control)
     monkeypatch.setattr(host, "archive_bridge", lambda *_: candidate)
-    monkeypatch.setattr(host, "configure_release", lambda *_: None)
+    monkeypatch.setattr(host, "configure_release", configure)
     monkeypatch.setattr(
         host, "verify_subjects", lambda *_: {"authenticatedSubjects": 2}
     )
-    monkeypatch.setattr(host, "remote", lambda *args, **kwargs: {"scopePresent": True, "portOccupied": False})
+    monkeypatch.setattr(host, "remote", remote)
     monkeypatch.setattr(host, "launchd_info", lambda label: f"path = {paths[label]}" if label in loaded else None)
     monkeypatch.setattr(host, "local_port_free", lambda _: True)
     monkeypatch.setattr(host, "wait_for_running_jobs", lambda labels, _: set(labels) == loaded or pytest.fail())
@@ -411,6 +503,7 @@ def test_mid_switch_failure_restores_previous_host_and_keeps_user_data(
         json.loads((root / "native-release.json").read_text())["stage"] == "rolled_back"
     )
     assert state_db.read_text() == "retained"
+    assert route_actions == (["route_activate", "route_restore"] if patch else [])
     assert all(
         label.startswith("ai.agentbridge.nanobot.pilot-test.") for _, label in history
     )

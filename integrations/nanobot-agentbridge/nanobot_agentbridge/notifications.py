@@ -118,7 +118,10 @@ async def notifications(host, record, action, body, *, paired_session=None):
 
         path = Path(req["userDir"]) / "coordinated-runs.sqlite3"
         if action == "telegram-workspace-result-view":
-            from .pi_workspace_result_cards import handle_request
+            if "pairingRef" in body:
+                from .workspace_query_delivery import handle_request
+            else:
+                from .pi_workspace_result_cards import handle_request
             return await handle_request(session, meta, req, path, body, origins)
         if action in ("telegram-chat-validate", "telegram-chat-receipt"):
             delivery, attempt = body.get("deliveryId"), body.get("attempt")
@@ -199,6 +202,7 @@ async def notifications(host, record, action, body, *, paired_session=None):
             "include_business_watch": True,
             "include_task_files": True,
             "include_oa_digest": True,
+            "include_workspace_query_v2": True,
         }
         claim_meta = meta
         if req.get("hostType") == "pi":
@@ -226,6 +230,16 @@ async def notifications(host, record, action, body, *, paired_session=None):
             if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
                 continue
             mode = item.get("deliveryMode")
+            if mode in {"workspace_query_v2", "workspace_text_v2"}:
+                from .workspace_query_delivery import pairing_ref, record_claim, source_fields
+                source, pairing = source_fields(item), item.get("pairingRef")
+                if source and source[1] == mode and identifier(source[0]) and pairing_ref(pairing):
+                    task, _, part_index, part_count = source
+                    record_claim(path, req["endpoint"], delivery, attempt, task, pairing, record=record,
+                                 mode=mode, part_index=part_index, part_count=part_count)
+                    fields = {"sourceEntryId": task, "partIndex": part_index, "partCount": part_count} if mode == "workspace_text_v2" else {"sourceTaskId": task}
+                    deliveries.append({"kind": mode, **fields, "deliveryId": delivery, "attempt": attempt, "pairingRef": pairing})
+                continue
             if mode == "workspace_result_view":
                 task = item.get("sourceTaskId")
                 if req.get("hostType") == "pi" and identifier(task):
@@ -485,6 +499,8 @@ class TerminalMessages:
     def __init__(self, pilot):
         self.pilot = pilot
         self.chat = ChatMirrors(pilot)
+        from .workspace_query_delivery import WorkspaceQueries
+        self.workspace_queries = WorkspaceQueries(self)
         self.workspace_results = None
         if getattr(pilot, "host_type", "nanobot") == "pi":
             from .pi_workspace_result_cards import WorkspaceResultCards
@@ -505,7 +521,7 @@ class TerminalMessages:
                     bot INTEGER NOT NULL, chat INTEGER NOT NULL, dedupe_key TEXT NOT NULL,
                     delivery TEXT, state TEXT NOT NULL, receipt INTEGER,
                     PRIMARY KEY(bot,chat,dedupe_key));
-                UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state='sending';
+                UPDATE telegram_card_deliveries SET state='delivery_unknown' WHERE state IN ('sending','beginning');
             """)
 
     def _reply_message_id(self, chat, binding, digest, run_id):
@@ -522,10 +538,9 @@ class TerminalMessages:
         from .telegram import TelegramUnavailable, numeric
 
         pilot = self.pilot
-        if send_before is not None:
-            active, proof = pilot._binding(chat)
-            if active != binding or proof != digest or time.time() >= send_before:
-                return False
+        active, proof = pilot._binding(chat)
+        if active != binding or proof != digest or (send_before is not None and time.time() >= send_before):
+            return False
         with pilot.db:
             inserted = pilot.db.execute(
                 "INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,?,'sending',NULL)",
@@ -535,11 +550,7 @@ class TerminalMessages:
             status = "delivery_unknown"
             receipt = None
             try:
-                if send_before is None:
-                    active, proof = pilot._binding(chat)
-                if active != binding or proof != digest:
-                    status = "binding_changed"
-                elif send_before is not None and time.time() >= send_before:
+                if send_before is not None and time.time() >= send_before:
                     with pilot.db:
                         pilot.db.execute("DELETE FROM telegram_card_deliveries WHERE bot=? AND chat=? AND dedupe_key=? AND state='sending'",
                                          (pilot.bot_id, chat, dedupe_key))
@@ -647,6 +658,7 @@ class TerminalMessages:
             self._ack_receipt(binding, delivery, event["runId"], event["attempt"], row[0] == "delivered")
 
     def flush_deferred(self, *, chat=None, run_id=None):
+        self.workspace_queries.drain()
         if self.workspace_results:
             self.workspace_results.drain()
         from agentbridge.workspace.gateway import GatewayRequestError
@@ -691,6 +703,9 @@ class TerminalMessages:
             reply = pilot.gateway._request("telegram-notifications", payload)
         for event in reply.get("deliveries", []):
             kind = event.get("kind")
+            if kind in {"workspace_query_v2", "workspace_text_v2"}:
+                self.workspace_queries.claim(chat, binding, digest, event)
+                continue
             if kind == "workspace_result_view":
                 if self.workspace_results:
                     self.workspace_results.claim(chat, binding, digest, event)

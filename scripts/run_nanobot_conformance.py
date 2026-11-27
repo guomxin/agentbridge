@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "schemas/agent-host/v1/test-vectors.json"
@@ -132,6 +133,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     opts = parser.parse_args()
     python = opts.nanobot_python.absolute()
+    adapter = tomllib.loads((ROOT / "integrations/nanobot-agentbridge/pyproject.toml").read_text())["project"]["version"]
     version = subprocess.check_output(
         [
             python,
@@ -157,7 +159,7 @@ def main():
     report = {
         "schemaVersion": "agentbridge.nanobot-conformance.v1",
         "host": "nanobot",
-        "adapter": "0.3.0",
+        "adapter": adapter,
         "sdk": version,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "contractSha256": hashlib.sha256(VECTORS.read_bytes()).hexdigest(),

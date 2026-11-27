@@ -230,8 +230,11 @@ def main():
               "governed","tests.support.pi_batch_probe",check_batch)]
     workspace_views = {"test_companion_uses_original_web_read_and_current_pair": {
         "H18": "the paired first Telegram account can open only the original eligible Workspace result; re-pairing invalidates the card"}}
+    independent_observation = {"test_reference_host_observation_contract_runs_without_the_central_package": {
+        "H16": "the coordinator validates the private observation wire contract without importing the central package"}}
     for path, cases in (("tests/test_pi_central.py",AUTHORITY_TESTS),("tests/test_pi_journal_conformance.py",JOURNAL_TESTS),
-                        ("tests/test_pi_workspace_result_views.py",workspace_views)):
+                        ("tests/test_pi_workspace_result_views.py",workspace_views),
+                        ("tests/test_pi_resume_observation.py",independent_observation)):
         plans.extend((name, claims, "pytest", path+"::"+name, None) for name, claims in cases.items())
     selected = [p for p in plans if set(p[1]) & required]
     pins = {"commit":start["commit"],"wheelSha256":artifact["sha256"] if artifact else None,

@@ -8,6 +8,7 @@ import path from "node:path";
 import { interactionResumeAllowed, resumeClaimAllowed } from "./recovery-policy.js";
 import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
+import { WorkspaceQueryDelivery } from "./workspace-query-delivery.js";
 
 import {
   appendPresentationLinks,
@@ -114,6 +115,7 @@ export class InteractionCoordinator {
     saveMediaBufferImpl = saveOpenClawMediaBuffer,
     interactionPresenter = null,
     toolIdentityResolver = null,
+    workspaceQueryDelivery = null,
   }) {
     this.api = api;
     this.config = config;
@@ -126,6 +128,7 @@ export class InteractionCoordinator {
     this.saveMediaBufferImpl = saveMediaBufferImpl;
     this.interactionPresenter = interactionPresenter;
     this.toolIdentityResolver = toolIdentityResolver;
+    this.workspaceQueryDelivery = workspaceQueryDelivery || new WorkspaceQueryDelivery({ api, config, now });
     this.sharedStateId = sharedState.id || "isolated";
     this.records = sharedState.records;
     this.resultViews = sharedState.resultViews || (sharedState.resultViews = new Map());
@@ -1468,6 +1471,7 @@ export class InteractionCoordinator {
   ) {
     let response;
     try {
+      await this.workspaceQueryDelivery.recover(binding, client, signal);
       response = await client.callTool(
         "agentbridge_host_notification_claim",
         {
@@ -1475,6 +1479,7 @@ export class InteractionCoordinator {
           endpoint_key: binding.key,
           limit,
           lease_seconds: enqueue ? 300 : 30,
+          ...(binding.channel === "telegram" ? { include_workspace_query_v2: true } : {}),
           ...(waitSeconds > 0 ? { wait_seconds: waitSeconds } : {}),
         },
         { signal, meta: hostContextMeta() },
@@ -1556,6 +1561,24 @@ export class InteractionCoordinator {
   }
 
   async processEndpointNotification(identityRouter, binding, client, signal, endpoint, notification) {
+      if (["workspace_query_v2", "workspace_text_v2"].includes(notification?.deliveryMode)) {
+        // This path has its own persistent begin/receipt protocol. Never fall
+        // through to the legacy boolean notification ACK or generic retry.
+        try {
+          await this.workspaceQueryDelivery.deliver({ binding, client, endpoint, notification, signal, identityRouter,
+            withDirectDelivery: async send => {
+              const sessionKey = endpoint?.conversationRef;
+              const depth = this.directDeliveries.get(sessionKey) || 0;
+              this.directDeliveries.set(sessionKey, depth + 1);
+              try { return await send(); }
+              finally { this.finishDirectDelivery(sessionKey); }
+            },
+          });
+        } catch (error) {
+          this.api.logger.warn(`AgentBridge Workspace receipt retained for recovery (${safeErrorCode(error)})`);
+        }
+        return;
+      }
       const watchNotification = notification?.deliveryMode === 'business_watch';
       let staleDelivery = false;
       const validateDelivery = async () => {
@@ -2842,12 +2865,14 @@ export class InteractionCoordinator {
       });
       return true;
     } finally {
-      if (depth === 0) {
-        this.directDeliveries.delete(sessionKey);
-      } else {
-        this.directDeliveries.set(sessionKey, depth);
-      }
+      this.finishDirectDelivery(sessionKey);
     }
+  }
+
+  finishDirectDelivery(sessionKey) {
+    const remaining = (this.directDeliveries.get(sessionKey) || 1) - 1;
+    if (remaining > 0) this.directDeliveries.set(sessionKey, remaining);
+    else this.directDeliveries.delete(sessionKey);
   }
 
   undeliveredPendingFor(record, { allowLaterRun = false } = {}) {
