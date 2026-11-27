@@ -425,6 +425,9 @@ class WorkspaceQueries:
             self.pilot.db.execute("""UPDATE telegram_card_deliveries SET state=?,receipt=?
                 WHERE bot=? AND chat=? AND dedupe_key=? AND delivery=?""",
                 (state, receipt, self.pilot.bot_id, claim.chat, claim.dedupe_key, claim.delivery))
+            if claim.entry and state == "delivered" and receipt:
+                self.pilot.navigation.remember(claim.chat, receipt, claim.digest,
+                    {"kind": "workspace_public_message", "receipt": receipt})
             if retry_seconds is not None:
                 self.pilot.db.execute("""UPDATE telegram_workspace_query_attempts SET retry_seconds=?,not_before=?
                     WHERE bot=? AND chat=? AND delivery=?""",

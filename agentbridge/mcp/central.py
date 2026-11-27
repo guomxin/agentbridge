@@ -6612,6 +6612,7 @@ def create_central_mcp_server(
         endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
         max_age_minutes: Annotated[int, Field(ge=1, le=1_440)] = 360,
         limit: Annotated[int, Field(ge=1, le=20)] = 12,
+        projection_reference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         _, registration = await _require_registered_host_call(
@@ -6620,6 +6621,14 @@ def create_central_mcp_server(
             identity=identity,
             agent_host=agent_host,
         )
+        if projection_reference is not None:
+            from agentbridge.core.cross_endpoint_reference import resolve
+            return await _run_host_control(
+                "agentbridge_host_cross_endpoint_context", resolve, service=service,
+                subject=identity["user_subject"], host=agent_host, instance=registration["hostInstanceId"],
+                token=identity["token_id"], endpoint_key=endpoint_key, reference=projection_reference,
+                max_age_minutes=max_age_minutes, limit=limit,
+            )
         return await _run_host_control(
             "agentbridge_host_cross_endpoint_context",
             service.get_host_cross_endpoint_context,

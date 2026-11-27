@@ -895,6 +895,20 @@ function ingestTimelineEntry(entry, render = true, advanceCursor = true) {
         timestamp: entry.created_at,
         sourceLabel: entry.source?.display_label || "其他端",
       });
+      if (entry.referenceable && entry.source?.client_type === "telegram") {
+        const quote = document.createElement("button");
+        quote.type = "button";
+        quote.className = "secondary";
+        quote.textContent = "引用这条消息";
+        quote.addEventListener("click", () => {
+          const input = $("#chat-form textarea[name='message']");
+          if (input.disabled) return;
+          const prefix = `继续电报消息 ${entry.entry_id}，`;
+          if (!input.value.startsWith(prefix)) input.value = prefix + input.value;
+          input.focus();
+        });
+        item.append(quote);
+      }
       state.syncedMessages.set(entry.entry_id, item);
     }
     item.dataset.messageKey = String(entry.message_key || "");

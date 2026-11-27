@@ -48,7 +48,7 @@ async def navigate(host, record, body):
     from aiohttp import web
 
     operation = body.get("operation")
-    if operation not in {"list", "history", "continue", "stop"}:
+    if operation not in {"list", "history", "continue", "stop", "public_reference"}:
         raise web.HTTPBadRequest()
     request = host.worker_payload(record, None)
     if not host.coordinator or not request["endpointKey"].startswith("telegram:"):
@@ -59,6 +59,16 @@ async def navigate(host, record, body):
         ):
             raise web.HTTPForbidden()
         endpoint = {"agent_host": request.get("hostType", "nanobot"), "endpoint_key": request["endpointKey"]}
+
+        if operation == "public_reference":
+            from .cross_endpoint_reference import answer
+            reference = body.get("target")
+            if (not isinstance(reference, dict) or set(reference) != {"telegramReceipt"}
+                    or type(reference["telegramReceipt"]) is not int or reference["telegramReceipt"] <= 0):
+                raise web.HTTPBadRequest()
+            text = await answer(session, meta, host=endpoint["agent_host"], endpoint=endpoint["endpoint_key"],
+                                reference=reference)
+            return {"referenceText": text}
 
         async def read(name, arguments):
             reply = await session.call_tool(name, arguments, meta=meta)

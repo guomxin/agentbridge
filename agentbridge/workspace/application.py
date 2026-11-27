@@ -1248,6 +1248,16 @@ class WorkspaceApplication:
             for item in _timeline_attachments(entry)]
         media = self.service.timeline_attachments.public_metadata(user_subject=account["user_subject"],
             attachment_ids=attachment_ids)
+        candidates = [e["dedupe_key"].removeprefix("message:") for e in entries
+                      if e.get("entry_type") == "chat_message" and
+                      endpoints.get(e.get("source_endpoint_id"), {}).get("client_type") == "telegram"
+                      and str(e.get("dedupe_key") or "").startswith("message:")]
+        reference_ids = set()
+        if candidates:
+            with self.service.tasks._connect() as db:
+                reference_ids = {r[0] for r in db.execute(
+                    "SELECT entry_id FROM telegram_history_receipts WHERE subject=? AND message_key IN (" +
+                    ",".join("?" for _ in candidates) + ")", (account["user_subject"], *candidates))}
         projected = []
         for entry in entries:
             if _timeline_attachments(entry):
@@ -1261,6 +1271,8 @@ class WorkspaceApplication:
                 is_origin=own_web or entry.get("source_endpoint_id") == account.get("endpoint_id"))
             if entry.get("source_endpoint_id") in hosts:
                 public["source"]["host"] = hosts[entry["source_endpoint_id"]]
+            if public["entry_id"] in reference_ids:
+                public["referenceable"] = True
             projected.append(public)
         return projected
 
