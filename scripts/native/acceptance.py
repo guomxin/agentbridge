@@ -15,14 +15,29 @@ REQUIRED_AGENTBRIDGE_HOOKS = frozenset({
     'before_prompt_build', 'before_tool_call', 'model_call_started',
     'model_call_ended', 'llm_input', 'llm_output', 'agent_end',
 })
+REFERENCE_REPLY_HOOKS = frozenset({
+    'message_received', 'reply_dispatch', 'before_agent_reply', 'session_end',
+})
+
+
+def required_runtime_hooks(version):
+    # Preserve inspected pre-0.4.135 predecessors. The new reply path needs
+    # source capture, model-free dispatch, its fail-closed fallback and reset
+    # cleanup. Later stable versions inherit these requirements.
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', str(version or ''))
+    if match and tuple(map(int, match.groups())) >= (0, 4, 135):
+        return REQUIRED_AGENTBRIDGE_HOOKS | REFERENCE_REPLY_HOOKS
+    return REQUIRED_AGENTBRIDGE_HOOKS
 
 
 def require_runtime_hooks(plugin):
+    required = required_runtime_hooks(plugin.get('plugin', {}).get('version'))
     hooks = {entry.get('name') for entry in plugin.get('typedHooks', [])
              if isinstance(entry, dict)}
     if (plugin.get('policy', {}).get('allowConversationAccess') is not True
-            or not REQUIRED_AGENTBRIDGE_HOOKS.issubset(hooks)):
+            or not required.issubset(hooks)):
         raise ValueError('AgentBridge native runtime hooks missing or conversation access blocked')
+    return sorted(required)
 
 
 def require_gateway_hooks_unblocked(host, started_at, expected_version=None):
@@ -148,7 +163,7 @@ def runtime(host):
             or plugin.get('plugin', {}).get('status') != 'loaded'
             or plugin.get('plugin', {}).get('version') != expected):
         raise ValueError('Gateway RPC/version/plugin mismatch')
-    require_runtime_hooks(plugin)
+    verified_hooks = require_runtime_hooks(plugin)
     # CLI plugin inspection alone is insufficient: require current Gateway registration.
     from datetime import datetime
     # observe pins ps to the C locale; parse numeric fields without depending on
@@ -161,7 +176,7 @@ def runtime(host):
     if lifecycle.observe(host) != observed:
         raise ValueError('No registration from current Gateway process')
     return {'rpc': 'ok', 'version': '2026.7.1', 'pluginVersion': expected,
-            'nativeHooks': sorted(REQUIRED_AGENTBRIDGE_HOOKS),
+            'nativeHooks': verified_hooks,
             'hookEvidence': 'runtime-inspection-and-current-gateway-log'}
 
 

@@ -303,11 +303,13 @@ def test_runtime_uses_normalized_observation_without_second_ps(host, tmp_path):
                   'gateway': {'version': '2026.7.1'}, 'pluginVersionDrift': {'drifts': []}},
                  {'plugin': {'status': 'loaded', 'version': version},
                   'policy': {'allowConversationAccess': True},
-                  'typedHooks': [{'name': name} for name in acceptance.REQUIRED_AGENTBRIDGE_HOOKS]}]
+                  'typedHooks': [{'name': name} for name in acceptance.required_runtime_hooks(version)]}]
     with mock.patch.object(lifecycle, 'observe', return_value=observed), \
          mock.patch.object(acceptance, 'host_run', side_effect=responses) as inspected, \
          mock.patch.object(acceptance, 'run', side_effect=AssertionError('Unexpected second ps')):
-        assert acceptance.runtime(host)['rpc'] == 'ok'
+        result = acceptance.runtime(host)
+        assert result['rpc'] == 'ok'
+        assert result['nativeHooks'] == sorted(acceptance.required_runtime_hooks(version))
     assert '--runtime' in inspected.call_args_list[1].args[1]
 
 

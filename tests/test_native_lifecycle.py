@@ -64,6 +64,26 @@ def test_runtime_native_inspection_needs_every_hook_and_permission():
         acceptance.require_runtime_hooks(report)
 
 
+@pytest.mark.parametrize('version', ['0.4.135', '0.4.136'])
+def test_reference_reply_version_requires_original_source_dispatch_fallback_and_reset(version):
+    required = acceptance.required_runtime_hooks(version)
+    assert acceptance.REFERENCE_REPLY_HOOKS <= required
+    report = {'plugin': {'version': version}, 'policy': {'allowConversationAccess': True},
+              'typedHooks': [{'name': name} for name in required]}
+    assert acceptance.require_runtime_hooks(report) == sorted(required)
+    for missing in acceptance.REFERENCE_REPLY_HOOKS:
+        incomplete = copy.deepcopy(report)
+        incomplete['typedHooks'] = [entry for entry in incomplete['typedHooks'] if entry['name'] != missing]
+        with pytest.raises(ValueError, match='native runtime hooks'):
+            acceptance.require_runtime_hooks(incomplete)
+
+
+def test_predecessor_hooks_do_not_require_unreleased_reference_reply_path():
+    report = {'plugin': {'version': '0.4.134'}, 'policy': {'allowConversationAccess': True},
+              'typedHooks': [{'name': name} for name in acceptance.REQUIRED_AGENTBRIDGE_HOOKS]}
+    assert acceptance.require_runtime_hooks(report) == sorted(acceptance.REQUIRED_AGENTBRIDGE_HOOKS)
+
+
 @pytest.mark.parametrize('structured', [True, False])
 def test_current_gateway_blocked_hook_is_rejected(tmp_path, structured):
     message = '[plugins] typed hook "agent_end" blocked because non-bundled plugins must set plugins.entries.agentbridge-interactions.hooks.allowConversationAccess=true'
@@ -138,7 +158,7 @@ def test_cli_runtime_registration_in_shared_log_cannot_certify_gateway(tmp_path)
             'message': f'AgentBridge interaction plugin registered (version={version}, state=cli)'}) + '\n')
         return {'plugin': {'status': 'loaded', 'version': version},
                 'policy': {'allowConversationAccess': True},
-                'typedHooks': [{'name': name} for name in acceptance.REQUIRED_AGENTBRIDGE_HOOKS]}
+                'typedHooks': [{'name': name} for name in acceptance.required_runtime_hooks(version)]}
 
     with mock.patch.object(lifecycle, 'observe', return_value=observed), \
          mock.patch.object(acceptance, 'host_run', side_effect=inspected) as inspect:
