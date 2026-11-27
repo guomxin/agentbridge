@@ -1,5 +1,6 @@
 import { resolvePluginConfig } from "./config.js";
 import { CrossEndpointReference } from "./cross-endpoint-reference.js";
+import { TelegramReferenceReply } from "./telegram-reference-reply.js";
 import { businessSkillContext, releaseSkillRun, releaseSkillSession, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard, draftSampleGuard } from "./business-skills.js";
 import { registerSkillCompletion } from "./skill-completion.js";
 import {
@@ -29,7 +30,7 @@ import { createHostPerformance, observeHostSync } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.134";
+export const PLUGIN_VERSION = "0.4.135";
 
 // Only fixed host guidance enters system context. Catalogs, trial material and
 // task history keep their existing data context and do not gain authority.
@@ -152,6 +153,10 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         })
       : null;
   coordinator.timelinePublisher = timelinePublisher;
+  const telegramReferenceReply = new TelegramReferenceReply({ api, router: identityRouter, coordinator,
+    reference: crossEndpointReference, sharedState, store: dependencies.telegramReferenceReplyStore,
+    loadSessionSdk: dependencies.referenceSessionSdk, now: dependencies.now });
+  coordinator.telegramReferenceReply = telegramReferenceReply;
   const mediaPublisher = config.syncTimeline && identityRouter.enabled
     ? new TelegramMediaProjection({api,identityRouter,logger:api.logger,now:dependencies.now,
         sleep:dependencies.timelineSleep,store:dependencies.telegramMediaProjectionStore}) : null;
@@ -311,6 +316,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     coordinator.recordUserMessage(event, context);
     bindTrustedDeliveryRoute(coordinator, identityRouter, event, context);
     crossEndpointReference.capture(event,context);
+    telegramReferenceReply.capture(event,context);
     void mediaPublisher?.capture({sessionKey:event.sessionKey||context.sessionKey,event,context});
     void timelinePublisher?.capture({
       sessionKey: event.sessionKey || context.sessionKey,
@@ -323,6 +329,11 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       ),
     });
   });
+
+  api.on("reply_dispatch", (event, context) => identityRouter.enabled
+    ? telegramReferenceReply.dispatch(event, context) : undefined);
+  api.on("before_agent_reply", (event, context) => identityRouter.enabled
+    ? telegramReferenceReply.fallback(event, context) : undefined);
 
   api.on("before_prompt_build", async (event, context) => {
     if (!identityRouter.enabled) {
@@ -525,6 +536,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   api.on("session_end", (event, context) => {
     if (["reset", "deleted"].includes(event.reason)) {
       const sessionKey = context.sessionKey || event.sessionKey;
+      telegramReferenceReply.forget(sessionKey);
       coordinator.removeSession(sessionKey);
       releaseSkillSession(identityRouter, sessionKey);
       identityRouter.removeSession(sessionKey);

@@ -99,7 +99,7 @@ export class CrossEndpointReference {
     return selected;
   }
   lock(context) {
-    const turn=this.turn(context.sessionKey);
+    const turn=context.referenceTurn ?? this.turn(context.sessionKey);
     if (!turn) this.state.fallback.add(context.sessionKey);
     if (turn) this.state.turns.add(this.key(context.sessionKey,turn));
     if (context.runId) this.state.runs.add(this.key(context.sessionKey,context.runId));
@@ -123,8 +123,8 @@ export class CrossEndpointReference {
     let blocked=this.blocked(frozen);
     return ()=>{blocked ||= this.blocked(frozen);return blocked?{status:'rejected',error:{code:'CROSS_ENDPOINT_REFERENCE_READ_ONLY',message:BLOCK}}:null;};
   }
-  async prompt(prompt,context) {
-    const selected=this.select(prompt,context);
+  async resolve(prompt,context,frozen=null) {
+    const selected=frozen?.selection || this.select(prompt,context);
     if (!selected) { this.state.fallback.delete(context.sessionKey); return null; }
     this.lock(context); // Fail closed before identity resolution or network I/O.
     let message=UNAVAILABLE;
@@ -138,14 +138,18 @@ export class CrossEndpointReference {
           const result=await identity.client.callTool('agentbridge_host_cross_endpoint_context',{
             agent_host:'openclaw',endpoint_key:endpoint,projection_reference:selected.reference,max_age_minutes:360,limit:8,
           },{meta:hostContextMeta(),signal:AbortSignal.timeout(3000)});
-          if (this.turn(sessionKey)===turn && this.fingerprint(this.identity(sessionKey),sessionKey)===fingerprint) {
+          if ((frozen ? frozen.isCurrent() : this.turn(sessionKey)===turn) && this.fingerprint(this.identity(sessionKey),sessionKey)===fingerprint) {
             message=referenceMessage(result,channel(sessionKey));
           }
         }
       } catch { message='暂时无法核对原消息。请稍后重新引用。'; }
     }
-    return {prependSystemContext:SYSTEM,prependContext:JSON.stringify({kind:'agentbridge.public-reference.v1',
-      allowNewOperation:false,reply:message,question:selected.question || ''})};
+    return {message,question:selected.question || ''};
+  }
+  async prompt(prompt,context) {
+    const resolved=await this.resolve(prompt,context);
+    return resolved ? {prependSystemContext:SYSTEM,prependContext:JSON.stringify({kind:'agentbridge.public-reference.v1',
+      allowNewOperation:false,reply:resolved.message,question:resolved.question})} : null;
   }
 }
 

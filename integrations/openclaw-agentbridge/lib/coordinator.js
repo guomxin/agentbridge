@@ -1541,6 +1541,7 @@ export class InteractionCoordinator {
     const notifications = Array.isArray(response?.notifications)
       ? response.notifications
       : [];
+    await this.telegramReferenceReply?.recover({ binding, endpoint });
     await this.nativeCards.recover({ binding, client, endpoint, identityRouter, signal,
       withDirectDelivery: (sessionKey, send) => this.withNativeDirectDelivery(sessionKey, send) });
     for (const notification of notifications) {
