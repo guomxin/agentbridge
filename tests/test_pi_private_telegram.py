@@ -38,6 +38,7 @@ def test_private_pi_rejects_before_download_pairing_or_dispatch(tmp_path):
     with fixture(tmp_path) as (state, bindings, create):
         original = create()
         calls = []
+        receptions = []
         class Gateway:
             host_type = "pi"
 
@@ -47,6 +48,11 @@ def test_private_pi_rejects_before_download_pairing_or_dispatch(tmp_path):
 
             def readiness(self):
                 return {"available": True}
+
+            def _request(self, action, body, **options):
+                assert action == "telegram-received-source"
+                receptions.append(body)
+                return original.gateway._request(action, body, **options)
 
         try:
             with pytest.raises(ValueError):
@@ -58,17 +64,19 @@ def test_private_pi_rejects_before_download_pairing_or_dispatch(tmp_path):
                 for i, body in enumerate(({"text": "/start " + "A"*32}, {"text": "/agentbridge link AAAAAAAA"},
                                           {"photo": [{"file_id": "unauthorized"}]}, {"text": "查本人待办"})):
                     pi.ingest(update(i, who=502, message=i+1, **body))
-                assert not calls and not state["downloads"] and not state["deliveries"]
+                assert not calls and not receptions and not state["downloads"] and not state["deliveries"]
                 assert pi.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
                 pi.ingest(update(21, message=11, text="/agentbridge status"))
                 pi.ingest(update(22, message=11, text="/agentbridge status"))
+                assert len(receptions) == 1 and receptions[0]["messageId"] == 11
+                assert receptions[0]["binding"] == bindings["501"] and receptions[0]["receivedAt"]
                 assert len(state["deliveries"]) == 1 and "Pi 私聊已绑定" in state["deliveries"][0]["text"]
                 assert not state["admissions"]
                 bindings["501"]["user_subject"] = "beta"
                 assert pi._binding(501) == (None, None)
                 path.write_text(json.dumps({**settings, "enabled": False}))
                 pi.ingest(update(23, message=12, text="/start"))
-                assert len(state["deliveries"]) == 1
+                assert len(state["deliveries"]) == 1 and len(receptions) == 1
             finally:
                 pi.db.close()
         finally:
