@@ -438,3 +438,24 @@ test("private interactions use the original endpoint's card and keep links out o
     } else assert.deepEqual(h.calls.map(x => x.args.action), ["issue"]);
   }
 });
+
+test('native references require original Bot route and credential custody in the durable actual-send receipt',async t=>{
+  const h=harness(t,{text:true});
+  h.api.config.channels.telegram.botToken='777:synthetic-original';
+  let credential='scope-original';h.context.identityRouter.catalogCacheKeyForBinding=()=>credential;
+  const consumer=h.consumer();
+  assert.equal(consumer.provesReceipt(h.context.binding,123,h.context.identityRouter),false);
+  await consumer.deliver(h.context);
+  assert.equal(h.consumer().provesReceipt(h.context.binding,123,h.context.identityRouter),true);
+  assert.equal(consumer.provesReceipt({...h.context.binding,senderId:'2002'},123,h.context.identityRouter),false);
+  h.api.config.channels.telegram.botToken='888:synthetic-replaced-bot';
+  assert.equal(consumer.provesReceipt(h.context.binding,123,h.context.identityRouter),false);
+  h.api.config.channels.telegram.botToken='777:rotated-same-bot';credential='scope-replaced';
+  assert.equal(consumer.provesReceipt(h.context.binding,123,h.context.identityRouter),false);
+  credential='scope-original';assert.equal(consumer.provesReceipt(h.context.binding,123,h.context.identityRouter),true);
+  const record=h.store.matchingReceipt(h.context.binding.key,123)[0];
+  assert.ok(record.botRouteRef);assert.ok(record.credentialRef);
+  assert.equal(JSON.stringify(record).includes('synthetic-original'),false);
+  delete record.botRouteRef;writeFileSync(h.store.file(record,true),JSON.stringify(record));
+  assert.equal(consumer.provesReceipt(h.context.binding,123,h.context.identityRouter),false);
+});

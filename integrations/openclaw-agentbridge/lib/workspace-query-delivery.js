@@ -5,7 +5,7 @@ import path from "node:path";
 import { unlink } from "node:fs/promises";
 import { hostContextMeta } from "./host-contract.js";
 import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
-import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
+import { canonicalTelegramAccount, sameTelegramAccount, telegramBotRouteRef } from "./telegram-identity.js";
 
 import { taskNotificationMode, taskNotificationPayload, validTaskNotification } from "./task-notification.js";
 import { workspaceMediaMode, materializeWorkspaceMedia } from "./telegram-media-delivery.js";
@@ -65,6 +65,20 @@ export class WorkspaceQueryReceiptStore {
     return names.filter(name => /^[a-f0-9]{64}\.[1-9][0-9]*\.json$/.test(name)).map(name =>
       JSON.parse(readFileSync(path.join(this.folder(bindingKey), name), "utf8")));
   }
+  matchingReceipt(bindingKey, receipt) {
+    const records=[];
+    for (const settled of [false,true]) {
+      const folder=this.folder(bindingKey,settled);
+      let names;
+      try { names=readdirSync(folder); } catch(error) { if(error.code==='ENOENT') continue; throw error; }
+      for (const name of names.filter(value=>/^[a-f0-9]{64}\.[1-9][0-9]*\.json$/.test(value))) {
+        const record=JSON.parse(readFileSync(path.join(folder,name),'utf8'));
+        if (record.endpointKey===bindingKey && record.outcome==='sent' && record.receipt===receipt
+            && ['workspace_query_v2','workspace_text_v2'].includes(record.deliveryMode)) records.push(record);
+      }
+    }
+    return records;
+  }
   prior(record) {
     const prefix = `${digest(record.deliveryId)}.`;
     const records = [];
@@ -114,6 +128,17 @@ export class WorkspaceQueryDelivery {
     this.now = now;
     this.saveMediaBuffer = saveMediaBuffer;
     this.recoveryOffset = 0;
+  }
+
+  provesReceipt(binding, receipt, identityRouter) {
+    const bot=telegramBotRouteRef(this.api.config,binding.accountId,binding.senderId);
+    const scope=identityRouter.catalogCacheKeyForBinding?.(binding);
+    if (!bot || !scope || !Number.isSafeInteger(receipt) || receipt<=0) return false;
+    try {
+      const records=this.store.matchingReceipt?.(binding.key,receipt) || [];
+      return records.length===1 && records[0].botRouteRef===bot && records[0].credentialRef===digest(scope)
+        && String(records[0].chatId)===String(binding.senderId) && sameTelegramAccount(records[0].accountId,binding.accountId);
+    } catch { return false; }
   }
 
   async recover(binding, client, signal) {
@@ -168,8 +193,11 @@ export class WorkspaceQueryDelivery {
       state: "prepared", ownerPid: process.pid, createdAt: new Date(this.now()).toISOString() };
     const key = this.store.file(record);
     const identityScope = identityRouter.catalogCacheKeyForBinding?.(binding);
+    record.credentialRef = identityScope ? digest(identityScope) : null;
+    record.botRouteRef = telegramBotRouteRef(this.api.config,route.accountId,route.to);
     const isCurrent = () => currentBinding(identityRouter, binding, endpoint, client) &&
-      identityRouter.catalogCacheKeyForBinding?.(binding) === identityScope;
+      identityRouter.catalogCacheKeyForBinding?.(binding) === identityScope &&
+      telegramBotRouteRef(this.api.config,route.accountId,route.to) === record.botRouteRef;
     if (active.has(key)) return;
     active.add(key);
     let mediaPayload;

@@ -1,4 +1,5 @@
 import { resolvePluginConfig } from "./config.js";
+import { CrossEndpointReference } from "./cross-endpoint-reference.js";
 import { businessSkillContext, releaseSkillRun, releaseSkillSession, workspaceSkillTrialContext, workspaceSkillTrialGuard, boundSkillToolGuard, draftSampleGuard } from "./business-skills.js";
 import { registerSkillCompletion } from "./skill-completion.js";
 import {
@@ -129,6 +130,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
           })
       : null,
   });
+  const crossEndpointReference = new CrossEndpointReference({identityRouter,coordinator,sharedState,
+    nativeReceiptProof:(binding,receipt)=>coordinator.workspaceQueryDelivery.provesReceipt(binding,receipt,identityRouter)});
   const taskCommandRunner = sharedState.taskCommandRunner || (sharedState.taskCommandRunner = createTaskCommandRunner({
     identityRouter, coordinator, performanceRecorder, logger: api.logger,
   }));
@@ -184,6 +187,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         () => createAgentBridgeProxyTools({
           context,
           identityRouter,
+          readOnlyReferenceGuard: crossEndpointReference.toolGuard(context),
           serverName: config.mcpServerName,
           taskIdResolver: (sessionKey, toolName) =>
             coordinator.taskIdForBusinessCall(sessionKey, toolName),
@@ -264,6 +268,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   // OpenClaw 2026.7.1 omits session context from result middleware.
   api.on("before_tool_call", (event, context) => observeHostSync(performanceRecorder,
     () => toolTimingContext(event, context), () => {
+    const referenceBlock = crossEndpointReference.guard(context) || crossEndpointReference.guard({...context,...event});
+    if (referenceBlock) return {block:true,blockReason:referenceBlock.error.message};
     coordinator.bindToolCall(event, context);
     const trial = coordinator.skillTrialForSession(event.sessionKey || context.sessionKey);
     // The Codex native relay qualifies this tool with its `openclaw` namespace.
@@ -301,6 +307,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   api.on("message_received", (event, context) => {
     coordinator.recordUserMessage(event, context);
     bindTrustedDeliveryRoute(coordinator, identityRouter, event, context);
+    crossEndpointReference.capture(event,context);
     void mediaPublisher?.capture({sessionKey:event.sessionKey||context.sessionKey,event,context});
     void timelinePublisher?.capture({
       sessionKey: event.sessionKey || context.sessionKey,
@@ -325,8 +332,9 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       coordinator,
       logger: api.logger,
       syncTimeline: config.syncTimeline,
+      crossEndpointReference,
     }), "host.prompt_build");
-    return result ? { ...result, prependSystemContext: HOST_CONTEXT_GUIDANCE } : result;
+    return result ? { ...result, prependSystemContext: [HOST_CONTEXT_GUIDANCE,result.prependSystemContext].filter(Boolean).join("\n\n") } : result;
   });
 
   // 2026.7.1 exposes per-provider-call diagnostics. TTFB is available; a first
@@ -684,6 +692,7 @@ async function taskContinuityPromptContext({
   coordinator,
   logger,
   syncTimeline = true,
+  crossEndpointReference,
 }) {
   const sessionKey = safeText(context.sessionKey, 1_024);
   const skillTrial = coordinator.skillTrialForSession(sessionKey);
@@ -696,6 +705,8 @@ async function taskContinuityPromptContext({
       ? inbound
       : "";
   }
+  const reference = await crossEndpointReference?.prompt(prompt,context);
+  if (reference) return reference;
   const contexts = [];
   const planningContext = await composedTaskPlanningContext({
     prompt,

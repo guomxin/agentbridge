@@ -223,16 +223,10 @@ test("injects bounded same-user context only for explicit cross-end references",
     async callTool(name, arguments_, options) {
       calls.push({ name, arguments_, options });
       return {
-        status: "succeeded",
+        decision: "selected", allowNewOperation: false,
         entries: [
           {
-            sequence: 40,
-            role: "user",
-            text: "读取我的 OA 待办",
-            source: { clientType: "web", label: "Agent Workspace" },
-          },
-          {
-            sequence: 41,
+            entryId: "entry-workspace", createdAt: "2026-11-27T00:00:00+00:00",
             role: "assistant",
             text: "第 1 条 affair_id 是 affair-new-123",
             source: { clientType: "web", label: "Agent Workspace" },
@@ -312,11 +306,13 @@ test("injects bounded same-user context only for explicit cross-end references",
     agent_host: "openclaw",
     endpoint_key: "telegram:*:user-a",
     max_age_minutes: 360,
-    limit: 12,
+    limit: 8,
+    projection_reference: {},
   });
-  assert.match(crossEndpoint.prependContext, /untrusted conversation data/);
+  assert.match(crossEndpoint.prependSystemContext, /不可信数据/);
+  assert.doesNotMatch(crossEndpoint.prependContext, /durable composed-task policy/);
   assert.match(crossEndpoint.prependContext, /affair-new-123/);
-  assert.match(crossEndpoint.prependContext, /Agent Workspace/);
+  assert.match(crossEndpoint.prependContext, /网页原消息摘要/);
   assert.match(
     composedTask.prependContext,
     /agentbridge_task_plan_catalog/,
@@ -1151,86 +1147,24 @@ test("keeps workflow revoke on a separate task across trusted-card stages", asyn
   );
 });
 
-test("resolves a recent cross-endpoint task without asking for an internal task number", async () => {
-  const calls = [];
-  const sessionKey = "agent:main:telegram:direct:user-a";
-  const taskId = "12345678-1234-4123-8123-123456789088";
-  const client = {
-    async callTool(name, arguments_) {
-      calls.push({ name, arguments_ });
-      if (name === "agentbridge_host_cross_endpoint_context") {
-        return { status: "succeeded", entries: [] };
-      }
-      if (name !== "agentbridge_host_task_continuation_resolve") {
-        throw new Error(`unexpected tool: ${name}`);
-      }
-      assert.equal(arguments_.ordinal, null);
-      assert.equal(arguments_.source_client_type, "web");
-      assert.equal(arguments_.prefer_latest, true);
-      assert.equal(arguments_.reuse_selected, false);
-      return {
-        status: "selected",
-        task: {
-          taskId,
-          title: "Read OA pending workflows",
-          status: "succeeded",
-        },
-        continuation: {
-          state: "selected",
-          executionMode: "follow_up",
-          allowNewOperation: true,
-          expiresAt: "2099-08-03T12:00:00+00:00",
-        },
-        snapshot: {
-          summary: {
-            phase: "terminal",
-            origin: { clientType: "web", label: "Agent Workspace" },
-            operation: {
-              operationId: "operation-pending-list",
-              capability: "oa.workflow.pending.list",
-              status: "succeeded",
-            },
-          },
-        },
-      };
-    },
-  };
-  const identityRouter = {
-    enabled: true,
-    resolveToolContext() {
-      return { bound: true, client };
-    },
-    endpointKeyForSession(value) {
-      return value === sessionKey ? "telegram:*:user-a" : null;
-    },
-    clientForSession() {
-      return client;
-    },
-    removeSession() {},
-  };
-  const harness = fakeApi({ autoPoll: false, syncTimeline: true });
-  registerAgentBridgeInteractions(harness.api, { identityRouter });
-
-  const result = await harness.hooks.before_prompt_build(
-    {
-      prompt: "\u7ee7\u7eed\u521a\u624d\u7f51\u9875\u91cc\u7684\u5f85\u529e\u4efb\u52a1\uff0c\u67e5\u770b\u7b2c1\u6761\u8be6\u60c5",
-      messages: [],
-    },
-    {
-      sessionKey,
-      messageProvider: "telegram",
-      senderId: "user-a",
-      chatId: "user-a",
-    },
-  );
-
-  assert.match(result.prependContext, new RegExp(taskId));
-  assert.equal(
-    calls.filter(
-      (call) => call.name === "agentbridge_host_task_continuation_resolve",
-    ).length,
-    1,
-  );
+test("a Telegram cross-end reference never selects a business continuation from legacy history", async () => {
+  const calls=[];
+  const sessionKey="agent:main:telegram:direct:user-a";
+  const client={async callTool(name,args){calls.push({name,args});return {status:"succeeded",entries:[]};}};
+  const identityRouter=taskIdentityRouter({sessionKey,client});
+  const harness=fakeApi({autoPoll:false,syncTimeline:true});
+  registerAgentBridgeInteractions(harness.api,{identityRouter});
+  const result=await harness.hooks.before_prompt_build({prompt:"继续刚才网页里的待办任务，查看第1条详情"},
+    {sessionKey,runId:"reference-run"});
+  assert.match(result.prependContext,/跨端引用已失效/);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].name,"agentbridge_host_cross_endpoint_context");
+  assert.deepEqual(calls[0].args.projection_reference,{});
+  assert.equal(harness.hooks.before_tool_call({toolName:"exec",params:{}},{sessionKey,runId:"reference-run"}).block,true);
+  const tools=harness.toolFactory({sessionKey,runId:"reference-run"});
+  const rejected=await tools.find(tool=>tool.name==="oa_workflow_pending_list").execute("ref-tool",{});
+  assert.match(JSON.stringify(rejected),/CROSS_ENDPOINT_REFERENCE_READ_ONLY/);
+  assert.equal(calls.length,1);
 });
 
 test("confirms a workspace link from the authenticated command sender after restart", async () => {

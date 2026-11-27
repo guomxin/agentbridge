@@ -129,6 +129,7 @@ export function createAgentBridgeProxyTools({
   taskContinuationResolver = null,
   interactionGetGuard = null,
   terminalPlanGuard = null,
+  readOnlyReferenceGuard = null,
   argumentNormalizer = null,
   skillTrialResolver = null,
   skillTrialResultHandler = null,
@@ -184,6 +185,7 @@ export function createAgentBridgeProxyTools({
         taskContinuationResolver,
         interactionGetGuard,
         terminalPlanGuard,
+        readOnlyReferenceGuard,
         argumentNormalizer,
         skillTrialResolver,
         skillTrialResultHandler,
@@ -245,6 +247,7 @@ function createProxyTool({
   taskContinuationResolver,
   interactionGetGuard,
   terminalPlanGuard,
+  readOnlyReferenceGuard,
   argumentNormalizer,
   skillTrialResolver,
   skillTrialResultHandler,
@@ -260,6 +263,8 @@ function createProxyTool({
     parameters: descriptor.inputSchema || emptyObjectSchema(),
     ...(descriptor.annotations ? { annotations: descriptor.annotations } : {}),
     execute: (toolCallId, rawParams, signal) => {
+      const referenceBlocked = readOnlyReferenceGuard?.();
+      if (referenceBlocked) return Promise.resolve(jsonToolResult(referenceBlocked));
       let skillLoad;
       // Capture the accepted turn before any asynchronous work. This context
       // is only for planning recovery; it cannot create a skill/run binding.
@@ -279,6 +284,8 @@ function createProxyTool({
           },
         });
       }
+      const referenceBlocked = readOnlyReferenceGuard?.();
+      if (referenceBlocked) return jsonToolResult(referenceBlocked);
       if (planningContextFactory) planningContext = planningContextFactory({ ...context,
         toolCallId, toolName: descriptor.name, identity }) || planningContext;
       const stalePlanningCall = () => descriptor.name === "agentbridge_task_plan_prepare" &&
