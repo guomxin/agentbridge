@@ -365,7 +365,7 @@ class HostContractStore:
             ("pi", "0.1.8", "L3", "sha256:bfda29ab4eec0ea35c7195d21924cf6c8f244c805bbb3901e5a35ab97cdf28b0"),
             ("nanobot", "0.2.0", "L2", "nanobot-private-credential-poll-resume-v1"),
             ("nanobot", "0.3.0", "L3", "sha256:9046f611fd05c7a8ebafb4a3af979c77cdf12019d1309ca2be0c0e6b6d8beb34"),
-            ("nanobot", "0.3.1", "L3", "sha256:89b3271c6ef1e2aa267146ed43af37b817b4ac21851484d1f3642bea27068779"),
+            ("nanobot", "0.3.1", "L3", "sha256:2bece59fe9990ddd24f00c80324e84ac775e1e483746868bf295409849824b5c"),
             ("openclaw", "0.4.71", "L3", "shared-contract-h01-h29-task-plan-v1"),
             (
                 "openclaw",
@@ -616,7 +616,7 @@ class HostContractStore:
                 "openclaw", "0.4.133", "L3",
                 "shared-contract-h01-h29-instance-notification-routing-v1",
             ),
-            ("openclaw", "0.4.134", "L3", "sha256:8fa061b1c3af79beb11aaa5677efc2f013c07fec06ee88f0e034c34f9d19e507"),
+            ("openclaw", "0.4.134", "L3", "sha256:eb48534d59077201e4c6100ab201d76b49c131f0b7468bdf980a4af5e27bdefe"),
         )
         for name, version, level, evidence in builtins:
             connection.execute(
