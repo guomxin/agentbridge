@@ -21,8 +21,11 @@ class Delivery:
         self.commands = host.commands
         self.card_origins = host.cards.origins
         self.runs = self
-        self.db = host.ledger.db
         self.binding = json.dumps(binding_key(record), ensure_ascii=False)
+
+    @property
+    def db(self):
+        return self.host.ledger.db
 
     def lookup(self, key, *, subject, endpoint, conversation):
         if (subject, endpoint, conversation) != tuple(self.record[k] for k in ("user_subject", "endpoint_id", "session_key")):
