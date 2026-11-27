@@ -23,6 +23,7 @@ import {
 } from "./proxy-tools.js";
 import { createHostRuntimeReporter } from "./runtime-reporter.js";
 import { TimelinePublisher } from "./timeline.js";
+import { TelegramMediaProjection } from "./telegram-media-projection.js";
 import { createHostPerformance, observeHostSync } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
@@ -117,6 +118,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
     now: dependencies.now,
     fetchImpl: dependencies.documentFetchImpl || globalThis.fetch,
     saveMediaBufferImpl: dependencies.saveMediaBufferImpl,
+    artifactReceiptStore: dependencies.artifactReceiptStore,
     interactionPresenter: identityRouter.enabled
       ? (interaction, sessionKey) =>
           presentInteractionForSession({
@@ -144,6 +146,9 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         })
       : null;
   coordinator.timelinePublisher = timelinePublisher;
+  const mediaPublisher = config.syncTimeline && identityRouter.enabled
+    ? new TelegramMediaProjection({api,identityRouter,logger:api.logger,now:dependencies.now,
+        sleep:dependencies.timelineSleep,store:dependencies.telegramMediaProjectionStore}) : null;
   const hostRuntimeReporter = identityRouter.enabled
     ? dependencies.hostRuntimeReporter ||
       createHostRuntimeReporter({
@@ -296,6 +301,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
   api.on("message_received", (event, context) => {
     coordinator.recordUserMessage(event, context);
     bindTrustedDeliveryRoute(coordinator, identityRouter, event, context);
+    void mediaPublisher?.capture({sessionKey:event.sessionKey||context.sessionKey,event,context});
     void timelinePublisher?.capture({
       sessionKey: event.sessionKey || context.sessionKey,
       role: "user",
@@ -514,12 +520,14 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       logger: api.logger,
     });
     timelinePublisher?.start();
+    mediaPublisher?.start();
     coordinator.startNotificationPump(identityRouter);
     hostRuntimeReporter?.start();
   });
 
   api.on("gateway_stop", () => {
     timelinePublisher?.stop();
+    mediaPublisher?.stop();
     hostRuntimeReporter?.stop();
     taskCommandRunner.stop();
     coordinator.stopAll();

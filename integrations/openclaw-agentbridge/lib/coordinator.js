@@ -10,6 +10,7 @@ import { normalizeTrustedResultView, resultViewPresentation } from "./result-vie
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 import { taskNotificationMode } from "./task-notification.js";
 import { WorkspaceQueryDelivery } from "./workspace-query-delivery.js";
+import { TelegramArtifactDelivery } from "./telegram-artifact-delivery.js";
 
 import {
   appendPresentationLinks,
@@ -117,6 +118,7 @@ export class InteractionCoordinator {
     interactionPresenter = null,
     toolIdentityResolver = null,
     workspaceQueryDelivery = null,
+    artifactReceiptStore = undefined,
   }) {
     this.api = api;
     this.config = config;
@@ -129,7 +131,10 @@ export class InteractionCoordinator {
     this.saveMediaBufferImpl = saveMediaBufferImpl;
     this.interactionPresenter = interactionPresenter;
     this.toolIdentityResolver = toolIdentityResolver;
-    this.workspaceQueryDelivery = workspaceQueryDelivery || new WorkspaceQueryDelivery({ api, config, now });
+    this.workspaceQueryDelivery = workspaceQueryDelivery || new WorkspaceQueryDelivery({ api, config, now, saveMediaBuffer: saveMediaBufferImpl });
+    this.artifactDelivery = new TelegramArtifactDelivery({api,store:artifactReceiptStore,now,sleep,
+      identityScope:sessionKey=>this.toolIdentityResolver?.(sessionKey),
+      routeFor:sessionKey=>this.sessionRoutes.get(sessionKey),clientFor:sessionKey=>this.clientForSession(sessionKey)});
     this.sharedStateId = sharedState.id || "isolated";
     this.records = sharedState.records;
     this.resultViews = sharedState.resultViews || (sharedState.resultViews = new Map());
@@ -1476,6 +1481,7 @@ export class InteractionCoordinator {
     let response;
     try {
       await this.workspaceQueryDelivery.recover(binding, client, signal);
+      if(this.artifactDelivery.store)await this.artifactDelivery.recoverReports();
       response = await client.callTool(
         "agentbridge_host_notification_claim",
         {
@@ -1483,7 +1489,8 @@ export class InteractionCoordinator {
           endpoint_key: binding.key,
           limit,
           lease_seconds: enqueue ? 300 : 30,
-          ...(binding.channel === "telegram" ? { include_workspace_query_v2: true, include_notification_v2: true } : {}),
+          ...(binding.channel === "telegram" ? { include_workspace_query_v2: true, include_notification_v2: true,
+            include_workspace_media_v2: true } : {}),
           ...(waitSeconds > 0 ? { wait_seconds: waitSeconds } : {}),
         },
         { signal, meta: hostContextMeta() },
@@ -1565,7 +1572,7 @@ export class InteractionCoordinator {
   }
 
   async processEndpointNotification(identityRouter, binding, client, signal, endpoint, notification) {
-      if (["workspace_query_v2", "workspace_text_v2", taskNotificationMode].includes(notification?.deliveryMode)) {
+      if (["workspace_query_v2", "workspace_text_v2", taskNotificationMode, "workspace_media_v2"].includes(notification?.deliveryMode)) {
         // This path has its own persistent begin/receipt protocol. Never fall
         // through to the legacy boolean notification ACK or generic retry.
         try {
@@ -1613,6 +1620,7 @@ export class InteractionCoordinator {
           message:validation.allowed ? validation.message : null};
       }
       let delivered = false;
+      let artifactOutcome = null;
       const sessionKey = endpoint?.conversationRef;
       const route = endpoint?.route;
       const commandHint = notification?.deliveryMode === "prepared_command";
@@ -1672,9 +1680,10 @@ export class InteractionCoordinator {
           const receipt = await this.deliverPreparedDocumentDirect(
             sessionKey,
             notification.artifact,
-            { deliveryRef: notification.deliveryId },
+            { deliveryRef: notification.deliveryId, beforeSend: protectPayload ? async () => Boolean(await protectPayload(true)) : null },
           );
           delivered = receipt.delivered;
+          artifactOutcome = receipt.deliveryUnknown ? "delivery_unknown" : receipt.delivered ? "attachment_sent" : null;
           await this.reportPreparedDocumentDelivery({
             sessionKey,
             taskId: notification.task?.taskId,
@@ -1725,6 +1734,7 @@ export class InteractionCoordinator {
             delivery_id: notification.deliveryId,
             ...(watchNotification ? {attempt_count:notification.attemptCount} : {}),
             succeeded: delivered,
+            ...(artifactOutcome ? {artifact_outcome:artifactOutcome,attempt_count:notification.attemptCount} : {}),
             retry_after_seconds: 5,
             defer_until_activity: deferUntilActivity,
           },
@@ -2365,12 +2375,12 @@ export class InteractionCoordinator {
     }
   }
 
-  async materializePreparedDocument(file) {
+  async materializePreparedDocument(file, {withBytes=false} = {}) {
     if (file.protectedCsv) {
       const body = Buffer.from(file.contentBase64, "base64");
       const saved = await this.saveMediaBufferImpl(body, "text/csv", "inbound", 65536, file.filename, file.filename);
       if (!saved?.path) throw new Error("protected CSV was not saved to the media store");
-      return saved.path;
+      return withBytes ? {path:saved.path,body} : saved.path;
     }
     if (typeof this.fetchImpl !== "function") {
       throw new Error("prepared document fetch is unavailable");
@@ -2420,13 +2430,13 @@ export class InteractionCoordinator {
     if (!saved?.path) {
       throw new Error("prepared document was not saved to the OpenClaw media store");
     }
-    return saved.path;
+    return withBytes ? {path:saved.path,body} : saved.path;
   }
 
   async deliverPreparedDocumentDirect(
     sessionKey,
     file,
-    { deliveryRef = null } = {},
+    { deliveryRef = null, beforeSend = null } = {},
   ) {
     this.prunePreparedDocumentReceipts();
     const receiptKey = preparedDocumentReceiptKey(
@@ -2440,7 +2450,7 @@ export class InteractionCoordinator {
     if (existing) {
       return existing.promise;
     }
-    const promise = this.performPreparedDocumentDelivery(sessionKey, file);
+    const promise = this.performPreparedDocumentDelivery(sessionKey, file, {deliveryRef,beforeSend});
     if (receiptKey) {
       this.documentDeliveryReceipts.set(receiptKey, {
         promise,
@@ -2454,13 +2464,21 @@ export class InteractionCoordinator {
     return receipt;
   }
 
-  async performPreparedDocumentDelivery(sessionKey, file) {
+  async performPreparedDocumentDelivery(sessionKey, file, {deliveryRef=null,beforeSend=null} = {}) {
     const route = this.sessionRoutes.get(sessionKey);
     if (!route) {
       this.api.logger.warn(
         "AgentBridge prepared document delivery unavailable because the private session route is missing",
       );
       return preparedDocumentReceipt(file, "failed", 0, "ROUTE_MISSING");
+    }
+    if(route.channel==='telegram'){
+      const receipt=await this.artifactDelivery.deliver({sessionKey,file,deliveryRef,beforeSend,
+        materialize:()=>this.materializePreparedDocument(file,{withBytes:true}),
+        withDirectDelivery:async send=>{const depth=this.directDeliveries.get(sessionKey)||0;this.directDeliveries.set(sessionKey,depth+1);
+          try{return await send();}finally{this.finishDirectDelivery(sessionKey);}}});
+      return {...preparedDocumentReceipt(file,receipt.state,receipt.attemptCount,receipt.errorCode),
+        deliveryUnknown:receipt.deliveryUnknown===true,...(receipt.telegramReceipt?{telegramReceipt:receipt.telegramReceipt}:{})};
     }
     if (this.isPullBasedSession(sessionKey) && (!file.protectedCsv || file.artifactId)) {
       this.api.logger.info(
@@ -2565,6 +2583,10 @@ export class InteractionCoordinator {
       return false;
     }
     const channel = this.sessionRoutes.get(sessionKey)?.channel || "unknown";
+    if(channel==='telegram')return this.artifactDelivery.report({sessionKey,client:deliveryClient,args:{
+      agent_host:'openclaw',task_id:taskId,delivery_ref:deliveryRef,channel,
+      files:report.files.filter(file=>file.artifactId).map(file=>({artifact_id:file.artifactId,state:file.state,
+        attempt_count:file.attemptCount,error_code:file.errorCode}))}});
     try {
       await deliveryClient.callTool(
         "agentbridge_host_artifact_delivery_report",
@@ -3448,6 +3470,7 @@ function normalizePreparedDocumentFile(file, allowedOrigins) {
     contentType,
     artifactId: normalizeOpaqueId(file.artifactId),
     downloadId: normalizeOpaqueId(file.downloadId),
+    expiresAt: typeof file.expiresAt==='string' ? file.expiresAt : null,
   };
 }
 
@@ -3520,9 +3543,12 @@ function preparedDocumentDeliveryReport(files, receipts, override = {}) {
     (file) => file.state === "fallback_link_sent",
   ).length;
   const failedCount = outcomes.filter((file) => file.state === "failed").length;
+  const unknownCount = outcomes.filter(file=>file.errorCode==='TELEGRAM_DELIVERY_UNKNOWN').length;
   const deliveredCount = attachmentSentCount + fallbackLinkSentCount;
   const state =
-    failedCount === 0
+    unknownCount > 0
+      ? deliveredCount > 0 ? "partial" : "unknown"
+      : failedCount === 0
       ? "delivered"
       : deliveredCount > 0
         ? "partial"
@@ -3539,7 +3565,8 @@ function preparedDocumentDeliveryReport(files, receipts, override = {}) {
       parts.push(`${fallbackLinkSentCount} 份附件上传失败，已改发下载链接`);
     }
   }
-  if (failedCount > 0) parts.push(`${failedCount} 份未能送达`);
+  if (failedCount-unknownCount > 0) parts.push(`${failedCount-unknownCount} 份未能送达`);
+  if (unknownCount > 0) parts.push(`${unknownCount} 份送达结果未确认，不会自动重发`);
   return {
     mode: outcomes.length === 1 ? "direct_attachment" : "direct_attachment_batch",
     oneFilePerMessage: true,
@@ -3551,7 +3578,8 @@ function preparedDocumentDeliveryReport(files, receipts, override = {}) {
     preparedCount: outcomes.length,
     attachmentSentCount,
     fallbackLinkSentCount,
-    failedCount,
+    failedCount: failedCount-unknownCount,
+    unknownCount,
     files: outcomes,
     userMessage: `${parts.join("，")}。`,
   };

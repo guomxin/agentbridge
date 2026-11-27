@@ -77,13 +77,22 @@ export class TimelineLocalStore {
   }
   delete(key) {return this.transaction(()=>this.db.prepare('DELETE FROM timeline_projection_entries WHERE key=?').run(key).changes>0);}
   entries() {return this.db.prepare('SELECT key,value FROM timeline_projection_entries ORDER BY key').all().map(row=>({key:row.key,value:JSON.parse(row.value)}));}
+  entriesWithPrefix(prefix) {return this.db.prepare('SELECT key,value FROM timeline_projection_entries WHERE substr(key,1,?)=? ORDER BY key')
+    .all(prefix.length,prefix).map(row=>({key:row.key,value:JSON.parse(row.value)}));}
+  keysWithPrefix(prefix) {return this.db.prepare('SELECT key FROM timeline_projection_entries WHERE substr(key,1,?)=? ORDER BY key')
+    .all(prefix.length,prefix).map(row=>row.key);}
   close() {this.db.close();}
 }
 
 export function openTimelineLocalStore(api) {
+  return openProjectionLocalStore(api,'timeline-projection-v2');
+}
+
+export function openProjectionLocalStore(api,namespace) {
   const resolve=api?.runtime?.state?.resolveStateDir;
   if(typeof resolve!=='function')return null;
-  const directory=path.join(resolve(),'agentbridge','timeline-projection-v2');
+  if(!['timeline-projection-v2','telegram-media-v2','telegram-artifact-v2'].includes(namespace))throw new Error('TIMELINE_STORAGE_CONFIG_INVALID');
+  const directory=path.join(resolve(),'agentbridge',namespace);
   if(!opened.has(directory))opened.set(directory,new TimelineLocalStore(directory));
   return opened.get(directory);
 }
