@@ -198,8 +198,11 @@ class Host:
         payload.update(message=message,trial=trial,requestKey=request_key,media=media)
         subject = record["user_subject"]
         directory = Path(payload["userDir"])
-        # The CLI module belongs to this installation, including in a source checkout.
-        bootstrap = "import runpy,sys;sys.path.insert(0,sys.argv[1]);runpy.run_module('nanobot_agentbridge.worker',run_name='__main__')"
+        # The model subprocess gets the same bundled central library as its parent.
+        # An absent/unsafe wheel must not fall back to another checkout or installation.
+        from .worker_library import BOOTSTRAP, release_library
+        release = Path(__file__).resolve().parents[1]
+        wheel = release_library(release)
         env = self.worker_environment(directory)
         async with self.subject_locks[subject]:
             process = await asyncio.create_subprocess_exec(
@@ -207,8 +210,9 @@ class Host:
                 "-I",
                 "-B",
                 "-c",
-                bootstrap,
-                str(Path(__file__).resolve().parents[1]),
+                BOOTSTRAP,
+                str(release),
+                str(wheel),
                 env=env,
                 cwd=directory,
                 stdin=asyncio.subprocess.PIPE,
