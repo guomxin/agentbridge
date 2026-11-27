@@ -117,6 +117,7 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'telegram_media_sources'],
                     ['table', 'telegram_media_receipts'],
                     ['table', 'workspace_media_deliveries'],
+                    ['table', 'artifact_report_receipt_custody'],
                     ['index', 'workspace_media_due'],
                     ['table', 'workspace_text_projection_decisions'],
                     ['index', 'workspace_text_projection_question'],
