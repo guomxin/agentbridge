@@ -55,18 +55,32 @@ def _handoff(db,row):
     if any(item['attempt_count'] or item['state'] not in {'pending','superseded'} for item in legacy):
         return False
     if row['host']=='pi':
-        old=db.execute('''SELECT state,attempt FROM pi_workspace_image_deliveries
-            WHERE dispatch_id=? AND destination=? AND ordinal=?''',
-            (row['dispatch_id'],row['endpoint_id'],row['ordinal'])).fetchone()
-        if old and (old['attempt'] or old['state'] not in {'pending','superseded'}):
+        old=db.execute('''SELECT ordinal,state,attempt FROM pi_workspace_image_deliveries
+            WHERE dispatch_id=? AND destination=?''',
+            (row['dispatch_id'],row['endpoint_id'])).fetchall()
+        own=next((item for item in old if item['ordinal']==row['ordinal']),None)
+        started=any(item['attempt'] or item['state'] not in {'pending','superseded'} for item in old)
+        # An earlier release may already have transferred this particular item.
+        # Preserve that owner; otherwise an active old group must finish there.
+        if started and (not own or own['state']!='superseded'):
             return False
-        db.execute('''UPDATE pi_workspace_image_deliveries SET state='superseded'
-            WHERE dispatch_id=? AND destination=? AND ordinal=? AND attempt=0 AND state='pending' ''',
-            (row['dispatch_id'],row['endpoint_id'],row['ordinal']))
+        if not started:
+            # Transfer every untouched original atomically so the legacy poller
+            # cannot send its second image while v2 is still sending the first.
+            db.execute('''UPDATE pi_workspace_image_deliveries SET state='superseded'
+                WHERE dispatch_id=? AND destination=? AND attempt=0 AND state='pending' ''',
+                (row['dispatch_id'],row['endpoint_id']))
     db.execute('''UPDATE notification_outbox SET state='superseded'
         WHERE event_id=? AND endpoint_id=? AND payload_type='timeline_message' AND attempt_count=0 AND state='pending' ''',
         (row['question_id'],row['endpoint_id']))
     return True
+
+
+def _legacy_predecessor_pending(db,row):
+    return row['host']=='pi' and db.execute('''SELECT 1 FROM pi_workspace_image_deliveries
+        WHERE dispatch_id=? AND destination=? AND entry_id=? AND ordinal<?
+            AND state IN ('pending','claimed','sending') LIMIT 1''',
+        (row['dispatch_id'],row['endpoint_id'],row['question_id'],row['ordinal'])).fetchone() is not None
 
 
 def _current(db,row,*,read_body,service):
@@ -118,6 +132,8 @@ def claim(service,subject,host,instance,endpoint,token,limit,lease,*,pairing_pro
             ORDER BY d.due,d.rowid LIMIT ?''',(subject,host,scope[1],endpoint,token,now.isoformat(),limit)).fetchall()
         result=[]
         for row in rows:
+            if _legacy_predecessor_pending(db,row):
+                continue
             if row['attempt']>=5 or not _current(db,row,read_body=False,service=service):
                 db.execute("UPDATE workspace_media_deliveries SET state='unavailable' WHERE delivery_id=?",(row['delivery_id'],))
                 continue
@@ -144,6 +160,8 @@ def handle(service,*,subject,host,instance,endpoint_key,token_id,pairing_ref,del
         if (any(x is not None for x in (outcome,receipt,retry_after_seconds)) or row['state']!='leased'
                 or not permits_delivery(db, host, subject, instance, endpoint_key, token_id, pairing_protocol)
                 or actions._date(row['due'])<=actions._now() or not query.registered(db,subject,host,(host,row['instance']),token_id)):
+            return {key:False}
+        if _legacy_predecessor_pending(db,row):
             return {key:False}
         resource=_current(db,row,read_body=True,service=service)
         if resource is None:

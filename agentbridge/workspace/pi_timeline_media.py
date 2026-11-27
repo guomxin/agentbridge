@@ -104,6 +104,21 @@ def _original_image(db, row):
     ).fetchone()
 
 
+def _v2_predecessor_pending(db, row):
+    # Old-only databases retain their original queue. For a partly handed-over
+    # group, a pending v2 predecessor still owns its place in the original order.
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_media_deliveries'").fetchone():
+        return False
+    return db.execute('''SELECT 1 FROM workspace_media_deliveries v
+        JOIN workspace_query_destinations p ON p.question_id=v.question_id
+        JOIN pi_workspace_image_deliveries previous ON previous.dispatch_id=v.dispatch_id
+            AND previous.entry_id=v.question_id AND previous.ordinal=v.ordinal
+            AND previous.attachment_id=v.attachment_id AND previous.destination=p.endpoint_id
+        WHERE v.dispatch_id=? AND v.question_id=? AND p.endpoint_id=? AND v.ordinal<?
+            AND previous.state='superseded' AND v.state IN ('pending','leased','retry_wait','sending')
+        LIMIT 1''', (row['dispatch_id'],row['entry_id'],row['destination'],row['ordinal'])).fetchone() is not None
+
+
 def _claim(db, scope):
     now = time.time()
     db.execute(
@@ -118,6 +133,8 @@ def _claim(db, scope):
             scope,
         ).fetchone()
         if not row or row["state"] == "sending" or row["state"] == "claimed" and row["lease_until"] > now:
+            return {"available": False}
+        if _v2_predecessor_pending(db, row):
             return {"available": False}
         if not _original_image(db, row):
             db.execute(
@@ -187,6 +204,8 @@ def delivery(
                 return {"recorded": True}
             return {"recorded": row["state"] == state and row["receipt"] == receipt}
         if row["state"] != "claimed" or row["lease_until"] <= time.time():
+            return {"available": False}
+        if _v2_predecessor_pending(db, row):
             return {"available": False}
         image = _original_image(db, row)
         if not image:
