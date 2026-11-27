@@ -130,6 +130,11 @@ export class WorkspaceQueryDelivery {
     this.recoveryOffset = 0;
   }
 
+  recognizesReceipt(binding, receipt) {
+    try { return (this.store.matchingReceipt?.(binding.key,receipt) || []).length>0; }
+    catch { return false; }
+  }
+
   provesReceipt(binding, receipt, identityRouter) {
     const bot=telegramBotRouteRef(this.api.config,binding.accountId,binding.senderId);
     const scope=identityRouter.catalogCacheKeyForBinding?.(binding);

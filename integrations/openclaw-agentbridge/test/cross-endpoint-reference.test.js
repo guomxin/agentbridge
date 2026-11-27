@@ -12,7 +12,7 @@ function setup(payload=selected) {
     client:{async callTool(name,args){calls.push({name,args});return typeof payload==='function'?payload():payload;}}};
   const router={resolveToolContext:()=>identity,endpointKeyForSession:()=>identity.binding.key,catalogCacheKeyForBinding:()=> 'original-credential'};
   const coordinator={recentUserMessages:messages,currentUserMessageForSession:key=>messages.get(key)?.intentText || null};
-  const subject=new CrossEndpointReference({identityRouter:router,coordinator,sharedState,nativeReceiptProof:()=>true});
+  const subject=new CrossEndpointReference({identityRouter:router,coordinator,sharedState,nativeReceiptProof:()=>true,nativeReceiptKnown:()=>true});
   return {subject,calls,identity,router,coordinator,sharedState,messages};
 }
 const native=(changes={})=>({sessionKey:session,content:'解释这条',messageId:'9',replyToId:'7',senderId:'701',from:'telegram:701',
@@ -144,4 +144,20 @@ test('native message id without original Bot receipt custody cannot select a pub
   h.subject.capture(native(),{sessionKey:session});
   assert.match((await h.subject.prompt('解释这条',{sessionKey:session})).prependContext,/失效/);
   assert.equal(h.calls.length,0);
+});
+
+
+test('ordinary Telegram replies retain same-endpoint behavior and never import cross-end history',async()=>{
+  const h=setup();h.messages.get(session).intentText='解释同端这条';
+  h.subject.nativeReceiptProof=()=>false;h.subject.nativeReceiptKnown=()=>false;
+  h.subject.capture(native({content:'解释同端这条'}),{sessionKey:session});
+  assert.equal(await h.subject.prompt('解释同端这条',{sessionKey:session,runId:'ordinary'}),null);
+  assert.equal(h.subject.guard({sessionKey:session,runId:'ordinary'}),null);assert.equal(h.calls.length,0);
+});
+
+test('explicit cross-end text with an unrecognized native receipt remains rejected, never latest',async()=>{
+  const h=setup();h.subject.nativeReceiptProof=()=>false;h.subject.nativeReceiptKnown=()=>false;
+  h.subject.capture(native({content:'继续网页刚才那个'}),{sessionKey:session});
+  assert.match((await h.subject.prompt('继续网页刚才那个',{sessionKey:session})).prependContext,/失效/);
+  assert.equal(h.calls.length,0);assert.ok(h.subject.guard({sessionKey:session}));
 });

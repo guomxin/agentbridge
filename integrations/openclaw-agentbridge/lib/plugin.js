@@ -131,7 +131,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       : null,
   });
   const crossEndpointReference = new CrossEndpointReference({identityRouter,coordinator,sharedState,
-    nativeReceiptProof:(binding,receipt)=>coordinator.workspaceQueryDelivery.provesReceipt(binding,receipt,identityRouter)});
+    nativeReceiptProof:(binding,receipt)=>coordinator.workspaceQueryDelivery.provesReceipt(binding,receipt,identityRouter),
+    nativeReceiptKnown:(binding,receipt)=>coordinator.workspaceQueryDelivery.recognizesReceipt(binding,receipt)});
   const taskCommandRunner = sharedState.taskCommandRunner || (sharedState.taskCommandRunner = createTaskCommandRunner({
     identityRouter, coordinator, performanceRecorder, logger: api.logger,
   }));

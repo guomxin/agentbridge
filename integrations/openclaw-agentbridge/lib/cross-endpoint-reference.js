@@ -41,8 +41,8 @@ export function parseProjectionReference(text, sessionKey) {
 }
 
 export class CrossEndpointReference {
-  constructor({identityRouter,coordinator,sharedState,nativeReceiptProof}) {
-    this.router=identityRouter;this.coordinator=coordinator;this.nativeReceiptProof=nativeReceiptProof;
+  constructor({identityRouter,coordinator,sharedState,nativeReceiptProof,nativeReceiptKnown}) {
+    this.router=identityRouter;this.coordinator=coordinator;this.nativeReceiptProof=nativeReceiptProof;this.nativeReceiptKnown=nativeReceiptKnown;
     this.state=sharedState.crossEndpointReferences ||= {native:new Map(),turns:new Set(),runs:new Set(),fallback:new Set()};
   }
   turn(sessionKey) { return this.coordinator.recentUserMessages.get(sessionKey)?.taskRunRef || null; }
@@ -71,9 +71,15 @@ export class CrossEndpointReference {
       || [event.accountId,context.accountId].some(value=>!sameTelegramAccount(value,binding.accountId))
       || (event.metadata?.replyToId!=null && positive(event.metadata.replyToId)!==reply)
       || (event.replyToIdFull!=null && positive(event.replyToIdFull)!==reply);
+    const proven=!conflict && this.nativeReceiptProof?.(binding,reply)===true;
+    const known=proven || this.nativeReceiptKnown?.(binding,reply)===true;
+    // A reply to an ordinary same-endpoint Telegram message is not a request to
+    // import Workspace history. Only explicit cross-end text or a known original
+    // Workspace receipt enters this resolver, even if its Bot proof is missing.
+    if (!known && !parseProjectionReference(event.content ?? event.text,sessionKey)) return;
     // Retain an invalid native-reference marker for this turn: a malformed or
     // foreign reply must not fall back to the newest unrelated public entry.
-    this.state.native.set(sessionKey,{turn,reply,invalid:Boolean(conflict) || this.nativeReceiptProof?.(binding,reply)!==true,fingerprint:this.fingerprint(identity,sessionKey)});
+    this.state.native.set(sessionKey,{turn,reply,invalid:!proven,fingerprint:this.fingerprint(identity,sessionKey)});
   }
   select(prompt,context) {
     const sessionKey=context.sessionKey;
