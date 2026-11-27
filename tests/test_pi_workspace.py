@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from agentbridge.admin.stores import AdminAuditStore
+from agentbridge.core.mcp_identities import McpIdentityTokenStore
 from agentbridge.workspace.application import WorkspaceApplication
 from agentbridge.workspace.gateway import GatewayRequestError
 from agentbridge.workspace.host_instances import HostInstanceConflict, LEGACY_INSTANCE_ID
@@ -180,19 +181,28 @@ def test_pairing_requires_current_first_account_allowlist_at_every_stage(pi):
     assert links.confirm(*a_args, challenge["challenge_id"], proof)["state"] == "linked"
     assert links.verified("user-a", "pi-office", "8801", "501")
     assert not links.verified("user-b", "pi-office", "8801", "501")
-    endpoint = links.ensure_endpoint("user-a", "fixture", "pi-office", "8801", "501")
+    identities = McpIdentityTokenStore(pi.service.db_path)
+    token_ids = {
+        subject: identities.issue(
+            user_subject=subject, expected_principal_ref=subject, label="pairing-test", ttl_seconds=600
+        )["token_id"]
+        for subject in ("user-a", "user-b")
+    }
+    with pytest.raises(PermissionError):
+        links.ensure_endpoint("user-a", "unrecognized", "pi-office", "8801", "501")
+    endpoint = links.ensure_endpoint("user-a", token_ids["user-a"], "pi-office", "8801", "501")
     assert len(endpoint["pairingRef"]) == 64 and int(endpoint["pairingRef"], 16) > 0
     assert pi.service.tasks.get_endpoint(endpoint["endpointId"], user_subject="user-a")["agent_host"] == "pi"
     with pytest.raises(PermissionError):
-        links.ensure_endpoint("user-b", "fixture", "pi-office", "8801", "501")
+        links.ensure_endpoint("user-b", token_ids["user-b"], "pi-office", "8801", "501")
     assert links.revoke(*a_args)["state"] == "unlinked"
     assert not links.verified("user-a", "pi-office", "8801", "501")
     with pytest.raises(PermissionError):
-        links.ensure_endpoint("user-a", "fixture", "pi-office", "8801", "501")
+        links.ensure_endpoint("user-a", token_ids["user-a"], "pi-office", "8801", "501")
     challenge = links.begin(*a_args)
     proof = links.present("user-a", "pi-office", "8801", "501", challenge["code"])
     links.confirm(*a_args, challenge["challenge_id"], proof)
-    renewed = links.ensure_endpoint("user-a", "fixture", "pi-office", "8801", "501")
+    renewed = links.ensure_endpoint("user-a", token_ids["user-a"], "pi-office", "8801", "501")
     assert renewed["pairingRef"] != endpoint["pairingRef"]
     assert renewed["endpointId"] == endpoint["endpointId"]
 
