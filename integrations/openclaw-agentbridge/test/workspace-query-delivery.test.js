@@ -20,6 +20,8 @@ function harness(t, options = {}) {
     delete notification.sourceTaskId;
     Object.assign(notification, { deliveryMode: "workspace_text_v2", sourceEntryId: "entry-1", partIndex: 1, partCount: 1 });
   }
+  if (options.kind) Object.assign(notification, { deliveryMode: "host_notification_v2",
+    notificationKind: options.kind, sourceEventId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" });
   const store = new WorkspaceQueryReceiptStore(directory);
   const calls = [], sends = [];
   let ackFails = options.ackFails || 0;
@@ -42,11 +44,12 @@ function harness(t, options = {}) {
       presentation: { owner: "agentbridge", endpointId: endpoint.endpointId, modelMustNotCollectValues: true,
         url: "https://cards.example.test/results/" + "t".repeat(43) }, selectionAvailable: true,
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(), sourceExpiresAt: new Date(Date.now() + 600_000).toISOString() },
-    ...(options.text ? { resultView: null, publicText: "【网页端 · 你】\n查看 OA 待办" } : {}), ...options.issued };
+    ...(options.text ? { resultView: null, publicText: "【网页端 · 你】\n查看 OA 待办" } : {}), ...(options.kind ? { resultView: null, publicText: "本次任务已取消。", notificationKind: options.kind,
+      sourceTaskId: notification.sourceTaskId, sourceEventId: notification.sourceEventId } : {}), ...options.issued };
   const client = { async callTool(name, args) {
     calls.push({ name, args });
     if (name === "agentbridge_host_notification_claim") return { endpoint, notifications: [notification] };
-    assert.equal(name, "agentbridge_host_workspace_result_view");
+    assert.equal(name, options.kind ? "agentbridge_host_notification_delivery" : "agentbridge_host_workspace_result_view");
     assert.equal(args.agent_host, "openclaw");
     if (args.action === "issue") return issued;
     if (args.action === "begin") {
@@ -335,4 +338,45 @@ test("an original text subscription revoked between issue and begin cannot send"
   await h.consumer().deliver(h.context);
   assert.equal(h.sends.length, 0);
   assert.equal(acks(h)[0].outcome, "delivery_unknown");
+});
+
+test("a terminal notification keeps its own event custody and recovers only the native receipt", async t => {
+  const h = harness(t, { kind: "public_status", ackFails: 1 });
+  await assert.rejects(h.consumer().deliver(h.context));
+  await h.consumer().recover(h.context.binding, h.context.client, h.context.signal);
+  await h.consumer().deliver(h.context);
+  assert.equal(h.sends.length, 1);
+  assert.equal(h.sends[0].text, "本次任务已取消。");
+  assert.deepEqual(h.calls.map(x => [x.name, x.args.action]), ["issue", "begin", "ack", "ack"].map(action =>
+    ["agentbridge_host_notification_delivery", action]));
+});
+
+test("generic task notifications verify kind, original event and task before requesting the permit", async t => {
+  for (const issued of [{ sourceTaskId: "other" }, { sourceEventId: "other" },
+    { notificationKind: "trusted_interaction" }, { interaction: {} }]) {
+    const h = harness(t, { kind: "public_status", issued });
+    await h.consumer().deliver(h.context);
+    assert.equal(h.sends.length, 0);
+    assert.deepEqual(h.calls.map(x => x.args.action), ["issue"]);
+  }
+});
+
+test("private interactions use the original endpoint's card and keep links out of the ordinary text", async t => {
+  const card = {
+    schemaVersion: "agentbridge.interaction.v1", interactionId: "e".repeat(32), state: "pending", type: "credential",
+    title: "登录", message: "请核对", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    presentation: { owner: "agentbridge", modelMustNotCollectValues: true,
+      endpointId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", url: "https://cards.example.test/flow/input/fixture" },
+  };
+  for (const invalid of [null, { presentation: { ...card.presentation, endpointId: "other" } },
+    { presentation: { ...card.presentation, url: "https://invalid.example/fixture" } },
+    { expiresAt: "2000-01-01T00:00:00Z" }]) {
+    const h = harness(t, { kind: "trusted_interaction", issued: { publicText: null, interaction: { ...card, ...invalid } } });
+    await h.consumer().deliver(h.context);
+    assert.equal(h.sends.length, invalid ? 0 : 1);
+    if (!invalid) {
+      assert.ok(!h.sends[0].text.includes("https:"));
+      assert.ok(h.sends[0].payload.channelData.telegram.buttons.some(button => button.webApp?.url === card.presentation.url));
+    } else assert.deepEqual(h.calls.map(x => x.args.action), ["issue"]);
+  }
 });

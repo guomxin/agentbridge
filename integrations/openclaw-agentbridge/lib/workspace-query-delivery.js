@@ -6,7 +6,11 @@ import { hostContextMeta } from "./host-contract.js";
 import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-const TOOL = "agentbridge_host_workspace_result_view";
+import { taskNotificationMode, taskNotificationPayload, validTaskNotification } from "./task-notification.js";
+
+function deliveryTool(record) {
+  return record.deliveryMode === taskNotificationMode ? "agentbridge_host_notification_delivery" : "agentbridge_host_workspace_result_view";
+}
 const active = new Set();
 const digest = value => createHash("sha256").update(value).digest("hex");
 
@@ -135,7 +139,7 @@ export class WorkspaceQueryDelivery {
   }
 
   async ack(record, client, signal) {
-    const result = await client.callTool(TOOL, {
+    const result = await client.callTool(deliveryTool(record), {
       ...controlArgs(record), action: "ack", outcome: record.outcome,
       ...(record.receipt ? { receipt: record.receipt } : {}),
       ...(record.outcome === "retry_after" ? { retry_after_seconds: record.retryAfterSeconds } : {}),
@@ -153,6 +157,8 @@ export class WorkspaceQueryDelivery {
       pairingRef: notification.pairingRef, deliveryMode: notification.deliveryMode,
       ...(textOnly ? { sourceEntryId: notification.sourceEntryId,
         partIndex: notification.partIndex, partCount: notification.partCount } : { sourceTaskId: notification.sourceTaskId }),
+      ...(notification.deliveryMode === taskNotificationMode
+        ? { sourceEventId: notification.sourceEventId, notificationKind: notification.notificationKind } : {}),
       endpointId: endpoint.endpointId, accountId: route.accountId, chatId: route.to,
       state: "prepared", ownerPid: process.pid, createdAt: new Date(this.now()).toISOString() };
     const key = this.store.file(record);
@@ -173,7 +179,7 @@ export class WorkspaceQueryDelivery {
       // failed. Only an acknowledged, explicit rate-limit refusal permits it.
       if (this.store.prior(record).some(prior => prior.attemptCount >= record.attemptCount ||
           prior.outcome !== "retry_after" || !prior.settled || prior.pairingRef !== record.pairingRef)) return;
-      const issued = await client.callTool(TOOL, { ...controlArgs(record), action: "issue" }, { signal, meta: hostContextMeta() });
+      const issued = await client.callTool(deliveryTool(record), { ...controlArgs(record), action: "issue" }, { signal, meta: hostContextMeta() });
       if (!issued?.available || signal.aborted) return;
       // Central freezes each text part and releases the next part only after
       // the previous native receipt. Never add a card, trim, split or rebuild
@@ -181,25 +187,31 @@ export class WorkspaceQueryDelivery {
       if (textOnly && issued.resultView) return;
       const adapter = await this.api.runtime.channel.outbound.loadAdapter("telegram");
       if (typeof adapter?.sendPayload !== "function") return;
-      const view = issued.resultView ? normalizeTrustedResultView(issued.resultView, {
-        sourceTaskId: record.sourceTaskId, endpointId: record.endpointId,
-        allowedOrigins: this.config.allowedCardOrigins, now: this.now(),
-      }) : null;
-      if (issued.resultView && !view) return;
-      const text = typeof issued.publicText === "string" ? (textOnly ? issued.publicText : issued.publicText.trim()) : "";
-      if (!text && !view) return;
-      let payload = { text: text || "OA 待办已查询，可从下方进入选择与办理。" };
-      if (view) {
-        if (typeof adapter.renderPresentation !== "function") return;
-        const presentation = resultViewPresentation([view], "telegram", this.now());
-        const publicCardText = [payload.text, presentation.title,
-          ...presentation.blocks.filter(block => ["text", "context"].includes(block.type)).map(block => block.text)].join("\n\n");
-        const rendered = await adapter.renderPresentation({ payload, presentation,
-          ctx: { cfg: this.api.config, to: route.to, accountId: route.accountId, payload } });
-        // The SDK's generic fallback includes button URLs in its plain text.
-        // Keep signed links exclusively in native buttons, outside the text it
-        // later caches as reply/model context.
-        payload = rendered ? { ...rendered, text: publicCardText } : null;
+      let payload;
+      if (record.deliveryMode === taskNotificationMode) {
+        payload = await taskNotificationPayload({ issued, record, adapter, allowedOrigins: this.config.allowedCardOrigins,
+          runtimeConfig: this.api.config, route, now: this.now() });
+      } else {
+        const view = issued.resultView ? normalizeTrustedResultView(issued.resultView, {
+          sourceTaskId: record.sourceTaskId, endpointId: record.endpointId,
+          allowedOrigins: this.config.allowedCardOrigins, now: this.now(),
+        }) : null;
+        if (issued.resultView && !view) return;
+        const text = typeof issued.publicText === "string" ? (textOnly ? issued.publicText : issued.publicText.trim()) : "";
+        if (!text && !view) return;
+        payload = { text: text || "OA 待办已查询，可从下方进入选择与办理。" };
+        if (view) {
+          if (typeof adapter.renderPresentation !== "function") return;
+          const presentation = resultViewPresentation([view], "telegram", this.now());
+          const publicCardText = [payload.text, presentation.title,
+            ...presentation.blocks.filter(block => ["text", "context"].includes(block.type)).map(block => block.text)].join("\n\n");
+          const rendered = await adapter.renderPresentation({ payload, presentation,
+            ctx: { cfg: this.api.config, to: route.to, accountId: route.accountId, payload } });
+          // The SDK's generic fallback includes button URLs in its plain text.
+          // Keep signed links exclusively in native buttons, outside the text it
+          // later caches as reply/model context.
+          payload = rendered ? { ...rendered, text: publicCardText } : null;
+        }
       }
       // Freeze one compact text+buttons payload. Escape all text ourselves so
       // Markdown expansion, rich-message fallback and internal chunking cannot
@@ -215,7 +227,7 @@ export class WorkspaceQueryDelivery {
       record.state = "begin_requested";
       this.store.save(record);
       let began;
-      try { began = await client.callTool(TOOL, { ...controlArgs(record), action: "begin" }, { signal, meta: hostContextMeta() }); }
+      try { began = await client.callTool(deliveryTool(record), { ...controlArgs(record), action: "begin" }, { signal, meta: hostContextMeta() }); }
       catch { return; }
       if (began?.allowed !== true || signal.aborted || !isCurrent()) {
         record.outcome = began?.allowed === false ? "unavailable" : "delivery_unknown";
@@ -251,14 +263,15 @@ function controlArgs(record) {
     delivery_id: record.deliveryId, attempt_count: record.attemptCount };
 }
 function validNotification(value) {
-  const source = value?.deliveryMode === "workspace_query_v2"
+  const source = value?.deliveryMode === taskNotificationMode ? validTaskNotification(value)
+    : value?.deliveryMode === "workspace_query_v2"
     ? typeof value.sourceTaskId === "string" && value.sourceTaskId.length > 0
     : value?.deliveryMode === "workspace_text_v2" && typeof value.sourceEntryId === "string" && value.sourceEntryId.length > 0 &&
       Number.isSafeInteger(value.partIndex) && Number.isSafeInteger(value.partCount) &&
       value.partIndex > 0 && value.partIndex <= value.partCount;
   return source && /^[a-f0-9-]{36}$/.test(value.deliveryId || "") &&
     /^[a-f0-9]{64}$/.test(value.pairingRef || "") && Number.isSafeInteger(value.attemptCount) && value.attemptCount > 0 &&
-    ["workspace_query_v2", "workspace_text_v2"].includes(value.deliveryMode);
+    ["workspace_query_v2", "workspace_text_v2", taskNotificationMode].includes(value.deliveryMode);
 }
 function checkedRoute(binding, endpoint) {
   const peer = /^agent:[^:]+:telegram:(?:direct|dm):([1-9][0-9]*)$/iu.exec(endpoint?.conversationRef || "")?.[1];

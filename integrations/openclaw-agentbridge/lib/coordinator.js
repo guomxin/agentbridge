@@ -8,6 +8,7 @@ import path from "node:path";
 import { interactionResumeAllowed, resumeClaimAllowed } from "./recovery-policy.js";
 import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
+import { taskNotificationMode } from "./task-notification.js";
 import { WorkspaceQueryDelivery } from "./workspace-query-delivery.js";
 
 import {
@@ -1482,7 +1483,7 @@ export class InteractionCoordinator {
           endpoint_key: binding.key,
           limit,
           lease_seconds: enqueue ? 300 : 30,
-          ...(binding.channel === "telegram" ? { include_workspace_query_v2: true } : {}),
+          ...(binding.channel === "telegram" ? { include_workspace_query_v2: true, include_notification_v2: true } : {}),
           ...(waitSeconds > 0 ? { wait_seconds: waitSeconds } : {}),
         },
         { signal, meta: hostContextMeta() },
@@ -1564,7 +1565,7 @@ export class InteractionCoordinator {
   }
 
   async processEndpointNotification(identityRouter, binding, client, signal, endpoint, notification) {
-      if (["workspace_query_v2", "workspace_text_v2"].includes(notification?.deliveryMode)) {
+      if (["workspace_query_v2", "workspace_text_v2", taskNotificationMode].includes(notification?.deliveryMode)) {
         // This path has its own persistent begin/receipt protocol. Never fall
         // through to the legacy boolean notification ACK or generic retry.
         try {
