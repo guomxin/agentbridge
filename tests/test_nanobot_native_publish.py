@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import pwd
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,7 @@ def spec_for(root):
 
 def test_reviewed_nanobot_patch_keeps_identity_and_restores_original_route(tmp_path, monkeypatch):
     import hashlib
+    from agentbridge.workspace.host_provision import WorkspaceHostProvision
 
     spec, args, workspace, identities, _, config = synthetic_admission(tmp_path, monkeypatch)
     original_spec = {**args["spec"], "adapterVersion": "0.3.0", "requiredLevel": "L3"}
@@ -72,7 +74,36 @@ def test_reviewed_nanobot_patch_keeps_identity_and_restores_original_route(tmp_p
                   "fromAdapterVersion": "0.3.0", "fromRevision": revision}
     new_spec["routeTransition"] = transition
     request = {**args, "spec": new_spec, "candidate": candidate}
-    invoke = lambda action, **extra: central.execute({**request, "action": action, **extra})
+    transmitted = []
+    def ssh(command, *, input, timeout):
+        assert timeout == 40 and "fixture-service" not in command
+        wire = json.loads(input.splitlines()[1])
+        assert wire["candidate"] == candidate
+        transmitted.append((shlex.split(command), wire["action"]))
+        return json.dumps(central.execute(wire))
+    publisher = SimpleNamespace(release=candidate, args=SimpleNamespace(remote_root=args["root"]), ssh=ssh)
+    invoke = lambda action, **extra: host.remote(publisher, new_spec, action, **extra)
+    client = SimpleNamespace(readiness=lambda: {
+        "available": True, "adapterVersion": current()["adapter_version"],
+        "capabilities": ["chat", "credential_card", "attachments", "skills", "skill_trial", "skill_model"],
+    })
+    original_routes = WorkspaceHostProvision._routes
+    def routes_with_local_client(provision):
+        routes = original_routes(provision)
+        routes[new_spec["routeRef"]]["client"] = client
+        return routes
+    monkeypatch.setattr(WorkspaceHostProvision, "_routes", routes_with_local_client)
+    # The online plan uses the real frontend and its serialized request, not a
+    # hand-built remote envelope. Only OS observations outside this home are fake.
+    read_text = Path.read_text
+    with monkeypatch.context() as observation:
+        observation.setattr(Path, "read_text", lambda path, *a, **kw: "header\n"
+                            if str(path) in {"/proc/net/tcp", "/proc/net/tcp6"}
+                            else read_text(path, *a, **kw))
+        observation.setattr(central, "restricted_tunnel", lambda spec, action: {"enabled": False})
+        plan = host.observability(publisher, new_spec, offline=False)
+        assert plan["remote"]["scopePresent"] and plan["remote"]["routeInstalled"]
+        assert not plan["remote"]["productionActions"]
 
     # No unreviewed route rewrite can precede a failed directory-version check.
     with monkeypatch.context() as root:
@@ -104,16 +135,76 @@ def test_reviewed_nanobot_patch_keeps_identity_and_restores_original_route(tmp_p
     assert not invoke("route_activate")["changed"]
     assert manifest.read_bytes() == updated and current()["adapter_version"] == "0.3.1"
     assert invoke("bind")["bindings"] == issued
+    assert invoke("probe")["ready"]
+    with pytest.raises(ValueError, match="release being probed"):
+        invoke("probe_predecessor")
     assert all(identities.verify(row["personalCredential"]) for row in issued)
     assert invoke("route_restore")["changed"]
     assert not invoke("route_restore")["changed"]
     assert manifest.read_bytes() == original and current()["adapter_version"] == "0.3.0"
+    assert invoke("probe_predecessor")["ready"]
+    with pytest.raises(ValueError, match="release being probed"):
+        invoke("probe")
     assert central.execute({**old_request, "action": "bind"})["bindings"] == issued
     with workspace._connect() as db:
         db.execute("UPDATE workspace_host_instances SET revision=revision+1 WHERE instance_id=?", (spec["instanceId"],))
     with pytest.raises(ValueError, match="revision"):
         invoke("route_activate")
     assert manifest.read_bytes() == original
+    assert {action for _, action in transmitted} == {
+        "observe", "stage", "route_activate", "bind", "route_restore", "probe", "probe_predecessor"}
+    assert all((command[0] == "sudo") == (action in {"route_activate", "bind", "route_restore", "probe", "probe_predecessor"})
+               for command, action in transmitted)
+
+
+@pytest.mark.parametrize("action", [
+    "observe", "stage", "bind", "route_activate", "route_restore", "probe",
+    "probe_predecessor", "rollback_scope", "recovery_check", "tunnel_enable", "tunnel_disable",
+])
+def test_publication_actions_bind_reviewed_candidate_at_serialization(tmp_path, action):
+    spec = {**spec_for(tmp_path), "adapterVersion": "0.3.1", "requiredLevel": "L3",
+            "routeTransition": {"toRelease": "2" * 12, "fromAdapterVersion": "0.3.0"}}
+    requests = []
+    def ssh(command, *, input, timeout):
+        requests.append(json.loads(input.splitlines()[1]))
+        return '{"checked": true}'
+    pub = SimpleNamespace(release="2" * 12, args=SimpleNamespace(remote_root=str(tmp_path)), ssh=ssh)
+    assert host.remote(pub, spec, action, recovery={"original": True}) == {"checked": True}
+    assert requests == [{"action": action, "spec": host.metadata(spec), "root": str(tmp_path),
+                         "recovery": {"original": True}, "candidate": pub.release}]
+    assert "botCredential" not in requests[0]["spec"]["telegram"]
+
+
+@pytest.mark.parametrize("transition,candidate,extra", [
+    ({"toRelease": "1" * 12}, "2" * 12, {}),
+    ({"toRelease": "2" * 12}, "2" * 12, {"candidate": "1" * 12}),
+    ({"toRelease": "2" * 12}, "2" * 12, {"spec": {}}),
+    ({"toRelease": "2" * 12}, "2" * 12, {"root": "/unreviewed"}),
+    ({"toRelease": "bad"}, "bad", {}),
+    ({"toRelease": None}, None, {}),
+    (None, "2" * 12, {}),
+    ("invalid", "2" * 12, {}),
+])
+def test_transition_scope_mismatch_is_rejected_before_ssh(tmp_path, transition, candidate, extra):
+    spec = {**spec_for(tmp_path), "routeTransition": transition}
+    def ssh(*args, **kwargs):
+        pytest.fail("Unreviewed transition reached SSH")
+    pub = SimpleNamespace(release=candidate, args=SimpleNamespace(remote_root=str(tmp_path)), ssh=ssh)
+    # Use the common encoding boundary so a direct caller cannot skip the guard.
+    with pytest.raises(ValueError, match="publication"):
+        host.remote_request(pub, host.metadata(spec), "observe", **extra)
+
+
+def test_publication_without_transition_keeps_original_request(tmp_path):
+    spec = spec_for(tmp_path)
+    requests = []
+    def ssh(command, *, input, timeout):
+        requests.append(json.loads(input.splitlines()[1]))
+        return '{"checked": true}'
+    pub = SimpleNamespace(args=SimpleNamespace(remote_root=str(tmp_path)), ssh=ssh)
+    assert host.remote(pub, spec, "stage", serviceSecret="fixture-service") == {"checked": True}
+    assert requests == [{"action": "stage", "spec": host.metadata(spec), "root": str(tmp_path),
+                         "serviceSecret": "fixture-service"}]
 
 
 def mac_for():

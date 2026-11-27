@@ -284,6 +284,20 @@ def remote(pub, spec, action, **extra):
 
 
 def remote_request(pub, remote_spec, action, **extra):
+    if "routeTransition" in remote_spec:
+        transition = remote_spec["routeTransition"]
+        if (
+            not isinstance(transition, dict)
+            or not isinstance(pub.release, str)
+            or not re.fullmatch(r"[0-9a-f]{12}", pub.release)
+            or transition.get("toRelease") != pub.release
+        ):
+            raise ValueError("Route transition belongs to a different publication candidate")
+        if {"spec", "root"} & extra.keys() or (
+            "candidate" in extra and extra["candidate"] != pub.release
+        ):
+            raise ValueError("Route transition request cannot override reviewed publication scope")
+        extra["candidate"] = pub.release
     # The script and any credentials pass on stdin. No literal secret in ssh/ps arguments.
     tunnel_code = (ROOT / "scripts/native/nanobot_tunnel.py").read_bytes()
     program = (
