@@ -200,10 +200,13 @@ def _current(service, db, row):
     return label + "\n" + part
 
 
-def claim(service, subject, host, instance, endpoint, token, limit, lease):
+def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
     scope = instance_key(host, instance)
     now = actions._now()
     with store_transaction(service.tasks) as db:
+        from agentbridge.workspace.telegram_pair_migration import permits_delivery
+        if not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol):
+            return []
         if not query.registered(db, subject, host, scope, token):
             return []
         rows = db.execute(_JOIN + """ WHERE p.subject=? AND p.host=? AND p.instance=? AND p.endpoint_key=?
@@ -228,7 +231,7 @@ def claim(service, subject, host, instance, endpoint, token, limit, lease):
 
 
 def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_ref, delivery_id,
-           attempt_count, action, outcome=None, receipt=None, retry_after_seconds=None):
+           attempt_count, action, outcome=None, receipt=None, retry_after_seconds=None, pairing_protocol=None):
     key = {"issue":"available", "begin":"allowed", "ack":"recorded"}[action]
     with store_transaction(service.tasks) as db:
         row = db.execute(_JOIN + " WHERE d.delivery_id=?", (delivery_id,)).fetchone()
@@ -238,6 +241,9 @@ def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_
         expected = (subject, host, scope[1], endpoint_key, token_id, pairing_ref, attempt_count)
         if tuple(row[field] for field in ("subject","host","instance","endpoint_key","token_id","pair_proof","attempt")) != expected:
             return {key:False}
+        from agentbridge.workspace.telegram_pair_migration import permits_delivery
+        if action != "ack" and not permits_delivery(db, host, subject, instance, endpoint_key, token_id, pairing_protocol):
+            return {key: False}
         if action == "ack":
             recorded = query.settle(db, row, outcome, receipt, retry_after_seconds, table=TABLE)
             if recorded and outcome in {"unavailable", "rejected", "delivery_unknown", "sent"}:

@@ -45,7 +45,7 @@ async def verify_subject(session, request) -> tuple[dict,str]:
     profile = {"schema":"agentbridge.host.v1","hostInstanceId":instance,"levels":levels,
                "implementation":{"name":"nanobot","version":context["hostVersion"]},
                "endpointTypes":["web_private","telegram_private"],"capabilities":capabilities}
-    meta = {"io.agentbridge/host-context":context}
+    meta = {"io.agentbridge/host-context":context, "io.agentbridge/telegram-pairing-version":2}
     registration = await session.call_tool("agentbridge_host_register",{},meta={**meta,"io.agentbridge/host-profile":profile})
     if registration.isError:
         raise PermissionError("Central host registration failed")

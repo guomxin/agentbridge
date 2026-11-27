@@ -1834,6 +1834,8 @@ class CentralCapabilityService:
         query_token_id: str | None = None,
         notification_token_id: str | None = None,
         media_token_id: str | None = None,
+        pairing_token_id: str | None = None,
+        pairing_protocol: int | None = None,
         quiet_pairing_ref: str | None = None,
         quiet_token_id: str | None = None,
     ) -> dict:
@@ -1857,6 +1859,7 @@ class CentralCapabilityService:
             lease_seconds=lease_seconds,
             host_instance_id=host_instance_id,
             include_workspace_chat=include_workspace_chat,
+            **({"pairing_token_id": pairing_token_id, "pairing_protocol": pairing_protocol} if pairing_token_id else {}),
             **({"include_business_watch": True} if include_business_watch else {}),
             **({"include_task_files": True} if include_task_files else {}),
             **({"include_oa_digest": True} if include_oa_digest else {}),
@@ -2051,11 +2054,11 @@ class CentralCapabilityService:
             from . import workspace_query_delivery, workspace_text_delivery
             space = limit - len(notifications)
             text_items = workspace_text_delivery.claim(self, user_subject, agent_host, host_instance_id,
-                                                      endpoint_key, query_token_id, space, lease_seconds)
+                                                      endpoint_key, query_token_id, space, lease_seconds, pairing_protocol=pairing_protocol)
             notifications.extend(text_items)
             if space > len(text_items):
                 notifications.extend(workspace_query_delivery.claim(self, user_subject, agent_host, host_instance_id,
-                    endpoint_key, query_token_id, space - len(text_items), lease_seconds))
+                    endpoint_key, query_token_id, space - len(text_items), lease_seconds, pairing_protocol=pairing_protocol))
         return {
             "protocolVersion": "0.1",
             "status": "succeeded",

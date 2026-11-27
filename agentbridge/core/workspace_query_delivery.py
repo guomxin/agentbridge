@@ -283,9 +283,12 @@ def checked_card(db, subject, target, task, delivery):
     return {"operationId":op["operation_id"],"deliveryId":delivery}
 
 
-def claim(service, subject, host, instance, endpoint, token, limit, lease):
+def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
     now = actions._now()
     with store_transaction(service.tasks) as db:
+        from agentbridge.workspace.telegram_pair_migration import permits_delivery
+        if not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol):
+            return []
         rows = db.execute(_JOIN + """ WHERE p.subject=? AND p.host=? AND p.instance=? AND p.endpoint_key=?
             AND p.token_id=? AND d.state IN ('pending','leased','retry_wait') AND d.due<=?
             AND NOT EXISTS (SELECT 1 FROM workspace_text_deliveries m WHERE m.question_id=p.question_id
@@ -342,7 +345,7 @@ def settle(db, row, outcome, receipt, delay, *, table="workspace_query_deliverie
 
 
 def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_ref, delivery_id,
-           attempt_count, action, outcome=None, receipt=None, retry_after_seconds=None):
+           attempt_count, action, outcome=None, receipt=None, retry_after_seconds=None, pairing_protocol=None):
     """Return None for legacy delivery IDs. Repeated begin can never authorize another send."""
     from .telegram_result_views import ResultViewService
     result_key = {"issue":"available","begin":"allowed","ack":"recorded"}[action]
@@ -350,7 +353,8 @@ def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_
     from . import workspace_text_delivery
     text_result = workspace_text_delivery.handle(service, subject=subject, host=host, instance=instance,
         endpoint_key=endpoint_key, token_id=token_id, pairing_ref=pairing_ref, delivery_id=delivery_id,
-        attempt_count=attempt_count, action=action, outcome=outcome, receipt=receipt, retry_after_seconds=retry_after_seconds)
+        attempt_count=attempt_count, action=action, outcome=outcome, receipt=receipt, retry_after_seconds=retry_after_seconds,
+        pairing_protocol=pairing_protocol)
     if text_result is not None:
         return text_result
     with store_transaction(service.tasks) as db:
@@ -360,6 +364,9 @@ def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_
         if (row["subject"], row["host"], row["instance"], row["endpoint_key"], row["token_id"],
                 row["pair_proof"], row["attempt"]) != (
                 subject,host,instance_key(host,instance)[1],endpoint_key,token_id,pairing_ref,attempt_count):
+            return refused
+        from agentbridge.workspace.telegram_pair_migration import permits_delivery
+        if action != "ack" and not permits_delivery(db, host, subject, instance, endpoint_key, token_id, pairing_protocol):
             return refused
         if action == "ack":
             return {"recorded":settle(db,row,outcome,receipt,retry_after_seconds)}

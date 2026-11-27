@@ -106,6 +106,7 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'workspace_telegram_pilot_links'],
                     ['table', 'workspace_telegram_pilot_challenges'],
                     ['table', 'workspace_telegram_pilot_revocations'],
+                    ['table', 'workspace_telegram_independent_pairs'],
                     ['table', 'workspace_query_destinations'],
                     ['table', 'workspace_query_deliveries'],
                     ['index', 'workspace_query_pending'],

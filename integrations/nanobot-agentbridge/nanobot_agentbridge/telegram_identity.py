@@ -32,6 +32,7 @@ async def verify_telegram_binding(
         {"agent_host": host_type},
         meta={
             "io.agentbridge/host-context": context,
+            **({"io.agentbridge/telegram-pairing-version": 2} if host_type == "nanobot" else {}),
             "io.agentbridge/telegram-identity": {
                 "botId": match[1],
                 "senderId": match[2],

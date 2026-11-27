@@ -31,6 +31,9 @@ def confirm_new_user(service, identity, instance, *, bot_id, sender_id, code):
     owner = identity["user_subject"]
     with store_transaction(service.tasks) as db:
         _, host_type = _deployment(db, owner, instance, bot, sender, new=True)
+        from .telegram_pair_migration import independent
+        if independent(db, owner, instance, bot):
+            raise PermissionError("请在已开通的工作台核对本实例的独立配对。")
         if active_claimants(db, sender) - {owner}:
             raise PermissionError("私聊端点已有不同归属。")
         peers = db.execute(
@@ -53,12 +56,15 @@ def confirm_new_user(service, identity, instance, *, bot_id, sender_id, code):
         return result
 
 
-def enrolled_workspace_binding(service, owner, instance, bot_id, sender_id):
+def enrolled_workspace_binding(service, owner, instance, bot_id, sender_id, *, token_id=None, protocol=None):
     """Resolve only a consumed first-login proof and its still-authorized Web binding."""
     bot, sender = numeric_id(bot_id), numeric_id(sender_id)
     with service.workspace._connect() as db:
         db.execute("BEGIN")
         credential, host_type = _deployment(db, owner, instance, bot, sender, new=False)
+        from .telegram_pair_migration import permits_delivery
+        if not permits_delivery(db, host_type, owner, instance, f"telegram:{bot}:{sender}", token_id, protocol):
+            raise PermissionError("当前独立配对未授权使用该开通记录。")
         account = db.execute(
             """SELECT a.account_id FROM workspace_accounts a
                JOIN workspace_link_challenges l ON a.user_subject=l.user_subject

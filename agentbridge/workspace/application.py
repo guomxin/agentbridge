@@ -1354,8 +1354,8 @@ class WorkspaceApplication:
         identity = (account["account_id"], instance_id, bot["bot_id"])
         if action == "confirm":
             return links.confirm(*identity, body["challenge_id"], body["confirmation_code"])
-        if action == "begin":
-            return links.begin(*identity)
+        if action in {"begin", "migrate"}:
+            return links.begin(*identity, migrate=action == "migrate")
         if action == "revoke":
             return links.revoke(*identity)
         raise ValueError("未知的 Telegram 绑定操作。")

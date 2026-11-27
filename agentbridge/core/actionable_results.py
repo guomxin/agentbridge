@@ -814,6 +814,13 @@ def _telegram_endpoint(connection, subject, endpoint_id):
     binding.update(bindingVersion="telegram-private-route-v1", client_type="telegram",
         account_id="default" if canonical_endpoint_account == "default" else endpoint_account,
         route=canonical_route)
+    if instance_id and host == "nanobot":
+        from agentbridge.workspace.telegram_pair_migration import independent
+        if independent(connection, subject, instance_id, endpoint_account):
+            from agentbridge.workspace.telegram_pilot_links import _revocation, verified_pair
+            if not verified_pair(connection, subject, instance_id, endpoint_account, sender, allow_new_pair=True):
+                _fail("ACTION_ENDPOINT_INVALID", "Telegram 独立配对已失效。")
+            binding["pairGeneration"] = _revocation(connection, subject, instance_id, endpoint_account)[0]
     endpoint["_binding_hash"] = _hash(binding)
     if instance_id:
         endpoint["_instance_id"] = instance_id

@@ -34,8 +34,22 @@ export async function loadTelegramLinks({container, api, scope, document, onErro
         });
         section.append(button);
       };
+      const startChallenge = async (action) => {
+        const result = await call(action);
+        scope.assertCurrent();
+        if (result.state === "linked") return render();
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(result.code)) throw new Error("绑定入口未能生成。");
+        const link = element("a", "打开机器人私聊");
+        link.href = bot.href + "?start=" + encodeURIComponent(result.code);
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        section.replaceChildren(element("h3", item.display_name + " · Telegram"), link,
+          element("p", "在 Telegram 点击开始，收到确认码后回到这里。"));
+        control("已收到，继续绑定", render);
+      };
       if (item.state === "linked") {
-        section.append(element("span", "私聊已关联"));
+        section.append(element("span", item.source === "existing" ? "已通过 OpenClaw 关联私聊" : "私聊已关联"));
+        if (item.can_migrate) control("转为独立配对", () => startChallenge("migrate"));
         if (item.source !== "existing") {
           control("解除关联", async () => { await call("revoke"); await render(); });
         }
@@ -54,19 +68,7 @@ export async function loadTelegramLinks({container, api, scope, document, onErro
           await render();
         });
       } else {
-        control(item.challenge_id ? "重新生成绑定入口" : "关联我的 Telegram", async () => {
-          const result = await call("begin");
-          scope.assertCurrent();
-          if (result.state === "linked") return render();
-          if (!/^[A-Za-z0-9_-]{1,64}$/.test(result.code)) throw new Error("绑定入口未能生成。");
-          const link = element("a", "打开机器人私聊");
-          link.href = bot.href + "?start=" + encodeURIComponent(result.code);
-          link.target = "_blank";
-          link.rel = "noopener noreferrer";
-          section.replaceChildren(element("h3", item.display_name + " · Telegram"), link,
-            element("p", "在 Telegram 点击开始，收到确认码后回到这里。"));
-          control("已收到，继续绑定", render);
-        });
+        control(item.challenge_id ? "重新生成绑定入口" : "关联我的 Telegram", () => startChallenge("begin"));
         if (item.challenge_id) control("查看绑定进度", render);
       }
       container.append(section);

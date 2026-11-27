@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agentbridge.core.actionable_results import _telegram_endpoint
+from . import telegram_pair_migration as migration
 from .nanobot_gateway import pi_telegram_sender, route_specs_for
 
 
@@ -120,6 +121,10 @@ def verified_pair(db, subject, instance, bot, sender, *, allow_new_pair):
     if host_type == "pi":
         if sender != allowed_sender or claimed - {subject}:
             return False
+    elif migration.independent(db, subject, instance, bot):
+        return bool(allow_new_pair and not claimed - {subject}
+                    and migration.grant_generation(db, subject, instance, bot, sender)
+                    and migration.supports_independent(db, subject, instance, bot))
     elif _revocation(db, subject, instance, bot):
         # Revocation permanently disables implicit inheritance for this host/Bot.
         # Only a fresh two-endpoint proof may restore an explicit grant.
@@ -202,6 +207,8 @@ def mirror_pair_proof(db, subject, binding, sender):
     basis = [binding["instance_id"], binding["endpoint_id"], binding["credential_ref"], binding["bot"], subject, sender, grants]
     if revoked:
         basis.append(revoked[0])
+        if migration.independent(db, subject, binding["instance_id"], binding["bot"]):
+            basis.append(migration.deployment_token(db, subject, binding["instance_id"], binding["bot"]))
     return hashlib.sha256(json.dumps(basis, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -260,6 +267,7 @@ def initialize_telegram_pilot_links(connection):
                     instance TEXT NOT NULL, bot TEXT NOT NULL, owner TEXT NOT NULL,
                     generation TEXT NOT NULL, PRIMARY KEY(instance,bot,owner));
             """)
+    migration.initialize(connection)
 
 
 class TelegramPilotLinks:
@@ -291,21 +299,8 @@ class TelegramPilotLinks:
         }
         host_type, _ = _channel_assignment(db, owner, instance, bot)
         candidates = old_peers(db, subject=owner) if (
-            host_type == "nanobot" and not _revocation(db, owner, instance, bot)) else set()
-        for _, sender in candidates:
-            if active_claimants(db, sender) == {owner}:
-                return {**view, "state": "linked", "source": "existing"}
-        row = db.execute(
-            "SELECT * FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND owner=?",
-            (instance, bot, owner),
-        ).fetchone()
-        if (
-            row
-            and not candidates
-            and verified_pair(db, owner, instance, bot, row["sender"], allow_new_pair=True)
-            and eligible(self.service, db, owner, instance, new_link=True)
-        ):
-            return {**view, "state": "linked", "source": "workspace"}
+            host_type == "nanobot" and not migration.independent(db, owner, instance, bot)
+            and not _revocation(db, owner, instance, bot)) else set()
         pending = db.execute(
             "SELECT * FROM workspace_telegram_pilot_challenges WHERE instance=? AND bot=? AND owner=? AND expires_at>? AND attempts<5",
             (instance, bot, owner, time.time()),
@@ -324,6 +319,21 @@ class TelegramPilotLinks:
                 if pending["sender"]
                 else None,
             }
+        for _, sender in candidates:
+            if active_claimants(db, sender) == {owner}:
+                return {**view, "state": "linked", "source": "existing",
+                        "can_migrate": bool(migration.inherited_proof(db, owner, instance, bot))}
+        row = db.execute(
+            "SELECT * FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND owner=?",
+            (instance, bot, owner),
+        ).fetchone()
+        if (
+            row
+            and not candidates
+            and verified_pair(db, owner, instance, bot, row["sender"], allow_new_pair=True)
+            and eligible(self.service, db, owner, instance, new_link=True)
+        ):
+            return {**view, "state": "linked", "source": "workspace"}
         return view
 
     def status(self, account_id, instance_id, bot_id):
@@ -336,14 +346,20 @@ class TelegramPilotLinks:
                 numeric_id(bot_id),
             )
 
-    def begin(self, account_id, instance_id, bot_id):
+    def begin(self, account_id, instance_id, bot_id, *, migrate=False):
         bot = numeric_id(bot_id)
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             owner = self._owner(db, account_id, instance_id, bot)
             state = self._status(db, owner, instance_id, bot)
-            if state["state"] == "linked":
+            previous = db.execute("""SELECT legacy_proof FROM workspace_telegram_pilot_challenges
+                WHERE instance=? AND bot=? AND owner=? AND expires_at>?""", (instance_id,bot,owner,time.time())).fetchone()
+            migrate = migrate or bool(previous and previous["legacy_proof"])
+            if state["state"] == "linked" and (not migrate or state["source"] != "existing"):
                 return state
+            proof = migration.inherited_proof(db, owner, instance_id, bot) if migrate else None
+            if migrate and not proof:
+                raise PermissionError("当前私聊或宿主版本不满足独立配对条件。")
             if not eligible(self.service, db, owner, instance_id, new_link=True):
                 raise PermissionError("管理员尚未为此账号指名开放试点")
             code = secrets.token_urlsafe(24)
@@ -352,8 +368,8 @@ class TelegramPilotLinks:
                 (instance_id, bot, owner, time.time()),
             )
             db.execute(
-                """INSERT INTO workspace_telegram_pilot_challenges(challenge_id,instance,bot,owner,code_hash,expires_at)
-                         VALUES(?,?,?,?,?,?)""",
+                """INSERT INTO workspace_telegram_pilot_challenges(challenge_id,instance,bot,owner,code_hash,expires_at,legacy_proof)
+                         VALUES(?,?,?,?,?,?,?)""",
                 (
                     str(uuid4()),
                     instance_id,
@@ -361,11 +377,12 @@ class TelegramPilotLinks:
                     owner,
                     self._hash(code),
                     time.time() + 300,
+                    proof,
                 ),
             )
             return {**self._status(db, owner, instance_id, bot), "code": code}
 
-    def present(self, subject, instance_id, bot_id, sender_id, code):
+    def present(self, subject, instance_id, bot_id, sender_id, code, *, token_id=None, protocol=None):
         bot, sender = numeric_id(bot_id), numeric_id(sender_id)
         if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", code):
             return None
@@ -383,9 +400,14 @@ class TelegramPilotLinks:
             host_type, allowed_sender = _channel_assignment(db, subject, instance_id, bot)
             claimed = active_claimants(db, sender)
             revoked = _revocation(db, subject, instance_id, bot)
+            legacy = row["legacy_proof"]
+            if legacy and migration.inherited_proof(db, subject, instance_id, bot, sender, token=token_id) != legacy:
+                return None
+            if not migration.permits_caller(db, subject, instance_id, bot, token_id, protocol, migration_challenge=bool(legacy)):
+                return None
             if (
                 not host_type or (host_type == "pi" and (sender != allowed_sender or claimed - {subject}))
-                or (host_type == "nanobot" and (claimed - {subject} if revoked else claimed))
+                or (host_type == "nanobot" and (claimed - {subject} if revoked or legacy else claimed))
                 or db.execute(
                     "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND sender=?",
                     (instance_id, bot, sender),
@@ -394,10 +416,11 @@ class TelegramPilotLinks:
                 return None
             confirmation = f"{secrets.randbelow(10**8):08d}"
             db.execute(
-                "UPDATE workspace_telegram_pilot_challenges SET sender=?,confirm_hash=? WHERE challenge_id=?",
+                "UPDATE workspace_telegram_pilot_challenges SET sender=?,confirm_hash=?,present_token_id=? WHERE challenge_id=?",
                 (
                     sender,
                     self._hash(row["challenge_id"] + confirmation),
+                    token_id,
                     row["challenge_id"],
                 ),
             )
@@ -434,16 +457,27 @@ class TelegramPilotLinks:
                 host_type, allowed_sender = _channel_assignment(db, owner, instance_id, bot)
                 claimed = active_claimants(db, row["sender"])
                 revoked = _revocation(db, owner, instance_id, bot)
+                legacy = row["legacy_proof"]
+                if legacy and migration.inherited_proof(db, owner, instance_id, bot, row["sender"]) != legacy:
+                    raise ValueError("原配对或授权版本已变化，请重新核对。")
+                if migration.independent(db, owner, instance_id, bot) and not (row["present_token_id"] and
+                        migration.supports_independent(db, owner, instance_id, bot, row["present_token_id"])):
+                    raise ValueError("当前宿主不能接收独立配对。")
                 if (
                     not host_type or (host_type == "pi" and (row["sender"] != allowed_sender or claimed - {owner}))
                     or (host_type == "nanobot" and (
-                        claimed - {owner} if revoked else old_peers(db, subject=owner) or claimed))
+                        claimed - {owner} if revoked or legacy else old_peers(db, subject=owner) or claimed))
                     or db.execute(
                         "SELECT 1 FROM workspace_telegram_pilot_links WHERE instance=? AND bot=? AND (owner=? OR sender=?)",
                         (instance_id, bot, owner, row["sender"]),
                     ).fetchone()
                 ):
                     raise ValueError("绑定已变化，请重新核对")
+                if legacy:
+                    db.execute("INSERT INTO workspace_telegram_independent_pairs VALUES(?,?,?,2)",
+                               (instance_id,bot,owner))
+                    db.execute("INSERT INTO workspace_telegram_pilot_revocations VALUES(?,?,?,?)",
+                               (instance_id,bot,owner,secrets.token_hex(32)))
                 db.execute(
                     "INSERT INTO workspace_telegram_pilot_links VALUES(?,?,?,?,?)",
                     (instance_id, bot, owner, row["sender"], time.time()),
@@ -474,11 +508,12 @@ class TelegramPilotLinks:
                 )
             return self._status(db, owner, instance_id, bot)
 
-    def verified(self, subject, instance, bot_id, sender_id):
+    def verified(self, subject, instance, bot_id, sender_id, *, token_id=None, protocol=None):
         sender, bot = numeric_id(sender_id), numeric_id(bot_id)
         with self.workspace._connect() as db:
             db.execute("BEGIN")
-            return self._verified(db, subject, instance, bot, sender)
+            return (migration.permits_caller(db, subject, instance, bot, token_id, protocol)
+                    and self._verified(db, subject, instance, bot, sender))
 
     def _verified(self, db, subject, instance, bot, sender):
         if not eligible(self.service, db, subject, instance):
@@ -486,20 +521,24 @@ class TelegramPilotLinks:
         return verified_pair(db, subject, instance, bot, sender,
                              allow_new_pair=eligible(self.service, db, subject, instance, new_link=True))
 
-    def mirror_peers(self, subject, instance, bot_id):
+    def mirror_peers(self, subject, instance, bot_id, *, token_id=None, protocol=None):
         from agentbridge.core.endpoint_instances import endpoint_instances
 
         bot = numeric_id(bot_id)
         with self.workspace._connect() as db:
             db.execute("BEGIN")
+            if not migration.permits_caller(db, subject, instance, bot, token_id, protocol):
+                return {"senderIds": []}
             binding = mirror_binding(db, subject, instance, endpoint_instances(db, subject))
             senders = mirror_sender_ids(db, subject, binding) if binding and binding["bot"] == bot else []
             return {"senderIds": senders}
 
-    def ensure_endpoint(self, subject, token_id, instance, bot_id, sender_id):
+    def ensure_endpoint(self, subject, token_id, instance, bot_id, sender_id, *, protocol=None):
         bot, sender = numeric_id(bot_id), numeric_id(sender_id)
         with self.workspace._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if not migration.permits_caller(db, subject, instance, bot, token_id, protocol):
+                raise PermissionError("当前宿主身份不能接收独立配对。")
             if not self._verified(db, subject, instance, bot, sender):
                 raise PermissionError("No current Telegram pairing")
             account = db.execute(

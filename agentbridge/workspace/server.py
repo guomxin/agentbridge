@@ -623,7 +623,7 @@ def create_workspace_http_server(
                         else MAX_BODY_BYTES
                     )
                 )
-                telegram_link = re.fullmatch(r"/api/hosts/telegram/(begin|confirm|revoke)", route.path)
+                telegram_link = re.fullmatch(r"/api/hosts/telegram/(begin|migrate|confirm|revoke)", route.path)
                 if telegram_link:
                     self._json(200, application.telegram_link_action(account, telegram_link.group(1), body))
                     return

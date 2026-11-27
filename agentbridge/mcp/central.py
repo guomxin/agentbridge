@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agentbridge.core import pi_resume_observation
+from agentbridge.workspace.telegram_pair_migration import PROTOCOL_META
 from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS
 from agentbridge.core.skill_contracts import SkillAuthoringData
 from agentbridge.core.skill_actions import SkillActionName
@@ -5950,7 +5951,8 @@ def create_central_mcp_server(
         identity = _request_identity(identity_store)
         host, _ = await _private_bot_context(ctx, service=service, identity=identity, minimum_level="L1")
         binding = await asyncio.to_thread(enrolled_workspace_binding, service, identity["user_subject"],
-                                          host["hostInstanceId"], bot_id, sender_id)
+                                          host["hostInstanceId"], bot_id, sender_id, token_id=identity["token_id"],
+                                          protocol=_request_meta(ctx).get(PROTOCOL_META))
         return CallToolResult(content=[TextContent(type="text", text="Workspace binding checked")],
                               _meta={"io.agentbridge/workspace-binding": binding})
 
@@ -5963,7 +5965,8 @@ def create_central_mcp_server(
         identity = _request_identity(identity_store)
         host,_ = await _private_bot_context(ctx, service=service, identity=identity, minimum_level="L1")
         return await asyncio.to_thread(TelegramPilotLinks(service).ensure_endpoint,
-            identity["user_subject"],identity["token_id"],host["hostInstanceId"],bot_id,sender_id)
+            identity["user_subject"],identity["token_id"],host["hostInstanceId"],bot_id,sender_id,
+            protocol=_request_meta(ctx).get(PROTOCOL_META))
 
     @mcp.tool(name="agentbridge_host_telegram_mirror_peers", title="Find verified private Telegram chat peers",
               description="Host-private. Resolve only the caller's current paired private senders for its deployed Bot.",
@@ -5973,7 +5976,8 @@ def create_central_mcp_server(
         identity = _request_identity(identity_store)
         host, _ = await _private_bot_context(ctx, service=service, identity=identity, minimum_level="L3")
         return await asyncio.to_thread(TelegramPilotLinks(service).mirror_peers, identity["user_subject"],
-                                      host["hostInstanceId"], bot_id)
+                                      host["hostInstanceId"], bot_id, token_id=identity["token_id"],
+                                      protocol=_request_meta(ctx).get(PROTOCOL_META))
 
     @mcp.tool(name="agentbridge_host_telegram_pair_present", title="Present private Telegram pairing challenge",
               description="Host-private. Register a numeric private sender against this user's pending Workspace challenge.",
@@ -5983,7 +5987,8 @@ def create_central_mcp_server(
         identity = _request_identity(identity_store)
         host,_ = await _private_bot_context(ctx, service=service, identity=identity, minimum_level="L1")
         def present():
-            return TelegramPilotLinks(service).present(identity["user_subject"],host["hostInstanceId"],bot_id,sender_id,code)
+            return TelegramPilotLinks(service).present(identity["user_subject"],host["hostInstanceId"],bot_id,sender_id,code,
+                token_id=identity["token_id"], protocol=_request_meta(ctx).get(PROTOCOL_META))
         confirmation = await asyncio.to_thread(present)
         return CallToolResult(content=[TextContent(type="text",text="Pairing checked")],
                               _meta={"io.agentbridge/telegram-confirmation":confirmation} if confirmation else {})
@@ -6025,7 +6030,8 @@ def create_central_mcp_server(
             from agentbridge.workspace.telegram_pilot_identity import verified_sender
             telegram_profile["telegramIdentityVerified"] = await asyncio.to_thread(
                 verified_sender, service, subject=identity["user_subject"],
-                instance=host_context["hostInstanceId"], evidence=evidence,
+                instance=host_context["hostInstanceId"], evidence=evidence, token_id=identity["token_id"],
+                protocol=_request_meta(ctx).get(PROTOCOL_META),
             )
         governed_prepares = {}
         if agent_host in PRIVATE_BOT_HOSTS and registration["acceptedLevel"] == "L3":
@@ -6713,6 +6719,8 @@ def create_central_mcp_server(
             lease_seconds=lease_seconds,
             wait_seconds=wait_seconds,
             host_instance_id=host["hostInstanceId"],
+            **({"pairing_token_id": identity["token_id"], "pairing_protocol": _request_meta(ctx).get(PROTOCOL_META)}
+               if agent_host == "nanobot" and endpoint_key.startswith("telegram:") else {}),
             **({"query_token_id":identity["token_id"]} if include_workspace_query_v2 else {}),
             **({"notification_token_id":identity["token_id"]} if include_notification_v2 else {}),
             **({"media_token_id":identity["token_id"]} if include_workspace_media_v2 else {}),
@@ -6766,7 +6774,8 @@ def create_central_mcp_server(
         query = await _run_host_control("agentbridge_host_workspace_result_view", handle, service=service,
             subject=identity["user_subject"],token_id=identity["token_id"],instance=host["hostInstanceId"],host=agent_host,
             endpoint_key=endpoint_key,pairing_ref=pairing_ref,delivery_id=delivery_id,attempt_count=attempt_count,
-            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds)
+            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds,
+            pairing_protocol=_request_meta(ctx).get(PROTOCOL_META))
         if query is not None:
             return query
         if agent_host != "pi" or action == "begin" or retry_after_seconds is not None:

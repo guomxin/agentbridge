@@ -3,14 +3,14 @@
 from .telegram_pilot_links import TelegramPilotLinks
 
 
-def verified_sender(service, *, subject, instance, evidence):
+def verified_sender(service, *, subject, instance, evidence, token_id=None, protocol=None):
     if not isinstance(evidence, dict) or set(evidence) != {"senderId", "botId"}:
         return False
     if not all(isinstance(value, str) for value in evidence.values()):
         return False
     try:
         return TelegramPilotLinks(service).verified(
-            subject, instance, evidence["botId"], evidence["senderId"]
+            subject, instance, evidence["botId"], evidence["senderId"], token_id=token_id, protocol=protocol
         )
     except (TypeError, ValueError):
         return False
@@ -21,7 +21,7 @@ def historical_private_binding(service, endpoint, instance):
     from datetime import datetime
 
     from agentbridge.core.actionable_results import _telegram_endpoint
-    from .telegram_pilot_links import active_claimants
+    from .telegram_pilot_links import _revocation, active_claimants
 
     subject, sender = endpoint["user_subject"], endpoint["external_subject"]
     if not instance or endpoint["agent_host"] not in {"nanobot", "pi"} or endpoint["client_type"] != "telegram":
@@ -32,7 +32,8 @@ def historical_private_binding(service, endpoint, instance):
             current = _telegram_endpoint(db, subject, endpoint["endpoint_id"])
             if current.get("_instance_id") != instance:
                 return None
-            inherited = endpoint["agent_host"] == "nanobot" and bool(active_claimants(db, sender))
+            inherited = (endpoint["agent_host"] == "nanobot" and not _revocation(db, subject, instance, endpoint["account_id"])
+                         and bool(active_claimants(db, sender)))
             if inherited:
                 # Inherited pairings may be refreshed routinely. Issuance and creation
                 # dates remain stable across those refreshes and change for a new grant.

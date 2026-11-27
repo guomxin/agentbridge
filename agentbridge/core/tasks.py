@@ -121,14 +121,25 @@ def _delivery_scope(db, ownership, endpoint):
         if not destination or endpoint["client_type"] != "telegram":
             return original_task, (endpoint["agent_host"], bool(destination))
         from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_pair_proof, mirror_sender_ids
+        from agentbridge.workspace.telegram_pair_migration import independent, grant_generation
+        migrated = endpoint["agent_host"] == "nanobot" and independent(db, endpoint["user_subject"], destination[1], endpoint["account_id"])
         binding = mirror_binding(db, endpoint["user_subject"], destination[1], ownership)
         if (not binding or endpoint["account_id"] != binding["bot"]
                 or mirror_sender_ids(db, endpoint["user_subject"], binding) != [endpoint["external_subject"]]):
-            return original_task, (endpoint["agent_host"], True)
+            return ("0", ()) if migrated else (original_task, (endpoint["agent_host"], True))
         proof = mirror_pair_proof(db, endpoint["user_subject"], binding, endpoint["external_subject"])
         companion_task = """d.payload_type='task_event' AND json_type(d.payload_json,'$.watchPairProof') IS NULL AND EXISTS (
             SELECT 1 FROM agent_tasks t WHERE t.task_id=d.task_id AND t.user_subject=d.user_subject
               AND t.agent_host=? AND t.origin_endpoint_id=?)"""
+        generation_args = ()
+        if migrated:
+            grant = grant_generation(db, endpoint["user_subject"], destination[1], endpoint["account_id"], endpoint["external_subject"])
+            if not grant:
+                return "0", ()
+            generation_args = (grant["generation"],)
+            generation_check = " AND json_extract(d.payload_json,'$.pairGeneration')=?"
+            original_task += generation_check
+            companion_task += generation_check
         digest = """d.payload_type='timeline_message' AND d.task_id=''
             AND json_extract(d.payload_json,'$.mirrorKind')=? AND json_extract(d.payload_json,'$.pairProof')=?
             AND json_extract(d.payload_json,'$.source.endpointId')=? AND json_extract(d.payload_json,'$.role')='assistant'
@@ -161,7 +172,7 @@ def _delivery_scope(db, ownership, endpoint):
                 AND u.source_endpoint_id=json_extract(d.payload_json,'$.source.endpointId')
                 AND u.role=json_extract(d.payload_json,'$.role')
                 AND u.entry_id=json_extract(d.payload_json,'$.entryId')
-                AND u.text=json_extract(d.payload_json,'$.text')))""", (endpoint["agent_host"], True, endpoint["agent_host"], binding["endpoint_id"], proof,
+                AND u.text=json_extract(d.payload_json,'$.text')))""", (endpoint["agent_host"], True, *generation_args, endpoint["agent_host"], binding["endpoint_id"], *generation_args, proof,
                     private_bot_digest_kind(endpoint["agent_host"]), proof, binding["endpoint_id"],
                     endpoint["agent_host"], proof, binding["endpoint_id"],
                     private_bot_chat_kind(endpoint["agent_host"]), proof, binding["endpoint_id"])
@@ -4549,6 +4560,8 @@ class TaskHubStore:
         quiet_pairing_ref: str | None = None,
         quiet_token_id: str | None = None,
         audit_quiet: Callable[[sqlite3.Connection, sqlite3.Row, sqlite3.Row], None] | None = None,
+        pairing_token_id: str | None = None,
+        pairing_protocol: int | None = None,
     ) -> list[dict]:
         if quiet_pairing_ref is not None and audit_quiet is None:
             raise ValueError("A quiet claim requires its transactional delivery audit")
@@ -4628,6 +4641,11 @@ class TaskHubStore:
             destination = ownership.get(endpoint_id)
             if host_instance_id and destination != instance_key(endpoint["agent_host"], host_instance_id):
                 raise TaskNotFound("client endpoint does not belong to this host instance")
+            if destination and endpoint["agent_host"] == "nanobot" and endpoint["client_type"] == "telegram":
+                from agentbridge.workspace.telegram_pair_migration import permits_delivery
+                if not permits_delivery(connection, "nanobot", user_subject, destination[1],
+                                        endpoint["endpoint_key"], pairing_token_id, pairing_protocol):
+                    return []
             predicate, parameters = _delivery_scope(connection, ownership, endpoint)
             connection.execute(f"""
                 UPDATE notification_outbox AS d SET state='failed', updated_at=?
@@ -5102,7 +5120,7 @@ class TaskHubStore:
         ).fetchall()
         ownership = endpoint_instances(connection, user_subject) if subscriptions else {}
         task_source = connection.execute(
-            """SELECT t.origin_endpoint_id,t.agent_host FROM agent_tasks t JOIN client_endpoints e
+            """SELECT t.origin_endpoint_id,t.agent_host,t.created_at FROM agent_tasks t JOIN client_endpoints e
                ON e.endpoint_id=t.origin_endpoint_id AND e.user_subject=t.user_subject AND e.agent_host=t.agent_host
                WHERE t.task_id=? AND t.user_subject=? AND e.state='active'""",
             (task_id, user_subject),
@@ -5119,6 +5137,13 @@ class TaskHubStore:
             if "*" not in filters and event_type not in filters:
                 continue
             envelope = {"eventId": event_id, "taskId": task_id, "eventType": event_type, "payload": payload}
+            if origin_scope and origin_scope[0] == "nanobot":
+                from agentbridge.workspace.telegram_pair_migration import grant_generation
+                endpoint = self._select_endpoint(connection, subscription["endpoint_id"])
+                if endpoint["client_type"] == "telegram":
+                    grant = grant_generation(connection, user_subject, origin_scope[1], endpoint["account_id"], endpoint["external_subject"])
+                    if grant and datetime.fromisoformat(task_source["created_at"]).timestamp() > grant["confirmed_at"]:
+                        envelope["pairGeneration"] = grant["generation"]
             if watch_proof:
                 envelope["watchPairProof"] = watch_proof
             if (event_type == "task.artifact.ready" and origin_scope and origin_scope[0] in PRIVATE_BOT_HOSTS
