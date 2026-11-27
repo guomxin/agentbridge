@@ -1,8 +1,14 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "1d0feaa9a281"
+    "87765c133e20"
   ],
-  "dataCompatibility": "no-migration",
-  "reason": "Pi 0.1.7 reuses a bounded authoritative observation from the same original resume response only after matching current identity, lease, nonce, version and complete references. Invalid or absent evidence retains the existing observation path, original authorization and authoritative business verification."
+  "dataCompatibility": "reviewed-schema-transition",
+  "reason": "Add scoped delivery, history, media and independent pairing receipts for the prior deployed central service. The two existing tables gain nullable route or challenge evidence. Existing scopes are retained, with no automatic adoption of old sends, backfill of missing proof or business operation replay.",
+  "schemaTransitions": {
+    "agentbridge.db": {
+      "beforeSha256": "7beef332b3cf8511a6c1ec15caa70f441984e112b936b06e9150ec85638bec2f",
+      "afterSha256": "edd26b3fa1e3fbcb2609723f717f053ede58b08ed9a91608d436ddaa95849663"
+    }
+  }
 }
