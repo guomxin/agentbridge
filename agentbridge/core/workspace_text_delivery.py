@@ -82,7 +82,10 @@ def _question_for_run(db, entry):
     return rows[0] if len(rows) == 1 else None
 
 
-def _allowed_reply(db, pin, run):
+def _project_text(db, pin, entry):
+    if entry["role"] != "assistant":
+        return public_mirror_text(entry["text"], maximum=200_000)
+    run = entry["dedupe_key"].removeprefix("message:workspace:assistant:")
     private = db.execute("""SELECT 1 FROM agent_host_dispatch_events WHERE dispatch_id=?
         AND event_name='host_progress' AND json_extract(payload_json,'$.kind')='private_interaction'
         UNION ALL SELECT 1 FROM agent_tasks t JOIN task_interactions i USING(task_id)
@@ -90,9 +93,23 @@ def _allowed_reply(db, pin, run):
               t.agent_host=? AND t.origin_endpoint_id=? AND t.active_conversation_ref=? LIMIT 1""",
         (pin["dispatch_id"],pin["subject"],run,pin["host"],pin["source"],pin["conversation_ref"])).fetchone()
     if not private:
-        return True
+        return public_mirror_text(entry["text"], maximum=200_000)
     from .tasks import TaskHubStore
-    return TaskHubStore._workspace_oa_read_after_login(db, pin["subject"], pin["source"], pin, run, pin["host"])
+    if TaskHubStore._workspace_oa_read_after_login(db, pin["subject"], pin["source"], pin, run, pin["host"]):
+        safe = public_mirror_text(entry["text"], maximum=200_000)
+        if safe:
+            return safe
+    # A final response exists, but its prose may quote private fields even when
+    # it contains no recognizable secret. Only project the original task's status.
+    task = db.execute("""SELECT status FROM agent_tasks WHERE user_subject=? AND agent_host=?
+        AND host_task_key=? AND origin_endpoint_id=? AND active_conversation_ref=?""",
+        (pin["subject"], pin["host"], run, pin["source"], pin["conversation_ref"])).fetchone()
+    labels = {"succeeded": "已完成", "partially_succeeded": "部分完成", "failed": "失败",
+              "outcome_unknown": "结果尚未确认", "canceled": "已取消", "expired": "已过期",
+              "superseded": "已被后续任务替代"}
+    label = labels.get(task["status"]) if task else None
+    status = f"原任务状态为{label}。" if label else ""
+    return f"工作台已收到本次运行的回复。{status}请在原会话查看可信交互和业务详情。"
 
 
 def enqueue_message(db, entry):
@@ -119,13 +136,9 @@ def enqueue_message(db, entry):
     metadata = json.loads(entry["payload_json"])
     if entry["task_id"] or set(metadata) - {"attachments"} or metadata.get("attachments"):
         return
-    text = public_mirror_text(entry["text"], maximum=200_000)
+    text = _project_text(db, pin, entry)
     if not text:
         return
-    if kind == "assistant":
-        run = entry["dedupe_key"].removeprefix("message:workspace:assistant:")
-        if not _allowed_reply(db, pin, run):
-            return
     _record(db, pin, entry["entry_id"], kind, pin["dispatch_id"] if kind == "assistant" else None, text)
 
 
@@ -159,11 +172,11 @@ def _current(service, db, row):
             AND source_endpoint_id=? AND role=?""", (row["entry_id"], subject, row["source"], row["kind"])).fetchone()
         if not entry:
             return False
-        text = public_mirror_text(entry["text"], maximum=200_000)
+        pin = row
         if row["kind"] == "assistant":
             pin = _question_for_run(db, entry)
             run = entry["dedupe_key"].removeprefix("message:workspace:assistant:")
-            if not pin or pin["question_id"] != row["question_id"] or not _allowed_reply(db, pin, run):
+            if not pin or pin["question_id"] != row["question_id"]:
                 return False
             if db.execute("""SELECT 1 FROM agent_tasks t JOIN task_operations l USING(task_id)
                 JOIN operations o USING(operation_id) WHERE t.user_subject=? AND t.agent_host=? AND
@@ -173,6 +186,7 @@ def _current(service, db, row):
                     service.user_grants.require_capability(subject, query.CAPABILITY)
                 except PermissionError:
                     return False
+        text = _project_text(db, pin, entry)
     if not text or hashlib.sha256(text.encode()).hexdigest() != row["source_hash"]:
         return False
     part = text[row["part_start"]:row["part_end"]]
