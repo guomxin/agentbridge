@@ -2244,6 +2244,7 @@ class CentralCapabilityService:
         delivery_ref: str,
         channel: str,
         files: list[dict],
+        receipt_context: dict | None = None,
     ) -> dict:
         task, event, reused = self.tasks.record_artifact_delivery(
             task_id=task_id,
@@ -2252,6 +2253,7 @@ class CentralCapabilityService:
             delivery_ref=delivery_ref,
             channel=channel,
             files=files,
+            **({'receipt_context':receipt_context} if receipt_context is not None else {}),
         )
         trace = self.runtime_governance.trace_for_task(
             task_id, user_subject=user_subject
@@ -2290,6 +2292,10 @@ class CentralCapabilityService:
             "eventId": event["event_id"],
             "reused": reused,
         }
+
+    def historical_host_artifact_delivery(self, **kwargs) -> dict | None:
+        from .artifact_report_receipts import historical
+        return historical(self, **kwargs)
 
     def ensure_host_task(
         self,

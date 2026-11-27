@@ -278,6 +278,12 @@ class TaskHubStore:
                 CREATE INDEX IF NOT EXISTS task_events_task_created
                 ON task_events (task_id, created_at);
 
+                CREATE TABLE IF NOT EXISTS artifact_report_receipt_custody (
+                    event_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    proof_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS task_operations (
                     task_id TEXT NOT NULL,
                     operation_id TEXT NOT NULL UNIQUE,
@@ -2297,6 +2303,7 @@ class TaskHubStore:
         delivery_ref: str,
         channel: str,
         files: list[dict[str, Any]],
+        receipt_context: dict | None = None,
     ) -> tuple[dict, dict, bool]:
         agent_host = _required_text(agent_host, "agent_host", 80)
         delivery_ref = _required_text(delivery_ref, "delivery_ref", 512)
@@ -2361,6 +2368,12 @@ class TaskHubStore:
                     _event_from_row(existing),
                     True,
                 )
+
+            from . import artifact_report_receipts
+            proof = artifact_report_receipts.capture(
+                connection, task=task, subject=user_subject, host=agent_host, channel=channel,
+                delivery_ref=delivery_ref, files=files, context=receipt_context,
+            )
 
             placeholders = ",".join("?" for _ in normalized)
             artifacts = connection.execute(
@@ -2459,6 +2472,7 @@ class TaskHubStore:
                 causation_ref=delivery_ref,
                 created_at=now,
             )
+            artifact_report_receipts.persist(connection, task_id=task_id, event_id=event_id, proof=proof)
             row = self._select_task(connection, task_id)
             event = connection.execute(
                 "SELECT * FROM task_events WHERE event_id = ?",
