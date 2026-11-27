@@ -2,14 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { unlink } from "node:fs/promises";
 import { hostContextMeta } from "./host-contract.js";
 import { normalizeTrustedResultView, resultViewPresentation } from "./result-view.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
 import { taskNotificationMode, taskNotificationPayload, validTaskNotification } from "./task-notification.js";
+import { workspaceMediaMode, materializeWorkspaceMedia } from "./telegram-media-delivery.js";
 
 function deliveryTool(record) {
-  return record.deliveryMode === taskNotificationMode ? "agentbridge_host_notification_delivery" : "agentbridge_host_workspace_result_view";
+  return record.deliveryMode === workspaceMediaMode ? "agentbridge_host_workspace_media_delivery"
+    : record.deliveryMode === taskNotificationMode ? "agentbridge_host_notification_delivery" : "agentbridge_host_workspace_result_view";
 }
 const active = new Set();
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -104,11 +107,12 @@ export function workspaceQueryStateDirectory(api) {
 }
 
 export class WorkspaceQueryDelivery {
-  constructor({ api, config, store = null, now = Date.now }) {
+  constructor({ api, config, store = null, now = Date.now, saveMediaBuffer = null }) {
     this.api = api;
     this.config = config;
     this.store = store || new WorkspaceQueryReceiptStore(workspaceQueryStateDirectory(api));
     this.now = now;
+    this.saveMediaBuffer = saveMediaBuffer;
     this.recoveryOffset = 0;
   }
 
@@ -152,10 +156,11 @@ export class WorkspaceQueryDelivery {
     if (!route || !validNotification(notification) || signal.aborted ||
         !identityRouter.restoreSessionBinding({ sessionKey: endpoint.conversationRef, bindingKey: binding.key })) return;
     const textOnly = notification.deliveryMode === "workspace_text_v2";
+    const media = notification.deliveryMode === workspaceMediaMode;
     const record = { schema: "agentbridge.openclaw-workspace-query.v2", endpointKey: binding.key,
       deliveryId: notification.deliveryId, attemptCount: notification.attemptCount,
       pairingRef: notification.pairingRef, deliveryMode: notification.deliveryMode,
-      ...(textOnly ? { sourceEntryId: notification.sourceEntryId,
+      ...(media ? { itemIndex: notification.itemIndex, itemCount: notification.itemCount } : textOnly ? { sourceEntryId: notification.sourceEntryId,
         partIndex: notification.partIndex, partCount: notification.partCount } : { sourceTaskId: notification.sourceTaskId }),
       ...(notification.deliveryMode === taskNotificationMode
         ? { sourceEventId: notification.sourceEventId, notificationKind: notification.notificationKind } : {}),
@@ -167,6 +172,7 @@ export class WorkspaceQueryDelivery {
       identityRouter.catalogCacheKeyForBinding?.(binding) === identityScope;
     if (active.has(key)) return;
     active.add(key);
+    let mediaPayload;
     try {
       const previous = this.store.read(record);
       if (previous) {
@@ -188,7 +194,23 @@ export class WorkspaceQueryDelivery {
       const adapter = await this.api.runtime.channel.outbound.loadAdapter("telegram");
       if (typeof adapter?.sendPayload !== "function") return;
       let payload;
-      if (record.deliveryMode === taskNotificationMode) {
+      if (media) {
+        if (issued.publicText || issued.resultView || issued.interaction || typeof this.saveMediaBuffer !== 'function') return;
+        try {
+          mediaPayload = await materializeWorkspaceMedia(issued.resource, { saveMediaBuffer: this.saveMediaBuffer,
+            ordinal: record.itemIndex-1, partCount: record.itemCount, now: this.now() });
+        } catch {
+          // Local preparation cannot have reached Telegram. Settle this original
+          // item explicitly; do not replace a failed image with any URL/group.
+          record.state = "completed";
+          record.outcome = "unavailable";
+          if (this.store.reserve(record)) await this.ack(record, client, signal);
+          return;
+        }
+        payload = mediaPayload.payload;
+        record.resourceSha256 = mediaPayload.sha256;
+        record.resourceByteSize = mediaPayload.byteSize;
+      } else if (record.deliveryMode === taskNotificationMode) {
         payload = await taskNotificationPayload({ issued, record, adapter, allowedOrigins: this.config.allowedCardOrigins,
           runtimeConfig: this.api.config, route, now: this.now() });
       } else {
@@ -216,7 +238,7 @@ export class WorkspaceQueryDelivery {
       // Freeze one compact text+buttons payload. Escape all text ourselves so
       // Markdown expansion, rich-message fallback and internal chunking cannot
       // turn this first-batch delivery into multiple platform sends.
-      if (!payload || typeof payload.text !== "string" || payload.mediaUrl || payload.mediaUrls?.length) return;
+      if (!payload || typeof payload.text !== "string" || (!media && payload.mediaUrl) || payload.mediaUrls?.length) return;
       payload = { ...payload, text: escapeHtml(payload.text) };
       if (!payload.text || payload.text.length > 3500 || signal.aborted ||
           !(Date.parse(issued.leaseExpiresAt) > this.now()) || !isCurrent()) return;
@@ -244,6 +266,8 @@ export class WorkspaceQueryDelivery {
           const result = await withDirectDelivery(() => adapter.sendPayload({
             cfg: singleAttemptConfig(this.api.config), to: route.to, accountId: route.accountId,
             text: payload.text, payload, formatting: { parseMode: "HTML" }, onDeliveryResult: persistReceipt,
+            ...(media ? { forceDocument: true, mediaReadFile: mediaPayload.mediaReadFile,
+              mediaLocalRoots: mediaPayload.mediaLocalRoots } : {}),
           }));
           if (!record.receipt) await persistReceipt(result);
         } catch (error) {
@@ -254,7 +278,10 @@ export class WorkspaceQueryDelivery {
       record.state = "completed";
       this.store.save(record);
       await this.ack(record, client, signal);
-    } finally { active.delete(key); }
+    } finally {
+      if (mediaPayload?.localPath) await unlink(mediaPayload.localPath).catch(() => {});
+      active.delete(key);
+    }
   }
 }
 
@@ -263,7 +290,9 @@ function controlArgs(record) {
     delivery_id: record.deliveryId, attempt_count: record.attemptCount };
 }
 function validNotification(value) {
-  const source = value?.deliveryMode === taskNotificationMode ? validTaskNotification(value)
+  const source = value?.deliveryMode === workspaceMediaMode ? Number.isSafeInteger(value.itemIndex) && Number.isSafeInteger(value.itemCount) &&
+      value.itemIndex>0 && value.itemIndex<=value.itemCount && value.itemCount<=4
+    : value?.deliveryMode === taskNotificationMode ? validTaskNotification(value)
     : value?.deliveryMode === "workspace_query_v2"
     ? typeof value.sourceTaskId === "string" && value.sourceTaskId.length > 0
     : value?.deliveryMode === "workspace_text_v2" && typeof value.sourceEntryId === "string" && value.sourceEntryId.length > 0 &&
@@ -271,7 +300,7 @@ function validNotification(value) {
       value.partIndex > 0 && value.partIndex <= value.partCount;
   return source && /^[a-f0-9-]{36}$/.test(value.deliveryId || "") &&
     /^[a-f0-9]{64}$/.test(value.pairingRef || "") && Number.isSafeInteger(value.attemptCount) && value.attemptCount > 0 &&
-    ["workspace_query_v2", "workspace_text_v2", taskNotificationMode].includes(value.deliveryMode);
+    ["workspace_query_v2", "workspace_text_v2", taskNotificationMode, workspaceMediaMode].includes(value.deliveryMode);
 }
 function checkedRoute(binding, endpoint) {
   const peer = /^agent:[^:]+:telegram:(?:direct|dm):([1-9][0-9]*)$/iu.exec(endpoint?.conversationRef || "")?.[1];
@@ -289,14 +318,14 @@ function currentBinding(router, binding, endpoint, client) {
   return current?.bound && current.binding?.key === binding.key &&
     current.client === client && current.binding.senderId === binding.senderId && sameTelegramAccount(current.binding.accountId, binding.accountId);
 }
-function checkedReceipt(result, route) {
+export function checkedReceipt(result, route) {
   const id = typeof result?.messageId === "string" && /^[1-9][0-9]*$/.test(result.messageId) ? Number(result.messageId) : result?.messageId;
   if (!Number.isSafeInteger(id) || id <= 0 || String(result?.chatId) !== route.to ||
       (result.channel !== undefined && result.channel !== "telegram") ||
       (result.accountId !== undefined && !sameTelegramAccount(result.accountId, route.accountId))) return null;
   return id;
 }
-function singleAttemptConfig(config) {
+export function singleAttemptConfig(config) {
   const telegram = config?.channels?.telegram || {};
   // The Telegram transport has a second IPv4/IP fallback loop below retry.
   // An explicit non-ipv4first DNS order disables that loop in the supported
@@ -307,7 +336,7 @@ function singleAttemptConfig(config) {
     ...(telegram.accounts ? { accounts: Object.fromEntries(Object.entries(telegram.accounts).map(([id, value]) => [id, single(value)])) } : {}),
   } } };
 }
-function sendFailure(error) {
+export function sendFailure(error) {
   // Only structured Telegram API refusals prove the request was not accepted.
   // Wrapper messages, transport failures and missing/mismatched receipts do not.
   const response = error?.error_code ? error : error?.error?.error_code ? error.error : null;

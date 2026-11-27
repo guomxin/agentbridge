@@ -7257,7 +7257,7 @@ test("delivers a prepared OA certificate as one direct attachment message", asyn
   );
   assert.equal(harness.sentPayloads.length, 1);
   assert.equal(harness.sentPayloads[0].payload.mediaUrl, "C:/media/certificate.bin");
-  assert.equal(harness.sentPayloads[0].payload.forceDocument, true);
+  assert.equal(harness.sentPayloads[0].forceDocument, true);
   assert.match(harness.sentPayloads[0].payload.text, /certificate-a\.pdf/);
 });
 
@@ -7303,7 +7303,7 @@ test("delivers a prepared Smartlight CSV report as a document attachment", async
     harness.sentPayloads[0].payload.mediaUrl,
     "C:/media/smartlight-report.csv",
   );
-  assert.equal(harness.sentPayloads[0].payload.forceDocument, true);
+  assert.equal(harness.sentPayloads[0].forceDocument, true);
   assert.match(
     harness.sentPayloads[0].payload.text,
     /smartlight-alarm-analysis-20260812\.csv/,
@@ -7339,7 +7339,7 @@ test("delivers a prepared OA certificate batch as ordered original files", async
 
   assert.equal(harness.sentPayloads.length, 2);
   assert.deepEqual(
-    harness.sentPayloads.map((item) => item.payload.forceDocument),
+    harness.sentPayloads.map((item) => item.forceDocument),
     [true, true],
   );
   assert.match(harness.sentPayloads[0].payload.text, /certificate-a\.jpg/);
@@ -7354,7 +7354,7 @@ test("delivers a prepared OA certificate batch as ordered original files", async
   );
 });
 
-test("retries one transient attachment failure before succeeding", async () => {
+test("retries only one structured rate-limit refusal before succeeding", async () => {
   const harness = fakeApi({ autoPoll: false });
   registerAgentBridgeInteractions(harness.api, {
     mcpClient: null,
@@ -7369,13 +7369,11 @@ test("retries one transient attachment failure before succeeding", async () => {
       if (context.payload.mediaUrl) {
         mediaAttempts += 1;
         if (mediaAttempts === 1) {
-          const error = new Error("telegram upload timed out");
-          error.code = "ETIMEDOUT";
-          throw error;
+          throw {error_code:429,parameters:{retry_after:1}};
         }
       }
       harness.sentPayloads.push(context);
-      return { channel: "telegram", messageId: "attachment-message" };
+      return { channel: "telegram", messageId: "501", chatId: context.to };
     },
   });
   bindToolCall(harness, {
@@ -7406,7 +7404,7 @@ test("retries one transient attachment failure before succeeding", async () => {
   );
 });
 
-test("falls back to a short-lived download link when attachment upload fails", async () => {
+test("never falls back to a short-lived link after an uncertain upload", async () => {
   const harness = fakeApi({ autoPoll: false });
   registerAgentBridgeInteractions(harness.api, {
     mcpClient: null,
@@ -7435,7 +7433,7 @@ test("falls back to a short-lived download link when attachment upload fails", a
     toolName: "oa_certificate_prepare_download",
   });
 
-  await harness.middleware(
+  const replacement = await harness.middleware(
     {
       toolCallId: "tool-certificate-fallback",
       toolName: "oa_certificate_prepare_download",
@@ -7444,10 +7442,11 @@ test("falls back to a short-lived download link when attachment upload fails", a
     { runtime: "openclaw", sessionKey },
   );
 
-  assert.equal(attempts, 3);
-  assert.equal(harness.sentPayloads.length, 1);
-  assert.match(harness.sentPayloads[0].payload.text, /附件上传失败/);
-  assert.match(harness.sentPayloads[0].payload.text, /\/file/);
+  const report=replacement.result.details.structuredContent.hostDelivery;
+  assert.equal(report.state,"unknown");assert.equal(report.unknownCount,1);assert.equal(report.failedCount,0);
+  assert.match(report.userMessage,/送达结果未确认，不会自动重发/);assert.doesNotMatch(report.userMessage,/未能送达/);
+  assert.equal(attempts, 1);
+  assert.equal(harness.sentPayloads.length, 0);
 });
 
 test("treats the Workspace task-card download as a successful fallback delivery", async () => {
@@ -7578,6 +7577,7 @@ function preparedDocumentDependencies({
   savedPath = "C:/media/certificate.bin",
 } = {}) {
   return {
+    artifactReceiptStore: memoryArtifactStore(),
     documentFetchImpl: async () => ({
       ok: true,
       status: 200,
@@ -7822,7 +7822,7 @@ function fakeApi(pluginConfig) {
       syncTimeline: false,
       ...pluginConfig,
     },
-    config: {},
+    config: {channels:{telegram:{botToken:"123:synthetic-only"}}},
     logger: {
       info(message) {
         logs.info.push(message);
@@ -7841,7 +7841,7 @@ function fakeApi(pluginConfig) {
               },
               async sendPayload(context) {
                 sentPayloads.push(context);
-                return { channel: "telegram", messageId: "message-1" };
+                return { channel: "telegram", messageId: "501", chatId: context.to };
               },
             };
           },
@@ -7915,7 +7915,7 @@ test("delivers authenticated Taihua CSV bytes without an anonymous fetch", async
   const harness = fakeApi({ autoPoll: false });
   let savedBytes;
   registerAgentBridgeInteractions(harness.api, {
-    mcpClient: null, sleep: async () => undefined,
+    mcpClient: null, sleep: async () => undefined, artifactReceiptStore: memoryArtifactStore(),
     documentFetchImpl: async () => { throw new Error("anonymous fetch forbidden"); },
     saveMediaBufferImpl: async (body) => { savedBytes = body; return { path: "C:/media/taihua.csv" }; },
   });
@@ -7955,7 +7955,7 @@ test("native CSV delivery survives missing middleware and strips bytes on succes
   for (const fail of [false, true]) {
     const harness = fakeApi({autoPoll: false});
     const coordinator = registerAgentBridgeInteractions(harness.api, {
-      mcpClient: null, sleep: async () => undefined,
+      mcpClient: null, sleep: async () => undefined, artifactReceiptStore: memoryArtifactStore(),
       saveMediaBufferImpl: async () => {
         if (fail) throw new Error("media store failed");
         return {path: "C:/media/native.csv"};
@@ -8148,3 +8148,10 @@ test('an unused pre-call hook holds no Skill reservation, and a dispatched load 
     execution:{legacy:false,effects:['read'],allow_batch:false,capabilities:[]}}});
   assert.equal((await running).structuredContent.binding_id,'synthetic');assert.equal(calls.length,1);
 });
+
+function memoryArtifactStore(){
+  const rows=new Map();return {lookup:key=>structuredClone(rows.get(key)),
+    registerIfAbsent(key,value){if(rows.has(key))return false;rows.set(key,structuredClone(value));return true;},
+    update(key,fn){const value=fn(structuredClone(rows.get(key)));if(value!==undefined)rows.set(key,structuredClone(value));},
+    entries:()=>[...rows].map(([key,value])=>({key,value:structuredClone(value)})),delete:key=>rows.delete(key)};
+}

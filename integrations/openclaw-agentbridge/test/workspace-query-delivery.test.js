@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { WorkspaceQueryDelivery, WorkspaceQueryReceiptStore } from "../lib/workspace-query-delivery.js";
@@ -22,6 +23,10 @@ function harness(t, options = {}) {
   }
   if (options.kind) Object.assign(notification, { deliveryMode: "host_notification_v2",
     notificationKind: options.kind, sourceEventId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" });
+  if (options.media) {
+    delete notification.sourceTaskId;
+    Object.assign(notification, { deliveryMode: "workspace_media_v2", itemIndex: 1, itemCount: 2 });
+  }
   const store = new WorkspaceQueryReceiptStore(directory);
   const calls = [], sends = [];
   let ackFails = options.ackFails || 0;
@@ -45,11 +50,17 @@ function harness(t, options = {}) {
         url: "https://cards.example.test/results/" + "t".repeat(43) }, selectionAvailable: true,
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(), sourceExpiresAt: new Date(Date.now() + 600_000).toISOString() },
     ...(options.text ? { resultView: null, publicText: "【网页端 · 你】\n查看 OA 待办" } : {}), ...(options.kind ? { resultView: null, publicText: "本次任务已取消。", notificationKind: options.kind,
-      sourceTaskId: notification.sourceTaskId, sourceEventId: notification.sourceEventId } : {}), ...options.issued };
+      sourceTaskId: notification.sourceTaskId, sourceEventId: notification.sourceEventId } : {}),
+    ...(options.media ? { publicText: null, resultView: null, resource: {
+      fileName: "原始图片.png", mimeType: "image/png", byteSize: mediaBody.length,
+      sha256: createHash('sha256').update(mediaBody).digest('hex'), contentBase64: mediaBody.toString('base64'),
+      expiresAt: new Date(Date.now()+60_000).toISOString(),
+    } } : {}), ...options.issued };
   const client = { async callTool(name, args) {
     calls.push({ name, args });
     if (name === "agentbridge_host_notification_claim") return { endpoint, notifications: [notification] };
-    assert.equal(name, options.kind ? "agentbridge_host_notification_delivery" : "agentbridge_host_workspace_result_view");
+    assert.equal(name, options.media ? "agentbridge_host_workspace_media_delivery"
+      : options.kind ? "agentbridge_host_notification_delivery" : "agentbridge_host_workspace_result_view");
     assert.equal(args.agent_host, "openclaw");
     if (args.action === "issue") return issued;
     if (args.action === "begin") {
@@ -67,12 +78,59 @@ function harness(t, options = {}) {
       assert.equal(sessionKey, endpoint.conversationRef);
       return options.identityDrift ? { bound: false } : { bound: true, binding, client };
     } };
-  const consumer = () => new WorkspaceQueryDelivery({ api, config, store });
+  let mediaWrites = 0;
+  const consumer = () => new WorkspaceQueryDelivery({ api, config, store, saveMediaBuffer: async body => {
+    const target=path.join(directory,`media-${++mediaWrites}.png`);writeFileSync(target,body,{mode:0o600});
+    return {path:target,size:body.length};
+  } });
   const context = { binding, client, endpoint, notification, identityRouter, signal: new AbortController().signal,
     withDirectDelivery: send => send() };
-  return { consumer, context, calls, sends, store, directory, api, config, issued };
+  return { consumer, context, calls, sends, store, directory, api, config, issued, mediaWrites:()=>mediaWrites };
 }
+const mediaBody = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
 const acks = h => h.calls.filter(call => call.args.action === "ack").map(call => call.args);
+
+test("each original media item records one real route receipt and an ACK loss never uploads again",async t=>{
+  const h=harness(t,{media:true,ackFails:1});
+  await assert.rejects(h.consumer().deliver(h.context),/acknowledgement/);
+  assert.equal(h.sends.length,1);assert.equal(h.sends[0].forceDocument,true);
+  assert.equal(h.sends[0].payload.forceDocument,undefined);
+  assert.equal(h.sends[0].cfg.channels.telegram.retry.attempts,1);
+  assert.equal(existsSync(h.sends[0].payload.mediaUrl),false);
+  await h.consumer().recover(h.context.binding,h.context.client,h.context.signal);
+  await h.consumer().deliver(h.context);
+  assert.equal(h.sends.length,1);assert.equal(h.mediaWrites(),1);
+  assert.deepEqual(acks(h).map(a=>[a.outcome,a.receipt]),[['sent',123],['sent',123]]);
+  const prior=h.store.prior({...h.context.notification,endpointKey:h.context.binding.key})[0];
+  assert.equal(prior.resourceSha256,h.issued.resource.sha256);
+  assert.equal(prior.resourceByteSize,mediaBody.length);
+  assert.equal(JSON.stringify(prior).includes(h.issued.resource.contentBase64),false);
+});
+
+test("a partly delivered media group never resends the first item or sends a fallback after an unknown second upload",async t=>{
+  const h=harness(t,{media:true,send:async(value,count)=>{
+    if(count>1)throw new Error('ECONNRESET after upload');
+    await value.onDeliveryResult({messageId:'126',chatId:'1001'});
+  }});
+  await h.consumer().deliver(h.context);
+  const second={...h.context,notification:{...h.context.notification,deliveryId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',itemIndex:2}};
+  await h.consumer().deliver(second);
+  await h.consumer().deliver(h.context);await h.consumer().deliver(second);
+  await h.consumer().deliver({...second,notification:{...second.notification,attemptCount:2}});
+  assert.equal(h.sends.length,2);assert.equal(h.mediaWrites(),2);
+  assert.deepEqual(acks(h).map(a=>a.outcome),['sent','delivery_unknown']);
+  assert.ok(h.sends.every(x=>x.forceDocument&&x.payload.mediaUrl&&!x.payload.text.includes('http')));
+});
+
+test("corrupted media or revoked permission closes only the original item without a native send",async t=>{
+  for(const revoked of [false,true]){
+    const h=harness(t,{media:true,...(revoked?{begin:{allowed:false}}:{})});
+    if(!revoked)h.issued.resource.sha256='a'.repeat(64);
+    await h.consumer().deliver(h.context);await h.consumer().deliver(h.context);
+    assert.equal(h.sends.length,0);assert.equal(acks(h)[0].outcome,'unavailable');
+    assert.equal(h.calls.filter(c=>c.args.action==='begin').length,revoked?1:0);
+  }
+});
 
 test("one OA result combines public text and trusted card, uses a genuine matching receipt and retains a tombstone", async t => {
   const h = harness(t);
