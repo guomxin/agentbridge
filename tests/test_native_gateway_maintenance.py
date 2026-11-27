@@ -308,3 +308,15 @@ def test_failed_receipt_directory_sync_prevents_enable(maintenance, monkeypatch)
         gm.start(m.host, m.authorization, CANDIDATE, m.receipt)
     assert m.state['calls'] == ['disable', 'bootout']
     assert common.read(m.receipt)['phase'] == 'starting'
+
+
+def test_failed_initial_receipt_directory_sync_prevents_stop(maintenance, monkeypatch):
+    m = maintenance
+    def fail(_):
+        raise OSError('injected initial receipt directory sync failure')
+    monkeypatch.setattr(gm, 'sync_directory', fail)
+    with pytest.raises(OSError):
+        gm.stop(m.host, m.authorization, CANDIDATE, m.replacement, m.receipt)
+    assert not m.state['calls']
+    assert m.state['loaded'] and not m.state['disabled']
+    assert common.read(m.receipt)['phase'] == 'stopping'
