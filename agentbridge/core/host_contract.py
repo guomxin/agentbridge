@@ -616,7 +616,7 @@ class HostContractStore:
                 "openclaw", "0.4.133", "L3",
                 "shared-contract-h01-h29-instance-notification-routing-v1",
             ),
-            ("openclaw", "0.4.134", "L3", "sha256:c0859efec2bdc9ff2c90cd9ec27feca342765692f0a4dc3364811babc3998a05"),
+            ("openclaw", "0.4.134", "L3", "sha256:084665693d19573da72b538e963e8a16270e68301e4c95882a5cd3cb2105f002"),
         )
         for name, version, level, evidence in builtins:
             connection.execute(
