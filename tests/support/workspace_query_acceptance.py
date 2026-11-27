@@ -40,10 +40,11 @@ class SyntheticHost(FakeGateway):
         self.fixture, self.host_type = fixture, host
         self.instance_id = INSTANCES[host]
         self.outcomes = {}
+        self.capabilities = ["chat"]
 
     def readiness(self):
         return {"available": True, "recoverable": False, "acceptedLevel": "L3",
-                "adapterVersion": delivery.VERSIONS[self.host_type], "capabilities": ["chat"]}
+                "adapterVersion": delivery.VERSIONS[self.host_type], "capabilities": list(self.capabilities)}
 
     def diagnostics(self):
         return {"configured": True, "synthetic": True}

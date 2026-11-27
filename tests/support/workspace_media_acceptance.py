@@ -69,6 +69,7 @@ class MediaFixture(Fixture):
         self.assets=assets(self.home/'assets',self.run_id)
         self.inbound=[]
         for peer in self.hosts.values():
+            peer.capabilities = ["chat", "attachments"]
             peer.send_dispatch=MethodType(self._dispatch,peer)
         # There is no OA/model step in this fixture; even a mistaken quick query
         # is denied by the actual capability call, not answered by a fake success.
