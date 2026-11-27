@@ -195,6 +195,24 @@ class Host:
                 answer = await run_trial(central.session, request, central.meta, complete)
                 emit("delta", answer)
                 return answer
+            from nanobot_agentbridge.cross_endpoint_reference import parse, answer as reference_answer
+            reference = parse(message, "telegram" if record["endpoint_key"].startswith("telegram:") else "workspace")
+            if reference is not None:
+                if images or central.level != "L3":
+                    raise PermissionError("Explicit public reference requires level three and text only")
+                await central.require_binding()
+                async def complete_reference(system, prompt):
+                    await central.require_binding()
+                    result = await self.invoke_model("completion", run=run, subject=record["user_subject"],
+                        system=system, message=prompt)
+                    await central.require_binding()
+                    self.ledger.record_usage(run, result.get("usage"))
+                    return result["text"]
+                answer = await reference_answer(central.session, central.meta, host="pi", endpoint=record["endpoint_key"],
+                    reference=reference[0], question=reference[1], complete=complete_reference)
+                await central.require_binding()
+                emit("delta", answer)
+                return answer
             if central.level in {"L2", "L3"}:
                 central.handle_card = partial(self.cards.resume_credential, central, record, run)
             if central.level == "L3" and self.coordinator:
