@@ -139,6 +139,8 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
           sharedState,
           now: dependencies.now,
           sleep: dependencies.timelineSleep,
+          api,
+          projectionStore: dependencies.timelineProjectionStore,
         })
       : null;
   coordinator.timelinePublisher = timelinePublisher;
@@ -511,11 +513,13 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       identityRouter,
       logger: api.logger,
     });
+    timelinePublisher?.start();
     coordinator.startNotificationPump(identityRouter);
     hostRuntimeReporter?.start();
   });
 
   api.on("gateway_stop", () => {
+    timelinePublisher?.stop();
     hostRuntimeReporter?.stop();
     taskCommandRunner.stop();
     coordinator.stopAll();

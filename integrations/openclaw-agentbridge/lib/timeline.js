@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { hostContextMeta } from "./host-contract.js";
+import { DurableTimelineProjection, openTimelineProjectionStore } from "./timeline-projection.js";
 
 const RECENT_KEY_TTL_MS = 10_000;
 const MAX_RECENT_KEYS = 500;
@@ -14,11 +15,16 @@ export class TimelinePublisher {
     sharedState = {},
     now = Date.now,
     sleep = retrySleep,
+    api = null,
+    projectionStore = undefined,
   }) {
     this.identityRouter = identityRouter;
     this.logger = logger;
     this.now = now;
     this.sleep = sleep;
+    const durable = projectionStore === undefined ? openTimelineProjectionStore(api) : projectionStore;
+    this.projection = durable ? new DurableTimelineProjection({ identityRouter, store: durable,
+      hostConfig: api?.config || {}, logger, now, sleep }) : null;
     this.queues =
       sharedState.timelineQueues ||
       (sharedState.timelineQueues = new Map());
@@ -56,6 +62,9 @@ export class TimelinePublisher {
       return Promise.resolve(false);
     }
     const binding = resolved.binding;
+    if (binding.channel === "telegram" && this.projection) {
+      return this.projection.capture({ resolved, sessionKey, endpointKey, role, text, event, context, taskId });
+    }
     const messageKey = this.messageKey({
       sessionKey,
       role,
@@ -140,8 +149,11 @@ export class TimelinePublisher {
   }
 
   async waitForIdle() {
-    await Promise.allSettled([...this.queues.values()]);
+    await Promise.allSettled([...this.queues.values(), this.projection?.waitForIdle()]);
   }
+
+  start() { this.projection?.start(); }
+  stop() { this.projection?.stop(); }
 
   messageKey({ sessionKey, role, text, event, context }) {
     const now = this.now();
@@ -151,6 +163,10 @@ export class TimelinePublisher {
     const deliveredId = event.success === true
       ? safeText(event.messageId || context.messageId, 256) : null;
     if (deliveredId) return `${role}:${sessionKey}:sent:${deliveredId}`.slice(0, 768);
+    // A real platform message id wins over the text fingerprint. Two messages
+    // with identical content are still separate user turns.
+    const platformId = safeText(event.messageId || context.messageId, 256);
+    if (platformId) return `${role}:${sessionKey}:${platformId}`.slice(0, 768);
     const fingerprint = createHash("sha256")
       .update(`${role}\0${sessionKey}\0${text}`, "utf8")
       .digest("hex");
