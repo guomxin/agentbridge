@@ -80,7 +80,8 @@ fi
         tools, project = (line.split() for line in log.read_text().splitlines())
         assert 'setuptools>=77' in tools and 'pytest' in tools
         assert ('pytest-xdist' in tools) == (profile == 'full')
-        assert project[-2:] == ['-e', '.[database-analysis]' if profile == 'full' else '.']
+        extras = {'full': '.[database-analysis,test]', 'python-tests': '.[test]'}
+        assert project[-2:] == ['-e', extras.get(profile, '.')]
 
 
 @pytest.fixture
