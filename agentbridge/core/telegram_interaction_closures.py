@@ -167,7 +167,7 @@ def poll(service, *, subject, host, instance, endpoint, token, pairing_protocol)
         rows = db.execute("""SELECT d.* FROM telegram_notification_deliveries d
             JOIN telegram_interaction_card_watches w ON w.card_delivery_id=d.delivery_id
             WHERE d.subject=? AND d.host=? AND d.instance=? AND d.endpoint_key=? AND d.token_id=?
-              AND d.state IN ('sent','sending','unknown') AND d.expires_at>?
+              AND ((d.state='sent' AND d.receipt>0) OR (d.state IN ('sending','unknown') AND d.expires_at>?))
               AND NOT EXISTS(SELECT 1 FROM telegram_interaction_closures c WHERE c.card_delivery_id=d.delivery_id)
             ORDER BY w.checked_at,d.rowid LIMIT 16""",
             (subject,host,instance_key(host,instance)[1],endpoint,token,actions._now().isoformat())).fetchall()

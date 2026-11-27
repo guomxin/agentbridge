@@ -256,15 +256,21 @@ def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pa
         for row in rows:
             if not registered(db,subject,host,(host,row["instance"]),token):
                 continue
-            state = "expired" if row["attempt"] >= 5 or now >= actions._date(row["expires_at"]) else (
+            expires = actions._date(row["expires_at"])
+            # A freshly observed public closure can wait offline before its first
+            # lease. Its dispatch budget is independent of the old card's TTL.
+            if (row["state"] == "pending" and row["attempt"] == 0 and row["kind"] == "public_status"
+                    and closures.metadata(db, row["delivery_id"])):
+                expires = now + timedelta(hours=24)
+            state = "expired" if row["attempt"] >= 5 or now >= expires else (
                 None if _current(db,row) else "revoked")
             if state:
                 db.execute("UPDATE telegram_notification_deliveries SET state=? WHERE delivery_id=?",(state,row["delivery_id"]))
                 continue
             if _mark_covered(service,db,row):
                 continue
-            db.execute("""UPDATE telegram_notification_deliveries SET state='leased',attempt=attempt+1,issued=0,due=?
-                WHERE delivery_id=?""",((now+timedelta(seconds=max(5,min(300,lease)))).isoformat(),row["delivery_id"]))
+            db.execute("""UPDATE telegram_notification_deliveries SET state='leased',attempt=attempt+1,issued=0,due=?,expires_at=?
+                WHERE delivery_id=?""",((now+timedelta(seconds=max(5,min(300,lease)))).isoformat(),expires.isoformat(),row["delivery_id"]))
             result.append({"deliveryMode":MODE,"deliveryId":row["delivery_id"],"attemptCount":row["attempt"]+1,
                 "sourceEventId":row["event_id"],"sourceTaskId":row["task_id"],"notificationKind":row["kind"],"pairingRef":row["pair_proof"]})
         return result

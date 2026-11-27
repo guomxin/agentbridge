@@ -275,3 +275,36 @@ def test_unopened_expired_card_is_observed_once_and_never_needs_old_send_permiss
     assert delivery.handle(service, **args, action="begin") == {"allowed": False}
     issued = delivery.handle(service, **scope(token, endpoint, closed), action="issue")
     assert issued["publicText"] == closures.text("credential", "expired") and "interaction" not in issued
+
+
+@pytest.mark.parametrize("already_observed", [False, True])
+def test_confirmed_original_can_close_after_host_was_offline_for_a_day(openclaw, already_observed):
+    fixture, token, endpoint = openclaw
+    claim(fixture, token, endpoint)
+    service = fixture.service
+    task = new_task(fixture)
+    record, raw = login(fixture, task)
+    card, = claim(fixture, token, endpoint)
+    original = scope(token, endpoint, card)
+    send(fixture, original)
+    expired = (actions._now() - timedelta(hours=25)).isoformat()
+    with service.tasks._connect() as db:
+        db.execute("UPDATE auth_challenges SET expires_at=? WHERE challenge_id=?",
+                   (expired, service._credential_challenge_id(record)))
+        db.execute("UPDATE telegram_notification_deliveries SET expires_at=? WHERE delivery_id=?",
+                   (expired, card["deliveryId"]))
+    if already_observed:
+        service.get_interaction(user_subject=OWNER, interaction_id=raw["interactionId"])
+        with service.tasks._connect() as db:
+            assert db.execute("""UPDATE telegram_notification_deliveries SET expires_at=?
+                WHERE delivery_id IN (SELECT delivery_id FROM telegram_interaction_closures)
+                AND state='pending' AND attempt=0""", (expired,)).rowcount == 1
+    notice, = claim(fixture, token, endpoint)
+    assert notice["notificationKind"] == "public_status" and notice["deliveryId"] != card["deliveryId"]
+    send(fixture, scope(token, endpoint, notice), receipt=102)
+    assert not claim(fixture, token, endpoint)
+    assert delivery.handle(service, **original, action="begin") == {"allowed": False}
+    with service.tasks._connect() as db:
+        original_row = db.execute("SELECT state,receipt,expires_at FROM telegram_notification_deliveries WHERE delivery_id=?",
+                                  (card["deliveryId"],)).fetchone()
+        assert tuple(original_row) == ("sent", 101, expired)
