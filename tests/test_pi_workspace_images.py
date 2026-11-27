@@ -37,6 +37,7 @@ def paired(pi):
         instance="pi-office",
         endpoint_key=pair["endpointKey"],
         pairing_ref=pair["pairingRef"],
+        token_id=owner['token_id'],
     )
 
 
@@ -154,6 +155,44 @@ def test_image_claim_rechecks_binding_and_keeps_unknown_send_closed(pi, paired):
     links.revoke(pi.accounts["a"]["account_id"], "pi-office", "8801")
     with pytest.raises(PermissionError):
         call("read", **fresh)
+
+
+def test_original_image_receipt_after_revocation_settles_only_the_frozen_attempt(pi, paired):
+    send(pi, 'a', 'late-original-image', [PNG+b'a', PNG+b'b'])
+    item = delivery(pi.service, **paired, action='claim')
+    target = {'delivery_id':item['deliveryId'], 'attempt':item['attempt']}
+    assert delivery(pi.service, **paired, action='read', **target)['available']
+    assert delivery(pi.service, **paired, action='begin', **target)['available']
+    TelegramPilotLinks(pi.service).revoke(pi.accounts['a']['account_id'], 'pi-office', '8801')
+    for wrong in ({'subject':'user-b'}, {'token_id':'other-token'}, {'instance':'other'},
+                  {'endpoint_key':'telegram:8801:502'}, {'pairing_ref':'0'*64}, {'attempt':2}):
+        values = {**paired, **target, **wrong}
+        with pytest.raises(PermissionError):
+            delivery(pi.service, **values, action='ack', receipt=901)
+    assert delivery(pi.service, **paired, action='ack', **target)['recorded']
+    assert delivery(pi.service, **paired, action='ack', receipt=901, **target)['recorded']
+    assert delivery(pi.service, **paired, action='ack', receipt=901, **target)['recorded']
+    assert not delivery(pi.service, **paired, action='ack', receipt=902, **target)['recorded']
+    for action in ('read', 'begin'):
+        with pytest.raises(PermissionError):
+            delivery(pi.service, **paired, action=action, **target)
+    with pytest.raises(PermissionError):
+        delivery(pi.service, **paired, action='claim')
+    with pi.service.workspace._connect() as db:
+        assert [tuple(row) for row in db.execute('SELECT state,attempt,receipt FROM pi_workspace_image_deliveries ORDER BY ordinal')] == [
+            ('sent',1,901), ('pending',0,None)]
+
+
+def test_legacy_image_without_original_credential_does_not_gain_revoked_ack_access(pi, paired):
+    send(pi, 'a', 'legacy-image', [PNG+b'a'])
+    with pi.service.workspace._connect() as db:
+        db.execute('UPDATE pi_workspace_image_deliveries SET token_id=NULL,endpoint_key=NULL')
+    item = delivery(pi.service, **paired, action='claim')
+    target = {'delivery_id':item['deliveryId'], 'attempt':item['attempt']}
+    assert delivery(pi.service, **paired, action='begin', **target)['available']
+    TelegramPilotLinks(pi.service).revoke(pi.accounts['a']['account_id'], 'pi-office', '8801')
+    with pytest.raises(PermissionError):
+        delivery(pi.service, **paired, action='ack', receipt=901, **target)
 
 
 @pytest.mark.parametrize("text_unavailable", [False, True])

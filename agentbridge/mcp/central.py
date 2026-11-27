@@ -6746,7 +6746,8 @@ def create_central_mcp_server(
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(ctx, service=service, identity=identity, agent_host="pi")
         result = await asyncio.to_thread(delivery, service, subject=identity["user_subject"], instance=host["hostInstanceId"],
-            endpoint_key=endpoint_key, pairing_ref=pairing_ref, action=action, delivery_id=delivery_id, attempt=attempt, receipt=receipt)
+            endpoint_key=endpoint_key, pairing_ref=pairing_ref, action=action, delivery_id=delivery_id, attempt=attempt,
+            receipt=receipt, token_id=identity['token_id'])
         return CallToolResult(content=[], structuredContent=result)
 
     @mcp.tool(name='agentbridge_host_notification_validate',title='Validate Endpoint Delivery Before Sending',

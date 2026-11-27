@@ -97,6 +97,9 @@ async def dispatch(host, record, action, body):
                 }, meta=meta)
                 if reply.isError or not isinstance(reply.structuredContent, dict):
                     raise HTTPException(403)
+                if body.get('action') == 'claim':
+                    from .media_receipts import record_claim
+                    record_claim(host, record, reply.structuredContent)
                 return reply.structuredContent
         if action == "telegram-task":
             return await telegram_tasks.navigate(delivery, record, body)

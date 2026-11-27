@@ -271,6 +271,9 @@ class Host:
         return event
 
     async def action(self, action, body):
+        if action == 'telegram-workspace-media' and body.get('action') == 'ack' and 'pairingRef' in body:
+            from .media_receipts import acknowledge
+            return await acknowledge(self, body)
         if action == "telegram-workspace-result-view" and body.get("action") == "ack" and "pairingRef" in body:
             from aiohttp import web
             from nanobot_agentbridge.workspace_query_delivery import acknowledge_receipt

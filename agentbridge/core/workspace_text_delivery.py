@@ -133,7 +133,7 @@ def enqueue_message(db, entry):
         _decision(db, pin, entry["entry_id"], kind, pin["selection"])
         return
     metadata = json.loads(entry["payload_json"])
-    if entry["task_id"] or set(metadata) - {"attachments"} or metadata.get("attachments"):
+    if entry["task_id"] or set(metadata) - {"attachments"}:
         _decision(db, pin, entry["entry_id"], kind, "private_metadata")
         return
     text = _project_text(db, pin, entry)

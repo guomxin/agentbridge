@@ -965,7 +965,7 @@ class WorkspaceStore:
                     source_endpoint_id=host["endpoint_id"],
                     message_key=message_key,
                     role="user",
-                    _workspace_chat=not (stored_attachments or skill_trial or continuation_task_id),
+                    _workspace_chat=not (skill_trial or continuation_task_id),
                     text=message,
                     payload={"attachments": timeline_attachments,
                              **({'skillTrial': trial_snapshot} if trial_snapshot else {})},

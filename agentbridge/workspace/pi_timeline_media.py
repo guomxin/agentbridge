@@ -20,10 +20,15 @@ def initialize(db):
             instance TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL, pair_proof TEXT NOT NULL,
             attachment_id TEXT NOT NULL, ordinal INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
             attempt INTEGER NOT NULL DEFAULT 0, lease_until REAL, receipt INTEGER,
+            token_id TEXT, endpoint_key TEXT,
             UNIQUE(dispatch_id,destination,ordinal));
         CREATE INDEX IF NOT EXISTS pi_workspace_images_destination
             ON pi_workspace_image_deliveries(subject,instance,destination,pair_proof,state);
     """)
+    columns = {row[1] for row in db.execute('PRAGMA table_info(pi_workspace_image_deliveries)')}
+    for name in ('token_id', 'endpoint_key'):
+        if name not in columns:
+            db.execute(f'ALTER TABLE pi_workspace_image_deliveries ADD COLUMN {name} TEXT')
 
 
 def enqueue(db, tasks, dispatch, entry, images):
@@ -32,11 +37,15 @@ def enqueue(db, tasks, dispatch, entry, images):
     if not web or web["host_type"] != "pi" or web["endpoint_id"] != dispatch["origin_endpoint_id"]:
         return
     for endpoint, proof in mirror_destinations(db, tasks, subject, web):
+        identity = db.execute('SELECT token_id,endpoint_key FROM client_endpoints WHERE endpoint_id=? AND user_subject=?',
+                              (endpoint, subject)).fetchone()
+        if not identity or not identity['token_id']:
+            continue
         for image in images:
             db.execute(
                 """INSERT OR IGNORE INTO pi_workspace_image_deliveries
-                (delivery_id,dispatch_id,entry_id,subject,instance,source,destination,pair_proof,attachment_id,ordinal)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (delivery_id,dispatch_id,entry_id,subject,instance,source,destination,pair_proof,attachment_id,ordinal,token_id,endpoint_key)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     str(uuid4()),
                     dispatch["dispatch_id"],
@@ -48,19 +57,22 @@ def enqueue(db, tasks, dispatch, entry, images):
                     proof,
                     image["attachment_id"],
                     image["ordinal"],
+                    identity['token_id'],
+                    identity['endpoint_key'],
                 ),
             )
 
 
-def _scope(service, db, subject, instance, endpoint_key, pairing_ref):
+def _scope(service, db, subject, instance, endpoint_key, pairing_ref, token_id=None):
     ownership = endpoint_instances(db, subject)
     web = mirror_binding(db, subject, instance, ownership)
     endpoint = db.execute(
-        """SELECT endpoint_id FROM client_endpoints WHERE user_subject=? AND agent_host='pi'
+        """SELECT endpoint_id,token_id FROM client_endpoints WHERE user_subject=? AND agent_host='pi'
         AND client_type='telegram' AND endpoint_key=? AND state='active'""",
         (subject, endpoint_key),
     ).fetchone()
-    if web and web["host_type"] == "pi" and endpoint and ownership.get(endpoint[0]) == ("pi", instance):
+    if (web and web["host_type"] == "pi" and endpoint and ownership.get(endpoint[0]) == ("pi", instance)
+            and (token_id is None or endpoint['token_id'] == token_id)):
         for destination, proof in mirror_destinations(db, service.tasks, subject, web):
             if destination == endpoint[0] and pairing_ref == proof:
                 return (subject, instance, web["endpoint_id"], destination, proof)
@@ -137,19 +149,30 @@ def delivery(
     delivery_id=None,
     attempt=None,
     receipt=None,
+    token_id=None,
 ):
     if action not in ("claim", "read", "begin", "ack"):
         raise ValueError("未知的原图投递操作。")
-    params = (subject, instance, endpoint_key, pairing_ref)
+    params = (subject, instance, endpoint_key, pairing_ref, token_id)
     with service.workspace._connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        scope = _scope(service, db, *params)
+        row = None
+        if action == 'ack' and token_id is not None:
+            # Settle only a previously frozen send under its original personal
+            # credential. This path cannot issue bytes or authorize another send.
+            row = db.execute("""SELECT * FROM pi_workspace_image_deliveries WHERE subject=? AND instance=?
+                AND endpoint_key=? AND pair_proof=? AND token_id=? AND delivery_id=? AND attempt=?""",
+                (subject, instance, endpoint_key, pairing_ref, token_id, delivery_id, attempt)).fetchone()
+        scope = _scope(service, db, *params) if row is None else None
         if action == "claim":
             return _claim(db, scope)
-        row = db.execute(
-            f"SELECT * FROM pi_workspace_image_deliveries WHERE {_SCOPE} AND delivery_id=? AND attempt=?",
-            (*scope, delivery_id, attempt),
-        ).fetchone()
+        if row is None:
+            row = db.execute(
+                f"SELECT * FROM pi_workspace_image_deliveries WHERE {_SCOPE} AND delivery_id=? AND attempt=?",
+                (*scope, delivery_id, attempt),
+            ).fetchone()
+            if row is not None and token_id is not None and row['token_id'] not in (None, token_id):
+                row = None
         if not row:
             raise PermissionError("找不到当前申请的原图投递。")
         if action == "ack":

@@ -68,13 +68,18 @@ def pair(db, subject, source, endpoint, ownership):
     return (target, proof) if proof else None
 
 
-def pin(db, question, subject, source):
+def pin(db, question, subject, source, *, media_tasks=None):
     """Called after the question and its eligible private-chat destinations are recorded."""
-    candidates = db.execute("""SELECT e.endpoint_id,e.agent_host,e.token_id FROM notification_outbox o
-        JOIN client_endpoints e ON e.endpoint_id=o.endpoint_id AND e.user_subject=o.user_subject
-        WHERE o.event_id=? AND o.user_subject=? AND o.payload_type='timeline_message'
-        AND e.client_type='telegram' AND e.state='active'""", (question, subject)).fetchall()
     ownership = endpoint_instances(db, subject)
+    if media_tasks is not None:
+        # Attachment bytes use their own resource policy. Freeze the ordinary
+        # text destination even when the legacy text-only outbox has no entry.
+        candidates, ownership = _endpoint_candidates(db, media_tasks, subject, source, ownership)
+    else:
+        candidates = db.execute("""SELECT e.endpoint_id,e.agent_host,e.token_id FROM notification_outbox o
+            JOIN client_endpoints e ON e.endpoint_id=o.endpoint_id AND e.user_subject=o.user_subject
+            WHERE o.event_id=? AND o.user_subject=? AND o.payload_type='timeline_message'
+            AND e.client_type='telegram' AND e.state='active'""", (question, subject)).fetchall()
     if not _pin_destination(db, question, subject, source, candidates, ownership):
         scope = ownership.get(source)
         if scope and registered(db, subject, scope[0], scope, None):
@@ -86,14 +91,19 @@ def pin(db, question, subject, source):
 def pin_button(db, tasks, event_id, subject, source):
     """A button has a durable command event but no user-authored timeline message."""
     ownership = endpoint_instances(db, subject)
+    candidates, ownership = _endpoint_candidates(db, tasks, subject, source, ownership)
+    _pin_destination(db, event_id, subject, source, candidates, ownership)
+
+
+def _endpoint_candidates(db, tasks, subject, source, ownership):
     scope = ownership.get(source)
     if not scope:
-        return
+        return [], ownership
     if scope[0] in {"nanobot", "pi"}:
         from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_destinations
         binding = mirror_binding(db, subject, scope[1], ownership)
         if not binding or binding["endpoint_id"] != source or not registered(db, subject, scope[0], scope, binding["token_id"]):
-            return
+            return [], ownership
         mirror_destinations(db, tasks, subject, binding)
         ownership = endpoint_instances(db, subject)
     candidates = [row for row in db.execute("""SELECT endpoint_id,agent_host,token_id FROM client_endpoints
@@ -101,7 +111,7 @@ def pin_button(db, tasks, event_id, subject, source):
           AND EXISTS (SELECT 1 FROM json_each(capabilities_json) WHERE value IN ('timeline_message','direct_status'))""",
         (subject, scope[0]))
         if ownership.get(row["endpoint_id"]) == scope]
-    _pin_destination(db, event_id, subject, source, candidates, ownership)
+    return candidates, ownership
 
 
 def _pin_destination(db, question, subject, source, candidates, ownership):

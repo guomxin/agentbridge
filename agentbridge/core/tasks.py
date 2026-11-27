@@ -3108,7 +3108,8 @@ class TaskHubStore:
                 workspace_chat=_workspace_chat or _workspace_response,
             )
             if role == "user" and _workspace_chat:
-                workspace_query_delivery.pin(connection, entry_id, user_subject, source_endpoint_id)
+                workspace_query_delivery.pin(connection, entry_id, user_subject, source_endpoint_id,
+                    media_tasks=self if json.loads(payload_json).get("attachments") else None)
             if _workspace_chat or _workspace_response:
                 workspace_text_delivery.enqueue_message(connection, row)
         else:

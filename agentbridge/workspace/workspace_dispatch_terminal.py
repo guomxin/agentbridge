@@ -77,7 +77,7 @@ def record(db, dispatch, state, event, now):
          dispatch["origin_endpoint_id"], public["text"], _json(payload), now))
     # Only the original admission pin can authorize a status delivery. Never
     # enqueue this entry through the legacy timeline mirror as well.
-    if not question["task_id"] and not (set(metadata) - {"attachments"}) and not metadata.get("attachments"):
+    if not question["task_id"] and not (set(metadata) - {"attachments"}):
         workspace_text_delivery.enqueue_status(db, dispatch, state)
     mark_transaction_change(db, user_subject=dispatch["user_subject"])
     return public
