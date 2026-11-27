@@ -72,6 +72,7 @@ def _rich_loopback(home: Path):
         "typing_calls": [],
         "receipts": [],
         "admissions": {},
+        "received_sources": [],
         "pending": False,
         "has_private_card": False,
         "card_payload": None,
@@ -126,12 +127,19 @@ def _rich_loopback(home: Path):
                     return
                 if self.path == "/v1/telegram-binding":
                     answer = {"verified": True}
+                elif self.path == "/v1/telegram-received-source":
+                    assert body["binding"] == binding
+                    state["received_sources"].append(body)
+                    # This older rich-card scenario exercises the inherited pairing path.
+                    answer = {"accepted": True, "generationScoped": False}
                 elif self.path == "/v1/telegram-timeline":
                     answer = {"recorded": True}
                 elif self.path == "/v1/telegram-mirror-peers":
                     answer = {"senderIds": list(state["mirror_peers"])}
                 elif self.path == "/v1/accept":
                     key = body["requestKey"]
+                    assert any(key == f"tg:{BOT}:501:{item['messageId']}"
+                               for item in state["received_sources"])
                     run = state["admissions"].setdefault(key, f"run-{len(state['admissions']) + 1}")
                     answer = {"runId": run, "state": "accepted"}
                 elif self.path == "/v1/lookup":
@@ -473,6 +481,9 @@ def test_telegram_pilot_rich_card_dedupe_result_view_markdown_typing_and_lost_re
         ]
         pilot.poll_once()
 
+        assert len(state["received_sources"]) == 1
+        assert state["received_sources"][0]["messageId"] == 10
+        assert set(state["admissions"]) == {f"tg:{BOT}:501:10"}
         assert len(state["typing_calls"]) >= 1
         assert state["typing_calls"][0] == {"chat_id": 501, "action": "typing"}
         # Even though BOTH reconcile (/v1/card) AND TerminalMessages.poll (notifications) saw the same interaction,
