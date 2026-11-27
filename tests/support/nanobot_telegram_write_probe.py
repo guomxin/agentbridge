@@ -2,6 +2,8 @@
 
 import argparse
 from pathlib import Path
+from datetime import datetime, timezone
+import time
 import json
 import sqlite3
 import sys
@@ -23,7 +25,11 @@ def exercise(*, fixture, binding, instance, gateway, model, capability="oa.leave
     )
     other = gateway._request("telegram-route", {"botId": "8001", "senderId": "777"})
     assert not other["binding"]
-    req = {"idempotency_key": "synthetic-telegram-private-write"}
+    message_id = 37
+    received = gateway._request("telegram-received-source", {"binding": tg, "messageId": message_id,
+        "receivedAt": datetime.fromtimestamp(int(time.time()), timezone.utc).isoformat()})
+    assert received["accepted"] is True
+    req = {"idempotency_key": f"tg:8001:501:{message_id}"}
     request = "请帮我保存请假草稿，使用我的工作台核验。" if capability == "oa.leave.prepare" else "请汇总我的已办和已发，形成工作日志并请我核验。"
     decided = False
     for event in gateway.send_dispatch(req, tg, request, [], None):
