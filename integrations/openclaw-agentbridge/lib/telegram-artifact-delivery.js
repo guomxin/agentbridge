@@ -124,7 +124,7 @@ export class TelegramArtifactDelivery {
   async sendReport(key,record,client){
     if(!this.current(record)||!client)return false;
     try{
-      const response=await client.callTool('agentbridge_host_artifact_delivery_report',record.args,{signal:AbortSignal.timeout(5000),meta:hostContextMeta()});
+      const response=await client.callTool('agentbridge_host_artifact_delivery_report',{...record.args,receipt_v2:true},{signal:AbortSignal.timeout(5000),meta:hostContextMeta()});
       if(response?.status!=='succeeded'||!response.eventId||response.task?.taskId!==record.args.task_id||
          response.delivery?.deliveryRef!==record.args.delivery_ref||response.delivery?.channel!==record.args.channel||
          !record.args.files.every(expected=>response.delivery.files?.some(actual=>actual.artifactId===expected.artifact_id&&
