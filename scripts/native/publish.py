@@ -118,7 +118,9 @@ class Publisher:
         pi = getattr(self, 'pi', None)
         pi_plan = pi_release.observability(self, pi, offline=offline) if pi else None
         reverting = getattr(self.args, 'rollback_nanobot', False) or getattr(self.args, 'rollback_pi', False)
+        maintenance = self.gateway_maintenance(offline=offline)
         return {'status': 'planned', 'commit': self.commit, 'branch': branch, 'remoteUrl': remote,
+                'gatewayMaintenance': maintenance,
                 'nanoBotPilot': pilot_plan,
                 'piPilot': pi_plan,
                 'trackedFilesClean': clean, 'releaseBranchAllowed': branch_ok,
@@ -133,6 +135,23 @@ class Publisher:
                             (['NanoBot runtime level is not approved for this candidate'] if not reverting and pilot_plan and not pilot_plan['compatibility']['approved'] else []) +
                             (['Pi runtime or candidate qualification is not approved'] if not reverting and pi_plan and not pi_plan['compatibility']['approved'] else []) +
                             (['remote predecessor unverified'] if offline else [])}
+
+    def gateway_maintenance(self, *, offline=False):
+        path = getattr(self.args, 'gateway_maintenance_receipt', None)
+        if not path:
+            return None
+        if (self.args.resume or getattr(self.args, 'rollback_nanobot', False)
+                or getattr(self.args, 'rollback_pi', False) or getattr(self.args, 'restore_pi_from', None)):
+            raise ValueError('Gateway maintenance start cannot be combined with resume or host rollback')
+        if not self.args.host_profile or not self.args.authorization:
+            raise ValueError('Gateway maintenance requires the original host profile and authorization')
+        import gateway_maintenance
+        import lifecycle
+        receipt = gateway_maintenance.check(lifecycle.settings(self.args.host_profile),
+            self.args.authorization, self.commit, path, runtime=not offline)
+        return {'phase': receipt['phase'], 'candidate': receipt['candidate'],
+                'runtimeChecked': not offline, 'explicitEnableAuthorized': True,
+                'receiptSha256': sha(private_file(path).read_bytes())}
 
     def deploy(self, artifact):
         if self.args.resume:
@@ -212,6 +231,7 @@ class Publisher:
             with nanobot_release.pilot_lock(self.nanobot):
                 return nanobot_release.restore(self,self.nanobot,host)
         before = lifecycle.fingerprint(host)
+        maintenance = self.gateway_maintenance()
         artifact, validation_mode = candidate_artifact(require_receipt=self.args.reuse_validation or self.args.resume)
         test_run([sys.executable, '-m', 'unittest', 'tests.test_runtime_governance', 'tests.test_runtime_backup'])
         # Recheck before the first remote mutation, after potentially long validation.
@@ -224,6 +244,8 @@ class Publisher:
         if (reviewed_host.get('profileSha256') != host.get('profileSha256')
                 or lifecycle.fingerprint(reviewed_host) != before):
             raise ValueError('Host configuration changed during validation')
+        if self.gateway_maintenance() != maintenance:
+            raise ValueError('Gateway maintenance evidence changed during validation')
         pilot = getattr(self, 'nanobot', None)
         pi = getattr(self, 'pi', None)
         if pi:
@@ -258,7 +280,13 @@ class Publisher:
         except (RuntimeError, ValueError, OSError):
             observed = None
         restart = lifecycle.decision(before, baseline, observed)
-        if restart['required']:
+        if maintenance:
+            if self.gateway_maintenance() != maintenance:
+                raise ValueError('Gateway maintenance evidence changed during deployment')
+            import gateway_maintenance
+            gateway_maintenance.start(host, self.args.authorization, self.commit,
+                                      self.args.gateway_maintenance_receipt)
+        elif restart['required']:
             if self.args.resume:
                 raise ValueError('Resume requires verified unchanged Gateway; restart forbidden')
             lifecycle.manage(host, 'restart', 'gateway', self.args.authorization)

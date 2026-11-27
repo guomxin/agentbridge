@@ -35,6 +35,8 @@ def main():
     publish.add_argument('--nanobot-profile', help='Private Mac pilot profile pinned by the environment profile')
     publish.add_argument('--pi-profile', help='Private Pi host profile pinned by the environment profile')
     publish.add_argument('--authorization')
+    publish.add_argument('--gateway-maintenance-receipt',
+                         help='Explicitly enable the Gateway stopped for this candidate and config switch')
     publish.add_argument('--identity-label', action='append', default=[])
     publish.add_argument('--expect-endpoint', action='append', default=[])
     publish.add_argument('--offline', action='store_true', help='No network, predecessor remains unverified')
@@ -53,6 +55,9 @@ def main():
     host.add_argument('--ownership-evidence')
     host.add_argument('--kind', choices=['gateway', 'tunnel'], default='gateway')
     host.add_argument('--authorization')
+    host.add_argument('--publish-candidate', help='Exact candidate for a managed plugin-path maintenance stop')
+    host.add_argument('--replacement-config', help='Reviewed private config copy changing one plugin load path')
+    host.add_argument('--maintenance-receipt', help='New private receipt for a publish maintenance stop')
     args = parser.parse_args()
     if sys.version_info < (3, 12):
         parser.error('Python 3.12+ required')
@@ -64,6 +69,8 @@ def main():
         elif args.command == 'publish':
             if args.apply and (not args.host_profile or not args.authorization):
                 raise ValueError('--apply requires --host-profile and --authorization')
+            if args.gateway_maintenance_receipt and (args.resume or args.rollback_nanobot or args.rollback_pi or args.restore_pi_from):
+                raise ValueError('Gateway maintenance start cannot be combined with resume or host rollback')
             if args.restore_pi_from:
                 from pi_same_release import restore_published
                 result = restore_published(args)
@@ -74,7 +81,14 @@ def main():
         else:
             import lifecycle
             config = lifecycle.settings(args.profile)
-            if args.action == 'render':
+            maintenance = (args.publish_candidate, args.replacement_config, args.maintenance_receipt)
+            if any(maintenance):
+                if args.action != 'stop' or args.kind != 'gateway' or not all(maintenance) or not args.authorization:
+                    raise ValueError('Maintenance requires Gateway stop, authorization, candidate, replacement config and receipt')
+                import gateway_maintenance
+                result = gateway_maintenance.stop(config, args.authorization, args.publish_candidate,
+                                                  args.replacement_config, args.maintenance_receipt)
+            elif args.action == 'render':
                 if not args.destination:
                     raise ValueError('render requires a new --destination')
                 result = lifecycle.render(config, args.destination)
