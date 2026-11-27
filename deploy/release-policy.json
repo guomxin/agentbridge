@@ -4,11 +4,11 @@
     "87765c133e20"
   ],
   "dataCompatibility": "reviewed-schema-transition",
-  "reason": "Add scoped delivery, history, media and independent pairing receipts for the prior deployed central service. The two existing tables gain nullable route or challenge evidence. Existing scopes are retained, with no automatic adoption of old sends, backfill of missing proof or business operation replay.",
+  "reason": "Add scoped delivery, history, media and independent pairing receipts for the prior deployed central service. The two existing tables gain nullable route or challenge evidence. New original card sends can record an observation watch and a closure bound to their delivery receipt. Existing scopes are retained, with no automatic adoption of old sends, backfill of missing proof or business operation replay.",
   "schemaTransitions": {
     "agentbridge.db": {
       "beforeSha256": "7beef332b3cf8511a6c1ec15caa70f441984e112b936b06e9150ec85638bec2f",
-      "afterSha256": "edd26b3fa1e3fbcb2609723f717f053ede58b08ed9a91608d436ddaa95849663"
+      "afterSha256": "d5cde8df5a7c35db391e599811f99942af9011bd31118fec6c56e7a18f3f69be"
     }
   }
 }
