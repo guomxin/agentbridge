@@ -64,7 +64,7 @@ def _current(db, subject, host, instance, token, endpoint_key):
         row['account_id'],row['conversation_ref'],json.loads(row['route_json']))
 
 
-def source(service, *, subject, host, instance, token, endpoint_key, source_message_id, received_at):
+def source(service, *, subject, host, instance, token, endpoint_key, source_message_id, received_at, pairing_protocol=None):
     stamp=_received_time(received_at)
     if type(source_message_id) is not int or not 0<source_message_id<2**53:
         raise ValueError('Original private message required')
@@ -81,7 +81,14 @@ def source(service, *, subject, host, instance, token, endpoint_key, source_mess
                 raise PermissionError('Original received source cannot be replaced')
             endpoint_id,proof=old['endpoint_id'],old['pair_proof']
         else:
+            from agentbridge.workspace.telegram_pair_migration import permits_delivery,reception_boundary
+            if not permits_delivery(db,host,subject,instance,endpoint_key,token,pairing_protocol):
+                raise PermissionError("Current reception protocol required")
             endpoint,proof=_current(db,subject,host,instance,token,endpoint_key)
+            if host in {'nanobot','pi'}:
+                boundary=reception_boundary(db,subject,instance,endpoint['account_id'],endpoint['external_subject'],token)
+                if boundary['generationScoped'] and (stamp.microsecond or stamp.timestamp()<=boundary['receptionFloor']):
+                    raise PermissionError("Original platform second does not prove the current grant")
             # Telegram dates have second precision. Endpoint creation is lazy,
             # so its timestamp is not the start of the user's authorization.
             grant=db.execute('SELECT created_at FROM mcp_identity_tokens WHERE token_id=?',(token,)).fetchone()
@@ -150,7 +157,7 @@ def _receipt(row):
 
 
 def append(service, *, subject, host, instance, token, endpoint_key, pairing_ref, source_message_id,
-           ordinal, file_name, mime_type, byte_size, sha256, received_at, content_base64=None, failure=None):
+           ordinal, file_name, mime_type, byte_size, sha256, received_at, content_base64=None, failure=None, pairing_protocol=None):
     manifest,stamp=_manifest(source_message_id,ordinal,file_name,mime_type,byte_size,sha256,received_at,failure)
     if not isinstance(pairing_ref,str) or not re.fullmatch('[0-9a-f]{64}',pairing_ref):
         raise ValueError('Original pairing generation required')
@@ -177,6 +184,9 @@ def append(service, *, subject, host, instance, token, endpoint_key, pairing_ref
                 AND endpoint_key=? AND source_message_id=?''',key[:-1]).fetchone()
             if not received or (received['token_id'],received['pair_proof'],received['received_at'])!=(token,pairing_ref,manifest['receivedAt']):
                 raise PermissionError('Original independent received source required')
+            from agentbridge.workspace.telegram_pair_migration import permits_delivery
+            if not permits_delivery(db,host,subject,instance,endpoint_key,token,pairing_protocol):
+                raise PermissionError("Current reception protocol required")
             endpoint,proof=_current(db,subject,host,instance,token,endpoint_key)
             if received['endpoint_id']!=endpoint['endpoint_id']:
                 raise PermissionError('Original received endpoint changed')

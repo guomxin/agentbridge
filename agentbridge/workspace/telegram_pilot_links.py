@@ -572,4 +572,5 @@ class TelegramPilotLinks:
                 "workspaceEndpointId": binding["endpoint_id"],
                 "workspaceEndpointKey": binding["endpoint_key"],
                 "pairingRef": proof,
+                **migration.reception_boundary(db,subject,instance,bot,sender,token_id),
             }

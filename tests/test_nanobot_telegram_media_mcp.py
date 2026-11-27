@@ -1,7 +1,7 @@
 """Shared Python intake helpers through the real private MCP tools and owned store."""
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 import hashlib
 import json
 import sys
@@ -66,7 +66,7 @@ def test_shared_private_intake_projects_original_resource_and_only_recovers_afte
         host.control_sessions=SimpleNamespace(borrow=borrowed)
         async def run():
             assert (await call_tool('agentbridge_host_register')).structuredContent['acceptedLevel']=='L3'
-            body={'binding':{k:record[k] for k in BINDING_FIELDS},'messageId':1001,'receivedAt':datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+            body={'binding':{k:record[k] for k in BINDING_FIELDS},'messageId':1001,'receivedAt':(datetime.now(timezone.utc).replace(microsecond=0)+timedelta(seconds=1)).isoformat()}
             source=await prepare_source(host,record,body)
             body.update(pairingRef=source['pairingRef'],ordinal=0,fileName='原文件.txt',mimeType='text/plain',byteSize=3,
                         sha256=hashlib.sha256(b'abc').hexdigest(),contentBase64='YWJj',failure=None)

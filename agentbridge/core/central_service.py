@@ -2876,6 +2876,11 @@ class CentralCapabilityService:
         task_id: str | None = None,
         host_instance_id: str | None = None,
         projection_v2: bool = False,
+        projection_receipt_only: bool = False,
+        pairing_protocol: int | None = None,
+        source_message_id: int | None = None,
+        received_at: str | None = None,
+        pairing_ref: str | None = None,
     ) -> dict:
         from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
         from agentbridge.core.store_transactions import store_transaction
@@ -2887,9 +2892,15 @@ class CentralCapabilityService:
             return append(self, subject=user_subject, host=agent_host, instance=host_instance_id,
                           token=token_id, endpoint_key=endpoint_key, sender=external_subject, account=account_id,
                           conversation=conversation_ref, route=route, message_key=message_key, role=role,
-                          text=text, task_id=task_id)
+                          text=text, task_id=task_id, receipt_only=projection_receipt_only, pairing_protocol=pairing_protocol,
+                          source_message_id=source_message_id, received_at=received_at, pairing_ref=pairing_ref)
 
+        if projection_receipt_only:
+            raise ValueError("Receipt-only requires the durable history protocol")
         with store_transaction(self.tasks) as db:
+            from agentbridge.workspace.telegram_pair_migration import permits_delivery
+            if not permits_delivery(db,agent_host,user_subject,host_instance_id,endpoint_key,token_id,pairing_protocol):
+                raise PermissionError("Current private history protocol required")
             old = db.execute("SELECT * FROM client_endpoints WHERE agent_host=? AND endpoint_key=?",
                              (agent_host, endpoint_key)).fetchone()
             if host_instance_id:
@@ -2914,6 +2925,13 @@ class CentralCapabilityService:
                 text = public_mirror_text(text)
                 if not text:
                     raise ValueError("Private content cannot be published to the chat timeline")
+                if agent_host in {"nanobot", "pi"}:
+                    from agentbridge.workspace.telegram_pair_migration import reception_boundary
+                    boundary = reception_boundary(db,user_subject,host_instance_id,account_id,external_subject,token_id)
+                    if boundary["generationScoped"] and not db.execute("""SELECT 1 FROM user_timeline
+                            WHERE user_subject=? AND source_endpoint_id=? AND dedupe_key=? AND role=? AND text=? AND task_id IS ?""",
+                            (user_subject,old["endpoint_id"],f"message:{message_key}",role,text,task_id)).fetchone():
+                        raise PermissionError("First history requires the durable original source protocol")
                 endpoint, endpoint_reused = _endpoint_from_row(old), True
             elif registered_web:
                 if (old["user_subject"] != user_subject or old["state"] != "active" or

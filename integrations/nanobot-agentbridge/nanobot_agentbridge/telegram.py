@@ -213,6 +213,9 @@ class TelegramPilot:
                 bot INTEGER, chat INTEGER, message INTEGER, subject TEXT, binding_hash TEXT,
                 state TEXT, run_id TEXT, receipt INTEGER, PRIMARY KEY(bot,chat,message));
             CREATE INDEX IF NOT EXISTS messages_waiting ON messages(bot,state);
+            CREATE TABLE IF NOT EXISTS telegram_inbound_sources(
+                bot INTEGER,chat INTEGER,message INTEGER,binding_json TEXT NOT NULL,pairing TEXT NOT NULL,
+                received_at TEXT NOT NULL,PRIMARY KEY(bot,chat,message));
             CREATE TABLE IF NOT EXISTS telegram_card_deliveries(
                 bot INTEGER NOT NULL, chat INTEGER NOT NULL, dedupe_key TEXT NOT NULL,
                 delivery TEXT, state TEXT NOT NULL, receipt INTEGER,
@@ -407,6 +410,9 @@ class TelegramPilot:
             return
         binding, digest = self._binding(chat_id)
         if binding is None:
+            return
+        from .telegram_reception import preflight
+        if not preflight(self,msg,chat_id,message_id,binding,digest):
             return
         text = msg["text"].strip()
         navigation = navigation_command(text, msg.get("reply_to_message"))

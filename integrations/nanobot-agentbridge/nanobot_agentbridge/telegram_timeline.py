@@ -68,6 +68,7 @@ async def publish_timeline(host, record, body):
     if (type(message) is not int or not 0 < message < 2**53 or role not in ("user", "assistant") or not text
             or (role == "user" and not telegram_text_fits(text))):
         raise web.HTTPBadRequest()
+    body = {**body, "text": text}
     key = f"tg:{bot}:{sender}:{message}"
     entry = host.runs.lookup(key, subject=record["user_subject"], endpoint=record["endpoint_id"],
                              conversation=record["session_key"])
@@ -98,6 +99,8 @@ async def publish_timeline(host, record, body):
                 or any(type(item) is not int or not 0 < item < 2**53 for item in receipts)
                 or len(set(receipts)) != len(receipts)):
             raise web.HTTPForbidden()
+    from .telegram_reception import validate
+    source = await validate(host, record, key)
     payload = host.worker_payload(record, None)
     host_type = payload.get("hostType", "nanobot")
     async with open_host_session(host, payload, lane="control") as (session, meta, level):
@@ -106,29 +109,44 @@ async def publish_timeline(host, record, body):
             raise web.HTTPForbidden()
         if received and not record_received(host, record, key, text):
             raise web.HTTPForbidden()
-        material = json.dumps([host.instance, record["endpoint_id"], key, role], separators=(",", ":")).encode()
-        message_key = host_type + ":telegram:" + hashlib.sha256(material).hexdigest()
-        result = await session.call_tool("agentbridge_host_timeline_append", {
-            "agent_host": host_type, "endpoint_key": record["endpoint_key"], "client_type": "telegram",
-            "external_subject": sender, "conversation_ref": record["session_key"], "account_id": bot,
-            "route": {"channel": "telegram", "accountId": bot, "to": sender},
-            "message_key": message_key,
-            "role": role, "text": text,
-            **({"projection_v2": True} if mode else {}),
-        }, meta=meta)
-        receipt = result.structuredContent or {}
-        endpoint, row = receipt.get("endpoint", {}), receipt.get("entry", {})
-        if (result.isError or receipt.get("status") != "succeeded" or endpoint.get("endpointId") != record["endpoint_id"]
-                or row.get("role") != role or (not mode and row.get("text") != text)):
+        from .telegram_history_receipts import freeze
+        freeze(host, record, key, body, source)
+        return await _central_publish(session, meta, host.instance, record, body, host_type, source=source)
+
+
+async def _central_publish(session, meta, instance, record, body, host_type, *, receipt_only=False, source=None):
+    from aiohttp import web
+    _, bot, sender = record["endpoint_key"].split(":")
+    key = f"tg:{bot}:{sender}:{body['messageId']}"
+    mode, role, text = body.get("projectionMode"), body["role"], body["text"]
+    material = json.dumps([instance, record["endpoint_id"], key, role], separators=(",", ":")).encode()
+    message_key = host_type + ":telegram:" + hashlib.sha256(material).hexdigest()
+    result = await session.call_tool("agentbridge_host_timeline_append", {
+        "agent_host": host_type, "endpoint_key": record["endpoint_key"], "client_type": "telegram",
+        "external_subject": sender, "conversation_ref": record["session_key"], "account_id": bot,
+        "route": {"channel": "telegram", "accountId": bot, "to": sender},
+        "message_key": message_key,
+        "role": role, "text": text,
+        **({"projection_v2": True} if mode else {}),
+        **({"projection_receipt_only": True} if receipt_only else {}),
+        **({"source_message_id": source["messageId"], "received_at": source["receivedAt"],
+            "pairing_ref": source["pairingRef"]} if source is not None else {}),
+    }, meta=meta)
+    receipt = result.structuredContent or {}
+    if receipt_only and not result.isError and receipt.get("status") == "unavailable" and receipt.get("recorded") is False:
+        return {"recorded": False}
+    endpoint, row = receipt.get("endpoint", {}), receipt.get("entry", {})
+    if (result.isError or receipt.get("status") != "succeeded" or endpoint.get("endpointId") != record["endpoint_id"]
+            or row.get("role") != role or (not mode and row.get("text") != text)):
+        raise web.HTTPServiceUnavailable()
+    if mode:
+        proof = receipt.get("projectionReceipt", {})
+        if (not isinstance(proof, dict) or not isinstance(proof.get("entryId"), str) or not proof["entryId"]
+                or proof["entryId"] != row.get("entryId")
+                or proof.get("messageKey") != message_key or proof.get("sourceEndpointId") != record["endpoint_id"]
+                or proof.get("role") != role or proof.get("textSha256") != hashlib.sha256(text.encode()).hexdigest()
+                or (row.get("retained") is not False and row.get("text") != text)):
             raise web.HTTPServiceUnavailable()
-        if mode:
-            proof = receipt.get("projectionReceipt", {})
-            if (not isinstance(proof, dict) or not isinstance(proof.get("entryId"), str) or not proof["entryId"]
-                    or proof["entryId"] != row.get("entryId")
-                    or proof.get("messageKey") != message_key or proof.get("sourceEndpointId") != record["endpoint_id"]
-                    or proof.get("role") != role or proof.get("textSha256") != hashlib.sha256(text.encode()).hexdigest()
-                    or (row.get("retained") is not False and row.get("text") != text)):
-                raise web.HTTPServiceUnavailable()
     return {"recorded": True}
 
 
@@ -170,12 +188,42 @@ class TelegramTimeline:
                 (row["bot"],row["chat"],row["message"],row["role"],status,reason))
             self.pilot.db.execute("DELETE FROM telegram_chat_projection WHERE rowid=?", (row["id"],))
 
+    def _recover(self):
+        """Original frozen credentials can query only a previously committed receipt."""
+        pilot, db = self.pilot, self.pilot.db
+        blocked = set()
+        rows = db.execute("""SELECT q.rowid AS id,q.*,m.run_id,s.binding_json FROM telegram_chat_projection q
+            JOIN messages m USING(bot,chat,message) JOIN telegram_inbound_sources s USING(bot,chat,message)
+            WHERE q.bot=? AND q.projection_mode IS NOT NULL ORDER BY q.rowid LIMIT 32""", (pilot.bot_id,)).fetchall()
+        for row in rows:
+            if row["attempt_count"] >= 24 or time.time() - row["created_at"] >= 86400:
+                self._finish(row, "expired", "projection_retry_budget")
+                continue
+            if row["next_attempt"] > time.time():
+                blocked.add(row["id"])
+                continue
+            try:
+                recorded = pilot.gateway.publish_telegram_timeline(json.loads(row["binding_json"]), row["message"],
+                    row["role"], row["text"], row["run_id"], [], projection_mode=row["projection_mode"],
+                    source_state=row["source_state"], receipt_only=True)
+                if recorded:
+                    self._finish(row, "acknowledged")
+            except (RuntimeError, OSError):
+                blocked.add(row["id"])
+                with db:
+                    db.execute("UPDATE telegram_chat_projection SET next_attempt=?,attempt_count=attempt_count+1 WHERE rowid=?",
+                        (time.time() + min(300, 5 * (2 ** min(row["attempt_count"], 6))), row["id"]))
+        return blocked
+
     def flush(self):
         pilot, db = self.pilot, self.pilot.db
+        blocked = self._recover()
         stale = db.execute("""SELECT q.rowid AS id,q.*,m.state AS message_state FROM telegram_chat_projection AS q
             JOIN messages m USING(bot,chat,message) WHERE q.bot=? AND (
               m.state='binding_changed' OR (m.state='admission_unknown' AND q.projection_mode IS NULL))""", (pilot.bot_id,)).fetchall()
         for row in stale:
+            if row["id"] in blocked:
+                continue
             self._finish(row, "revoked" if row["message_state"] == "binding_changed" else "source_unavailable", row["message_state"])
         # An earlier unsynchronized role in the same chat cannot be overtaken after a publication timeout.
         # The second pass allows an immediate confirmed answer after the user entry.
@@ -188,6 +236,8 @@ class TelegramTimeline:
                     AND (q.projection_mode IS NULL OR earlier.message=q.message))
                 ORDER BY q.rowid LIMIT 32""", (pilot.bot_id, time.time())).fetchall()
             for row in rows:
+                if row["id"] in blocked:
+                    continue
                 if row["projection_mode"] and (row["attempt_count"] >= 24 or time.time() - row["created_at"] >= 86400):
                     self._finish(row, "expired", "projection_retry_budget")
                     continue

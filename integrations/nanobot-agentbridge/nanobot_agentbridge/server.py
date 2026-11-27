@@ -271,6 +271,9 @@ class Host:
         )
 
     async def action(self, action: str, body: dict) -> dict:
+        if action == "telegram-timeline" and body.get("receiptOnly") is True:
+            from .telegram_history_receipts import recover_route
+            return await recover_route(self, body, host_type="nanobot")
         if action == "telegram-media-append":
             from .telegram_media_receipts import recover_route
             recovered = await recover_route(self,body,host_type="nanobot")
@@ -304,6 +307,9 @@ class Host:
             return await complete_for_binding(self, record, body["system"], body["prompt"])
         if action=="prepare-command":
             return await self.commands.accept(record,body)
+        if action == "telegram-received-source":
+            from .telegram_reception import receive
+            return await receive(self,record,body)
         if action in {"telegram-media-source","telegram-media-append"}:
             from .telegram_media_receipts import prepare_source,publish_media
             return await (prepare_source if action=="telegram-media-source" else publish_media)(self,record,body)
@@ -323,6 +329,12 @@ class Host:
             try:
                 async with open_host_session(self, self.worker_payload(record,None), lane="control") as (session,meta,_):
                     verified = await verify_telegram_binding(session,self.instance,key[0],meta,record["endpoint_key"])
+                    if verified:
+                        from .telegram_reception import scope
+                        try:
+                            await scope(session,meta,record)
+                        except web.HTTPForbidden:
+                            verified=False
             except Exception as exc:
                 if not identity_denial(exc):
                     raise
@@ -338,6 +350,9 @@ class Host:
         if action == "accept":
             message = body["message"]
             channel = channel_for(record["endpoint_key"])
+            if channel == "telegram":
+                from .telegram_reception import validate
+                await validate(self,record,request_key)
             images = validate_attachments(body.get("attachments"), telegram=channel == "telegram")
             if (
                 not isinstance(message, str)
@@ -476,7 +491,7 @@ class Host:
 def create_app(spec: dict) -> web.Application:
     host = Host(spec)
     app = web.Application(client_max_size=18 * 1024 * 1024)
-    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|telegram-media-source|telegram-media-append|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-artifact-file|telegram-mirror-peers|telegram-task|telegram-watch-validate|telegram-workspace-result-view|telegram-workspace-media-v2}", host.handle)
+    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|telegram-media-source|telegram-media-append|telegram-received-source|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-artifact-file|telegram-mirror-peers|telegram-task|telegram-watch-validate|telegram-workspace-result-view|telegram-workspace-media-v2}", host.handle)
 
     if host.coordinator:
         from .recovery import recover

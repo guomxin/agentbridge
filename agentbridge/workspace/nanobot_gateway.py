@@ -281,15 +281,19 @@ class NanoBotGatewayClient:
         return reply.get("verified") is True
 
     def publish_telegram_timeline(self, binding, message, role, text, run_id, receipts,
-                                  *, projection_mode=None, source_state=None):
+                                  *, projection_mode=None, source_state=None, receipt_only=False):
         result = self._request("telegram-timeline", {
             "binding": self._binding(binding), "messageId": message, "role": role, "text": text, "runId": run_id,
             "deliveredMessageIds": receipts,
+            **({"receiptOnly": True} if receipt_only else {}),
             **({"projectionMode": projection_mode} if projection_mode is not None else {}),
             **({"sourceState": source_state} if source_state is not None else {}),
         })
+        if receipt_only and result.get("recorded") is False:
+            return False
         if result.get("recorded") is not True:
             raise GatewayRequestError("GATEWAY_RESPONSE_INVALID", "聊天记录回执待核对。")
+        return True
 
     def send_dispatch(
         self, dispatch: dict, binding: dict, message: str, attachments, trial

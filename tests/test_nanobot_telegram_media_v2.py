@@ -236,7 +236,8 @@ def test_source_generation_cannot_change_and_receipt_fields_are_exact(media_host
     asyncio.run(run())
 
 
-def test_actual_nano_http_media_admission_and_public_caption_use_distinct_proofs(tmp_path,monkeypatch):
+@pytest.mark.parametrize("scoped",[False,True])
+def test_actual_nano_http_media_admission_and_public_caption_use_distinct_proofs(tmp_path,monkeypatch,scoped):
     """Regression: the actual accept digest includes files, while history matches its caption."""
     from aiohttp.test_utils import TestClient,TestServer
     # This HTTP/digest test never invokes the SDK, card presenter, or worker.
@@ -252,10 +253,12 @@ def test_actual_nano_http_media_admission_and_public_caption_use_distinct_proofs
         path=tmp_path/name;path.write_text(text);path.chmod(0o600);return str(path)
     service="synthetic-private-http-service-credential"
     record={"user_subject":"first","endpoint_id":str(uuid4()),"endpoint_key":"telegram:8001:501",
-            "session_key":"original-private-chat","credential_ref":"original-private-generation",
+            "session_key":"original-private-chat","credential_ref":"tg-"+"a"*64,
+            "workspaceEndpointId":str(uuid4()),"workspaceEndpointKey":"workspace:original",
             "tokenFile":private("personal.token","synthetic-personal-credential"),"modelConfigFile":private("model.json","{}")}
     spec={"instanceId":"actual-nano-media-test","mcpUrl":"http://127.0.0.1:1/mcp","serviceTokenFile":private("service.token",service),
           "stateDir":str(tmp_path/"state"),"bindings":[record]}
+    floor=int(time.time())-2
     executions=[];projections=[];failures=[]
     original_action=Host.action
     async def checked_action(self,*args,**kwargs):
@@ -272,6 +275,13 @@ def test_actual_nano_http_media_admission_and_public_caption_use_distinct_proofs
     async def verified(*_,**__):
         return True
     async def call(name,args,**_):
+        if name == "agentbridge_host_telegram_endpoint":
+            return SimpleNamespace(isError=False,structuredContent={"endpointId":record["endpoint_id"],
+                "endpointKey":record["endpoint_key"],"conversationRef":record["session_key"],
+                "generationScoped":scoped,"receptionFloor":floor if scoped else None,"pairingRef":"a"*64})
+        if name == "agentbridge_host_telegram_media_source":
+            return SimpleNamespace(isError=False,structuredContent={"recorded":True,"sourceEndpointId":record["endpoint_id"],
+                "pairingRef":"a"*64,"receivedAt":args["received_at"]})
         assert name=="agentbridge_host_timeline_append" and args["projection_v2"] is True
         projections.append(args)
         entry_id=str(uuid4())
@@ -284,6 +294,8 @@ def test_actual_nano_http_media_admission_and_public_caption_use_distinct_proofs
         yield SimpleNamespace(call_tool=call),{},"L3"
     monkeypatch.setattr("nanobot_agentbridge.telegram_identity.verify_telegram_binding",verified)
     monkeypatch.setattr("nanobot_agentbridge.session_pool.open_host_session",session)
+    monkeypatch.setattr("nanobot_agentbridge.telegram_media_receipts.open_host_session",session)
+    monkeypatch.setattr("nanobot_agentbridge.telegram_media_receipts.verify_telegram_binding",verified)
     def attachment(color):
         return {"type":"image","mimeType":"image/png","fileName":"原图.png","content":base64.b64encode(sample_png(color)).decode()}
     images=[attachment((1,2,3)),attachment((4,5,6))]
@@ -295,6 +307,13 @@ def test_actual_nano_http_media_admission_and_public_caption_use_distinct_proofs
         async def post(action,body):
             return await client.post("/v1/"+action,json={"instance":spec["instanceId"],**body},headers={"Authorization":"Bearer "+service})
         try:
+            if scoped:
+                assert (await post("accept",request)).status==403
+                assert not executions
+                old={"binding":binding,"messageId":7,"receivedAt":datetime.fromtimestamp(floor,timezone.utc).isoformat()}
+                assert (await post("telegram-received-source",old)).status==403
+                good={**old,"receivedAt":datetime.fromtimestamp(floor+1,timezone.utc).isoformat()}
+                assert (await post("telegram-received-source",good)).status==200
             accepted=await post("accept",request);assert accepted.status==200,failures
             run_id=(await accepted.json())["runId"]
             await asyncio.sleep(0)

@@ -143,7 +143,7 @@ def test_pi_current_pair_projects_documents_and_fixed_failures_without_model_or_
     _,scope,_,_,endpoint,links,pair=paired_query(pi,identity=identity,query_v2=True)
     body=dict(subject='user-a',host='pi',instance='pi-office',token=identity['token_id'],
         endpoint_key=scope['endpoint_key'],source_message_id=501,
-        received_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+        received_at=(datetime.now(timezone.utc).replace(microsecond=0)+timedelta(seconds=1)).isoformat())
     proof=media.source(svc,**body)
     args=original(body,proof,b'col\nvalue','text/csv','original.csv')
     receipt=media.append(svc,**args)['mediaReceipt']
@@ -199,7 +199,7 @@ def test_actual_private_mcp_media_tools_preserve_identity_and_are_not_model_tool
         for tool in ('agentbridge_host_telegram_media_source','agentbridge_host_telegram_media_append'):
             assert tool in planes['hostControl']['levels']['L3'] and tool not in planes['model']['toolNames']
         body=dict(agent_host='pi',endpoint_key=scope['endpoint_key'],source_message_id=1001,
-            received_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+            received_at=(datetime.now(timezone.utc).replace(microsecond=0)+timedelta(seconds=1)).isoformat())
         assert call('agentbridge_host_telegram_media_source',body,meta={})['isError']
         proof=call('agentbridge_host_telegram_media_source',body)['structuredContent']
         raw=b'%PDF-1.4\noriginal'

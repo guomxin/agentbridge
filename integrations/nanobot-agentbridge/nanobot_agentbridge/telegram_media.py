@@ -145,6 +145,9 @@ def receive(pilot, msg, chat, message):
     binding, digest = pilot._binding(chat)
     if binding is None:
         return
+    from .telegram_reception import preflight
+    if not preflight(pilot,msg,chat,message,binding,digest):
+        return
     with pilot.db:
         if not pilot.db.execute(
             "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,'reading_media',NULL,NULL)",

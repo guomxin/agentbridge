@@ -93,6 +93,9 @@ async def dispatch(host, record, action, body):
             return await artifacts.reissue(delivery, record, body, run)
         if not record["endpoint_key"].startswith("telegram:"):
             raise HTTPException(403)
+        if action == 'telegram-received-source':
+            from nanobot_agentbridge.telegram_reception import receive
+            return await receive(delivery, record, body)
         if action in {'telegram-media-source', 'telegram-media-append'}:
             from nanobot_agentbridge import telegram_media_receipts
             method = telegram_media_receipts.prepare_source if action == 'telegram-media-source' else telegram_media_receipts.publish_media

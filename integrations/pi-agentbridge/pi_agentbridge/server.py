@@ -30,7 +30,7 @@ from .runtime import PiRuntime, private_dir, private_file
 BINDING_FIELDS = ("user_subject", "endpoint_id", "endpoint_key", "session_key", "credential_ref")
 PAIRED_DELIVERY_ACTIONS = {"telegram-notifications", "telegram-notification-receipt", "telegram-chat-validate",
     "telegram-chat-receipt", "telegram-artifact-file", "telegram-watch-validate", "telegram-workspace-media",
-    "telegram-workspace-result-view", "telegram-workspace-media-v2", "telegram-media-source", "telegram-media-append"}
+    "telegram-workspace-result-view", "telegram-workspace-media-v2", "telegram-media-source", "telegram-media-append", "telegram-received-source"}
 DELIVERY_ACTIONS = PAIRED_DELIVERY_ACTIONS | {"telegram-task", "telegram-timeline", "artifact-reissue"}
 
 
@@ -289,6 +289,13 @@ class Host:
         return event
 
     async def action(self, action, body):
+        if action == "telegram-timeline" and body.get("receiptOnly") is True:
+            from aiohttp import web
+            from nanobot_agentbridge.telegram_history_receipts import recover_route
+            try:
+                return await recover_route(self, body, host_type="pi")
+            except web.HTTPException as exc:
+                raise HTTPException(exc.status) from None
         if action == 'telegram-media-append':
             from aiohttp import web
             from nanobot_agentbridge.telegram_media_receipts import recover_route
@@ -376,6 +383,14 @@ class Host:
         request_key = text_field(body.get("requestKey"), 512)
         binding = json.dumps(key, ensure_ascii=False)
         if action == "accept":
+            if key[2].startswith("telegram:"):
+                from aiohttp import web
+                from nanobot_agentbridge.telegram_reception import validate
+                from .channel_delivery import Delivery
+                try:
+                    await validate(Delivery(self,record,action),record,request_key)
+                except web.HTTPException as exc:
+                    raise HTTPException(exc.status) from None
             if not self.runtime.ready:
                 raise HTTPException(503)
             try:

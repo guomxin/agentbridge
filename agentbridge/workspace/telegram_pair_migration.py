@@ -1,5 +1,7 @@
 """Evidence for migrating an existing inherited private NanoBot pairing."""
 import hashlib
+from datetime import datetime
+import math
 import json
 
 from agentbridge.core.workspace_query_delivery import VERSIONS, registered
@@ -121,3 +123,19 @@ def grant_generation(db, owner, instance, bot, sender):
         JOIN workspace_telegram_independent_pairs p USING(instance,bot,owner)
         WHERE r.owner=? AND r.instance=? AND r.bot=? AND l.sender=?""", (owner, instance, bot, sender)).fetchone()
     return row
+
+
+def reception_boundary(db, subject, instance, bot, sender, token):
+    """Explicit grants need a provably later original platform second."""
+    link=db.execute("""SELECT confirmed_at FROM workspace_telegram_pilot_links
+        WHERE owner=? AND instance=? AND bot=? AND sender=?""",(subject,instance,bot,sender)).fetchone()
+    if not link:
+        return {"generationScoped":False,"receptionFloor":None}
+    identity=db.execute("SELECT created_at FROM mcp_identity_tokens WHERE token_id=? AND user_subject=?",
+                        (token,subject)).fetchone()
+    if not identity:
+        raise PermissionError("Original personal reception identity unavailable")
+    effective=max(float(link[0]),datetime.fromisoformat(identity[0]).timestamp())
+    if not math.isfinite(effective) or effective<=0:
+        raise PermissionError("Original reception boundary unavailable")
+    return {"generationScoped":True,"receptionFloor":math.floor(effective)}

@@ -167,6 +167,10 @@ class TelegramRoutes:
                                 or not isinstance(paired.get("endpointId"), str)
                             ):
                                 return None
+                            if paired.get("generationScoped") is True:
+                                if not re.fullmatch(r"[a-f0-9]{64}",str(paired.get("pairingRef",""))):
+                                    return None
+                                record["credential_ref"]="tg-"+paired["pairingRef"]
                             record["endpoint_id"] = paired["endpointId"]
                             record.update(
                                 workspaceEndpointId=paired["workspaceEndpointId"],

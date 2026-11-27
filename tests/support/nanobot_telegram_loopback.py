@@ -166,6 +166,8 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                         self.close_connection = True
                         return
                     answer = {"recorded": True}
+                elif self.path == "/v1/telegram-received-source":
+                    answer = {"accepted": True, "generationScoped": False}
                 elif self.path == "/v1/telegram-media-source":
                     key=(binding["endpoint_id"],body["messageId"])
                     source={"recorded":True,"pairingRef":"1"*64,"receivedAt":body["receivedAt"]}

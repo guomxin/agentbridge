@@ -194,6 +194,10 @@ def timeline_host(monkeypatch):
               "user_subject": "synthetic-owner", "session_key": "synthetic-conversation", "credential_ref": "original-generation"}
     class Session:
         async def call_tool(self, name, body, **_):
+            if name == "agentbridge_host_telegram_endpoint":
+                return SimpleNamespace(isError=False, structuredContent={"endpointId":record["endpoint_id"],
+                    "endpointKey":record["endpoint_key"], "conversationRef":record["session_key"],
+                    "pairingRef":"1"*64, "generationScoped":False, "receptionFloor":None})
             state["calls"].append((name, body))
             entry = {"entryId":"synthetic-entry","role":body["role"], "text":body["text"]}
             if state.get("history_pruned"):

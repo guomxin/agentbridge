@@ -2,7 +2,7 @@
 import asyncio
 import base64
 from contextlib import asynccontextmanager
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from email.parser import BytesParser
 from email.policy import default
 import hashlib
@@ -85,16 +85,22 @@ def test_actual_pi_media_routes_original_upload_and_original_receipt_after_revok
             yield check
         async def current(*_): return record if live[0] else None
         host=SimpleNamespace(instance='pi-office',level='L3',coordinator=SimpleNamespace(program=tmp_path/'coordinator-unused'),commands=None,
-            cards=SimpleNamespace(origins=[]),ledger=SimpleNamespace(db=ledger),bindings={'owner':owner},
+            cards=SimpleNamespace(origins=[]),ledger=SimpleNamespace(db=ledger,lookup=lambda *_:None),bindings={'owner':owner},
             control_sessions=SimpleNamespace(borrow=borrowed,checkout=checkout),
-            telegram=SimpleNamespace(current=current,delivery_hint=current,bot='8801'),
+            telegram=SimpleNamespace(current=current,delivery_hint=current,verified=current,bot='8801'),
             user_directory=lambda _:tmp_path,spec={'mcpUrl':'http://testserver'})
         host.worker_payload=lambda rec,run:Host.worker_payload(host,rec,run)
         def request(route,body,**_):
             routes.append((route,body))
             return asyncio.run(Host.action(host,route,{'instance':'pi-office',**body}))
         assert asyncio.run(call_tool('agentbridge_host_register')).structuredContent['acceptedLevel']=='L3'
-        body={'binding':binding,'messageId':1001,'receivedAt':datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+        body={'binding':binding,'messageId':1001,'receivedAt':(datetime.now(timezone.utc).replace(microsecond=0)+timedelta(seconds=1)).isoformat()}
+        history={'binding':binding,'messageId':1001,'role':'user','text':'原附件说明','runId':None,
+                 'deliveredMessageIds':[],'projectionMode':'telegram_received_v2'}
+        with pytest.raises(HTTPException):
+            request('telegram-timeline',history)
+        assert request('telegram-received-source',body)['accepted']
+        assert request('telegram-timeline',history)=={'recorded':True}
         source=request('telegram-media-source',body)
         original={**body,'pairingRef':source['pairingRef'],'ordinal':0,'fileName':'原文件.txt','mimeType':'text/plain',
             'byteSize':3,'sha256':hashlib.sha256(b'abc').hexdigest(),'contentBase64':'YWJj','failure':None}
@@ -140,6 +146,8 @@ def test_actual_pi_media_routes_original_upload_and_original_receipt_after_revok
             links.revoke(account,'pi-office','8801');live[0]=False
             assert request('telegram-workspace-media-v2',ack)=={'recorded':True}
             assert request('telegram-media-append',{**original,'contentBase64':None})==stored
+            assert request('telegram-timeline',{**history,'receiptOnly':True})=={'recorded':True}
+            assert request('telegram-timeline',{**history,'messageId':1002,'receiptOnly':True})=={'recorded':False}
             assert len(wire)==2
             with pytest.raises(HTTPException): request('telegram-media-source',{**body,'messageId':1002})
             with pytest.raises((PermissionError,ValueError)): pi.app.timeline_attachment(pi.accounts['a'],stored['mediaReceipt']['attachmentId'])

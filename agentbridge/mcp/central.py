@@ -6218,6 +6218,10 @@ def create_central_mcp_server(
         route: dict[str, Any] | None = None,
         task_id: Annotated[str | None, Field(max_length=128)] = None,
         projection_v2: bool = False,
+        projection_receipt_only: bool = False,
+        source_message_id: Annotated[int | None, Field(gt=0, lt=9007199254740992)] = None,
+        received_at: Annotated[str | None, Field(max_length=40)] = None,
+        pairing_ref: Annotated[str | None, Field(max_length=64)] = None,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6247,6 +6251,9 @@ def create_central_mcp_server(
             host_instance_id=host["hostInstanceId"],
             task_id=task_id,
             projection_v2=projection_v2,
+            projection_receipt_only=projection_receipt_only,
+            source_message_id=source_message_id, received_at=received_at, pairing_ref=pairing_ref,
+            pairing_protocol=_request_meta(ctx).get(PROTOCOL_META),
         )
 
     @mcp.tool(name='agentbridge_host_telegram_media_source', title='Freeze Original Private Media Source',
@@ -6263,7 +6270,7 @@ def create_central_mcp_server(
         host,_=await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
         return await asyncio.to_thread(source,service,subject=identity['user_subject'],host=agent_host,
             instance=host['hostInstanceId'],token=identity['token_id'],endpoint_key=endpoint_key,
-            source_message_id=source_message_id,received_at=received_at)
+            source_message_id=source_message_id,received_at=received_at,pairing_protocol=_request_meta(ctx).get(PROTOCOL_META))
 
     @mcp.tool(name='agentbridge_host_telegram_media_append', title='Retain One Original Private Media Item',
         description='Host-private per-item received resource or fixed failure. Caption is independent; no remote URL fetch, model admission or business artifact authorization. Retries return the original receipt without renewing retention.',
@@ -6288,7 +6295,8 @@ def create_central_mcp_server(
         return await asyncio.to_thread(append,service,subject=identity['user_subject'],host=agent_host,
             instance=host['hostInstanceId'],token=identity['token_id'],endpoint_key=endpoint_key,pairing_ref=pairing_ref,
             source_message_id=source_message_id,ordinal=ordinal,file_name=file_name,mime_type=mime_type,
-            byte_size=byte_size,sha256=sha256,received_at=received_at,content_base64=content_base64,failure=failure)
+            byte_size=byte_size,sha256=sha256,received_at=received_at,content_base64=content_base64,failure=failure,
+            pairing_protocol=_request_meta(ctx).get(PROTOCOL_META))
 
     async def authorize_oa_digest(ctx: Context, agent_host: str) -> str:
         identity = _request_identity(identity_store)
