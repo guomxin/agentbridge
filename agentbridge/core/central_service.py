@@ -1833,6 +1833,7 @@ class CentralCapabilityService:
         include_workspace_result_views: bool = False,
         query_token_id: str | None = None,
         notification_token_id: str | None = None,
+        media_token_id: str | None = None,
         quiet_pairing_ref: str | None = None,
         quiet_token_id: str | None = None,
     ) -> dict:
@@ -1844,10 +1845,15 @@ class CentralCapabilityService:
         if notification_token_id and host_instance_id:
             from . import telegram_notification_delivery
             telegram_notification_delivery.activate(self,user_subject,agent_host,host_instance_id,endpoint_key,notification_token_id)
+        media_items = []
+        if media_token_id and host_instance_id:
+            from . import workspace_media_delivery
+            media_items = workspace_media_delivery.claim(self, user_subject, agent_host, host_instance_id,
+                endpoint_key, media_token_id, min(limit, 4), lease_seconds)
         deliveries = self.tasks.claim_outbox(
             user_subject=user_subject,
             endpoint_id=endpoint["endpoint_id"],
-            limit=limit,
+            limit=limit-len(media_items),
             lease_seconds=lease_seconds,
             host_instance_id=host_instance_id,
             include_workspace_chat=include_workspace_chat,
@@ -1857,8 +1863,8 @@ class CentralCapabilityService:
             **({"include_workspace_result_views": True} if include_workspace_result_views else {}),
             **({"quiet_pairing_ref": quiet_pairing_ref, "quiet_token_id": quiet_token_id, "audit_quiet": self._audit_quiet_claim}
                if quiet_pairing_ref is not None else {}),
-        )
-        notifications = []
+        ) if len(media_items) < limit else []
+        notifications = list(media_items)
         quiet_count = 0
         for delivery in deliveries:
             if quiet_pairing_ref is not None and delivery["state"] == "acknowledged":

@@ -34,7 +34,8 @@ def original(body, proof, raw=b'\x89PNG\r\n\x1a\noriginal', mime='image/png', na
 
 @pytest.mark.parametrize(('raw','mime','name'),[(b'\x89PNG\r\n\x1a\noriginal','image/png','图.png'),
     (b'%PDF-1.4\nsynthetic','application/pdf','文件.pdf'),('列一,列二\n甲,乙'.encode(),'text/csv','表.csv'),
-    (b'<script>parent.stolen=true</script>','text/html','download-only.html')])
+    (b'<script>parent.stolen=true</script>','text/html','download-only.html'),
+    (b'original text','text/plain',' original.txt ')])
 def test_owned_original_download_and_receipt_never_use_public_media_route(openclaw, raw, mime, name):
     fixture,token,endpoint=openclaw
     svc=fixture.service
@@ -50,6 +51,7 @@ def test_owned_original_download_and_receipt_never_use_public_media_route(opencl
         aid=receipt['attachmentId']
         media.authorize_download(svc,OWNER,aid)
         assert svc.timeline_attachments.ready_payload(aid)['body']==raw
+        assert svc.timeline_attachments.ready_payload(aid)['filename']==receipt['fileName']==name
         with pytest.raises(PermissionError): media.authorize_download(svc,'other-user',aid)
         assert TrustedTimelineAttachmentApplication(attachment_store=svc.timeline_attachments).get_file(aid).status==404
     with svc.tasks._connect() as db:
@@ -206,3 +208,25 @@ def test_actual_private_mcp_media_tools_preserve_identity_and_are_not_model_tool
         receipt=call('agentbridge_host_telegram_media_append',args)['structuredContent']
         assert receipt['recorded'] and receipt['mediaReceipt']['state']=='stored'
         assert call('agentbridge_host_telegram_media_append',{**args,'content_base64':None})['structuredContent']==receipt
+        # The same real private MCP server also negotiates the media sender;
+        # install the fixture's actual personal token on its lazily seeded web endpoint.
+        from agentbridge.core.endpoint_instances import endpoint_instances
+        from agentbridge.workspace.telegram_pilot_links import mirror_binding
+        with svc.tasks._connect() as db:
+            web=mirror_binding(db,'user-a','pi-office',endpoint_instances(db,'user-a'))
+            row=dict(db.execute('SELECT * FROM client_endpoints WHERE endpoint_id=?',(web['endpoint_id'],)).fetchone())
+        svc.tasks.ensure_endpoint(user_subject='user-a',token_id=identity['token_id'],agent_host='pi',
+            **{k:row[k] for k in ('endpoint_key','client_type','external_subject','conversation_ref','account_id')},
+            route=json.loads(row['route_json']),capabilities=json.loads(row['capabilities_json']))
+        svc.workspace.accept_chat_request(account_id=pi.accounts['a']['account_id'],user_subject='user-a',message='原图。',
+            idempotency_key='mcp-original-image',attachments=[{'fileName':'one.png','mimeType':'image/png',
+                'content':base64.b64encode(b'\x89PNG\r\n\x1a\noriginal').decode()}],tasks=svc.tasks,
+            attachment_store=svc.timeline_attachments,media_base_url='https://fixture.invalid',instance_id='pi-office')
+        item,=call('agentbridge_host_notification_claim',{'agent_host':'pi','endpoint_key':scope['endpoint_key'],
+            'include_workspace_media_v2':True})['structuredContent']['notifications']
+        assert item['deliveryMode']=='workspace_media_v2'
+        delivery=dict(agent_host='pi',endpoint_key=scope['endpoint_key'],pairing_ref=item['pairingRef'],
+            delivery_id=item['deliveryId'],attempt_count=item['attemptCount'])
+        for action,field in [('issue','available'),('begin','allowed')]:
+            assert call('agentbridge_host_workspace_media_delivery',{**delivery,'action':action})['structuredContent'][field]
+        assert call('agentbridge_host_workspace_media_delivery',{**delivery,'action':'ack','outcome':'sent','receipt':101})['structuredContent']['recorded']

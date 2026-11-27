@@ -313,7 +313,7 @@ def claim(service, subject, host, instance, endpoint, token, limit, lease):
 
 
 def settle(db, row, outcome, receipt, delay, *, table="workspace_query_deliveries"):
-    if table not in {"workspace_query_deliveries", "workspace_text_deliveries", "telegram_notification_deliveries"}:
+    if table not in {"workspace_query_deliveries", "workspace_text_deliveries", "telegram_notification_deliveries", "workspace_media_deliveries"}:
         raise ValueError("Unknown Workspace delivery ledger")
     target_state = {"sent":"sent", "delivery_unknown":"unknown", "retry_after":"retry_wait",
                     "unavailable":"rejected", "rejected":"rejected"}.get(outcome)

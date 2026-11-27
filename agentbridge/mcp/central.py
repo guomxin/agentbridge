@@ -393,6 +393,7 @@ HOST_COORDINATION_TOOL_NAMES = (
     "agentbridge_host_timeline_append",
     "agentbridge_host_telegram_media_source",
     "agentbridge_host_telegram_media_append",
+    "agentbridge_host_workspace_media_delivery",
     "agentbridge_host_oa_daily_digest",
     "agentbridge_host_oa_daily_digest_status",
     "agentbridge_host_task_observe",
@@ -6690,6 +6691,7 @@ def create_central_mcp_server(
         include_workspace_result_views: bool = False,
         include_workspace_query_v2: bool = False,
         include_notification_v2: bool = False,
+        include_workspace_media_v2: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6713,6 +6715,7 @@ def create_central_mcp_server(
             host_instance_id=host["hostInstanceId"],
             **({"query_token_id":identity["token_id"]} if include_workspace_query_v2 else {}),
             **({"notification_token_id":identity["token_id"]} if include_notification_v2 else {}),
+            **({"media_token_id":identity["token_id"]} if include_workspace_media_v2 else {}),
             **({"include_workspace_chat": True} if include_workspace_chat else {}),
             **({"include_business_watch": True} if include_business_watch else {}),
             **({"include_task_files": True} if include_task_files else {}),
@@ -6773,6 +6776,27 @@ def create_central_mcp_server(
             subject=identity["user_subject"], token_id=identity["token_id"], instance=host["hostInstanceId"],
             endpoint_key=endpoint_key, pairing_ref=pairing_ref, delivery_id=delivery_id, attempt_count=attempt_count,
             action=action, outcome=outcome, receipt=receipt)
+
+    @mcp.tool(name='agentbridge_host_workspace_media_delivery',title='Deliver One Original Workspace Media Item',
+        description='Host-private original bytes, single-use permission and exact receipt. No URL fallback or replays after an unknown send.',
+        annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=False,openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_host_workspace_media_delivery(ctx: Context,action:Literal['issue','begin','ack'],
+        agent_host:Literal['openclaw','nanobot','pi'],
+        endpoint_key:Annotated[str,Field(min_length=1,max_length=768)],
+        pairing_ref:Annotated[str,Field(pattern='^[0-9a-f]{64}$')],
+        delivery_id:Annotated[str,Field(min_length=36,max_length=36)],
+        attempt_count:Annotated[int,Field(ge=1,le=5)],
+        outcome:Literal['sent','unavailable','delivery_unknown','rejected','retry_after']|None=None,
+        receipt:Annotated[int,Field(gt=0,lt=2**53)]|None=None,
+        retry_after_seconds:Annotated[int,Field(ge=1,le=86400)]|None=None)->dict[str,Any]:
+        from agentbridge.core.workspace_media_delivery import handle
+        identity=_request_identity(identity_store)
+        host,_=await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host,minimum_level='L3')
+        return await _run_host_control('agentbridge_host_workspace_media_delivery',handle,service=service,
+            subject=identity['user_subject'],host=agent_host,instance=host['hostInstanceId'],token_id=identity['token_id'],
+            endpoint_key=endpoint_key,pairing_ref=pairing_ref,delivery_id=delivery_id,attempt_count=attempt_count,
+            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds)
 
     @mcp.tool(name="agentbridge_host_telegram_workspace_media", title="Deliver an Original Workspace Image",
         description="Host-private Pi delivery of one original image to its currently paired private endpoint.",

@@ -982,6 +982,9 @@ class WorkspaceStore:
                 if host["host_type"] == "pi" and stored_attachments and not (skill_trial or continuation_task_id):
                     from agentbridge.workspace.pi_timeline_media import enqueue
                     enqueue(connection, tasks, dispatch, entry, stored_attachments)
+                if stored_attachments and not (skill_trial or continuation_task_id):
+                    from agentbridge.core.workspace_media_delivery import enqueue as enqueue_media
+                    enqueue_media(connection, dispatch, entry, stored_attachments)
             return dispatch, False
         except BaseException:
             attachment_store._discard_created_files(created_paths)

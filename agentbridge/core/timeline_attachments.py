@@ -410,7 +410,9 @@ def _prepared_attachment(value: dict[str, Any], ordinal: int, *, allow_documents
     if not body:
         raise ValueError("timeline attachment content is empty")
     supplied_name = str(value.get("fileName") or "").replace("\\", "/")
-    filename = supplied_name.rsplit("/", 1)[-1].strip()
+    filename = supplied_name.rsplit("/", 1)[-1]
+    if not allow_documents:
+        filename = filename.strip()
     if not filename:
         filename = f"image-{ordinal + 1}{suffix}"
     if any(ord(character) < 32 for character in filename):
