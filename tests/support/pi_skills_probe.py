@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from tests.support.business_draft_acceptance import OWNER
 from tests.support.pi_governed_probe import BrowserModel, exercise
-from tests.support.pi_notification_failure import pair_before_run
+from tests.support.pi_notification_failure import pair_before_run, telegram_request
 
 SAMPLE = "合成样本：修复功能已完成。"
 PROPOSAL = {"name":"合成个人周报", "description":"按用户材料整理周报",
@@ -47,7 +47,8 @@ class Model(BrowserModel):
 
 
 def chat(post, binding, message):
-    args = {"binding":binding, "requestKey":"skill-" + uuid4().hex}
+    args = (telegram_request(post, binding) if binding["endpoint_key"].startswith("telegram:")
+            else {"binding":binding, "requestKey":"skill-" + uuid4().hex})
     assert post("accept", **args, message=message).status_code == 200
     for _ in range(250):
         row = post("lookup", **args).json()

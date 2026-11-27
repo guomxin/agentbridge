@@ -1,6 +1,8 @@
 """H14: failed delivery of a real Pi task notification must not change the verified business effect."""
 
 import time
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from agentbridge.workspace.telegram_pilot_links import TelegramPilotLinks
 
@@ -20,6 +22,23 @@ def pair_before_run(central, post, web):
     assert confirmation and links.confirm(*args, challenge["challenge_id"], confirmation)["state"] == "linked"
     endpoint = post("telegram-route", botId="8801", senderId="501").json()["binding"]
     assert endpoint["user_subject"] == subject and endpoint["endpoint_key"] == "telegram:8801:501"
+    # Telegram dates have whole-second precision. A newly paired intake must
+    # actually occur after this second, including in synthetic SDK probes.
+    paired_second = int(time.time())
+    deadline = time.monotonic() + 2
+    while int(time.time()) <= paired_second:
+        assert time.monotonic() < deadline, "The fixture clock did not advance after pairing"
+        time.sleep(.01)
+
+
+def telegram_request(post, binding, *, message_id=None):
+    """Record a fresh synthetic private message through the real intake route."""
+    message_id = message_id or (uuid4().int % 1_000_000_000 + 1)
+    _, bot, sender = binding["endpoint_key"].split(":")
+    stamp = datetime.fromtimestamp(int(time.time()), timezone.utc).isoformat()
+    response = post("telegram-received-source", binding=binding, messageId=message_id, receivedAt=stamp)
+    assert response.status_code == 200 and response.json().get("accepted") is True, response.status_code
+    return {"binding": binding, "requestKey": f"tg:{bot}:{sender}:{message_id}"}
 
 
 def check_failed_delivery(central, web):

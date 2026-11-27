@@ -10,7 +10,7 @@ import time
 from tests.authorization_fixtures import grant_permissions
 from tests.support.nanobot_system_login_probe import CASES as EXTRA_SYSTEMS
 from tests.support.pi_governed_probe import ORIGIN, exercise
-from tests.support.pi_notification_failure import pair_before_run
+from tests.support.pi_notification_failure import pair_before_run, telegram_request
 from tests.support.skill_host_acceptance import SyntheticWorker
 
 SYSTEMS = {
@@ -102,7 +102,7 @@ class Systems:
             before = len(reads)
             with sqlite3.connect(service.db_path) as db:
                 highest = db.execute("SELECT COALESCE(MAX(rowid),0) FROM operations").fetchone()[0]
-            key = {"binding": binding, "requestKey": model.tool_id}
+            key = telegram_request(post, binding, message_id=100 + index)
             run = post("accept", **key, message="请查本人的 " + system + " 合成业务资料。").json()["runId"]
             task = None
             for _ in range(320):

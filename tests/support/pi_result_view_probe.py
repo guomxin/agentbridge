@@ -9,7 +9,7 @@ import signal
 import sys
 import tempfile
 from threading import Event
-from time import monotonic, sleep
+from time import monotonic, sleep, time
 from urllib.parse import urlsplit
 from unittest.mock import patch
 from uuid import uuid4
@@ -129,11 +129,12 @@ class ResultViews:
             assert tg and post("telegram-route", botId="8801", senderId="502").status_code == 403
             def read(message_id, arguments, expected, partial=False):
                 model.arguments = arguments
-                update = {"message": {"message_id":message_id, "chat":{"type":"private","id":501},
+                update = {"message": {"message_id":message_id, "date":int(time()), "chat":{"type":"private","id":501},
                                       "from":{"id":501,"is_bot":False}, "text":"请查阅本人的办公待办。"}}
                 before = len(bot.messages)
                 channel.ingest(update)
                 row = channel._record(501, message_id)
+                assert row and row["run_id"], "The original dated message was not admitted"
                 run, key = row["run_id"], channel._key(501, message_id)
                 request = {"binding":tg, "requestKey":key}
                 deadline = monotonic() + 45
