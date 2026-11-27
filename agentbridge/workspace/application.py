@@ -738,8 +738,9 @@ class WorkspaceApplication:
             message_max_sequence=message_max_sequence, chat_endpoints=self.store.visible_chat_endpoints(account),
             task_scope=self.store.view_task_scope(account))
         has_more, selected = len(rows) > limit, rows[:limit]
-        # Rows descend from newest to oldest. Avoid opening a normal history
-        # page with a prior turn's answer/card but without its user message.
+        # Rows descend from newest to oldest. Workspace admission records its
+        # question before a task; asynchronous channel projections may arrive
+        # after that task completes and cannot define the same turn boundary.
         # Trimmed rows stay behind the actual returned cursor for the next
         # page. With no user boundary, return the bounded slice unchanged so
         # large single turns and task-only histories always make progress.
@@ -747,8 +748,14 @@ class WorkspaceApplication:
                             if selected[index]["kind"] == "message"
                             and selected[index]["message"].get("role") == "user"), None)
         if oldest_user is not None and oldest_user < len(selected) - 1:
-            selected = selected[:oldest_user + 1]
-            has_more = True
+            try:
+                origin = self.service.tasks.get_endpoint(
+                    selected[oldest_user]['message']['source_endpoint_id'], user_subject=account['user_subject'])
+            except (TaskNotFound, ValueError):
+                origin = {}
+            if origin.get('client_type') in {'web','webchat'} and origin.get('account_id') == account['account_id']:
+                selected = selected[:oldest_user + 1]
+                has_more = True
         messages = self._project_timeline_entries(account,
             [row["message"] for row in reversed(selected) if row["kind"] == "message"])
         task_ids = [row["id"] for row in selected if row["kind"] == "task"]
