@@ -30,7 +30,7 @@ from .runtime import PiRuntime, private_dir, private_file
 BINDING_FIELDS = ("user_subject", "endpoint_id", "endpoint_key", "session_key", "credential_ref")
 PAIRED_DELIVERY_ACTIONS = {"telegram-notifications", "telegram-notification-receipt", "telegram-chat-validate",
     "telegram-chat-receipt", "telegram-artifact-file", "telegram-watch-validate", "telegram-workspace-media",
-    "telegram-workspace-result-view"}
+    "telegram-workspace-result-view", "telegram-workspace-media-v2", "telegram-media-source", "telegram-media-append"}
 DELIVERY_ACTIONS = PAIRED_DELIVERY_ACTIONS | {"telegram-task", "telegram-timeline", "artifact-reissue"}
 
 
@@ -271,10 +271,19 @@ class Host:
         return event
 
     async def action(self, action, body):
+        if action == 'telegram-media-append':
+            from aiohttp import web
+            from nanobot_agentbridge.telegram_media_receipts import recover_route
+            try:
+                previous = await recover_route(self, body, host_type='pi')
+            except web.HTTPException as exc:
+                raise HTTPException(exc.status) from None
+            if previous is not None:
+                return previous
         if action == 'telegram-workspace-media' and body.get('action') == 'ack' and 'pairingRef' in body:
             from .media_receipts import acknowledge
             return await acknowledge(self, body)
-        if action == "telegram-workspace-result-view" and body.get("action") == "ack" and "pairingRef" in body:
+        if action in {"telegram-workspace-result-view", "telegram-workspace-media-v2"} and body.get("action") == "ack" and "pairingRef" in body:
             from aiohttp import web
             from nanobot_agentbridge.workspace_query_delivery import acknowledge_receipt
             try:

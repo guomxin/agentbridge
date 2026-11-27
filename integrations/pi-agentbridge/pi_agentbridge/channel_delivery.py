@@ -15,6 +15,9 @@ class Delivery:
             "telegram-notifications": "notifications",
             "telegram-workspace-media": "workspace-media",
             "telegram-workspace-result-view": "workspace-result-view",
+            "telegram-workspace-media-v2": "workspace-media-v2",
+            "telegram-media-source": "telegram-media",
+            "telegram-media-append": "telegram-media",
         }.get(action, "control")
         self.instance = host.instance
         self.coordinator = host.coordinator
@@ -87,6 +90,10 @@ async def dispatch(host, record, action, body):
             return await artifacts.reissue(delivery, record, body, run)
         if not record["endpoint_key"].startswith("telegram:"):
             raise HTTPException(403)
+        if action in {'telegram-media-source', 'telegram-media-append'}:
+            from nanobot_agentbridge import telegram_media_receipts
+            method = telegram_media_receipts.prepare_source if action == 'telegram-media-source' else telegram_media_receipts.publish_media
+            return await method(delivery, record, body)
         if action == "telegram-workspace-media":
             if set(body) - {"instance", "binding", "action", "delivery_id", "attempt", "receipt"}:
                 raise HTTPException(400)
