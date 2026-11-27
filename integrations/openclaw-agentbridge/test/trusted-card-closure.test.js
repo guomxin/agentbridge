@@ -6,7 +6,7 @@ import path from "node:path";
 import { InteractionCoordinator, createInteractionSharedState } from "../lib/coordinator.js";
 import { resolvePluginConfig } from "../lib/config.js";
 
-const closedText = "此前发送的登录卡已完成登录，无需再次输入。原任务将继续，请以原任务结果为准。";
+const closedText = "此前发送的登录卡已完成登录，无需再次输入。请以原任务的当前状态和结果为准。";
 const uuid = number => `${String(number).padStart(8, "0")}-0000-4000-8000-000000000001`;
 const taskId = uuid(90);
 const closure = number => ({ deliveryMode: "host_notification_v2", deliveryId: uuid(number),

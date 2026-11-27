@@ -2170,7 +2170,15 @@ class TaskHubStore:
                     current_interaction_id=interaction_id,
                     now=now,
                 )
-            if decision.emit_event:
+            # A later observation of a previously delivered card can close it
+            # even after another interaction or the task has become current.
+            # This immutable companion fact must not reopen the task or create
+            # new legacy notifications for endpoints that never saw the card.
+            from . import telegram_interaction_closures as closures
+            companion_close = (not decision.emit_event and decision.observation_changed
+                and state in closures.STATES and bool(closures.original(connection,
+                    subject=user_subject, task=task_id, interaction=interaction_id)))
+            if decision.emit_event or companion_close:
                 if event_type == "task.interaction.waiting":
                     self._subscribe_companion_endpoints(
                         connection,
@@ -2190,6 +2198,7 @@ class TaskHubStore:
                     },
                     causation_ref=interaction_id,
                     created_at=now,
+                    companion_closure_only=companion_close,
                 )
             row = self._select_task(connection, task_id)
         return _task_from_row(row)
@@ -5082,6 +5091,7 @@ class TaskHubStore:
         causation_ref: str | None,
         created_at: str,
         watch_pair_proofs: dict[str, str] | None = None,
+        companion_closure_only: bool = False,
     ) -> str:
         event_id = str(uuid4())
         payload_json = _canonical_json(payload)
@@ -5172,6 +5182,8 @@ class TaskHubStore:
                     source=task_source[0], endpoint=subscription["endpoint_id"], event=envelope,
                     ownership=ownership, created_at=created_at):
                 continue
+            if companion_closure_only:
+                continue
             connection.execute(
                 """
                 INSERT OR IGNORE INTO notification_outbox (
@@ -5192,7 +5204,7 @@ class TaskHubStore:
                     created_at,
                 ),
             )
-        if event_type in {"task.completed", "task.failed", "task.operation.succeeded",
+        if not companion_closure_only and event_type in {"task.completed", "task.failed", "task.operation.succeeded",
                           "task.operation.failed", "task.operation.outcome_unknown","task.canceled"}:
             workspace_query_delivery.project(connection, self._select_owned_task(connection, task_id, user_subject))
         mark_transaction_change(connection, user_subject=user_subject)

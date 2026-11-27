@@ -10,6 +10,7 @@ from uuid import uuid4
 from agentbridge.workspace.telegram_pair_migration import grant_generation, permits_delivery
 
 from . import actionable_results as actions
+from . import telegram_interaction_closures as closures
 from .endpoint_instances import endpoint_instances, instance_key
 from .store_transactions import store_transaction
 from .workspace_query_delivery import pair, registered, settle
@@ -55,6 +56,7 @@ def initialize(db):
         CREATE INDEX IF NOT EXISTS telegram_notification_pending
             ON telegram_notification_deliveries(subject,host,instance,state,due);
     """)
+    closures.initialize(db)
 
 
 def activate(service, subject, host, instance, endpoint_key, token, *, pairing_protocol=None):
@@ -89,7 +91,8 @@ def activate(service, subject, host, instance, endpoint_key, token, *, pairing_p
 def enqueue(db, *, subject, source, endpoint, event, ownership, created_at):
     """Called in the event transaction. A new event gets a new immutable identity."""
     event_type = event["eventType"]
-    if event_type not in PUBLIC and event_type != "task.interaction.waiting":
+    closed = closures.observation(event)
+    if event_type not in PUBLIC and event_type != "task.interaction.waiting" and not closed:
         return False
     consumer = db.execute("SELECT * FROM telegram_notification_consumers WHERE endpoint_id=? AND subject=? AND source=? AND protocol=?",
                           (endpoint,subject,source,MODE)).fetchone()
@@ -104,10 +107,17 @@ def enqueue(db, *, subject, source, endpoint, event, ownership, created_at):
         if grant and event.get("pairGeneration") != grant["generation"]:
             # This task belongs to an earlier pairing and has no destination in the current one.
             return True
-    interaction = (event.get("payload") or {}).get("interactionId") if event_type == "task.interaction.waiting" else None
+    card = None
+    if closed:
+        card = closures.candidate(db, subject=subject, task=event["taskId"], endpoint=endpoint,
+            observed=closed, consumer=consumer, proof=proof, target=target, source=source)
+        if not card or db.execute("SELECT 1 FROM telegram_interaction_closures WHERE card_delivery_id=? AND closed_state=?",
+                                 (card["delivery_id"],closed[2])).fetchone():
+            return True  # A quiet/no-send observation must not fall through to the legacy queue.
+    interaction = closed[0] if closed else ((event.get("payload") or {}).get("interactionId") if event_type == "task.interaction.waiting" else None)
     if event_type == "task.interaction.waiting" and not isinstance(interaction,str):
         return False
-    kind = "trusted_interaction" if interaction else "public_status"
+    kind = "trusted_interaction" if interaction and not closed else "public_status"
     observation_hash = None
     operation_id = (event.get("payload") or {}).get("operationId")
     if event_type in {"task.operation.succeeded", "task.operation.failed", "task.operation.outcome_unknown"} and operation_id:
@@ -116,13 +126,18 @@ def enqueue(db, *, subject, source, endpoint, event, ownership, created_at):
             (operation_id,subject,event["taskId"])).fetchone()
         if op and op["status"] == (event.get("payload") or {}).get("status") and op["finished_at"]:
             observation_hash = actions._hash([op["operation_id"],op["status"],op["error_code"],op["finished_at"],op["result_json"]])
-    db.execute("""INSERT OR IGNORE INTO telegram_notification_deliveries
+    delivery_id = str(uuid4())
+    inserted = db.execute("""INSERT OR IGNORE INTO telegram_notification_deliveries
         (delivery_id,event_id,task_id,subject,host,instance,source,endpoint_id,endpoint_key,token_id,
          pair_proof,endpoint_hash,source_hash,kind,interaction_id,public_text,created_at,expires_at,protocol,state,due,observation_hash)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
-        (str(uuid4()),event["eventId"],event["taskId"],subject,consumer["host"],consumer["instance"],source,endpoint,
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (delivery_id,event["eventId"],event["taskId"],subject,consumer["host"],consumer["instance"],source,endpoint,
          target["endpoint_key"],consumer["token_id"],proof,target["_binding_hash"],actions._hash(event),kind,interaction,
-         PUBLIC.get(event_type),created_at,(actions._date(created_at)+timedelta(hours=24)).isoformat(),MODE,created_at,observation_hash))
+         closures.text(closed[1],closed[2]) if closed else PUBLIC.get(event_type),created_at,
+         (actions._date(created_at)+timedelta(hours=24)).isoformat(),MODE,
+         "awaiting_card_receipt" if card and card["state"] != "sent" else "pending",created_at,observation_hash)).rowcount
+    if closed and inserted:
+        closures.attach(db,delivery_id,card,closed)
     return True
 
 
@@ -150,6 +165,9 @@ def _current(db,row):
             envelope["pairGeneration"] = grant["generation"]
     if actions._hash(envelope) != row["source_hash"]:
         return False
+    closed = closures.metadata(db,row["delivery_id"])
+    if closed:
+        return row["protocol"] == MODE and closures.current(db,row,envelope,closed)
     expected_interaction = (json.loads(event["payload_json"]) or {}).get("interactionId") if event["event_type"] == "task.interaction.waiting" else None
     expected_kind = "trusted_interaction" if expected_interaction else "public_status"
     if (row["protocol"] != MODE or row["kind"] != expected_kind or row["interaction_id"] != expected_interaction
@@ -172,6 +190,8 @@ def _covered(service,db,row):
     """Suppress only a proven same destination/fact responsibility, never another task."""
     if row["kind"] != "public_status":
         return None
+    if closures.metadata(db,row["delivery_id"]):
+        return None  # Closing this card is independent of the task/result terminal.
     if row["observation_hash"]:
         prior=db.execute("""SELECT delivery_id FROM telegram_notification_deliveries
             WHERE subject=? AND task_id=? AND endpoint_id=? AND token_id=? AND pair_proof=? AND endpoint_hash=?
@@ -222,6 +242,8 @@ def _mark_covered(service,db,row):
 
 
 def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
+    closures.poll(service,subject=subject,host=host,instance=instance,endpoint=endpoint,
+                  token=token,pairing_protocol=pairing_protocol)
     now = actions._now()
     with store_transaction(service.tasks) as db:
         if not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol):
@@ -270,7 +292,10 @@ def handle(service, *, subject, host, instance, endpoint_key, token_id, pairing_
             if row["state"] == "covered":
                 return {"recorded":outcome in {"unavailable","delivery_unknown"} and receipt is None and retry_after_seconds is None}
             # Exact original credentials can reconcile after revocation; this never grants a send.
-            return {"recorded":settle(db,row,outcome,receipt,retry_after_seconds,table=TABLE)}
+            recorded = settle(db,row,outcome,receipt,retry_after_seconds,table=TABLE)
+            if recorded and row["kind"] == "trusted_interaction":
+                closures.receipt_recorded(db,row)
+            return {"recorded":recorded}
         if any(x is not None for x in (outcome,receipt,retry_after_seconds)) or not _eligible(db,row,pairing_protocol):
             return denied
         if _mark_covered(service,db,row):
@@ -304,6 +329,8 @@ def handle(service, *, subject, host, instance, endpoint_key, token_id, pairing_
             if not current["issued"]:
                 return denied
             db.execute("UPDATE telegram_notification_deliveries SET state='sending' WHERE delivery_id=?",(delivery_id,))
+            if current["kind"] == "trusted_interaction":
+                closures.arm(db,current)
             return {"allowed":True}
         db.execute("UPDATE telegram_notification_deliveries SET issued=1 WHERE delivery_id=?",(delivery_id,))
     return reply
