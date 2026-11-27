@@ -1,5 +1,6 @@
 from __future__ import annotations
-from agentbridge.core import telegram_timeline_projection, workspace_query_delivery, workspace_text_delivery, telegram_notification_delivery
+from agentbridge.core import (telegram_media_receipts, telegram_notification_delivery, telegram_timeline_projection,
+                              workspace_query_delivery, workspace_text_delivery)
 from agentbridge.core.chat_mirror import private_bot_digest_kind, private_bot_chat_kind
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS, endpoint_instances, instance_key
@@ -212,6 +213,7 @@ class TaskHubStore:
             telegram_notification_delivery.initialize(connection)
             workspace_text_delivery.initialize(connection)
             telegram_timeline_projection.initialize(connection)
+            telegram_media_receipts.initialize(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS client_endpoints (

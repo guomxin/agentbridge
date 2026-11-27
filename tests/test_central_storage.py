@@ -114,6 +114,8 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'telegram_notification_consumers'],
                     ['table', 'telegram_notification_deliveries'],
                     ['index', 'telegram_notification_pending'],
+                    ['table', 'telegram_media_sources'],
+                    ['table', 'telegram_media_receipts'],
                     ['index', 'workspace_text_due'],
                     ['table', 'workspace_text_projection_decisions'],
                     ['index', 'workspace_text_projection_question'],

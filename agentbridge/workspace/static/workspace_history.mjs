@@ -53,10 +53,49 @@ export async function loadHistoryPage({state, getScope, loadMessages, loadTasks,
   }
 }
 
+export function timelineEntryMedia(entry) {
+  const attachments = Array.isArray(entry?.payload?.attachments) ? entry.payload.attachments : [];
+  return attachments.filter(item => ["image", "document"].includes(item?.type))
+    .slice().sort((a,b) => Number(a.ordinal || 0) - Number(b.ordinal || 0))
+    .map(item => {
+      const download = item.attachmentId
+        ? `/api/timeline/attachments/${encodeURIComponent(item.attachmentId)}/download` : null;
+      return {...item, mediaUrl: item.type === "image" ? (download ? `${download}?preview=1` : item.mediaUrl) : null,
+        downloadUrl: download || (item.type === "image" ? item.mediaUrl : null)};
+    });
+}
+
+function appendDocument({document, list, image, formatTime, scope, now}) {
+  const figure=document.createElement("figure"); figure.className="message-image-record";
+  const caption=document.createElement("figcaption"); caption.className="message-image-retention";
+  const link=document.createElement("a"); link.className="message-image-button";
+  link.textContent=`下载 ${image.fileName || "附件"}`;
+  link.setAttribute("download", image.fileName || "附件");
+  const expires=Date.parse(image.expiresAt || "");
+  let ready=false;
+  const expired=()=>image.state === "expired" || (Number.isFinite(expires) && expires <= now());
+  const update=()=> {
+    ready=!expired() && image.state === "ready" && /^\/api\/timeline\/attachments\/[^/]+\/download$/.test(image.downloadUrl || "");
+    if (ready) link.setAttribute("href",image.downloadUrl);
+    else link.removeAttribute("href");
+    link.setAttribute("aria-disabled",String(!ready));
+    caption.textContent=expired() ? "附件保留期限已到，历史消息仍保留。"
+      : !ready ? (image.reason || "历史记录保留，原附件不可读取。")
+      : `原件保留至 ${formatTime(image.expiresAt)}`;
+  };
+  link.addEventListener("click",event=> {update(); if (!ready) event.preventDefault();});
+  figure.append(link,caption); list.append(figure); update();
+  if (!expired() && Number.isFinite(expires) && scope) {
+    const arm=()=>scope.timeout(()=> {update();if(!expired())arm();},Math.min(2147483647,Math.max(1,expires-now()+1)));
+    arm();
+  }
+}
+
 export function appendMessageImages({document, container, images, formatTime, onOpen, scope, now = Date.now}) {
   if (!Array.isArray(images) || !images.length) return;
   const list = document.createElement("div"); list.className = "message-image-list";
   for (const image of images) {
+    if (image.type === "document") { appendDocument({document,list,image,formatTime,scope,now}); continue; }
     const source = image.dataUrl || image.mediaUrl;
     const fileName = image.fileName || "附加图片";
     const figure = document.createElement("figure"); figure.className = "message-image-record";

@@ -18,6 +18,12 @@ _SUPPORTED_IMAGE_TYPES = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+RECEIVED_DOCUMENT_TYPES = {
+    'application/pdf': '.pdf', 'text/plain': '.txt', 'text/csv': '.csv', 'text/html': '.html',
+    'text/yaml': '.yaml', 'application/yaml': '.yaml', 'text/markdown': '.md',
+    'text/tab-separated-values': '.tsv', 'application/json': '.json', 'text/xml': '.xml',
+    'application/xml': '.xml',
+}
 
 
 class TimelineAttachmentNotFound(KeyError):
@@ -129,6 +135,9 @@ class TimelineAttachmentStore:
         media_base_url: str,
         ttl_seconds: int = TIMELINE_ATTACHMENT_TTL_SECONDS,
         created_paths: list[Path],
+        received_at: datetime | None = None,
+        ordinal_offset: int = 0,
+        allow_documents: bool = False,
     ) -> list[dict]:
         """Register media in the caller's transaction and track only new files.
 
@@ -144,10 +153,13 @@ class TimelineAttachmentStore:
             raise ValueError("timeline attachment TTL is invalid")
 
         prepared = [
-            _prepared_attachment(value, ordinal)
+            _prepared_attachment(value, ordinal + ordinal_offset, allow_documents=allow_documents)
             for ordinal, value in enumerate(attachments)
         ]
-        now = _as_utc(self.clock())
+        now = _as_utc(received_at or self.clock())
+        if received_at is not None and (now > _as_utc(self.clock()) + timedelta(seconds=60)
+                or now + timedelta(seconds=ttl_seconds) <= _as_utc(self.clock())):
+            raise TimelineAttachmentExpired('Original received resource retention has ended')
         expires_at = now + timedelta(seconds=ttl_seconds)
         existing = connection.execute(
             """
@@ -366,7 +378,7 @@ class TimelineAttachmentStore:
 def public_attachment(record: dict) -> dict:
     return {
         "attachmentId": record["attachment_id"],
-        "type": "image",
+        "type": "image" if record['content_type'] in _SUPPORTED_IMAGE_TYPES else "document",
         "mimeType": record["content_type"],
         "fileName": record["filename"],
         "size": record["byte_size"],
@@ -378,11 +390,11 @@ def public_attachment(record: dict) -> dict:
     }
 
 
-def _prepared_attachment(value: dict[str, Any], ordinal: int) -> dict:
+def _prepared_attachment(value: dict[str, Any], ordinal: int, *, allow_documents=False) -> dict:
     if not isinstance(value, dict):
         raise ValueError("timeline attachment is invalid")
     content_type = str(value.get("mimeType") or "").strip().lower()
-    suffix = _SUPPORTED_IMAGE_TYPES.get(content_type)
+    suffix = _SUPPORTED_IMAGE_TYPES.get(content_type) or (RECEIVED_DOCUMENT_TYPES.get(content_type) if allow_documents else None)
     if suffix is None:
         raise ValueError("timeline attachment content type is unsupported")
     content = value.get("content")
@@ -405,7 +417,7 @@ def _prepared_attachment(value: dict[str, Any], ordinal: int) -> dict:
         raise ValueError("timeline attachment filename is invalid")
     return {
         "ordinal": ordinal,
-        "filename": filename[:120],
+        "filename": filename[:256 if allow_documents else 120],
         "content_type": content_type,
         "body": body,
         "content_hash": hashlib.sha256(body).hexdigest(),

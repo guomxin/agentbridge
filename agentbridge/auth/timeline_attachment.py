@@ -16,6 +16,12 @@ class TrustedTimelineAttachmentApplication:
         self.attachment_store = attachment_store
 
     def get_file(self, attachment_id: str) -> AuthCardResponse:
+        # Received private files are accessible only through the authenticated
+        # Workspace route, which rechecks the original current pairing.
+        with self.attachment_store._connect() as db:
+            if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_media_receipts'").fetchone()
+                    and db.execute("SELECT 1 FROM telegram_media_receipts WHERE attachment_id=?", (attachment_id,)).fetchone()):
+                return _message_response(404, "附件不存在")
         try:
             payload = self.attachment_store.ready_payload(attachment_id)
         except TimelineAttachmentNotFound:

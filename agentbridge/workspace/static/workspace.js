@@ -1,5 +1,5 @@
 import { loadTelegramLinks } from "./workspace_telegram.mjs";
-import { historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages } from "./workspace_history.mjs";
+import { historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages, timelineEntryMedia } from "./workspace_history.mjs";
 import { createHistoryAutoload, restoreHistoryAnchor } from "./workspace_history_autoload.mjs";
 import { createLifecycle, isCancellation } from "./workspace_lifecycle.mjs";
 import { createWorkspaceRequests, workspaceViewPath } from "./workspace_request.mjs";
@@ -1309,31 +1309,7 @@ function reconcileOriginChatMessage(entry, render = true) {
 }
 
 function timelineEntryImages(entry) {
-  const attachments = Array.isArray(entry?.payload?.attachments)
-    ? entry.payload.attachments
-    : [];
-  return attachments
-    .filter(
-      (attachment) =>
-        attachment?.type === "image" &&
-        (attachment.attachmentId || (typeof attachment.mediaUrl === "string" && attachment.mediaUrl)),
-    )
-    .sort(
-      (left, right) =>
-        Number(left.ordinal || 0) - Number(right.ordinal || 0),
-    )
-    .map((attachment) => ({
-      mediaUrl: attachment.attachmentId
-        ? `/api/timeline/attachments/${encodeURIComponent(attachment.attachmentId)}/download?preview=1`
-        : attachment.mediaUrl,
-      downloadUrl: attachment.attachmentId
-        ? `/api/timeline/attachments/${encodeURIComponent(attachment.attachmentId)}/download`
-        : attachment.mediaUrl,
-      fileName: attachment.fileName || "附加图片",
-      mimeType: attachment.mimeType,
-      expiresAt: attachment.expiresAt,
-      state: attachment.state,
-    }));
+  return timelineEntryMedia(entry);
 }
 
 function removeMatchingHistoryMessage(entry) {

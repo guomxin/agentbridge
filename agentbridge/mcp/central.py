@@ -391,6 +391,8 @@ HOST_COORDINATION_TOOL_NAMES = (
     "agentbridge_host_task_ensure",
     "agentbridge_host_task_prepare",
     "agentbridge_host_timeline_append",
+    "agentbridge_host_telegram_media_source",
+    "agentbridge_host_telegram_media_append",
     "agentbridge_host_oa_daily_digest",
     "agentbridge_host_oa_daily_digest_status",
     "agentbridge_host_task_observe",
@@ -6239,6 +6241,47 @@ def create_central_mcp_server(
             task_id=task_id,
             projection_v2=projection_v2,
         )
+
+    @mcp.tool(name='agentbridge_host_telegram_media_source', title='Freeze Original Private Media Source',
+        description='Host-private original Telegram receive fact. Freezes the current private pairing and platform message time; not a model capability.',
+        annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_host_telegram_media_source(ctx: Context,
+        agent_host: Annotated[str,Field(min_length=1,max_length=80)],
+        endpoint_key: Annotated[str,Field(min_length=1,max_length=768)],
+        source_message_id: Annotated[int,Field(gt=0,lt=2**53)],
+        received_at: Annotated[str,Field(min_length=1,max_length=40)]) -> dict[str,Any]:
+        from agentbridge.core.telegram_media_receipts import source
+        identity=_request_identity(identity_store)
+        host,_=await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
+        return await asyncio.to_thread(source,service,subject=identity['user_subject'],host=agent_host,
+            instance=host['hostInstanceId'],token=identity['token_id'],endpoint_key=endpoint_key,
+            source_message_id=source_message_id,received_at=received_at)
+
+    @mcp.tool(name='agentbridge_host_telegram_media_append', title='Retain One Original Private Media Item',
+        description='Host-private per-item received resource or fixed failure. Caption is independent; no remote URL fetch, model admission or business artifact authorization. Retries return the original receipt without renewing retention.',
+        annotations=ToolAnnotations(readOnlyHint=False,destructiveHint=False,idempotentHint=True,openWorldHint=False),
+        structured_output=True)
+    async def agentbridge_host_telegram_media_append(ctx: Context,
+        agent_host: Annotated[str,Field(min_length=1,max_length=80)],
+        endpoint_key: Annotated[str,Field(min_length=1,max_length=768)],
+        pairing_ref: Annotated[str,Field(pattern='^[0-9a-f]{64}$')],
+        source_message_id: Annotated[int,Field(gt=0,lt=2**53)],
+        ordinal: Annotated[int,Field(ge=0,le=3)],
+        file_name: Annotated[str,Field(min_length=1,max_length=256)],
+        mime_type: Annotated[str,Field(min_length=1,max_length=120)],
+        byte_size: Annotated[int,Field(ge=0,le=6*1024*1024)],
+        received_at: Annotated[str,Field(min_length=1,max_length=40)],
+        sha256: Annotated[str|None,Field(pattern='^[0-9a-f]{64}$')]=None,
+        content_base64: Annotated[str|None,Field(max_length=8*1024*1024)]=None,
+        failure: Annotated[str|None,Field(pattern='^(unsupported|unreadable|too_large|expired)$')]=None) -> dict[str,Any]:
+        from agentbridge.core.telegram_media_receipts import append
+        identity=_request_identity(identity_store)
+        host,_=await _require_registered_host_call(ctx,service=service,identity=identity,agent_host=agent_host)
+        return await asyncio.to_thread(append,service,subject=identity['user_subject'],host=agent_host,
+            instance=host['hostInstanceId'],token=identity['token_id'],endpoint_key=endpoint_key,pairing_ref=pairing_ref,
+            source_message_id=source_message_id,ordinal=ordinal,file_name=file_name,mime_type=mime_type,
+            byte_size=byte_size,sha256=sha256,received_at=received_at,content_base64=content_base64,failure=failure)
 
     async def authorize_oa_digest(ctx: Context, agent_host: str) -> str:
         identity = _request_identity(identity_store)

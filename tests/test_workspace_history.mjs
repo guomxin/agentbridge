@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createDocument, descendants} from './workspace_dom_fixture.mjs';
-import {historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages} from '../agentbridge/workspace/static/workspace_history.mjs';
+import {historyPresentation, loadHistoryPage, applyHistoryPage, appendMessageImages, timelineEntryMedia} from '../agentbridge/workspace/static/workspace_history.mjs';
 import {createProjectionOrder} from '../agentbridge/workspace/static/workspace_projection.mjs';
 
 test('a unified page applies text and cards before advancing its shared cursor without moving SSE replay', () => {
@@ -96,6 +96,39 @@ function imageFixture(image) {
   return {container,button:all.find(n=>n.tag==='button'),img:all.find(n=>n.tag==='img'),timers,opened,
     expire(){clock=Date.parse('2026-11-05T04:00:03Z');timers[0].fn();}};
 }
+
+test('received documents use owned opaque downloads, preserve original order and never render file HTML', () => {
+  const input=[{type:'document',attachmentId:'doc-id',fileName:'<script>file</script>.html',state:'ready',ordinal:1,
+      mediaUrl:'https://untrusted.invalid/never-fetch',expiresAt:'2026-11-05T04:00:02Z'},
+    {type:'image',attachmentId:'image-id',fileName:'图.png',state:'ready',ordinal:0},
+    {type:'document',fileName:'附件',state:'unavailable',reason:'原附件读取失败。',ordinal:2}];
+  const mapped=timelineEntryMedia({payload:{attachments:input}});
+  assert.deepEqual(input.map(x=>x.ordinal),[1,0,2]);
+  assert.deepEqual(mapped.map(x=>x.ordinal),[0,1,2]);
+  assert.equal(mapped[1].mediaUrl,null);
+  assert.equal(mapped[1].downloadUrl,'/api/timeline/attachments/doc-id/download');
+  const document=createDocument(),container=document.createElement('article'),timers=[];
+  let clock=Date.parse('2026-11-05T04:00:00Z');
+  appendMessageImages({document,container,images:mapped.slice(1),formatTime:x=>x,
+    onOpen(){throw new Error('Documents must never open image viewers')},
+    scope:{timeout:fn=>timers.push(fn)},now:()=>clock});
+  const links=descendants(container).filter(x=>x.tag==='a');
+  assert.equal(links[0].attributes.href,mapped[1].downloadUrl);
+  assert.equal(links[0].attributes.download,input[0].fileName);
+  assert.equal(links[1].attributes.href,undefined);
+  assert.match(container.textContent,/原附件读取失败/);
+  assert.equal(descendants(container).some(x=>['iframe','object','script','img'].includes(x.tag)),false);
+  clock+=3000;timers[0]();
+  assert.equal(links[0].attributes.href,undefined);
+  let blocked=0;links[0].events.click({preventDefault(){blocked++}});
+  assert.equal(blocked,1);assert.match(container.textContent,/保留期限已到/);
+});
+
+test('document metadata without an owned attachment id cannot create an external download', () => {
+  const mapped=timelineEntryMedia({payload:{attachments:[{type:'document',state:'ready',fileName:'x.pdf',
+    mediaUrl:'https://untrusted.invalid/never-fetch',downloadUrl:'https://untrusted.invalid/never-fetch'}]}});
+  assert.equal(mapped[0].mediaUrl,null);assert.equal(mapped[0].downloadUrl,null);
+});
 
 test('image retention is visible and expires in place without another media request', () => {
   const f=imageFixture({mediaUrl:'/api/timeline/attachments/synthetic',fileName:'evidence.png',expiresAt:'2026-11-05T04:00:02Z'});

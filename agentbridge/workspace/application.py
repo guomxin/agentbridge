@@ -1234,6 +1234,7 @@ class WorkspaceApplication:
         return self._project_timeline_entries(account, entries)
 
     def _project_timeline_entries(self, account: dict, entries: list[dict]) -> list[dict]:
+        from agentbridge.core.telegram_media_receipts import failure_attachment
         endpoints = {
             endpoint["endpoint_id"]: endpoint
             for endpoint in self.service.tasks.list_endpoints(
@@ -1251,7 +1252,7 @@ class WorkspaceApplication:
         for entry in entries:
             if _timeline_attachments(entry):
                 entry = {**entry, "payload":{**entry["payload"], "attachments":[
-                    media.get(item.get("attachmentId"), {"type":"image", "attachmentId":item.get("attachmentId"),
+                    media.get(item.get("attachmentId"), failure_attachment(item) or {"type":"image", "attachmentId":item.get("attachmentId"),
                         "fileName":item.get("fileName", "附加图片"), "state":"unavailable", "mediaUrl":None})
                     for item in _timeline_attachments(entry)]}}
             source = endpoints.get(entry.get("source_endpoint_id")) or {}
@@ -1269,6 +1270,8 @@ class WorkspaceApplication:
         )
 
     def timeline_attachment(self, account: dict, attachment_id: str) -> dict:
+        from agentbridge.core.telegram_media_receipts import authorize_download
+        authorize_download(self.service, account['user_subject'], attachment_id)
         try:
             attachment = self.service.timeline_attachments.ready_payload(
                 attachment_id

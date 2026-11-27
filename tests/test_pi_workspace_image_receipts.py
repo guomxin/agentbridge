@@ -64,7 +64,9 @@ def receipt_host(pi, paired, tmp_path, monkeypatch):
         control_sessions=SimpleNamespace(borrow=borrow,checkout=checkout),
         telegram=SimpleNamespace(current=current), record=record, calls=calls, token=token,
         coordinator=None, commands=None, cards=SimpleNamespace(origins=[]), pair_available=True, current_lookups=0)
-    return host
+    host.ledger = SimpleNamespace(db=sqlite3.connect(user / 'pi-runs.sqlite3'))
+    yield host
+    host.ledger.db.close()
 
 
 def frozen_body(host, claim, **extra):
