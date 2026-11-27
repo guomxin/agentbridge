@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from agentbridge.core.chat_mirror import public_mirror_text
+from agentbridge.core.chat_mirror import PUBLIC_TEXT_MAX_CHARACTERS, public_mirror_text
 from agentbridge.workspace.gateway import GatewayRequestError
 from .telegram_text import split_telegram_text
 
@@ -20,12 +20,33 @@ def telegram_text_fits(value):
 
 
 def telegram_answer(answer):
-    if isinstance(answer, str) and answer.strip() and len(answer) <= 50_000:
-        public = public_mirror_text(answer)
+    if isinstance(answer, str) and answer.strip() and len(answer) <= PUBLIC_TEXT_MAX_CHARACTERS:
+        public = public_mirror_text(answer, maximum=PUBLIC_TEXT_MAX_CHARACTERS)
         if public is not None:
             return public
         return "原请求已结束，请在本人工作台的可信界面查看受保护的信息。"
-    return "原请求已结束，答复未能在 Telegram 完整展示。"
+    return "原请求已结束，答复超过 Telegram 完整展示范围，请在本人工作台的原对话查看完整答复。"
+
+
+def terminal_answer(state):
+    return {"stopped": "原请求的生成已停止，请在本人工作台的原对话查看进度；业务状态以核验结果为准。",
+            "unknown": "原请求的结果暂时无法确认，请在本人工作台的原对话核对；系统不会自动重新办理。"}[state]
+
+
+def record_received(host, record, key, text):
+    """Authenticated sole poller intake fact; deliberately independent of model admission."""
+    db = getattr(host.runs, "_db", None)
+    if db is None:
+        db = host.runs.db
+    db.execute("""CREATE TABLE IF NOT EXISTS telegram_received_sources (
+        subject TEXT NOT NULL, endpoint TEXT NOT NULL, conversation TEXT NOT NULL, request_key TEXT NOT NULL,
+        credential_ref TEXT NOT NULL, text_digest TEXT NOT NULL, PRIMARY KEY(subject,request_key))""")
+    scope = (record["user_subject"], record["endpoint_id"], record["session_key"], key,
+             record["credential_ref"], hashlib.sha256(text.encode()).hexdigest())
+    with db:
+        db.execute("INSERT OR IGNORE INTO telegram_received_sources VALUES(?,?,?,?,?,?)", scope)
+        row = db.execute("SELECT * FROM telegram_received_sources WHERE subject=? AND request_key=?", (scope[0], key)).fetchone()
+        return tuple(row) == scope
 
 
 async def publish_timeline(host, record, body):
@@ -37,22 +58,41 @@ async def publish_timeline(host, record, body):
     if not route:
         raise web.HTTPForbidden()
     bot, sender = route.groups()
-    message, role, text = body["messageId"], body["role"], public_mirror_text(body["text"])
+    message, role = body.get("messageId"), body.get("role")
+    mode = body.get("projectionMode")
+    if mode not in {None, "telegram_received_v2", "host_result_v2"}:
+        raise web.HTTPBadRequest()
+    text = public_mirror_text(body.get("text"), maximum=PUBLIC_TEXT_MAX_CHARACTERS if mode else 50_000)
     if (type(message) is not int or not 0 < message < 2**53 or role not in ("user", "assistant") or not text
             or (role == "user" and not telegram_text_fits(text))):
         raise web.HTTPBadRequest()
     key = f"tg:{bot}:{sender}:{message}"
     entry = host.runs.lookup(key, subject=record["user_subject"], endpoint=record["endpoint_id"],
                              conversation=record["session_key"])
-    if not entry or entry["run_id"] != body["runId"]:
+    received = mode == "telegram_received_v2"
+    if received and (role != "user" or body.get("deliveredMessageIds") != [] or body.get("sourceState") is not None):
+        raise web.HTTPForbidden()
+    if not received and (not entry or entry["run_id"] != body.get("runId")):
         raise web.HTTPForbidden()
     if role == "user":
-        if body.get("deliveredMessageIds") != [] or not host.runs.matches_message(entry["run_id"], text):
+        if mode == "host_result_v2" or (not received and (
+                body.get("deliveredMessageIds") != [] or not host.runs.matches_message(entry["run_id"], text))):
+            raise web.HTTPForbidden()
+        if received and entry and not host.runs.matches_message(entry["run_id"], text):
             raise web.HTTPForbidden()
     else:
         receipts = body.get("deliveredMessageIds")
-        if (entry["state"] != "completed" or telegram_answer(entry["answer"]) != text or not isinstance(receipts, list)
-                or len(receipts) != sum(1 for _ in split_telegram_text(text))
+        if mode == "host_result_v2":
+            state = body.get("sourceState")
+            if state not in {"completed", "stopped", "unknown"} or state != entry["state"]:
+                raise web.HTTPForbidden()
+            expected = telegram_answer(entry["answer"]) if state == "completed" else terminal_answer(state)
+            if expected != text:
+                raise web.HTTPForbidden()
+        elif entry["state"] != "completed" or telegram_answer(entry["answer"]) != text:
+            raise web.HTTPForbidden()
+        if (not isinstance(receipts, list)
+                or (mode is None and len(receipts) != sum(1 for _ in split_telegram_text(text)))
                 or any(type(item) is not int or not 0 < item < 2**53 for item in receipts)
                 or len(set(receipts)) != len(receipts)):
             raise web.HTTPForbidden()
@@ -62,19 +102,29 @@ async def publish_timeline(host, record, body):
         if level != "L3" or not await verify_telegram_binding(
                 session, host.instance, record["user_subject"], meta, record["endpoint_key"], host_type=host_type):
             raise web.HTTPForbidden()
+        if received and not record_received(host, record, key, text):
+            raise web.HTTPForbidden()
         material = json.dumps([host.instance, record["endpoint_id"], key, role], separators=(",", ":")).encode()
+        message_key = host_type + ":telegram:" + hashlib.sha256(material).hexdigest()
         result = await session.call_tool("agentbridge_host_timeline_append", {
             "agent_host": host_type, "endpoint_key": record["endpoint_key"], "client_type": "telegram",
             "external_subject": sender, "conversation_ref": record["session_key"], "account_id": bot,
             "route": {"channel": "telegram", "accountId": bot, "to": sender},
-            "message_key": host_type + ":telegram:" + hashlib.sha256(material).hexdigest(),
+            "message_key": message_key,
             "role": role, "text": text,
+            **({"projection_v2": True} if mode else {}),
         }, meta=meta)
         receipt = result.structuredContent or {}
         endpoint, row = receipt.get("endpoint", {}), receipt.get("entry", {})
         if (result.isError or receipt.get("status") != "succeeded" or endpoint.get("endpointId") != record["endpoint_id"]
                 or row.get("role") != role or row.get("text") != text):
             raise web.HTTPServiceUnavailable()
+        if mode:
+            proof = receipt.get("projectionReceipt", {})
+            if (not isinstance(proof, dict) or not isinstance(proof.get("entryId"), str) or not proof["entryId"]
+                    or proof.get("messageKey") != message_key or proof.get("sourceEndpointId") != record["endpoint_id"]
+                    or proof.get("role") != role or proof.get("textSha256") != hashlib.sha256(text.encode()).hexdigest()):
+                raise web.HTTPServiceUnavailable()
     return {"recorded": True}
 
 
@@ -89,45 +139,75 @@ class TelegramTimeline:
             bot INTEGER NOT NULL, chat INTEGER NOT NULL, message INTEGER NOT NULL, part INTEGER NOT NULL,
             answer_digest TEXT NOT NULL, receipt INTEGER NOT NULL,
             PRIMARY KEY(bot,chat,message,part), UNIQUE(bot,chat,receipt))""")
+        columns = {row[1] for row in pilot.db.execute("PRAGMA table_info(telegram_chat_projection)")}
+        for name, kind in (("projection_mode", "TEXT"), ("source_state", "TEXT"),
+                           ("attempt_count", "INTEGER NOT NULL DEFAULT 0"), ("created_at", "REAL NOT NULL DEFAULT 0")):
+            if name not in columns:
+                pilot.db.execute(f"ALTER TABLE telegram_chat_projection ADD COLUMN {name} {kind}")
+        pilot.db.execute("""CREATE TABLE IF NOT EXISTS telegram_projection_outcomes (
+            bot INTEGER NOT NULL,chat INTEGER NOT NULL,message INTEGER NOT NULL,role TEXT NOT NULL,
+            status TEXT NOT NULL,reason TEXT,PRIMARY KEY(bot,chat,message,role))""")
+        pilot.db.commit()
 
-    def queue(self, chat, message, role, text):
+    def queue(self, chat, message, role, text, *, projection_mode=None, source_state=None):
         # Called within the intake/confirmed-send transaction. The proof row stores no private card or command.
-        text = public_mirror_text(text)
+        text = public_mirror_text(text, maximum=PUBLIC_TEXT_MAX_CHARACTERS if projection_mode else 50_000)
         if text and (role == "assistant" or telegram_text_fits(text)):
-            self.pilot.db.execute("""INSERT OR IGNORE INTO telegram_chat_projection(bot,chat,message,role,text)
-                                  VALUES (?,?,?,?,?)""", (self.pilot.bot_id, chat, message, role, text))
+            key = (self.pilot.bot_id, chat, message, role)
+            if self.pilot.db.execute("SELECT 1 FROM telegram_projection_outcomes WHERE bot=? AND chat=? AND message=? AND role=?", key).fetchone():
+                return
+            self.pilot.db.execute("""INSERT OR IGNORE INTO telegram_chat_projection
+                (bot,chat,message,role,text,projection_mode,source_state,created_at) VALUES (?,?,?,?,?,?,?,?)""",
+                (*key, text, projection_mode, source_state, time.time()))
+
+    def _finish(self, row, status, reason=None):
+        with self.pilot.db:
+            self.pilot.db.execute("INSERT OR REPLACE INTO telegram_projection_outcomes VALUES(?,?,?,?,?,?)",
+                (row["bot"],row["chat"],row["message"],row["role"],status,reason))
+            self.pilot.db.execute("DELETE FROM telegram_chat_projection WHERE rowid=?", (row["id"],))
 
     def flush(self):
         pilot, db = self.pilot, self.pilot.db
-        db.execute("""DELETE FROM telegram_chat_projection AS q WHERE bot=? AND EXISTS (
-            SELECT 1 FROM messages m WHERE (m.bot,m.chat,m.message)=(q.bot,q.chat,q.message)
-              AND m.state IN ('admission_unknown','binding_changed'))""", (pilot.bot_id,))
-        db.commit()
+        stale = db.execute("""SELECT q.rowid AS id,q.*,m.state AS message_state FROM telegram_chat_projection AS q
+            JOIN messages m USING(bot,chat,message) WHERE q.bot=? AND (
+              m.state='binding_changed' OR (m.state='admission_unknown' AND q.projection_mode IS NULL))""", (pilot.bot_id,)).fetchall()
+        for row in stale:
+            self._finish(row, "revoked" if row["message_state"] == "binding_changed" else "source_unavailable", row["message_state"])
         # An earlier unsynchronized role in the same chat cannot be overtaken after a publication timeout.
         # The second pass allows an immediate confirmed answer after the user entry.
         for _ in range(2):
             rows = db.execute("""SELECT q.rowid AS id,q.*,m.binding_hash,m.run_id FROM telegram_chat_projection q
-                JOIN messages m USING(bot,chat,message) WHERE q.bot=? AND q.next_attempt<=? AND m.run_id IS NOT NULL
+                JOIN messages m USING(bot,chat,message) WHERE q.bot=? AND q.next_attempt<=?
+                AND (m.run_id IS NOT NULL OR q.projection_mode='telegram_received_v2')
                 AND NOT EXISTS (SELECT 1 FROM telegram_chat_projection earlier WHERE earlier.bot=q.bot
-                    AND earlier.chat=q.chat AND earlier.rowid<q.rowid)
+                    AND earlier.chat=q.chat AND earlier.rowid<q.rowid
+                    AND (q.projection_mode IS NULL OR earlier.message=q.message))
                 ORDER BY q.rowid LIMIT 32""", (pilot.bot_id, time.time())).fetchall()
             for row in rows:
+                if row["projection_mode"] and (row["attempt_count"] >= 24 or time.time() - row["created_at"] >= 86400):
+                    self._finish(row, "expired", "projection_retry_budget")
+                    continue
                 try:
                     binding, digest = pilot._binding(row["chat"])
-                    if binding and digest == row["binding_hash"]:
+                    if not binding or digest != row["binding_hash"]:
+                        self._finish(row, "revoked", "binding_changed")
+                        continue
+                    if binding:
                         receipts = []
                         if row["role"] == "assistant":
                             receipts = [item[0] for item in db.execute("""SELECT receipt FROM telegram_reply_parts
                                 WHERE bot=? AND chat=? AND message=? ORDER BY part""",
                                 (pilot.bot_id, row["chat"], row["message"]))]
+                        options = {"projection_mode":row["projection_mode"], "source_state":row["source_state"]} if row["projection_mode"] else {}
                         pilot.gateway.publish_telegram_timeline(binding, row["message"], row["role"], row["text"],
-                                                                row["run_id"], receipts)
+                                                                row["run_id"], receipts, **options)
                 except (RuntimeError, OSError) as error:
                     if not isinstance(error, GatewayRequestError) or error.code not in {
-                            "NANOBOT_BINDING_UNAVAILABLE", "NANOBOT_INVALID_REQUEST"}:
+                            pilot.host_type.upper() + "_BINDING_UNAVAILABLE", pilot.host_type.upper() + "_INVALID_REQUEST"}:
                         with db:
-                            db.execute("UPDATE telegram_chat_projection SET next_attempt=? WHERE rowid=?",
-                                       (time.time() + 5, row["id"]))
+                            db.execute("UPDATE telegram_chat_projection SET next_attempt=?,attempt_count=attempt_count+1 WHERE rowid=?",
+                                       (time.time() + min(300, 5 * (2 ** min(row["attempt_count"], 6))), row["id"]))
                         continue
-                with db:
-                    db.execute("DELETE FROM telegram_chat_projection WHERE rowid=?", (row["id"],))
+                    self._finish(row, "rejected", "source_or_binding_rejected")
+                    continue
+                self._finish(row, "acknowledged")

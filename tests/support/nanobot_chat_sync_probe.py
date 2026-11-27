@@ -71,7 +71,7 @@ def run(home):
         long_answer = "合成长文开始" + "甲🟢" * 2200 + "合成长文结束"
         wait_for(lambda: timeline(web).count(("assistant", long_answer)) == 1, "one complete multipart reply")
         long_receipt = private.get("/state").json()["rows"][-1]
-        assert long_receipt["sendCalls"] == 2 and long_receipt["state"] == "delivered"
+        assert long_receipt["sendCalls"] == 3 and long_receipt["state"] == "delivered"
         assert not other_private.get("/state").json()["mirrors"]
 
         legacy = "校验原宿主普通通道"
@@ -108,5 +108,5 @@ def run(home):
                 JOIN user_timeline u ON o.event_id=u.entry_id JOIN client_endpoints e ON e.endpoint_id=o.endpoint_id
                 WHERE o.payload_type='timeline_message' AND u.text=?""", (legacy,)).fetchall()
             assert original == [("openclaw", "501")], original
-        return {"webToTelegramRoles": 2, "telegramToWebRoles": 2, "ordinaryHostRuns": 2, "longReplyParts": 2,
+        return {"webToTelegramRoles": 2, "telegramToWebRoles": 2, "ordinaryHostRuns": 2, "longReplyParts": 3,
                 "crossAccountOrOpenClaw": 0, "duplicateSends": 0, "durableTextReceipts": 2, "legacyMirrorSends": 0}

@@ -29,16 +29,16 @@ def test_confirmed_turn_retries_only_its_history_after_restart(tmp_path):
         pilot.db.close()
 
 
-def test_unknown_send_and_command_are_not_recorded_as_chat_answers(tmp_path):
+def test_unknown_send_keeps_host_answer_but_commands_are_not_chat_answers(tmp_path):
     with transport(tmp_path) as (state, _, create):
         pilot = create()
         state.update(lost_delivery=True, updates=[update(1), update(2, 502, text="/start")])
         pilot.poll_once()
-        assert list(state["timeline"].values()) == ["查询我的待办"]
+        assert list(state["timeline"].values()) == ["查询我的待办", "合成结果 alpha"]
         state.update(lost_delivery=False, updates=[update(3), update(4, 502, text="/start")])
         pilot.poll_once()
         assert len(state["deliveries"]) == 2 and len(state["admissions"]) == 1
-        assert len(state["timeline"]) == 1
+        assert len(state["timeline"]) == 2
         pilot.db.close()
 
 
@@ -80,13 +80,14 @@ def test_length_limit_counts_utf16_and_does_not_forward_private_or_malformed_ans
     emoji = "😀" * 2048
     assert telegram_text_fits(emoji) and telegram_answer(emoji) == emoji
     assert not telegram_text_fits(emoji + "a") and telegram_answer(emoji + "a") == emoji + "a"
-    assert len(telegram_answer("文" * 50_001)) < 100
+    assert telegram_answer("文" * 50_001) == "文" * 50_001
+    assert "原对话" in telegram_answer("文" * 200_001)
     assert not telegram_text_fits("\ud800") and public_mirror_text("\ud800") is None
     assert "private" not in telegram_answer("https://fixture.invalid/auth/private")
 
 
 @pytest.mark.parametrize("lose_second", [True, False])
-def test_long_original_reply_publishes_once_after_every_receipt(tmp_path, lose_second):
+def test_long_original_reply_publishes_independently_of_platform_receipts(tmp_path, lose_second):
     with transport(tmp_path) as (state, _, create):
         expected = "文" * 4095 + "😀" + "末尾" * 2200
         state.update(final_answer=expected, updates=[update(1)],
@@ -104,12 +105,13 @@ def test_long_original_reply_publishes_once_after_every_receipt(tmp_path, lose_s
         rows = list(state["timeline"].values())
         if lose_second:
             assert pilot._record(501,9)["state"] == "delivery_unknown"
-            assert len(texts) == 2 and rows == ["查询我的待办"]
+            assert len(texts) == 2 and rows == ["查询我的待办", expected]
         else:
-            assert len(texts) == 3 and "".join(texts) == expected
+            assert len(texts) == 4 and "".join(texts) == expected
             assert rows == ["查询我的待办", expected]
             published = [body for path, body in state["calls"] if path == "/v1/telegram-timeline" and body["role"] == "assistant"]
-            assert len(published) == 1 and published[0]["deliveredMessageIds"] == [701, 702, 703]
+            assert len(published) == 1 and published[0]["deliveredMessageIds"] == [701, 702, 703, 704]
+            assert published[0]["projectionMode"] == "host_result_v2"
         pilot.db.close()
 
 
@@ -127,13 +129,13 @@ def test_resume_only_unsent_segments_after_identity_service_returns(tmp_path, mo
         monkeypatch.setattr(pilot, "_binding", temporarily_offline)
         pilot.poll_once()
         assert pilot._record(501, 9)["state"] == "working"
-        assert [d["text"] for d in state["deliveries"]] == ["首" * 4096]
+        assert [d["text"] for d in state["deliveries"]] == ["首" * 2700]
         pilot.db.close()
         pilot = create()
         with pilot.db:
             pilot.db.execute("UPDATE telegram_chat_projection SET next_attempt=0")
         pilot.poll_once()
-        assert [d["text"] for d in state["deliveries"]] == ["首" * 4096, "次段已核对"]
+        assert [d["text"] for d in state["deliveries"]] == ["首" * 2700, "首" * 1396 + "次段已核对"]
         assert list(state["timeline"].values()) == ["查询我的待办", answer]
         assert len(state["admissions"]) == 1
         pilot.db.close()

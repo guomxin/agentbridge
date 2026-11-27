@@ -37,6 +37,7 @@ from . import telegram_media
 from .telegram_text import split_telegram_text
 from .telegram_navigation import TelegramNavigation, command as navigation_command
 from .telegram_timeline import TelegramTimeline, telegram_answer, telegram_text_fits
+from .telegram_direct_replies import DirectReplies
 
 
 def numeric(value):
@@ -229,6 +230,7 @@ class TelegramPilot:
         with self.db:
             self.db.execute("DELETE FROM messages WHERE bot=? AND state='reading_media'", (self.bot_id,))
         self.timeline = TelegramTimeline(self)
+        self.direct_replies = DirectReplies(self)
         self.terminal = None
         if allow_pairing:
             from .notifications import TerminalMessages
@@ -414,7 +416,8 @@ class TelegramPilot:
                 (self.bot_id, chat_id, message_id, binding["user_subject"], digest),
             ).rowcount
             if inserted and ordinary:
-                self.timeline.queue(chat_id, message_id, "user", text)
+                self.direct_replies.admit(chat_id, message_id, digest)
+                self.timeline.queue(chat_id, message_id, "user", text, projection_mode="telegram_received_v2")
         if not inserted:
             return
         if not ordinary:
@@ -497,7 +500,7 @@ class TelegramPilot:
         else:
             self._send(chat, message, answer)
 
-    def _confirmed_send(self, chat, message, answer, *, parse_mode=None, reply_markup=None):
+    def _confirmed_send(self, chat, message, answer, *, parse_mode=None, reply_markup=None, preserve_rejections=False):
         if self.sender_subject is not None and self.sender_subject(chat) is None:
             return None
         # Telegram sendMessage has no idempotency key. A lost reply after this
@@ -527,6 +530,10 @@ class TelegramPilot:
                 or result["reply_to_message"].get("message_id") != message
             ):
                 raise TelegramUnavailable("Reply identity not confirmed")
+        except TelegramRejected:
+            if preserve_rejections:
+                raise
+            return None
         except TelegramUnavailable:
             return None
         return result["message_id"]
@@ -537,10 +544,10 @@ class TelegramPilot:
         self._state(chat, message, "delivered" if receipt else "delivery_unknown", receipt=receipt)
 
     def _deliver_card_once(self, chat, message, binding, binding_digest, dedupe_key, params, *, result_deadline=None):
+        # Authority checks must not consume a send reservation.
+        if self._binding(chat) != (binding, binding_digest):
+            return "binding_changed"
         if result_deadline is not None:
-            # A slow or failed authority check is still before the durable Bot send boundary.
-            if self._binding(chat) != (binding, binding_digest):
-                return "binding_changed"
             if time.time() >= result_deadline:
                 return "expired"
         with self.db:
@@ -553,18 +560,15 @@ class TelegramPilot:
         status = "delivery_unknown"
         receipt = None
         try:
-            if result_deadline is None and self._binding(chat) != (binding, binding_digest):
-                status = "binding_changed"
-            else:
-                receipt = self._confirmed_send(
-                    chat,
-                    message,
-                    params["text"],
-                    parse_mode=params.get("parse_mode"),
-                    reply_markup=params.get("reply_markup"),
-                )
-                if receipt is not None:
-                    status = "delivered"
+            receipt = self._confirmed_send(
+                chat,
+                message,
+                params["text"],
+                parse_mode=params.get("parse_mode"),
+                reply_markup=params.get("reply_markup"),
+            )
+            if receipt is not None:
+                status = "delivered"
         except TelegramUnavailable:
             pass
         with self.db:
@@ -581,6 +585,8 @@ class TelegramPilot:
         return "handled"
 
     def _send_public_reply(self, chat, message, answer, binding_digest):
+        if self.direct_replies.send(chat, message, answer, binding_digest):
+            return
         key = (self.bot_id, chat, message)
         parts = list(split_telegram_text(answer))
         content_digest = hashlib.sha256(answer.encode()).hexdigest()
@@ -698,13 +704,26 @@ class TelegramPilot:
                 if has_view and not self.result_cards:
                     self._deliver_result_view(chat, message, binding, digest, key, run_id)
             elif evidence["state"] == "completed":
-                self.deliver(chat, message, telegram_answer(evidence.get("final_text")), ordinary=True)
+                answer = telegram_answer(evidence.get("final_text"))
+                if self.direct_replies._row(chat, message):
+                    with self.db:
+                        self.timeline.queue(chat, message, "assistant", answer,
+                            projection_mode="host_result_v2", source_state="completed")
+                self.deliver(chat, message, answer, ordinary=True)
                 if has_view and not self.result_cards:
                     self._deliver_result_view(chat, message, binding, digest, key, run_id)
                 if self.terminal:
                     self.terminal.flush_deferred(chat=chat, run_id=run_id)
             elif evidence["state"] in {"stopped", "unknown"}:
-                self.deliver(chat, message, "原请求已停止或结果待核对。")
+                from .telegram_timeline import terminal_answer
+                answer = terminal_answer(evidence["state"])
+                if self.direct_replies._row(chat, message):
+                    with self.db:
+                        self.timeline.queue(chat, message, "assistant", answer,
+                            projection_mode="host_result_v2", source_state=evidence["state"])
+                    self.deliver(chat, message, answer, ordinary=True)
+                else:
+                    self.deliver(chat, message, "原请求已停止或结果待核对。")
         if self.result_cards:
             self.result_cards.flush_one()
         if self.terminal:
