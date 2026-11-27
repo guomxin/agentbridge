@@ -1,5 +1,5 @@
 from __future__ import annotations
-from agentbridge.core import workspace_query_delivery, workspace_text_delivery
+from agentbridge.core import telegram_timeline_projection, workspace_query_delivery, workspace_text_delivery
 from agentbridge.core.chat_mirror import private_bot_digest_kind, private_bot_chat_kind
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS, endpoint_instances, instance_key
@@ -210,6 +210,7 @@ class TaskHubStore:
             connection.execute("PRAGMA journal_mode=WAL")
             workspace_query_delivery.initialize(connection)
             workspace_text_delivery.initialize(connection)
+            telegram_timeline_projection.initialize(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS client_endpoints (
@@ -3017,6 +3018,7 @@ class TaskHubStore:
         payload: dict[str, Any] | None = None,
         notify_source: bool = False,
         _workspace_response: bool = False,
+        _telegram_projection: bool = False,
         _workspace_chat: bool = False,
         target_endpoint_id: str | None = None,
         target_endpoint_binding: str | None = None,
@@ -3050,7 +3052,7 @@ class TaskHubStore:
             raise ValueError("workspace response source is invalid")
         normalized_text = _timeline_text(
             text,
-            maximum=(WORKSPACE_RESPONSE_MAX_CHARACTERS if _workspace_response
+            maximum=(WORKSPACE_RESPONSE_MAX_CHARACTERS if _workspace_response or _telegram_projection
                      else TIMELINE_TEXT_MAX_CHARACTERS),
         )
         if normalized_task_id:

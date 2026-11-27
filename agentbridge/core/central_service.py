@@ -2859,9 +2859,19 @@ class CentralCapabilityService:
         route: dict | None = None,
         task_id: str | None = None,
         host_instance_id: str | None = None,
+        projection_v2: bool = False,
     ) -> dict:
         from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
         from agentbridge.core.store_transactions import store_transaction
+
+        if projection_v2:
+            from agentbridge.core.telegram_timeline_projection import append
+            if client_type != "telegram":
+                raise ValueError("Private history requires a Telegram source")
+            return append(self, subject=user_subject, host=agent_host, instance=host_instance_id,
+                          token=token_id, endpoint_key=endpoint_key, sender=external_subject, account=account_id,
+                          conversation=conversation_ref, route=route, message_key=message_key, role=role,
+                          text=text, task_id=task_id)
 
         with store_transaction(self.tasks) as db:
             old = db.execute("SELECT * FROM client_endpoints WHERE agent_host=? AND endpoint_key=?",

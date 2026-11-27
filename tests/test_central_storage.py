@@ -110,6 +110,7 @@ class CentralStorageTests(unittest.TestCase):
                     ['table', 'workspace_query_deliveries'],
                     ['index', 'workspace_query_pending'],
                     ['table', 'workspace_text_deliveries'],
+                    ['table', 'telegram_history_receipts'],
                     ['index', 'workspace_text_due'],
                     ['index', 'workspace_dispatch_request'],
                     ['table', 'pi_workspace_image_deliveries'],

@@ -6202,11 +6202,12 @@ def create_central_mcp_server(
         conversation_ref: Annotated[str, Field(min_length=1, max_length=1024)],
         message_key: Annotated[str, Field(min_length=1, max_length=768)],
         role: Annotated[str, Field(pattern="^(user|assistant)$")],
-        text: Annotated[str, Field(min_length=1, max_length=50_000)],
+        text: Annotated[str, Field(min_length=1, max_length=200_000)],
         account_id: Annotated[str | None, Field(max_length=512)] = None,
         label: Annotated[str | None, Field(max_length=120)] = None,
         route: dict[str, Any] | None = None,
         task_id: Annotated[str | None, Field(max_length=128)] = None,
+        projection_v2: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
         host, _ = await _require_registered_host_call(
@@ -6215,7 +6216,7 @@ def create_central_mcp_server(
             identity=identity,
             agent_host=agent_host,
             task_id=task_id,
-            require_coordinator_lease=bool(task_id),
+            require_coordinator_lease=bool(task_id) and not projection_v2,
         )
         return await _run_host_control(
             "agentbridge_host_timeline_append",
@@ -6235,6 +6236,7 @@ def create_central_mcp_server(
             route=route,
             host_instance_id=host["hostInstanceId"],
             task_id=task_id,
+            projection_v2=projection_v2,
         )
 
     async def authorize_oa_digest(ctx: Context, agent_host: str) -> str:

@@ -163,6 +163,14 @@ def test_central_paired_source_preserves_metadata_and_never_echoes(pair_fixture,
         for _ in range(2):
             result = fixture.service.append_host_timeline_message(**source)
             assert result["endpoint"]["endpointId"] == end["endpointId"]
+    from tests.test_workspace_query_projection import register
+    register(fixture.service, a, "nanobot", INSTANCE, fixture.tokens["a"])
+    upgraded = fixture.service.append_host_timeline_message(**source, projection_v2=True)
+    assert upgraded["reused"]["entry"]
+    assert upgraded["projectionReceipt"]["sourceEndpointId"] == end["endpointId"]
+    assert upgraded["projectionReceipt"]["entryId"] == result["entry"]["entryId"]
+    with pytest.raises(ValueError):
+        fixture.service.append_host_timeline_message(**{**source,"text":"同键异载荷"},projection_v2=True)
     assert endpoint() == original
     def visible(owner, selected):
         view = {**owner, "_workspace_view_instance": selected}
