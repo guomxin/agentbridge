@@ -602,22 +602,32 @@ export class InteractionCoordinator {
     // Retain the binding for middleware handling of any non-card result data.
     const binding = this.toolBindings.get(normalizeToolCallId(event.toolCallId));
     const sessionKey = binding?.sessionKey || context.sessionKey;
+    const source = event.planningContext;
+    const knownNativeLogin = !taskIdFromToolResult(event.result) &&
+      /^agent:[^:]+:telegram:(?:direct|dm):[1-9][0-9]*$/iu.test(source?.sessionKey || "") &&
+      /^(?:oa|taihua|yuque|smartlight)_session_login$/u.test(event.toolName || "") &&
+      trustedAgentBridgeStructuredContent(event.result, this.config.mcpServerName) &&
+      typeof source?.isCurrent === "function" && source.toolCallId === normalizeToolCallId(event.toolCallId);
+    const sourceCurrent = knownNativeLogin && source.sessionKey === sessionKey &&
+      this.planningCalls.get(source.toolCallId) === source && this.planningCallCurrent(source) &&
+      Boolean(source.identityScope) && source.identityScope === this.toolIdentityResolver?.(sessionKey);
     const interactions =
-      (await this.presentInteractions(processed.interactions, sessionKey)) ||
+      (knownNativeLogin && !sourceCurrent ? processed.interactions :
+        await this.presentInteractions(processed.interactions, sessionKey)) ||
       processed.interactions;
     this.captureInteractions(interactions, binding, context, taskIdFromToolResult(event.result));
     // A task-free login has no central task-origin proof. Admit only the actual
     // identity-routed native login result whose original call is still current;
     // arbitrary legacy metadata and historical booleans do not mint this proof.
-    const source = event.planningContext;
-    if (!taskIdFromToolResult(event.result) && /^(?:oa|taihua|yuque|smartlight)_session_login$/u.test(event.toolName || "") &&
-        trustedAgentBridgeStructuredContent(event.result, this.config.mcpServerName) &&
-        source?.sessionKey === sessionKey && this.planningCalls.get(source.toolCallId) === source &&
-        this.planningCallCurrent(source) && source.identityScope === this.toolIdentityResolver?.(sessionKey)) {
+    if (knownNativeLogin) {
       for (const interaction of interactions) {
         const record = this.records.get(interaction.interactionId);
-        if (interaction.type === "credential" && record?.sessionKey === sessionKey && !record.taskId)
-          record.nativeCardIdentityScope = source.identityScope;
+        if (interaction.type === "credential" && record?.sessionKey === sessionKey && !record.taskId) {
+          const known = record.nativeCardSourceKnown || Boolean(record.nativeCardIdentityScope);
+          record.nativeCardSourceRejected ||= !sourceCurrent || known && record.nativeCardIdentityScope !== source.identityScope;
+          if (!known) record.nativeCardIdentityScope = source.identityScope;
+          record.nativeCardSourceKnown = true;
+        }
       }
     }
     return processed.result;
@@ -1288,6 +1298,7 @@ export class InteractionCoordinator {
       .filter(
         (record) =>
           record.sessionKey === sessionKey &&
+          !this.nativeCardSourceUnavailable(record) &&
           ["pending", "processing"].includes(record.interaction.state),
       )
       .sort((left, right) => right.capturedAt - left.capturedAt)
@@ -2763,18 +2774,46 @@ export class InteractionCoordinator {
 
   nativeCardCanHandle(sessionKey, interaction) {
     const record = this.records.get(interaction.interactionId);
-    return record?.sessionKey === sessionKey && this.nativeCards.canHandle(sessionKey, interaction, record.taskId,
-      Boolean(record.nativeCardIdentityScope && record.nativeCardIdentityScope === this.toolIdentityResolver?.(sessionKey)));
+    return record?.sessionKey === sessionKey && (record.nativeCardSourceKnown || Boolean(record.nativeCardIdentityScope) ||
+      /^agent:[^:]+:telegram:(?:direct|dm):[1-9][0-9]*$/iu.test(sessionKey || "") &&
+        this.nativeCards.canHandle(sessionKey, interaction, record.taskId));
+  }
+
+  nativeCardSourceUnavailable(record) {
+    return Boolean((record?.nativeCardSourceKnown || record?.nativeCardIdentityScope) &&
+      (record.nativeCardSourceRejected || !record.nativeCardIdentityScope ||
+        record.nativeCardIdentityScope !== this.toolIdentityResolver?.(record.sessionKey)));
+  }
+
+  async nativeCardPresentationAllowed(sessionKey, interaction) {
+    const record = this.records.get(interaction.interactionId);
+    if (!(record?.nativeCardSourceKnown || record?.nativeCardIdentityScope) &&
+        (!/^agent:[^:]+:telegram:(?:direct|dm):[1-9][0-9]*$/iu.test(sessionKey || "") ||
+          !this.nativeCards.original(sessionKey, interaction.interactionId))) return true;
+    if (this.nativeCardSourceUnavailable(record)) return false;
+    const allowed = await this.nativeCards.presentationAllowed({ sessionKey, interaction, taskId: record.taskId,
+      standalone: Boolean(record.nativeCardIdentityScope) });
+    return allowed && !this.nativeCardSourceUnavailable(record);
   }
 
   async deliverNativeInteractionCards(sessionKey, interactions) {
     const results = [];
     for (const interaction of interactions) {
       const record = this.records.get(interaction.interactionId);
+      if (this.nativeCardSourceUnavailable(record)) {
+        // This is a known original source whose authority changed, not a
+        // source-free legacy card. Never move it into an untracked payload.
+        record.delivered = false;
+        results.push("unavailable");
+        continue;
+      }
       const outcome = await this.nativeCards.deliver({ sessionKey, interaction, taskId: record?.taskId,
         standalone: Boolean(record?.nativeCardIdentityScope && record.nativeCardIdentityScope === this.toolIdentityResolver?.(sessionKey)),
         withDirectDelivery: send => this.withNativeDirectDelivery(sessionKey, send) });
-      if (outcome !== "unclaimed" && record?.sessionKey === sessionKey) record.delivered = true;
+      if (outcome !== "unclaimed" && record?.sessionKey === sessionKey) {
+        const original = this.nativeCards.original(sessionKey, interaction.interactionId);
+        record.delivered = Boolean(original && !original.unreadable);
+      }
       results.push(outcome);
     }
     return results;

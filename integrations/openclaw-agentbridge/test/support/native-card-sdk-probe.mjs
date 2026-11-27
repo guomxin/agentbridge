@@ -80,10 +80,37 @@ try {
   replyMode = '429'; await h.reply(h.card(3)); assert.equal(wire.length, 6);
   h.restart(); replyMode = 'ok'; await h.observe(); assert.equal(wire.length, 6);
   h.now += 2001; await h.observe(); assert.equal(wire.length, 7);
+  const guardedSources = ['after_capture', 'before_callback', 'storage_unavailable', 'adapter_unavailable'];
+  for (const condition of guardedSources) {
+    const boundary = nativeFixture(path.join(home, condition), { adapter, hostConfig, taskId: null });
+    try {
+      const original = boundary.card();
+      if (condition === 'before_callback') boundary.beforeNativeCapture = () => { boundary.token = 'changed-before-result'; };
+      await boundary.captureStandalone(original);
+      if (condition === 'after_capture') boundary.token = 'changed-before-first-send';
+      if (condition === 'storage_unavailable') boundary.bridge.nativeCards.store = null;
+      if (condition === 'adapter_unavailable') boundary.api.runtime.channel.outbound.loadAdapter = async () => null;
+      const before = wire.length;
+      const ordinary = await boundary.reply(original, '原公开文字保留');
+      assert.equal(ordinary.payload.presentation, undefined);
+      assert.ok(ordinary.payload.text.startsWith('原公开文字保留'));
+      assert.equal(wire.length, before, 'A known original source cannot fall back to a card POST');
+      await native.sendPayload({ cfg: hostConfig, to: '1001', accountId: 'default', payload: ordinary.payload,
+        text: ordinary.payload.text, formatting: { parseMode: 'HTML' } });
+      assert.equal(wire.length, before + 1);
+      assert.equal(wire.at(-1).reply_markup?.inline_keyboard?.flat().length || 0, 0);
+      await boundary.bridge.deliverInteractionsDirect(boundary.sessionKey, [original]);
+      assert.equal(wire.length, before + 1, 'Direct delivery cannot resend the old source either');
+      const pending = await boundary.command.handler({ sessionKey: boundary.sessionKey, channelId: 'telegram', args: 'pending' });
+      assert.equal(pending.presentation, undefined, 'The user command cannot bypass the same source boundary');
+      if (condition !== 'adapter_unavailable') assert.equal(boundary.calls.length, 0);
+    } finally { boundary.close(); }
+  }
   console.log(JSON.stringify({ passed: true, proof: 'actual-sdk-loopback-synthetic-central', sdkVersion: JSON.parse(readFileSync(path.join(sdkDir, 'package.json'))).version,
     originalCardWire: 1, ordinaryAnswerWire: 1, originalReadContinuationWire: 1, originalReadCalls: reads,
     closureWire: 1, callbackReceipts: callbacks.length, replayedAfterRestart: 0,
     unknownHttpAttempts: 1, rateLimitedHttpAttempts: 1, retryAfterNewAttemptWire: 1,
+    knownSourceBoundary: { scenarios: guardedSources, legacyCardHttpAttempts: 0, preservedOrdinaryReplies: 4 },
     closuresUseStateOnly: true, realTelegram: false, platformPolling: false,
     textSha256: wire.map(body => createHash('sha256').update(body.text).digest('hex')) }));
 } finally { h?.close(); await new Promise(resolve => server.close(resolve)); rmSync(home, { recursive: true, force: true }); }

@@ -583,7 +583,10 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
         });
       }
       if (action === "pending") {
-        const interactions = coordinator.pendingForSession(sessionKey);
+        const interactions = [];
+        for (const interaction of coordinator.pendingForSession(sessionKey)) {
+          if (await coordinator.nativeCardPresentationAllowed(sessionKey, interaction)) interactions.push(interaction);
+        }
         const presentation = presentationForRecords(
           interactions,
           context.channelId || context.channel,

@@ -79,6 +79,21 @@ export class TelegramNativeCards {
       row.value.sessionKey === sessionKey && row.value.interactionId === identifier); }
     catch { return { unreadable: true }; }
   }
+  async presentationAllowed({ sessionKey, interaction, taskId = null, standalone = false }) {
+    // Explicit /pending keeps its view semantics, but a known native source
+    // must still belong to the current active endpoint. This never issues a
+    // new presentation or creates a delivery intent.
+    const scope = this.scope(sessionKey), original = this.original(sessionKey, interaction.interactionId);
+    if (!scope || original?.unreadable || !this.canHandle(sessionKey, interaction, taskId, standalone)) return false;
+    if (original && original.value.card.state !== 'sent') return false;
+    const record = original?.value || { ...scope, taskId, standalone,
+      interactionId: interaction.interactionId, type: interaction.type };
+    if (record.taskId !== taskId || record.type !== interaction.type) return false;
+    try {
+      const observed = await this.authority(record, this.clientFor(sessionKey));
+      return Boolean(observed && ['pending', 'processing'].includes(observed.interaction.state));
+    } catch { return false; }
+  }
   async authority(record, client, signal) {
     if (!client || !this.current(record) || signal?.aborted) return null;
     const snapshot = await client.callTool('agentbridge_host_interaction_present', {
@@ -109,7 +124,7 @@ export class TelegramNativeCards {
     if (existing?.unreadable) return 'unavailable';
     if (existing && (!scope || !this.current(existing.value) || existing.value.taskId !== taskId ||
         existing.value.type !== interaction.type)) return 'unavailable';
-    if (!this.canHandle(sessionKey, interaction, taskId, standalone)) return 'unclaimed';
+    if (!this.canHandle(sessionKey, interaction, taskId, standalone)) return standalone ? 'unavailable' : 'unclaimed';
     const key = this.key(scope, interaction.interactionId), lock = `${this.store.filename}:${key}`;
     if (active.has(lock)) return 'pending';
     active.add(lock);
@@ -125,7 +140,7 @@ export class TelegramNativeCards {
       if (!this.store.registerIfAbsent(key, record)) return 'pending';
       return await this.sendCard(key, record, withDirectDelivery, signal, interaction);
     } catch {
-      try { return this.store.lookup(key) ? 'unavailable' : 'unclaimed'; }
+      try { return this.store.lookup(key) || standalone ? 'unavailable' : 'unclaimed'; }
       catch { return 'unavailable'; }
     }
     finally { active.delete(lock); }

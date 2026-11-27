@@ -202,12 +202,122 @@ test('a changed native standalone identity cannot fall back to an untracked old-
   await h.reply(card); assert.equal(h.sends.length, 1); assert.equal(h.rows().length, 1);
 });
 
-test('a stale native call cannot create task-free source proof', async t => {
+test('a known stale native call is rejected, not mistaken for a source-free legacy card', async t => {
   const h = fixture(t, { taskId: null }), card = h.card();
   const original = h.bridge.planningCallCurrent.bind(h.bridge);
   h.bridge.planningCallCurrent = () => false; await h.captureStandalone(card);
   h.bridge.planningCallCurrent = original;
-  assert.equal(h.bridge.nativeCardCanHandle(h.sessionKey, card), false);
-  const reply = await h.reply(card); assert.ok(reply.payload.presentation);
+  assert.equal(h.bridge.nativeCardCanHandle(h.sessionKey, card), true);
+  const reply = await h.reply(card); assert.equal(reply.payload.presentation, undefined);
+  assert.ok(reply.payload.text.includes('尚未确认'));
   assert.equal(h.sends.length, 0); assert.equal(h.rows().length, 0);
+});
+
+for (const entry of ['reply', 'direct']) {
+  for (const condition of ['identity_changed', 'store_unavailable', 'reserve_failed', 'adapter_unavailable']) {
+    test(`known standalone source stays owned before first send: ${entry}/${condition}`, async t => {
+      const h = fixture(t, { taskId: null }), card = h.card(); await h.captureStandalone(card);
+      if (condition === 'identity_changed') h.token = 'changed-before-first-send';
+      if (condition === 'store_unavailable') h.bridge.nativeCards.store = null;
+      if (condition === 'reserve_failed') h.store.registerIfAbsent = () => { throw Error('definite local reservation failure'); };
+      if (condition === 'adapter_unavailable') h.api.runtime.channel.outbound.loadAdapter = async () => null;
+      assert.equal(h.bridge.nativeCardCanHandle(h.sessionKey, card), true);
+      if (entry === 'reply') {
+        const answer = await h.reply(card, '原公开文字');
+        assert.ok(answer.payload.text.startsWith('原公开文字')); assert.ok(answer.payload.text.includes('尚未确认'));
+        assert.equal(answer.payload.presentation, undefined);
+      } else {
+        assert.equal(await h.bridge.deliverInteractionsDirect(h.sessionKey, [card]), true);
+      }
+      assert.equal(h.sends.length, 0);
+      assert.equal(h.rows().length, condition === 'adapter_unavailable' ? 1 : 0);
+      assert.equal(h.bridge.records.get(card.interactionId).delivered, condition === 'adapter_unavailable');
+    });
+  }
+}
+
+for (const entry of ['reply', 'direct']) {
+  for (const change of ['identity', 'missing_original_scope']) {
+    test(`known source changed before native result cannot be re-admitted: ${entry}/${change}`, async t => {
+      const h = fixture(t, { taskId: null }), card = h.card();
+      if (change === 'missing_original_scope') h.token = null;
+      h.beforeNativeCapture = () => { h.token = 'new-current-identity'; };
+      await h.captureStandalone(card);
+      const record = h.bridge.records.get(card.interactionId);
+      assert.equal(record.nativeCardSourceKnown, true); assert.equal(record.nativeCardSourceRejected, true);
+      if (entry === 'reply') {
+        const reply = await h.reply(card, '原公开文字');
+        assert.ok(reply.payload.text.startsWith('原公开文字')); assert.equal(reply.payload.presentation, undefined);
+      } else assert.equal(await h.bridge.deliverInteractionsDirect(h.sessionKey, [card]), true);
+      assert.equal(h.sends.length, 0); assert.equal(h.rows().length, 0); assert.equal(h.calls.length, 0);
+      h.beforeNativeCapture = null; await h.captureStandalone(card);
+      assert.equal(record.nativeCardSourceRejected, true, 'A later identity cannot overwrite the original source');
+      await h.bridge.deliverInteractionsDirect(h.sessionKey, [card]); assert.equal(h.sends.length, 0);
+    });
+  }
+}
+
+test('WeChat native login keeps its existing reply and pending presentation', async t => {
+  const h = fixture(t, { taskId: null, channel: 'openclaw-weixin' }), card = h.card();
+  await h.captureStandalone(card);
+  assert.equal(h.bridge.records.get(card.interactionId).nativeCardSourceKnown, undefined);
+  const reply = await h.reply(card, '微信原公开文字');
+  assert.ok(reply.payload.text.startsWith('微信原公开文字')); assert.ok(reply.payload.presentation);
+  const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'openclaw-weixin', args: 'pending' });
+  assert.ok(pending.presentation); assert.equal(h.sends.length, 0); assert.equal(h.rows().length, 0);
+});
+
+for (const changedAt of ['before_result', 'before_reply', 'withdrawn']) {
+  test(`pending command cannot reveal a known original source after ${changedAt}`, async t => {
+    const h = fixture(t, { taskId: null }), card = h.card();
+    if (changedAt === 'before_result') h.beforeNativeCapture = () => { h.token = 'replaced-before-result'; };
+    await h.captureStandalone(card);
+    if (changedAt === 'before_reply') h.token = 'replaced-before-reply';
+    if (changedAt === 'withdrawn') h.token = null;
+    const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'telegram', args: 'pending' });
+    assert.equal(pending.presentation, undefined); assert.equal(h.sends.length, 0); assert.equal(h.calls.length, 0);
+  });
+}
+
+test('pending command still displays a current owned native card and source-free legacy card', async t => {
+  const h = fixture(t, { taskId: null }); await h.captureStandalone(h.card(1));
+  h.bridge.captureInteractions([h.card(2)], { sessionKey: h.sessionKey }, { sessionKey: h.sessionKey }, null);
+  const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'telegram', args: 'pending' });
+  assert.ok(pending.presentation); assert.equal(h.bridge.pendingForSession(h.sessionKey).length, 2);
+  assert.equal(h.sends.length, 0); assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].args.state_only, true);
+});
+
+for (const refusal of ['endpoint_revoked', 'expired', 'store_unavailable', 'state_read_failed']) {
+  test(`pending confirms current native ownership without signing a card: ${refusal}`, async t => {
+    const h = fixture(t, { taskId: null }), card = h.card(); await h.captureStandalone(card);
+    if (refusal === 'endpoint_revoked') h.endpoint.state = 'revoked';
+    if (refusal === 'expired') h.finish(1, 'expired');
+    if (refusal === 'store_unavailable') h.bridge.nativeCards.store = null;
+    if (refusal === 'state_read_failed') h.authorityChange = () => { throw Error('temporary state read failure'); };
+    const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'telegram', args: 'pending' });
+    assert.equal(pending.presentation, undefined); assert.equal(h.sends.length, 0); assert.equal(h.rows().length, 0);
+    assert.ok(h.calls.every(call => call.name === 'agentbridge_host_interaction_present' && call.args.state_only === true));
+  });
+}
+
+test('pending also refuses a task-bound original durable card after identity changes', async t => {
+  const h = fixture(t); await h.reply(); h.token = 'replaced-after-original-receipt';
+  const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'telegram', args: 'pending' });
+  assert.equal(pending.presentation, undefined); assert.equal(h.sends.length, 1);
+});
+
+test('unavailable Telegram storage cannot intercept source-free WeChat cards', async t => {
+  const h = fixture(t, { taskId: null, channel: 'openclaw-weixin' }), card = h.card();
+  await h.captureStandalone(card); h.store.entries = () => { throw Error('Telegram ledger unreadable'); };
+  const reply = await h.reply(card, '微信公开答复'); assert.ok(reply.payload.presentation);
+  const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'openclaw-weixin', args: 'pending' });
+  assert.ok(pending.presentation); assert.equal(h.sends.length, 0);
+});
+
+test('pending cannot turn an unknown native attempt into a legacy card repost', async t => {
+  const h = fixture(t, { taskId: null }), card = h.card(); await h.captureStandalone(card);
+  h.sendBehavior = async () => { throw Error('unknown platform receipt'); }; await h.reply(card);
+  const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'telegram', args: 'pending' });
+  assert.equal(pending.presentation, undefined); assert.equal(h.sends.length, 1);
 });

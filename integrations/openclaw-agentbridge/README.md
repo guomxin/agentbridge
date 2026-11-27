@@ -26,6 +26,8 @@ Workspace 的“查询 OA 待办”与 Telegram 选择页的“重新查询”�
 原任务续办保持原流程。旧内存布尔不补成历史回执，未知投递不重发，明确 429 最多三次发送尝试并按平台期限等待。
 持久数据位于插件 state 目录下 `agentbridge/telegram-native-cards-v1/projection.sqlite`，不保存卡 URL 或正文。
 普通回复保留原内容；没有本轮原生来源证明的兼容卡片保留原呈现路径，不宣称拥有可靠关闭证明。
+已经捕获的原生来源不会因凭据范围变化、旧调用迟到或本地发送入口不可用而降为兼容卡；
+即使首发前尚无投递记录，也只保留公开文字和未确认说明，不重呈现旧卡、不接纳新的身份范围。
 可用 `test/support/native-card-sdk-probe.mjs <受审 SDK 绝对目录>` 验证实际 SDK 的本机发送边界；
 `test/support/native-card-mcp-sdk-probe.py --node <受审 Node> --sdk-dir <受审 SDK>` 贯穿隔离中央 MCP，
 附加 `--standalone` 验证无 task 独立登录。两者均不启动 Telegram 入站消费者，不能代替真实平台验收。

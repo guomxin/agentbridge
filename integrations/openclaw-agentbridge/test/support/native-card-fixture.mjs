@@ -8,11 +8,12 @@ export const uuid = number => `${String(number).padStart(8, '0')}-0000-4000-8000
 // Real registration, reply hook, Coordinator and SQLite. MCP and Telegram are
 // explicit boundary doubles here; the companion probe loads the official SDK.
 export function nativeFixture(home, options = {}) {
-  const sessionKey = 'agent:main:telegram:direct:1001', taskId = Object.hasOwn(options, 'taskId') ? options.taskId : uuid(80);
-  const binding = { key: 'telegram:default:1001', channel: 'telegram', accountId: 'default', senderId: '1001' };
+  const channel = options.channel || 'telegram';
+  const sessionKey = `agent:main:${channel}:direct:1001`, taskId = Object.hasOwn(options, 'taskId') ? options.taskId : uuid(80);
+  const binding = { key: `${channel}:default:1001`, channel, accountId: 'default', senderId: '1001' };
   const endpoint = options.endpoint || { endpointId: uuid(90), userSubject: 'synthetic-owner', agentHost: 'openclaw', state: 'active',
-    clientType: 'telegram', externalSubject: '1001', accountId: 'default', conversationRef: sessionKey,
-    route: { channel: 'telegram', to: '1001', accountId: 'default' } };
+    clientType: channel, externalSubject: '1001', accountId: 'default', conversationRef: sessionKey,
+    route: { channel, to: '1001', accountId: 'default' } };
   const task = taskId === null ? null : { taskId, userSubject: endpoint.userSubject, agentHost: 'openclaw', originEndpointId: endpoint.endpointId,
     activeConversationRef: sessionKey };
   const h = { now: Date.now(), token: 'same-central-identity', endpoint, task, binding, sessionKey, taskId,
@@ -54,7 +55,7 @@ export function nativeFixture(home, options = {}) {
     pluginConfig: { autoPoll: false, syncTimeline: false, wakeAgentOnComplete: false, allowedCardOrigins: ['https://cards.example.test'] },
     logger: { info() {}, warn() {}, debug() {} }, runtime: { channel: { outbound: { loadAdapter: async () => adapter } },
       system: { enqueueSystemEvent() { assert.fail('No model wake'); }, requestHeartbeat() { assert.fail('No model wake'); } } },
-    registerAgentToolResultMiddleware() {}, registerTool() {}, registerCommand() {}, registerGatewayMethod() {}, on() {} };
+    registerAgentToolResultMiddleware() {}, registerTool() {}, registerCommand(command) { h.command = command; }, registerGatewayMethod() {}, on() {} };
   h.restart = () => {
     h.bridges.forEach(value => value.stopAll());
     h.stores.splice(0).forEach(value => value.close());
@@ -69,13 +70,14 @@ export function nativeFixture(home, options = {}) {
   };
   h.reply = async (card = h.card(), text = '请先完成本人登录，随后查看待办。') => {
     h.bridge.captureInteractions([card], { sessionKey }, { sessionKey }, taskId);
-    return h.hooks.reply_payload_sending({ kind: 'final', sessionKey, channel: 'telegram', payload: { text } },
-      { sessionKey, channelId: 'telegram', conversationId: '1001', accountId: 'default' });
+    return h.hooks.reply_payload_sending({ kind: 'final', sessionKey, channel, payload: { text } },
+      { sessionKey, channelId: channel, conversationId: '1001', accountId: 'default' });
   };
   h.captureStandalone = async card => {
     const toolCallId = 'native-login-original-call', runId = 'native-login-original-run';
     const planningContext = h.bridge.capturePlanningCall({ toolCallId, sessionKey, runId,
       resolvedIdentityScope: h.bridge.toolIdentityResolver(sessionKey) });
+    await h.beforeNativeCapture?.();
     const payload = { status: 'requires_user_action', interaction: card };
     await h.bridge.captureNativeToolResult({ toolCallId, toolName: 'oa_session_login', planningContext,
       result: { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload,
