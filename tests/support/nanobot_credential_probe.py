@@ -87,13 +87,15 @@ class CredentialModel:
 
 async def client(spec):
     from aiohttp import web
-    from agentbridge.workspace.gateway import GatewayRequestError
-    from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
-    from nanobot_agentbridge.server import create_app
     from tests.support.nanobot_sdk_probe import MODEL, model_server
 
     root = spec.parent
     binding = json.loads(spec.read_text())
+    from tests.support.nanobot_probe_release import activate
+    activate(binding["probe_release"])
+    from agentbridge.workspace.gateway import GatewayRequestError
+    from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
+    from nanobot_agentbridge.server import create_app
     model = CredentialModel(binding["initial_read"], binding["expire"])
     httpd = model_server(model)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -293,12 +295,15 @@ def driver(nanobot_python, initial_read=False, expire=False):
                 "session_key": "session-" + label,
                 "credential_ref": "credential-" + label,
             }
+        from tests.support.nanobot_probe_release import copy_release
+        meta["probe_release"] = str(copy_release(root / "release"))
         spec = root / "client.json"
         spec.write_text(json.dumps(meta))
         proc = subprocess.Popen(
             [
                 str(nanobot_python),
                 "-I",
+                "-B",
                 str(Path(__file__).resolve()),
                 "--client",
                 str(spec),

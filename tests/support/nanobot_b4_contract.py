@@ -91,10 +91,15 @@ def environment(python):
             + ")\nfrom reference_host.bound_coordinator import main\nmain()\n"
         )
         coordinator.chmod(0o700)
+        from tests.support.nanobot_probe_release import copy_release
+        release = copy_release(root / "release")
         worker = start(
             [
                 str(python),
+                "-B",
                 str(ROOT / "tests/support/nanobot_b4_worker.py"),
+                "--release",
+                str(release),
                 "--home",
                 str(home),
                 "--coordinator",

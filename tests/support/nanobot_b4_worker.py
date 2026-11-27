@@ -15,11 +15,8 @@ from aiohttp import web
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "integrations/nanobot-agentbridge")]
-from nanobot_agentbridge.server import create_app
 
-from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
 from tests.support.nanobot_sdk_probe import MODEL, QUESTION, Scenario, model_server
-from tests.support.nanobot_telegram_console import run_console
 
 
 class Model(Scenario):
@@ -154,7 +151,13 @@ async def main():
     opts = argparse.ArgumentParser()
     opts.add_argument("--home", type=Path, required=True)
     opts.add_argument("--coordinator", type=Path, required=True)
+    opts.add_argument("--release", required=True, type=Path)
     args = opts.parse_args()
+    from tests.support.nanobot_probe_release import activate
+    activate(args.release)
+    from agentbridge.workspace.nanobot_gateway import NanoBotGatewayClient
+    from nanobot_agentbridge.server import create_app
+    from tests.support.nanobot_telegram_console import run_console
     home = args.home
     info = json.loads((home / "public.json").read_text())
     bindings = json.loads((home / "bindings.json").read_text())

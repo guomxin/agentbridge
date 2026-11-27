@@ -67,7 +67,7 @@ PROBES = (
 )
 
 
-def execute(spec, python):
+def execute(spec, python, release):
     name, module, args, cases = spec
     cmd = [
         sys.executable,
@@ -91,6 +91,7 @@ def execute(spec, python):
             AGENTBRIDGE_SESSION_KEY_FILE=str(key),
             PYTHONNOUSERSITE="1",
             PYTHONDONTWRITEBYTECODE="1",
+            AGENTBRIDGE_NANOBOT_PROBE_RELEASE=str(release),
         )
         location = None
         try:
@@ -150,8 +151,14 @@ def main():
     ]
     if {c for *_, cs in PROBES for c in cs} != set(expected):
         raise RuntimeError("Conformance vector coverage changed")
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        checks = list(pool.map(lambda spec: execute(spec, python), PROBES))
+    sys.path.insert(0, str(ROOT))
+    from tests.support.nanobot_probe_release import prepare, digest
+    with tempfile.TemporaryDirectory(prefix="nanobot-conformance-artifact-") as area:
+        release = prepare(Path(area))
+        release_proof = json.loads((release / "probe-release.json").read_text())
+        wheel_sha = digest(release / "agentbridge.whl")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            checks = list(pool.map(lambda spec: execute(spec, python, release), PROBES))
     cases = [
         {"caseId": c, "passed": all(p["passed"] for p in checks if c in p["cases"])}
         for c in expected
@@ -164,6 +171,9 @@ def main():
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "contractSha256": hashlib.sha256(VECTORS.read_bytes()).hexdigest(),
         "syntheticDownstreams": True,
+        "candidate": release_proof["commit"],
+        "wheelSha256": wheel_sha,
+        "archivedAdapter": True,
         "probes": checks,
         "cases": cases,
         "passed": all(row["passed"] for row in cases),

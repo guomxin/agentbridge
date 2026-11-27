@@ -13,13 +13,8 @@ from nanobot_release import jobs
 
 
 def worker_argv(root, python, instance, port, config):
-    release = root / "releases" / "synthetic"
-    release.mkdir(parents=True)
-    shutil.copytree(
-        ROOT / "integrations/nanobot-agentbridge/nanobot_agentbridge",
-        release / "nanobot_agentbridge",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
+    from tests.support.nanobot_probe_release import copy_release
+    release = copy_release(root / "releases" / "synthetic")
     shutil.copy2(config, release / "host.json")
     (root / "current").symlink_to(release, target_is_directory=True)
     # Only the worker definition is executed. The companion SSH definition is inert.
