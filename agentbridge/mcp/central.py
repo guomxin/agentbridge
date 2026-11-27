@@ -6935,8 +6935,22 @@ def create_central_mcp_server(
         delivery_ref: Annotated[str, Field(min_length=1, max_length=512)],
         channel: Annotated[str, Field(min_length=1, max_length=80)],
         files: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=20)],
+        receipt_v2: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
+        receipt_context = None
+        if receipt_v2:
+            host, _ = await _require_registered_host_call(
+                ctx, service=service, identity=identity, agent_host=agent_host, task_id=task_id,
+            )
+            receipt_context = {'hostInstanceId':host['hostInstanceId'], 'tokenId':identity['token_id']}
+            historical = await asyncio.to_thread(
+                service.historical_host_artifact_delivery, subject=identity['user_subject'], host=agent_host,
+                instance=host['hostInstanceId'], token=identity['token_id'], task_id=task_id,
+                delivery_ref=delivery_ref, channel=channel, files=files,
+            )
+            if historical is not None:
+                return historical
         await _require_registered_host_call(
             ctx,
             service=service,
@@ -6954,6 +6968,7 @@ def create_central_mcp_server(
             delivery_ref=delivery_ref,
             channel=channel,
             files=files,
+            **({'receipt_context':receipt_context} if receipt_context is not None else {}),
         )
 
     @mcp.tool(

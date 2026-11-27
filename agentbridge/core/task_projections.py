@@ -131,6 +131,8 @@ def _task_from_row(row: Mapping[str, Any]) -> dict:
     value = dict(row)
     value["summary"] = json.loads(value.pop("summary_json"))
     summary = value["summary"]
+    if not isinstance(summary, dict):
+        return value
     channels = summary.get("artifactDeliveryByChannel")
     if isinstance(channels, dict):
         converted = {k: _artifact_delivery_outcome(v) for k, v in channels.items()}
