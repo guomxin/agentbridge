@@ -46,7 +46,7 @@ from agentbridge.core.task_projections import (
     _outbox_from_row,
     _timeline_from_row,
     _continuation_from_row,
-    _artifact_delivery_aggregate,
+    _artifact_delivery_aggregate, _artifact_delivery_outcome,
 )
 
 
@@ -2433,6 +2433,8 @@ class TaskHubStore:
                 "userMessage": "，".join(message_parts) + "。",
                 "reportedAt": now,
             }
+            report = _artifact_delivery_outcome(report)
+            by_channel = {key: _artifact_delivery_outcome(value) for key, value in by_channel.items()}
             by_channel[channel] = report
             summary["artifactDeliveryByChannel"] = by_channel
             summary["artifactDelivery"] = report

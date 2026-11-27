@@ -325,6 +325,7 @@ export function taskCardArtifactDeliveryMessage(summary) {
   ];
   if (fallback) parts.push(`${fallback} 份已改发下载链接`);
   if (failed) parts.push(`${failed} 份未能送达`);
+  if (delivery.unknownCount) parts.push(`${delivery.unknownCount} 份送达结果未确认，不会自动重发`);
   return `${parts.join("，")}。`;
 }
 

@@ -104,9 +104,41 @@ def _endpoint_from_row(row: Mapping[str, Any]) -> dict:
     return value
 
 
+def _artifact_delivery_outcome(report):
+    """Recover uncertain platform results in both current reports and older persisted summaries."""
+    if (not isinstance(report, dict) or "unknownCount" in report
+            or report.get("completionMeaning") != "endpoint_delivery_reported"):
+        return report
+    files = report.get("files") or []
+    unknown = sum(isinstance(f, dict) and f.get("state") == "failed" and f.get("errorCode") == "TELEGRAM_DELIVERY_UNKNOWN"
+                  for f in files)
+    if not unknown:
+        return report
+    failed = sum(isinstance(f, dict) and f.get("state") == "failed" for f in files) - unknown
+    attached = report.get("attachmentSentCount", 0)
+    fallback = report.get("fallbackLinkSentCount", 0)
+    parts = [f"{len(files)} 份文件已准备", f"{attached} 份已作为附件发送"]
+    if fallback:
+        parts.append(f"{fallback} 份已改发下载链接")
+    if failed:
+        parts.append(f"{failed} 份未能送达")
+    parts.append(f"{unknown} 份送达结果未确认，不会自动重发")
+    return {**report, "unknownCount": unknown, "failedCount": failed,
+            "state": "partial" if attached or fallback or failed else "delivery_unknown", "userMessage": "，".join(parts)+"。"}
+
+
 def _task_from_row(row: Mapping[str, Any]) -> dict:
     value = dict(row)
     value["summary"] = json.loads(value.pop("summary_json"))
+    summary = value["summary"]
+    channels = summary.get("artifactDeliveryByChannel")
+    if isinstance(channels, dict):
+        converted = {k: _artifact_delivery_outcome(v) for k, v in channels.items()}
+        if any(converted[k] is not v for k, v in channels.items()):
+            summary["artifactDeliveryByChannel"] = converted
+            summary["artifactDeliveryAggregate"] = _artifact_delivery_aggregate(converted)
+    if "artifactDelivery" in summary:
+        summary["artifactDelivery"] = _artifact_delivery_outcome(summary["artifactDelivery"])
     return value
 
 
@@ -194,6 +226,7 @@ def _artifact_delivery_aggregate(by_channel: dict[str, dict]) -> dict:
     parts: list[str] = []
     delivered_channels = 0
     failed_channels = 0
+    unknown_channels = 0
     for channel, report in sorted(by_channel.items()):
         files = report.get("files") if isinstance(report, dict) else []
         for item in (files if isinstance(files, list) else []):
@@ -223,16 +256,21 @@ def _artifact_delivery_aggregate(by_channel: dict[str, dict]) -> dict:
             )
         if failed_count:
             channel_parts.append(f"{failed_count} 份未送达")
+        if report.get("unknownCount"):
+            unknown_channels += 1
+            channel_parts.append(f"{report['unknownCount']} 份送达结果未确认，不会自动重发")
         if channel_parts:
             parts.append(f"{label}：{'，'.join(channel_parts)}")
         if report.get("state") == "delivered":
             delivered_channels += 1
-        elif report.get("state") in {"partial", "failed"}:
+        elif failed_count or (not report.get("unknownCount") and report.get("state") in {"partial", "failed"}):
             failed_channels += 1
     prepared_count = len(artifacts)
     prefix = f"{prepared_count} 份文件已准备" if prepared_count else "文件已准备"
     return {
-        "state": "partial" if failed_channels else "delivered",
+        "state": ("delivery_unknown" if unknown_channels and all(r.get("state") == "delivery_unknown" for r in by_channel.values())
+                  else "partial" if failed_channels or unknown_channels else "delivered"),
+        **({"unknownChannelCount": unknown_channels} if unknown_channels else {}),
         "completionMeaning": "cross_endpoint_delivery_reported",
         "preparedCount": prepared_count,
         "channelCount": len(by_channel),

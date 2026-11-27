@@ -434,6 +434,24 @@ class TaskHubStoreTests(unittest.TestCase):
         self.assertIn("网页端：1 个下载入口可用", aggregate["userMessage"])
         self.assertIn("Telegram：1 份附件已送达", aggregate["userMessage"])
 
+    def test_existing_artifact_report_projects_unknown_separately_from_a_rejection(self):
+        from agentbridge.core.task_projections import _task_from_row
+        items = [{"artifactId": "a", "state": "failed", "errorCode": "TELEGRAM_DELIVERY_UNKNOWN"},
+                 {"artifactId": "b", "state": "failed", "errorCode": "FORBIDDEN"}]
+        old = {"completionMeaning": "endpoint_delivery_reported", "state": "failed",
+               "preparedCount": 2, "failedCount": 2, "files": items, "userMessage": "2 份未能送达"}
+        import json
+        stored = {"artifactDeliveryByChannel": {"telegram": old}, "artifactDelivery": old}
+        projected = _task_from_row({"summary_json": json.dumps(stored)})["summary"]
+        report = projected["artifactDelivery"]
+        self.assertEqual((report["failedCount"], report["unknownCount"], report["state"]), (1, 1, "partial"))
+        self.assertIn("1 份送达结果未确认，不会自动重发", report["userMessage"])
+        aggregate = projected["artifactDeliveryAggregate"]
+        self.assertEqual(aggregate["unknownChannelCount"], 1)
+        self.assertIn("1 份未送达", aggregate["userMessage"])
+        self.assertIn("1 份送达结果未确认", aggregate["userMessage"])
+        self.assertEqual(stored["artifactDelivery"]["failedCount"], 2)
+
     def test_expired_artifact_is_refreshed_in_place_and_remains_user_bound(self):
         origin, _ = self._endpoint()
         task, _ = self._task(origin["endpoint_id"])
