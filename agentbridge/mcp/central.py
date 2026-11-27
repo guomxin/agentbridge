@@ -6669,15 +6669,24 @@ def create_central_mcp_server(
         agent_host: Annotated[str, Field(min_length=1, max_length=80)],
         endpoint_key: Annotated[str, Field(min_length=1, max_length=768)],
         interaction_id: Annotated[str, Field(min_length=16, max_length=128)],
+        state_only: bool = False,
     ) -> dict[str, Any]:
         identity = _request_identity(identity_store)
-        await _require_registered_host_call(
+        host, registration = await _require_registered_host_call(
             ctx,
             service=service,
             identity=identity,
             agent_host=agent_host,
             minimum_level="L2",
         )
+        if state_only:
+            from agentbridge.core.native_telegram_card_state import read_state
+
+            return await asyncio.to_thread(
+                read_state, service, subject=identity["user_subject"], token=identity["token_id"],
+                registration=registration, host_instance=host["hostInstanceId"], host=agent_host,
+                endpoint_key=endpoint_key, interaction_id=interaction_id,
+            )
         return await asyncio.to_thread(
             service.present_interaction,
             user_subject=identity["user_subject"],

@@ -302,7 +302,7 @@ def build_interaction_envelope(record: dict, resource: dict) -> dict:
             display["actionView"] = {"schemaVersion": "agentbridge.action-view.v1", "capabilityId": profile.commit}
         except (BusinessDraftError, TypeError, AttributeError):
             pass  # Old/unknown contracts keep their original generic entry.
-    state, ready, resume_completed = _project_state(
+    state, ready, resume_completed = project_interaction_state(
         interaction_type,
         str(resource["state"]),
     )
@@ -335,7 +335,7 @@ def build_interaction_envelope(record: dict, resource: dict) -> dict:
     }
 
 
-def _project_state(
+def project_interaction_state(
     interaction_type: str,
     resource_state: str,
 ) -> tuple[str, bool, bool]:

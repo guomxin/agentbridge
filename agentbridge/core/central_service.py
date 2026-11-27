@@ -4156,16 +4156,7 @@ class CentralCapabilityService:
     def _resume_login_read(self, *, user_subject: str, record: dict) -> dict | None:
         return resume_login_read(self, user_subject=user_subject, record=record)
 
-    def _load_interaction(
-        self,
-        *,
-        user_subject: str,
-        interaction_id: str,
-    ) -> tuple[dict, dict, dict]:
-        record = self.interactions.get(
-            interaction_id,
-            user_subject=user_subject,
-        )
+    def _interaction_resource(self, record: dict) -> dict:
         interaction_type = record["interaction_type"]
         if interaction_type == "credential":
             resource = self.challenges.get(self._credential_challenge_id(record))
@@ -4185,6 +4176,19 @@ class CentralCapabilityService:
             raise InteractionIntegrityError(
                 "interaction binding does not match its trusted resource"
             )
+        return resource
+
+    def _load_interaction(
+        self,
+        *,
+        user_subject: str,
+        interaction_id: str,
+    ) -> tuple[dict, dict, dict]:
+        record = self.interactions.get(
+            interaction_id,
+            user_subject=user_subject,
+        )
+        resource = self._interaction_resource(record)
         envelope = build_interaction_envelope(record, resource)
         from . import telegram_interaction_closures
         telegram_interaction_closures.observe(self, record, envelope)
