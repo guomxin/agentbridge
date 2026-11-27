@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+from urllib.parse import urlsplit
 
 from agentbridge.core.chat_mirror import public_mirror_text
 from agentbridge.workspace.gateway import GatewayRequestError
@@ -15,7 +16,8 @@ from agentbridge.workspace.nanobot_gateway import PiGatewayClient
 
 from .pi_workspace_result_cards import timestamp
 from .telegram_identity import identifier
-from .telegram_presentation import normalize_result_view, render_result_view_message
+from .telegram_presentation import (normalize_result_view, render_result_view_message, normalize_interaction,
+                                    interaction_can_open, render_interaction_message)
 from .private_files import private_text
 
 BINDING_FIELDS = ("user_subject", "endpoint_id", "endpoint_key", "session_key", "credential_ref")
@@ -26,6 +28,11 @@ def pairing_ref(value):
 
 
 def source_fields(body):
+    if "sourceEventId" in body:
+        if ("sourceEntryId" in body or not identifier(body.get("sourceTaskId"))
+                or body.get("notificationKind") not in {"public_status", "trusted_interaction"}):
+            return None
+        return body["sourceEventId"], "host_notification_v2", 1, 1
     if "sourceEntryId" in body:
         if "sourceTaskId" in body:
             return None
@@ -37,7 +44,7 @@ def source_fields(body):
 
 
 def record_claim(path, endpoint, delivery, attempt, task, pairing, *, record=None,
-                 mode="workspace_query_v2", part_index=1, part_count=1):
+                 mode="workspace_query_v2", part_index=1, part_count=1, event_task=None, notification_kind=None):
     """Persist only the proof returned by this endpoint's authenticated central claim."""
     with sqlite3.connect(path) as db:
         db.execute("""CREATE TABLE IF NOT EXISTS workspace_query_claims(
@@ -56,6 +63,13 @@ def record_claim(path, endpoint, delivery, attempt, task, pairing, *, record=Non
             WHERE endpoint=excluded.endpoint AND task=excluded.task AND pairing=excluded.pairing
                 AND mode=excluded.mode AND part_index=excluded.part_index AND part_count=excluded.part_count
                 AND attempt<=excluded.attempt""", (delivery, endpoint, task, pairing, attempt, mode, part_index, part_count))
+        if mode == "host_notification_v2":
+            if not identifier(event_task) or notification_kind not in {"public_status", "trusted_interaction"}:
+                raise ValueError("Invalid original notification source")
+            db.execute("""CREATE TABLE IF NOT EXISTS telegram_notification_claim_sources(
+                delivery TEXT PRIMARY KEY,event_task TEXT NOT NULL,kind TEXT NOT NULL)""")
+            db.execute("INSERT OR IGNORE INTO telegram_notification_claim_sources VALUES(?,?,?)",
+                       (delivery,event_task,notification_kind))
         if record and all(isinstance(record.get(k), str) and record[k] for k in (
                 *BINDING_FIELDS, "workspaceEndpointId", "workspaceEndpointKey", "tokenFile")):
             token_hash = hashlib.sha256(private_text(Path(record["tokenFile"])).strip().encode()).hexdigest()
@@ -145,6 +159,13 @@ async def handle_request(session, meta, req, path, body, origins):
                            (delivery,)).fetchone() if exists else None
     if claim != (req["endpoint"], task, pairing, attempt, mode, part_index, part_count):
         raise web.HTTPForbidden()
+    if mode == "host_notification_v2":
+        with sqlite3.connect(path) as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='telegram_notification_claim_sources'").fetchone()
+            original = db.execute("SELECT event_task,kind FROM telegram_notification_claim_sources WHERE delivery=?",
+                                  (delivery,)).fetchone() if exists else None
+        if original != (body.get("sourceTaskId"),body.get("notificationKind")):
+            raise web.HTTPForbidden()
     action = body.get("action")
     args = {"agent_host": host, "action": action, "endpoint_key": req["endpointKey"],
             "pairing_ref": pairing, "delivery_id": delivery, "attempt_count": attempt}
@@ -159,7 +180,8 @@ async def handle_request(session, meta, req, path, body, origins):
         args["outcome"] = outcome
     elif action not in {"issue", "begin"}:
         raise web.HTTPBadRequest()
-    reply = await session.call_tool("agentbridge_host_workspace_result_view", args, meta=meta)
+    tool = "agentbridge_host_notification_delivery" if mode == "host_notification_v2" else "agentbridge_host_workspace_result_view"
+    reply = await session.call_tool(tool, args, meta=meta)
     value = reply.structuredContent
     if reply.isError or not isinstance(value, dict):
         raise web.HTTPBadGateway()
@@ -173,6 +195,22 @@ async def handle_request(session, meta, req, path, body, origins):
     if value.get("available") is not True or timestamp(value.get("leaseExpiresAt")) is None:
         raise web.HTTPBadGateway()
     result = {"available": True, "leaseExpiresAt": value["leaseExpiresAt"]}
+    if mode == "host_notification_v2":
+        if (value.get("sourceEventId"),value.get("sourceTaskId"),value.get("notificationKind")) != (task,*original):
+            raise web.HTTPBadGateway()
+        result.update(sourceEventId=task, sourceTaskId=original[0], notificationKind=original[1])
+        if value.get("resultView") is not None:
+            raise web.HTTPBadGateway()
+        if original[1] == "trusted_interaction":
+            raw = value.get("interaction")
+            card = normalize_interaction(raw,origins)
+            if (value.get("publicText") is not None or not card or not interaction_can_open(card)
+                    or (raw.get("presentation") or {}).get("endpointId") != req["endpoint"]):
+                raise web.HTTPBadGateway()
+            result["interaction"] = card
+            return result
+        if value.get("interaction") is not None:
+            raise web.HTTPBadGateway()
     if value.get("publicText") is not None:
         text = public_mirror_text(value["publicText"])
         if text is None:
@@ -212,9 +250,13 @@ class Claim:
     entry: str | None = None
     part_index: int = 1
     part_count: int = 1
+    event_task: str | None = None
+    notification_kind: str | None = None
 
     @property
     def dedupe_key(self):
+        if self.event_task:
+            return "notification_event:" + self.task
         if self.entry:
             return "workspace_text:" + self.entry + ":" + str(self.part_index)
         # Shares the old Pi/card receipt namespace. A new profile cannot replay it.
@@ -222,6 +264,8 @@ class Claim:
 
     def payload(self):
         source = {"sourceEntryId": self.entry, "partIndex": self.part_index, "partCount": self.part_count} if self.entry else {"sourceTaskId": self.task}
+        if self.event_task:
+            source = {"sourceEventId":self.task,"sourceTaskId":self.event_task,"notificationKind":self.notification_kind}
         return {"binding": self.binding, "deliveryId": self.delivery, "attempt": self.attempt,
                 **source, "pairingRef": self.pairing}
 
@@ -292,7 +336,9 @@ class WorkspaceQueries:
             old[2].cancel()
             self.issued.pop(delivery, None)
         claim = Claim(chat, dict(binding), digest, delivery, attempt, task, pairing,
-                      task if mode == "workspace_text_v2" else None, part_index, part_count)
+                      task if mode == "workspace_text_v2" else None, part_index, part_count,
+                      event.get("sourceTaskId") if mode == "host_notification_v2" else None,
+                      event.get("notificationKind") if mode == "host_notification_v2" else None)
         row = self._receipt(claim)
         if row and row[0] == delivery and row[1] == "retry_after":
             retry = self._retry(claim)
@@ -314,6 +360,25 @@ class WorkspaceQueries:
             return None
         view = value.get("resultView")
         deadlines = [timestamp(value.get("leaseExpiresAt"))]
+        if claim.event_task:
+            if (value.get("sourceEventId"),value.get("sourceTaskId"),value.get("notificationKind")) != (
+                    claim.task,claim.event_task,claim.notification_kind) or view is not None:
+                return None
+            if claim.notification_kind == "trusted_interaction":
+                raw = value.get("interaction")
+                url = urlsplit(str(((raw or {}).get("presentation") or {}).get("url") or "")) if isinstance(raw,dict) else None
+                # The private handler already validated the configured HTTPS origin.
+                origins = frozenset({f"https://{url.netloc}"}) if url and url.scheme == "https" and url.netloc else frozenset()
+                card = normalize_interaction(raw,origins)
+                if text is not None or not card or not interaction_can_open(card):
+                    return None
+                params = render_interaction_message(card,origins)
+                deadlines.append(timestamp(card.get("expiresAt")))
+                if not params or None in deadlines or time.time() >= min(deadlines):
+                    return None
+                return params,min(deadlines)
+            if value.get("interaction") is not None or not text:
+                return None
         if claim.entry and (view is not None or text is None or len(text.encode("utf-16-le")) // 2 > 4096):
             return None
         if view is not None:
@@ -383,7 +448,8 @@ class WorkspaceQueries:
         self._state(claim, state, receipt=receipt, retry_seconds=delay)
         if receipt and not claim.entry:
             with self.pilot.db:
-                self.pilot.navigation.remember(claim.chat, receipt, claim.digest, {"kind": "result", "id": claim.task})
+                self.pilot.navigation.remember(claim.chat, receipt, claim.digest,
+                    {"kind": "task" if claim.event_task else "result", "id": claim.event_task or claim.task})
 
     def drain(self):
         from .telegram import TelegramUnavailable

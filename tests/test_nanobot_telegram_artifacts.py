@@ -134,6 +134,8 @@ def host_gateway(origin, monkeypatch, tmp_path):
             if name == "agentbridge_host_notification_claim" and arguments.pop("include_workspace_query_v2", False):
                 # The actual MCP adapter derives this value from the authenticated session.
                 arguments["query_token_id"] = origin.token_id
+            if name == "agentbridge_host_notification_claim" and arguments.pop("include_notification_v2", False):
+                arguments["notification_token_id"] = origin.token_id
             result = handler(host_instance_id=INSTANCE, user_subject=origin.subject, **arguments)
             return SimpleNamespace(structuredContent=result, isError=False)
 

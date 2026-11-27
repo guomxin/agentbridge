@@ -1832,6 +1832,7 @@ class CentralCapabilityService:
         include_oa_digest: bool = False,
         include_workspace_result_views: bool = False,
         query_token_id: str | None = None,
+        notification_token_id: str | None = None,
         quiet_pairing_ref: str | None = None,
         quiet_token_id: str | None = None,
     ) -> dict:
@@ -1840,6 +1841,9 @@ class CentralCapabilityService:
             agent_host=agent_host,
             endpoint_key=endpoint_key,
         )
+        if notification_token_id and host_instance_id:
+            from . import telegram_notification_delivery
+            telegram_notification_delivery.activate(self,user_subject,agent_host,host_instance_id,endpoint_key,notification_token_id)
         deliveries = self.tasks.claim_outbox(
             user_subject=user_subject,
             endpoint_id=endpoint["endpoint_id"],
@@ -2034,9 +2038,12 @@ class CentralCapabilityService:
                 item["deliveryMode"] = "status"
                 item["message"] = _task_notification_message(task, event)
             notifications.append(item)
-        if query_token_id and host_instance_id and len(deliveries) < limit:
+        if notification_token_id and host_instance_id and len(notifications) < limit:
+            notifications.extend(telegram_notification_delivery.claim(self,user_subject,agent_host,host_instance_id,
+                endpoint_key,notification_token_id,limit-len(notifications),lease_seconds))
+        if query_token_id and host_instance_id and len(notifications) < limit:
             from . import workspace_query_delivery, workspace_text_delivery
-            space = limit - len(deliveries)
+            space = limit - len(notifications)
             text_items = workspace_text_delivery.claim(self, user_subject, agent_host, host_instance_id,
                                                       endpoint_key, query_token_id, space, lease_seconds)
             notifications.extend(text_items)

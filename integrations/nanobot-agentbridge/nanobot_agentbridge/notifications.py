@@ -203,6 +203,7 @@ async def notifications(host, record, action, body, *, paired_session=None):
             "include_task_files": True,
             "include_oa_digest": True,
             "include_workspace_query_v2": True,
+            "include_notification_v2": True,
         }
         claim_meta = meta
         if req.get("hostType") == "pi":
@@ -230,14 +231,18 @@ async def notifications(host, record, action, body, *, paired_session=None):
             if not identifier(delivery) or type(attempt) is not int or not 1 <= attempt <= 5:
                 continue
             mode = item.get("deliveryMode")
-            if mode in {"workspace_query_v2", "workspace_text_v2"}:
+            if mode in {"workspace_query_v2", "workspace_text_v2", "host_notification_v2"}:
                 from .workspace_query_delivery import pairing_ref, record_claim, source_fields
                 source, pairing = source_fields(item), item.get("pairingRef")
                 if source and source[1] == mode and identifier(source[0]) and pairing_ref(pairing):
                     task, _, part_index, part_count = source
                     record_claim(path, req["endpoint"], delivery, attempt, task, pairing, record=record,
-                                 mode=mode, part_index=part_index, part_count=part_count)
+                                 mode=mode, part_index=part_index, part_count=part_count,
+                                 event_task=item.get("sourceTaskId") if mode == "host_notification_v2" else None,
+                                 notification_kind=item.get("notificationKind") if mode == "host_notification_v2" else None)
                     fields = {"sourceEntryId": task, "partIndex": part_index, "partCount": part_count} if mode == "workspace_text_v2" else {"sourceTaskId": task}
+                    if mode == "host_notification_v2":
+                        fields = {"sourceEventId":task,"sourceTaskId":item["sourceTaskId"],"notificationKind":item["notificationKind"]}
                     deliveries.append({"kind": mode, **fields, "deliveryId": delivery, "attempt": attempt, "pairingRef": pairing})
                 continue
             if mode == "workspace_result_view":
@@ -702,7 +707,7 @@ class TerminalMessages:
             reply = pilot.gateway._request("telegram-notifications", payload)
         for event in reply.get("deliveries", []):
             kind = event.get("kind")
-            if kind in {"workspace_query_v2", "workspace_text_v2"}:
+            if kind in {"workspace_query_v2", "workspace_text_v2", "host_notification_v2"}:
                 self.workspace_queries.claim(chat, binding, digest, event)
                 continue
             if kind == "workspace_result_view":

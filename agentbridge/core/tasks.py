@@ -1,5 +1,5 @@
 from __future__ import annotations
-from agentbridge.core import telegram_timeline_projection, workspace_query_delivery, workspace_text_delivery
+from agentbridge.core import telegram_timeline_projection, workspace_query_delivery, workspace_text_delivery, telegram_notification_delivery
 from agentbridge.core.chat_mirror import private_bot_digest_kind, private_bot_chat_kind
 from agentbridge.core.store_transactions import store_transaction
 from agentbridge.core.endpoint_instances import PRIVATE_BOT_HOSTS, endpoint_instances, instance_key
@@ -209,6 +209,7 @@ class TaskHubStore:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             workspace_query_delivery.initialize(connection)
+            telegram_notification_delivery.initialize(connection)
             workspace_text_delivery.initialize(connection)
             telegram_timeline_projection.initialize(connection)
             connection.executescript(
@@ -5122,6 +5123,10 @@ class TaskHubStore:
                     proof = origin_pair_proof(connection, user_subject, source_endpoint, ownership)
                     if proof:
                         envelope["artifactPairProof"] = proof
+            if not watch_proof and telegram_notification_delivery.enqueue(connection, subject=user_subject,
+                    source=task_source[0], endpoint=subscription["endpoint_id"], event=envelope,
+                    ownership=ownership, created_at=created_at):
+                continue
             connection.execute(
                 """
                 INSERT OR IGNORE INTO notification_outbox (

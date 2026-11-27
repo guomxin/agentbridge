@@ -14,7 +14,7 @@ from nanobot_agentbridge.workspace_query_delivery import BINDING_FIELDS, acknowl
 
 
 @pytest.mark.parametrize("host_type", ["nanobot", "pi"])
-@pytest.mark.parametrize("mode", ["workspace_query_v2", "workspace_text_v2"])
+@pytest.mark.parametrize("mode", ["workspace_query_v2", "workspace_text_v2", "host_notification_v2"])
 def test_only_exact_original_binding_and_credential_can_settle_after_revocation(tmp_path, monkeypatch, host_type, mode):
     from aiohttp import web
     token = tmp_path / "owner.token"
@@ -28,10 +28,12 @@ def test_only_exact_original_binding_and_credential_can_settle_after_revocation(
     delivery, task, pair = str(uuid4()), str(uuid4()), "a" * 64
     path = tmp_path / "coordinated-runs.sqlite3"
     record_claim(path, original["endpoint_id"], delivery, 1, task, pair, record=original, mode=mode,
-                 part_index=1, part_count=2 if mode == "workspace_text_v2" else 1)
+                 part_index=1, part_count=2 if mode == "workspace_text_v2" else 1,
+                 event_task=task if mode == "host_notification_v2" else None,
+                 notification_kind="public_status" if mode == "host_notification_v2" else None)
     called = []
     async def call(name, args, meta):
-        assert name == "agentbridge_host_workspace_result_view"
+        assert name == ("agentbridge_host_notification_delivery" if mode == "host_notification_v2" else "agentbridge_host_workspace_result_view")
         assert args == {"agent_host": host_type, "action": "ack", "endpoint_key": original["endpoint_key"],
                         "pairing_ref": pair, "delivery_id": delivery, "attempt_count": 1, "outcome": "sent", "receipt": 9}
         called.append(args)
@@ -58,6 +60,8 @@ def test_only_exact_original_binding_and_credential_can_settle_after_revocation(
     if mode == "workspace_text_v2":
         body.pop("sourceTaskId")
         body.update(sourceEntryId=task, partIndex=1, partCount=2)
+    if mode == "host_notification_v2":
+        body.update(sourceEventId=task,notificationKind="public_status")
     def settle(value):
         return asyncio.run(acknowledge_receipt(host, value, host_type=host_type))
     # No Telegram route resolver exists: neither a restart nor revocation may
