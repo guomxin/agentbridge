@@ -9,6 +9,7 @@ import pytest
 
 from agentbridge.core import actionable_results as actions, quick_queries
 from agentbridge.core import workspace_query_delivery as queries
+from agentbridge.core.endpoint_instances import instance_key
 from agentbridge.core.mcp_identities import McpIdentityTokenStore
 from agentbridge.core.telegram_result_views import ResultViewService
 from tests.support.latency_acceptance import LatencyAcceptanceFixture, LatencyContract, OWNER
@@ -16,8 +17,9 @@ from tests.test_pi_workspace import pi  # noqa: F401
 from tests.test_pi_workspace_result_views import paired_query
 
 
-def register(service, subject, host, instance, token):
-    version = queries.VERSIONS[host]
+def register(service, subject, host, instance, token, version=None):
+    if version is None:
+        version = queries.VERSIONS[host]
     with service.tasks._connect() as db:
         db.execute("INSERT OR REPLACE INTO agent_host_compatibility VALUES (?,?,'L3','synthetic-contract','test','now')",
                    (host, version))
@@ -62,6 +64,17 @@ def claim(service, subject, host, instance, token, endpoint):
         if cards or not texts:
             return cards
     raise AssertionError("Unexpected number of Workspace messages")
+
+
+@pytest.mark.parametrize(("version", "supported"), [
+    ("0.4.134", True), ("0.4.135", True), ("0.4.133", False), ("0.4.136", False),
+])
+def test_openclaw_query_protocol_requires_exact_supported_version(openclaw, version, supported):
+    fixture, token, _ = openclaw
+    instance = "openclaw-gateway"
+    register(fixture.service, OWNER, "openclaw", instance, token, version)
+    with fixture.service.tasks._connect() as db:
+        assert queries.registered(db, OWNER, "openclaw", instance_key("openclaw", instance), token) is supported
 
 
 @pytest.mark.parametrize('button', [False, True])

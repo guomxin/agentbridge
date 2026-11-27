@@ -9,7 +9,12 @@ from .endpoint_instances import endpoint_instances, instance_key
 from .store_transactions import store_transaction
 
 MODE = "workspace_query_v2"
-VERSIONS = {"openclaw": "0.4.134", "nanobot": "0.3.1", "pi": "0.1.8"}
+SUPPORTED_VERSIONS = {
+    "openclaw": ("0.4.134", "0.4.135"),
+    "nanobot": ("0.3.1",),
+    "pi": ("0.1.8",),
+}
+VERSIONS = {host: versions[-1] for host, versions in SUPPORTED_VERSIONS.items()}
 CAPABILITY = "oa.workflow.pending.list"
 
 
@@ -39,8 +44,10 @@ def registered(db, subject, host, scope, token):
     rows = db.execute("""SELECT r.host_instance_id FROM agent_host_registrations r
         JOIN agent_host_compatibility c ON c.implementation_name=r.agent_host
           AND c.implementation_version=r.host_version AND c.accepted_level='L3' AND c.evidence_digest!=''
-        WHERE r.user_subject=? AND r.agent_host=? AND (? IS NULL OR r.token_id=?) AND r.host_version=?
-          AND r.accepted_level='L3' AND r.compatibility_status='approved'""", (subject, host, token, token, VERSIONS[host]))
+        WHERE r.user_subject=? AND r.agent_host=? AND (? IS NULL OR r.token_id=?)
+          AND r.host_version IN (SELECT value FROM json_each(?))
+          AND r.accepted_level='L3' AND r.compatibility_status='approved'""",
+        (subject, host, token, token, json.dumps(SUPPORTED_VERSIONS[host])))
     return any(instance_key(host, row[0]) == scope for row in rows)
 
 
