@@ -25,7 +25,9 @@ def telegram_answer(answer):
         if public is not None:
             return public
         return "原请求已结束，请在本人工作台的可信界面查看受保护的信息。"
-    return "原请求已结束，答复超过 Telegram 完整展示范围，请在本人工作台的原对话查看完整答复。"
+    if isinstance(answer, str) and len(answer) > PUBLIC_TEXT_MAX_CHARACTERS:
+        return "原请求已结束，答复超过 200,000 字符的展示上限。请在本人工作台的原对话查看可用记录，必要时缩小问题范围后分次查询。"
+    return "原请求已结束，未取得可展示的答复。请在本人工作台的原对话查看状态。"
 
 
 def terminal_answer(state):
@@ -117,13 +119,15 @@ async def publish_timeline(host, record, body):
         receipt = result.structuredContent or {}
         endpoint, row = receipt.get("endpoint", {}), receipt.get("entry", {})
         if (result.isError or receipt.get("status") != "succeeded" or endpoint.get("endpointId") != record["endpoint_id"]
-                or row.get("role") != role or row.get("text") != text):
+                or row.get("role") != role or (not mode and row.get("text") != text)):
             raise web.HTTPServiceUnavailable()
         if mode:
             proof = receipt.get("projectionReceipt", {})
             if (not isinstance(proof, dict) or not isinstance(proof.get("entryId"), str) or not proof["entryId"]
+                    or proof["entryId"] != row.get("entryId")
                     or proof.get("messageKey") != message_key or proof.get("sourceEndpointId") != record["endpoint_id"]
-                    or proof.get("role") != role or proof.get("textSha256") != hashlib.sha256(text.encode()).hexdigest()):
+                    or proof.get("role") != role or proof.get("textSha256") != hashlib.sha256(text.encode()).hexdigest()
+                    or (row.get("retained") is not False and row.get("text") != text)):
                 raise web.HTTPServiceUnavailable()
     return {"recorded": True}
 

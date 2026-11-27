@@ -605,6 +605,9 @@ class TerminalMessages:
 
         pilot = self.pilot
         delivery = event["deliveryId"]
+        active, proof = pilot._binding(chat)
+        if active != binding or proof != digest:
+            return
         with pilot.db:
             inserted = pilot.db.execute(
                 "INSERT OR IGNORE INTO notification_receipts VALUES(?,?,?,?,'sending')",
@@ -614,30 +617,26 @@ class TerminalMessages:
             status = "delivery_unknown"
             receipt = None
             try:
-                active, proof = pilot._binding(chat)
-                if active != binding or proof != digest:
-                    status = "binding_changed"
-                else:
-                    result = pilot.api.call(
-                        "sendMessage",
-                        chat_id=chat,
-                        text=self.TEXT[event["status"]],
-                        reply_parameters={
-                            "message_id": original_message,
-                            "allow_sending_without_reply": False,
-                        },
-                    )
-                    if (
-                        isinstance(result, dict)
-                        and numeric(result.get("message_id"))
-                        and (result.get("from") or {}).get("id") == pilot.bot_id
-                        and (result.get("chat") or {}).get("id") == chat
-                        and (result.get("chat") or {}).get("type") == "private"
-                        and (result.get("reply_to_message") or {}).get("message_id")
-                        == original_message
-                    ):
-                        status = "delivered"
-                        receipt = result["message_id"]
+                result = pilot.api.call(
+                    "sendMessage",
+                    chat_id=chat,
+                    text=self.TEXT[event["status"]],
+                    reply_parameters={
+                        "message_id": original_message,
+                        "allow_sending_without_reply": False,
+                    },
+                )
+                if (
+                    isinstance(result, dict)
+                    and numeric(result.get("message_id"))
+                    and (result.get("from") or {}).get("id") == pilot.bot_id
+                    and (result.get("chat") or {}).get("id") == chat
+                    and (result.get("chat") or {}).get("type") == "private"
+                    and (result.get("reply_to_message") or {}).get("message_id")
+                    == original_message
+                ):
+                    status = "delivered"
+                    receipt = result["message_id"]
             except TelegramUnavailable:
                 pass
             with pilot.db:

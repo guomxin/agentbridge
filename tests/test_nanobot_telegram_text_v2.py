@@ -167,6 +167,21 @@ def test_binding_outage_before_send_never_reserves_card(tmp_path, monkeypatch):
         pilot.db.close()
 
 
+def test_binding_outage_before_terminal_notification_never_reserves_send(tmp_path, monkeypatch):
+    with transport(tmp_path, allow_pairing=True) as (state, _, create):
+        pilot = create()
+        binding, digest = pilot._binding(501)
+        def offline(_):
+            raise TelegramUnavailable()
+        monkeypatch.setattr(pilot, "_binding", offline)
+        event = {"deliveryId":"synthetic-delivery", "runId":"synthetic-run", "attempt":1,"status":"succeeded"}
+        with pytest.raises(TelegramUnavailable):
+            pilot.terminal._deliver_terminal_event(501,binding,digest,event,9)
+        assert not pilot.db.execute("SELECT 1 FROM notification_receipts").fetchone()
+        assert not state["deliveries"]
+        pilot.db.close()
+
+
 @pytest.fixture
 def timeline_host(monkeypatch):
     db = sqlite3.connect(":memory:")
@@ -180,11 +195,15 @@ def timeline_host(monkeypatch):
     class Session:
         async def call_tool(self, name, body, **_):
             state["calls"].append((name, body))
+            entry = {"entryId":"synthetic-entry","role":body["role"], "text":body["text"]}
+            if state.get("history_pruned"):
+                entry.pop("text")
+                entry["retained"] = False
             return SimpleNamespace(isError=False, structuredContent={"status":"succeeded",
-                "endpoint":{"endpointId":record["endpoint_id"]}, "entry":{"role":body["role"], "text":body["text"]},
+                "endpoint":{"endpointId":record["endpoint_id"]}, "entry":entry,
                 "projectionReceipt":{"entryId":"synthetic-entry","messageKey":body["message_key"],
                     "sourceEndpointId":record["endpoint_id"],"role":body["role"],
-                    "textSha256":hashlib.sha256(body["text"].encode()).hexdigest()}})
+                    "textSha256":state.get("override_digest", hashlib.sha256(body["text"].encode()).hexdigest())}})
     @asynccontextmanager
     async def session(*_, **__):
         yield Session(), {}, "L3"
@@ -240,3 +259,16 @@ def test_unknown_result_never_accepts_raw_provider_error(timeline_host):
     with pytest.raises(web.HTTPForbidden):
         asyncio.run(publish_timeline(host, record, {**body,"text":"private provider failure"}))
     assert "原对话" in telegram_answer("x" * 200_001)
+
+
+def test_pruned_history_can_confirm_exact_original_receipt_without_recreating_text(timeline_host):
+    from aiohttp import web
+    host, record, state = timeline_host
+    state["history_pruned"] = True
+    body = {"messageId":9,"role":"assistant","text":"合成公开答复","runId":"original-run",
+            "deliveredMessageIds":[],"projectionMode":"host_result_v2","sourceState":"completed"}
+    assert asyncio.run(publish_timeline(host,record,body)) == {"recorded":True}
+    assert state["calls"][-1][1]["projection_v2"] is True
+    state["override_digest"] = "0" * 64
+    with pytest.raises(web.HTTPServiceUnavailable):
+        asyncio.run(publish_timeline(host,record,body))
