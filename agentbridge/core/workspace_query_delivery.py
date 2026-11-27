@@ -109,7 +109,10 @@ def _endpoint_candidates(db, tasks, subject, source, ownership):
     if scope[0] in {"nanobot", "pi"}:
         from agentbridge.workspace.telegram_pilot_links import mirror_binding, mirror_destinations
         binding = mirror_binding(db, subject, scope[1], ownership)
-        if not binding or binding["endpoint_id"] != source or not registered(db, subject, scope[0], scope, binding["token_id"]):
+        # A Web binding may carry a Workspace-only identity, not the host's MCP
+        # credential. Admission checks the instance here; _pin_destination
+        # checks the exact Telegram target's registered token and current pair.
+        if not binding or binding["endpoint_id"] != source or not registered(db, subject, scope[0], scope, None):
             return [], ownership
         mirror_destinations(db, tasks, subject, binding)
         ownership = endpoint_instances(db, subject)
