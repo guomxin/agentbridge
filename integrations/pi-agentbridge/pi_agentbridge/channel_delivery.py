@@ -21,6 +21,7 @@ class Delivery:
         self.commands = host.commands
         self.card_origins = host.cards.origins
         self.runs = self
+        self.db = host.ledger.db
         self.binding = json.dumps(binding_key(record), ensure_ascii=False)
 
     def lookup(self, key, *, subject, endpoint, conversation):
