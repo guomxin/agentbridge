@@ -5,6 +5,8 @@ import hashlib
 import json
 from uuid import uuid4
 
+from agentbridge.workspace.telegram_pair_migration import permits_delivery
+
 from . import actionable_results as actions, workspace_query_delivery as query
 from .endpoint_instances import endpoint_instances, instance_key
 from .store_transactions import store_transaction
@@ -98,11 +100,12 @@ def _current(db,row,*,read_body,service):
     return {**_manifest(image),'contentBase64':base64.b64encode(raw).decode('ascii')}
 
 
-def claim(service,subject,host,instance,endpoint,token,limit,lease):
+def claim(service,subject,host,instance,endpoint,token,limit,lease,*,pairing_protocol=None):
     scope=instance_key(host,instance)
     now=actions._now()
     with store_transaction(service.tasks) as db:
-        if not query.registered(db,subject,host,scope,token):
+        if (not query.registered(db,subject,host,scope,token) or
+                not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol)):
             return []
         db.execute('''UPDATE workspace_media_deliveries SET state='unknown',outcome='delivery_unknown'
             WHERE state='sending' AND due<=? AND question_id IN
@@ -129,7 +132,7 @@ def claim(service,subject,host,instance,endpoint,token,limit,lease):
 
 
 def handle(service,*,subject,host,instance,endpoint_key,token_id,pairing_ref,delivery_id,attempt_count,action,
-           outcome=None,receipt=None,retry_after_seconds=None):
+           outcome=None,receipt=None,retry_after_seconds=None,pairing_protocol=None):
     key={'issue':'available','begin':'allowed','ack':'recorded'}[action]
     with store_transaction(service.tasks) as db:
         row=db.execute(_JOIN+' WHERE d.delivery_id=?',(delivery_id,)).fetchone()
@@ -139,6 +142,7 @@ def handle(service,*,subject,host,instance,endpoint_key,token_id,pairing_ref,del
         if action=='ack':
             return {key:query.settle(db,row,outcome,receipt,retry_after_seconds,table=TABLE)}
         if (any(x is not None for x in (outcome,receipt,retry_after_seconds)) or row['state']!='leased'
+                or not permits_delivery(db, host, subject, instance, endpoint_key, token_id, pairing_protocol)
                 or actions._date(row['due'])<=actions._now() or not query.registered(db,subject,host,(host,row['instance']),token_id)):
             return {key:False}
         resource=_current(db,row,read_body=True,service=service)

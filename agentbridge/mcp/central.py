@@ -6627,6 +6627,7 @@ def create_central_mcp_server(
                 "agentbridge_host_cross_endpoint_context", resolve, service=service,
                 subject=identity["user_subject"], host=agent_host, instance=registration["hostInstanceId"],
                 token=identity["token_id"], endpoint_key=endpoint_key, reference=projection_reference,
+                pairing_protocol=_request_meta(ctx).get(PROTOCOL_META),
                 max_age_minutes=max_age_minutes, limit=limit,
             )
         return await _run_host_control(
@@ -6761,7 +6762,8 @@ def create_central_mcp_server(
         return await _run_host_control("agentbridge_host_notification_delivery", handle, service=service,
             subject=identity["user_subject"],token_id=identity["token_id"],instance=host["hostInstanceId"],host=agent_host,
             endpoint_key=endpoint_key,pairing_ref=pairing_ref,delivery_id=delivery_id,attempt_count=attempt_count,
-            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds)
+            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds,
+            pairing_protocol=_request_meta(ctx).get(PROTOCOL_META))
 
     @mcp.tool(name="agentbridge_host_workspace_result_view", title="Deliver a Paired Workspace Message or OA Result",
         description="Host-private issuance, single-use send permission and receipt for a claimed Workspace delivery to its original Telegram chat.",
@@ -6814,7 +6816,8 @@ def create_central_mcp_server(
         return await _run_host_control('agentbridge_host_workspace_media_delivery',handle,service=service,
             subject=identity['user_subject'],host=agent_host,instance=host['hostInstanceId'],token_id=identity['token_id'],
             endpoint_key=endpoint_key,pairing_ref=pairing_ref,delivery_id=delivery_id,attempt_count=attempt_count,
-            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds)
+            action=action,outcome=outcome,receipt=receipt,retry_after_seconds=retry_after_seconds,
+            pairing_protocol=_request_meta(ctx).get(PROTOCOL_META))
 
     @mcp.tool(name="agentbridge_host_telegram_workspace_media", title="Deliver an Original Workspace Image",
         description="Host-private Pi delivery of one original image to its currently paired private endpoint.",

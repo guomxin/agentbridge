@@ -121,17 +121,16 @@ async def run(request: dict) -> None:
                 raise PermissionError("Card binding unavailable")
             return await wait_for_credential(session,request,task_meta or meta,card)
         can_present = level in {"L2","L3"} and channel in {"workspace","telegram"}
-        if request.get("trial") is not None:
-            if channel!="workspace":
-                raise PermissionError("Workspace trial binding required")
-            from .skills import run_workspace_trial
-            answer = await run_workspace_trial(config,session,binding,request,meta,emit)
-            print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
-            return
         from . import cross_endpoint_reference
         selection = cross_endpoint_reference.parse(request["message"], channel)
-        if selection is not None and not request.get("media"):
-            if level != "L3":
+        opposite = "workspace" if channel == "telegram" else "telegram"
+        wrong_source = selection is None and cross_endpoint_reference.parse(request["message"], opposite) is not None
+        if selection is not None or wrong_source:
+            if wrong_source:
+                answer = "请在另一端引用这条消息。"
+            elif request.get("media") or request.get("trial") is not None:
+                answer = "请单独发送原消息引用。"
+            elif level != "L3":
                 answer = "当前宿主无法核对原消息。"
             else:
                 from .skill_model import provider_completion
@@ -141,6 +140,13 @@ async def run(request: dict) -> None:
                 reference, question = selection
                 answer = await cross_endpoint_reference.answer(session, meta, host="nanobot", endpoint=request["endpointKey"],
                     reference=reference, question=question, complete=summarize)
+            print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
+            return
+        if request.get("trial") is not None:
+            if channel!="workspace":
+                raise PermissionError("Workspace trial binding required")
+            from .skills import run_workspace_trial
+            answer = await run_workspace_trial(config,session,binding,request,meta,emit)
             print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
             return
         coordinator_tool = None

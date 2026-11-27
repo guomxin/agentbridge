@@ -56,8 +56,9 @@ def test_selected_public_reference_is_tool_free_and_history_free(reference_host,
     if channel=='workspace': record['endpoint_key']='workspace:pi-office:one'
     source='网页' if channel=='telegram' else '电报'
     assert run(f'继续{source}消息 original-0，解释这条消息。')=='只解释已选择的公开摘要。'
-    call,=state['calls']
-    assert call['agent_host']=='pi' and call['projection_reference']=={'entryId':'original-0'}
+    initial, confirmed = state['calls']
+    assert initial == confirmed
+    assert initial['agent_host']=='pi' and initial['projection_reference']=={'entryId':'original-0'}
     mode,args=state['models'][0]
     prompt=json.loads(args['message'])
     assert prompt['本次问题']=='解释这条消息。' and '不可合并的旧端历史' not in args['message']

@@ -205,3 +205,46 @@ def test_migration_uses_original_private_consumer_when_web_has_a_different_ident
     assert confirmation
     assert links.confirm(accounts[owner], INSTANCE, 8001, challenge["challenge_id"], confirmation)["source"] == "workspace"
     assert links.verified(owner, INSTANCE, 8001, 501, token_id=native_token, protocol=2)
+
+
+def test_migrated_routes_fence_media_and_notifications_separately_from_original_ack(mirror, pair_fixture):
+    import base64
+    from uuid import uuid4
+    from agentbridge.core import workspace_media_delivery as media, telegram_notification_delivery as notices
+    from agentbridge.core.endpoint_instances import endpoint_instances
+    from agentbridge.workspace.telegram_pilot_links import mirror_binding
+
+    service, links, accounts, owner, _, token = migration_setup(mirror, pair_fixture)
+    args = accounts[owner], INSTANCE, 8001
+    old = links.ensure_endpoint(owner, token, INSTANCE, 8001, 501)
+    challenge = links.begin(*args, migrate=True)
+    proof = links.present(owner, INSTANCE, 8001, 501, challenge["code"], token_id=token, protocol=2)
+    links.confirm(*args, challenge["challenge_id"], proof)
+    key = old["endpointKey"]
+    common = (service, owner, "nanobot", INSTANCE, key, token)
+    notices.activate(*common)
+    with service.tasks._connect() as db:
+        assert not db.execute("SELECT 1 FROM telegram_notification_consumers").fetchone()
+        web = mirror_binding(db, owner, INSTANCE, endpoint_instances(db, owner))
+    notices.activate(*common, pairing_protocol=2)
+    task, _ = service.tasks.ensure_task(user_subject=owner, agent_host="nanobot", host_task_key=uuid4().hex,
+        origin_endpoint_id=web["endpoint_id"], active_conversation_ref=web["session_key"], title="隔离任务")
+    service.tasks.complete_task(user_subject=owner, task_id=task["task_id"], reason="synthetic completion")
+    service.workspace.accept_chat_request(account_id=accounts[owner], user_subject=owner, message="合成图片",
+        idempotency_key=uuid4().hex, instance_id=INSTANCE, tasks=service.tasks, attachment_store=service.timeline_attachments,
+        media_base_url="https://fixture.invalid", attachments=[{"fileName":"original.png", "mimeType":"image/png",
+        "content":base64.b64encode(b"\x89PNG\r\n\x1a\noriginal").decode()}])
+    pending = []
+    for delivery in (media, notices):
+        assert not delivery.claim(*common, 4, 30)
+        item, = delivery.claim(*common, 4, 30, pairing_protocol=2)
+        scope = dict(subject=owner, host="nanobot", instance=INSTANCE, endpoint_key=key, token_id=token,
+            delivery_id=item["deliveryId"], pairing_ref=item["pairingRef"], attempt_count=item["attemptCount"])
+        for action, flag in (("issue", "available"), ("begin", "allowed")):
+            assert delivery.handle(service, **scope, action=action)[flag] is False
+            assert delivery.handle(service, **scope, action=action, pairing_protocol=2)[flag] is True
+        pending.append((delivery, scope))
+    links.revoke(*args)
+    for receipt, (delivery, scope) in enumerate(pending, 51):
+        assert delivery.handle(service, **scope, action="ack", outcome="sent", receipt=receipt)["recorded"]
+        assert not delivery.handle(service, **scope, action="ack", outcome="sent", receipt=receipt+999)["recorded"]

@@ -30,13 +30,15 @@ def parse(message, channel):
 
 async def answer(session, meta, *, host, endpoint, reference, question="", complete=None):
     unavailable = "这条跨端引用已失效，或当前账号没有可核对的原消息。"
-    try:
+    async def read(selector):
         result = await session.call_tool("agentbridge_host_cross_endpoint_context", {
-            "agent_host": host, "endpoint_key": endpoint, "projection_reference": reference,
+            "agent_host": host, "endpoint_key": endpoint, "projection_reference": selector,
             "max_age_minutes": 360, "limit": 8}, meta=meta)
+        return result.structuredContent if not result.isError else {}
+    try:
+        payload = await read(reference)
     except Exception:
         return "暂时无法核对原消息。请稍后重新引用。"
-    payload = result.structuredContent if not result.isError else {}
     if not isinstance(payload, dict) or payload.get("allowNewOperation") is not False:
         return unavailable
     entries = payload.get("entries")
@@ -45,7 +47,8 @@ async def answer(session, meta, *, host, endpoint, reference, question="", compl
     expected = "web" if endpoint.startswith("telegram:") else "telegram"
     label = "网页" if expected == "web" else "电报"
     for entry in entries:
-        if (not isinstance(entry, dict) or (entry.get("source") or {}).get("clientType") != expected
+        if (not isinstance(entry, dict) or not isinstance(entry.get("source"), dict)
+                or entry["source"].get("clientType") != expected
                 or not re.fullmatch(_IDENTIFIER, str(entry.get("entryId") or ""))
                 or not public_mirror_text(entry.get("text"), maximum=600)):
             return unavailable
@@ -58,4 +61,13 @@ async def answer(session, meta, *, host, endpoint, reference, question="", compl
     if not question or not complete:
         return f"{label}原消息摘要\n{entry['text']}"
     prompt = json.dumps({"本次问题":question,"引用来源":label,"原消息摘要":entry["text"]}, ensure_ascii=False)
-    return await complete(SYSTEM, prompt)
+    response = await complete(SYSTEM, prompt)
+    # While the model was running the source may have expired or the owner may have unpaired.
+    try:
+        current = await read({"entryId": entry["entryId"]})
+    except Exception:
+        return "暂时无法核对原消息。请稍后重新引用。"
+    if (not isinstance(current, dict) or current.get("allowNewOperation") is not False
+            or current.get("decision") != "selected" or current.get("entries") != [entry]):
+        return unavailable
+    return response

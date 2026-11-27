@@ -5,6 +5,8 @@ import hashlib
 import json
 import re
 
+from agentbridge.workspace.telegram_pair_migration import permits_delivery
+
 from . import actionable_results as actions
 from . import workspace_query_delivery as query
 from . import workspace_text_delivery as texts
@@ -73,7 +75,7 @@ def _from_workspace(service, db, endpoint, token, key, ident, cutoff, limit):
     return found
 
 
-def _from_telegram(service, db, endpoint, token, ownership, key, ident, cutoff, limit):
+def _from_telegram(service, db, endpoint, token, ownership, key, ident, cutoff, limit, pairing_protocol):
     if key == "telegramReceipt":
         return []
     subject = endpoint["user_subject"]
@@ -87,6 +89,8 @@ def _from_telegram(service, db, endpoint, token, ownership, key, ident, cutoff, 
     if len(peers) != 1:
         return []
     target, proof = peers[0]
+    if not permits_delivery(db, scope[0], subject, scope[1], target["endpoint_key"], token, pairing_protocol):
+        return []
     condition = {"entryId": "r.entry_id=?", "taskId": "r.task_id=?"}.get(key, "r.role='user'")
     rows = db.execute("""SELECT e.text,e.created_at,e.payload_json,r.* FROM telegram_history_receipts r
         JOIN user_timeline e ON e.entry_id=r.entry_id AND e.user_subject=r.subject AND e.source_endpoint_id=r.endpoint_id
@@ -118,7 +122,7 @@ def _from_telegram(service, db, endpoint, token, ownership, key, ident, cutoff, 
     return found
 
 
-def resolve(service, *, subject, host, instance, token, endpoint_key, reference, max_age_minutes=360, limit=8):
+def resolve(service, *, subject, host, instance, token, endpoint_key, reference, max_age_minutes=360, limit=8, pairing_protocol=None):
     key, ident = _reference(reference)
     limit = max(2, min(8, limit))
     cutoff = (actions._now() - timedelta(minutes=max(1, min(1440, max_age_minutes)))).isoformat()
@@ -130,10 +134,11 @@ def resolve(service, *, subject, host, instance, token, endpoint_key, reference,
         endpoint = db.execute("""SELECT * FROM client_endpoints WHERE user_subject=? AND agent_host=?
             AND endpoint_key=? AND state='active'""", (subject, host, endpoint_key)).fetchone()
         if endpoint and ownership.get(endpoint["endpoint_id"]) == scope and query.registered(db, subject, host, scope, token):
-            if endpoint["client_type"] == "telegram" and endpoint["token_id"] == token:
+            if (endpoint["client_type"] == "telegram" and endpoint["token_id"] == token and
+                    permits_delivery(db, host, subject, instance, endpoint_key, token, pairing_protocol)):
                 found = _from_workspace(service, db, endpoint, token, key, ident, cutoff, limit)
             elif endpoint["client_type"] in {"web", "webchat"}:
-                found = _from_telegram(service, db, endpoint, token, ownership, key, ident, cutoff, limit)
+                found = _from_telegram(service, db, endpoint, token, ownership, key, ident, cutoff, limit, pairing_protocol)
     found.sort(key=lambda item: item["createdAt"], reverse=True)
     decision = "unavailable" if not found else "selected" if len(found) == 1 else "ambiguous"
     return {"decision": decision, "entries": found[:limit], "allowNewOperation": False}

@@ -1846,12 +1846,12 @@ class CentralCapabilityService:
         )
         if notification_token_id and host_instance_id:
             from . import telegram_notification_delivery
-            telegram_notification_delivery.activate(self,user_subject,agent_host,host_instance_id,endpoint_key,notification_token_id)
+            telegram_notification_delivery.activate(self,user_subject,agent_host,host_instance_id,endpoint_key,notification_token_id, pairing_protocol=pairing_protocol)
         media_items = []
         if media_token_id and host_instance_id:
             from . import workspace_media_delivery
             media_items = workspace_media_delivery.claim(self, user_subject, agent_host, host_instance_id,
-                endpoint_key, media_token_id, min(limit, 4), lease_seconds)
+                endpoint_key, media_token_id, min(limit, 4), lease_seconds, pairing_protocol=pairing_protocol)
         deliveries = self.tasks.claim_outbox(
             user_subject=user_subject,
             endpoint_id=endpoint["endpoint_id"],
@@ -2049,7 +2049,7 @@ class CentralCapabilityService:
             notifications.append(item)
         if notification_token_id and host_instance_id and len(notifications) < limit:
             notifications.extend(telegram_notification_delivery.claim(self,user_subject,agent_host,host_instance_id,
-                endpoint_key,notification_token_id,limit-len(notifications),lease_seconds))
+                endpoint_key,notification_token_id,limit-len(notifications),lease_seconds, pairing_protocol=pairing_protocol))
         if query_token_id and host_instance_id and len(notifications) < limit:
             from . import workspace_query_delivery, workspace_text_delivery
             space = limit - len(notifications)

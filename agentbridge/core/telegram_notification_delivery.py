@@ -7,6 +7,8 @@ from datetime import timedelta
 import json
 from uuid import uuid4
 
+from agentbridge.workspace.telegram_pair_migration import grant_generation, permits_delivery
+
 from . import actionable_results as actions
 from .endpoint_instances import endpoint_instances, instance_key
 from .store_transactions import store_transaction
@@ -55,11 +57,12 @@ def initialize(db):
     """)
 
 
-def activate(service, subject, host, instance, endpoint_key, token):
+def activate(service, subject, host, instance, endpoint_key, token, *, pairing_protocol=None):
     """Only a currently qualified original consumer can select future v2 events."""
     with store_transaction(service.tasks) as db:
         scope = instance_key(host, instance)
-        if not registered(db, subject, host, scope, token):
+        if (not registered(db, subject, host, scope, token) or
+                not permits_delivery(db, host, subject, instance, endpoint_key, token, pairing_protocol)):
             return
         endpoint = db.execute("SELECT * FROM client_endpoints WHERE user_subject=? AND agent_host=? AND endpoint_key=?",
                               (subject, host, endpoint_key)).fetchone()
@@ -96,6 +99,11 @@ def enqueue(db, *, subject, source, endpoint, event, ownership, created_at):
     if (not identity or identity[1] != consumer["pair_proof"] or identity[0]["_binding_hash"] != consumer["endpoint_hash"]):
         return False
     target, proof = identity
+    if consumer["host"] == "nanobot":
+        grant = grant_generation(db, subject, consumer["instance"], target["account_id"], target["external_subject"])
+        if grant and event.get("pairGeneration") != grant["generation"]:
+            # This task belongs to an earlier pairing and has no destination in the current one.
+            return True
     interaction = (event.get("payload") or {}).get("interactionId") if event_type == "task.interaction.waiting" else None
     if event_type == "task.interaction.waiting" and not isinstance(interaction,str):
         return False
@@ -125,12 +133,22 @@ def _current(db,row):
     if (not identity or identity[1] != row["pair_proof"] or identity[0]["_binding_hash"] != row["endpoint_hash"]
             or ownership.get(row["source"]) != (row["host"],row["instance"])):
         return False
-    event = db.execute("""SELECT e.* FROM task_events e JOIN agent_tasks t USING(task_id)
+    event = db.execute("""SELECT e.*,t.created_at AS task_created_at FROM task_events e JOIN agent_tasks t USING(task_id)
         WHERE e.event_id=? AND e.task_id=? AND e.user_subject=? AND t.user_subject=e.user_subject
           AND t.origin_endpoint_id=? AND t.agent_host=?""",
         (row["event_id"],row["task_id"],subject,row["source"],row["host"])).fetchone()
-    if not event or actions._hash({"eventId":event["event_id"],"taskId":event["task_id"],
-            "eventType":event["event_type"],"payload":json.loads(event["payload_json"])}) != row["source_hash"]:
+    if not event:
+        return False
+    envelope = {"eventId": event["event_id"], "taskId": event["task_id"],
+                "eventType": event["event_type"], "payload": json.loads(event["payload_json"])}
+    if row["host"] == "nanobot":
+        target = identity[0]
+        grant = grant_generation(db, subject, row["instance"], target["account_id"], target["external_subject"])
+        if grant:
+            if actions._date(event["task_created_at"]).timestamp() <= grant["confirmed_at"]:
+                return False
+            envelope["pairGeneration"] = grant["generation"]
+    if actions._hash(envelope) != row["source_hash"]:
         return False
     expected_interaction = (json.loads(event["payload_json"]) or {}).get("interactionId") if event["event_type"] == "task.interaction.waiting" else None
     expected_kind = "trusted_interaction" if expected_interaction else "public_status"
@@ -203,9 +221,11 @@ def _mark_covered(service,db,row):
     return bool(covered)
 
 
-def claim(service, subject, host, instance, endpoint, token, limit, lease):
+def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
     now = actions._now()
     with store_transaction(service.tasks) as db:
+        if not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol):
+            return []
         rows = db.execute("""SELECT * FROM telegram_notification_deliveries WHERE subject=? AND host=? AND instance=?
             AND endpoint_key=? AND token_id=? AND protocol=? AND state IN ('pending','leased','retry_wait')
             AND due<=? ORDER BY created_at,rowid LIMIT ?""",
@@ -228,14 +248,15 @@ def claim(service, subject, host, instance, endpoint, token, limit, lease):
         return result
 
 
-def _eligible(db,row):
+def _eligible(db,row,pairing_protocol):
     now=actions._now()
     return (row["state"] == "leased" and now < actions._date(row["due"]) and now < actions._date(row["expires_at"])
+            and permits_delivery(db, row["host"], row["subject"], row["instance"], row["endpoint_key"], row["token_id"], pairing_protocol)
             and registered(db,row["subject"],row["host"],(row["host"],row["instance"]),row["token_id"]) and _current(db,row))
 
 
 def handle(service, *, subject, host, instance, endpoint_key, token_id, pairing_ref, delivery_id, attempt_count,
-           action, outcome=None, receipt=None, retry_after_seconds=None):
+           action, outcome=None, receipt=None, retry_after_seconds=None, pairing_protocol=None):
     refused={"issue":"available","begin":"allowed","ack":"recorded"}
     if action not in refused:
         raise ValueError("Unsupported notification action")
@@ -250,7 +271,7 @@ def handle(service, *, subject, host, instance, endpoint_key, token_id, pairing_
                 return {"recorded":outcome in {"unavailable","delivery_unknown"} and receipt is None and retry_after_seconds is None}
             # Exact original credentials can reconcile after revocation; this never grants a send.
             return {"recorded":settle(db,row,outcome,receipt,retry_after_seconds,table=TABLE)}
-        if any(x is not None for x in (outcome,receipt,retry_after_seconds)) or not _eligible(db,row):
+        if any(x is not None for x in (outcome,receipt,retry_after_seconds)) or not _eligible(db,row,pairing_protocol):
             return denied
         if _mark_covered(service,db,row):
             return denied
@@ -275,7 +296,7 @@ def handle(service, *, subject, host, instance, endpoint_key, token_id, pairing_
             return denied
     with store_transaction(service.tasks) as db:
         current=db.execute("SELECT * FROM telegram_notification_deliveries WHERE delivery_id=?",(delivery_id,)).fetchone()
-        if current["attempt"] != attempt_count or current["due"] != snapshot["due"] or not _eligible(db,current):
+        if current["attempt"] != attempt_count or current["due"] != snapshot["due"] or not _eligible(db,current,pairing_protocol):
             return denied
         if _mark_covered(service,db,current):
             return denied
