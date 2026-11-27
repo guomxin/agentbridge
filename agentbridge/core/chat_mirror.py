@@ -7,6 +7,31 @@ from agentbridge.adapters.yuque_content import redact_sensitive_text
 
 
 NANOBOT_OA_DIGEST = "nanobot_oa_daily_digest_v1"
+PUBLIC_TEXT_MAX_CHARACTERS = 200_000
+PUBLIC_TEXT_PART_UTF16_UNITS = 2_700
+
+
+def split_public_text(text: str) -> list[str]:
+    """Split approved public text without changing its characters or adding labels.
+
+    Count HTML escapes and UTF-16 units conservatively so hosts can add their
+    ordinary role/part labels within Telegram's message budget. Callers must
+    screen private content first and persist these exact parts before sending.
+    """
+    if not isinstance(text, str) or not text or len(text) > PUBLIC_TEXT_MAX_CHARACTERS:
+        raise ValueError("public text must contain 1 to 200000 Unicode characters")
+    text.encode("utf-8")
+    segments = []
+    start = used = 0
+    escapes = {"&": 5, "<": 4, ">": 4, '"': 6, "'": 6}
+    for pos, char in enumerate(text):
+        size = escapes.get(char, 2 if ord(char) > 65535 else 1)
+        if used + size > PUBLIC_TEXT_PART_UTF16_UNITS:
+            segments.append(text[start:pos])
+            start, used = pos, 0
+        used += size
+    segments.append(text[start:])
+    return segments
 
 
 def private_bot_digest_kind(host: str) -> str:

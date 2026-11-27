@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from . import actionable_results as actions
 from . import workspace_query_delivery as query
-from .chat_mirror import public_mirror_text
+from .chat_mirror import PUBLIC_TEXT_MAX_CHARACTERS, public_mirror_text, split_public_text as split_text
 from .endpoint_instances import endpoint_instances, instance_key
 from .store_transactions import store_transaction
 
@@ -41,21 +41,6 @@ def initialize(db):
     """)
 
 
-def split_text(text):
-    """Reserve room for a role and part number even after HTML escaping on Telegram."""
-    segments = []
-    start = used = 0
-    escapes = {"&": 5, "<": 4, ">": 4, '"': 6, "'": 6}
-    for pos, char in enumerate(text):
-        size = escapes.get(char, 2 if ord(char) > 65535 else 1)
-        if used + size > 2700:
-            segments.append(text[start:pos])
-            start, used = pos, 0
-        used += size
-    segments.append(text[start:])
-    return segments
-
-
 def _record(db, pin, entry_id, kind, request, original):
     parts = split_text(original)
     digest = hashlib.sha256(original.encode()).hexdigest()
@@ -84,7 +69,7 @@ def _question_for_run(db, entry):
 
 def _project_text(db, pin, entry):
     if entry["role"] != "assistant":
-        return public_mirror_text(entry["text"], maximum=200_000)
+        return public_mirror_text(entry["text"], maximum=PUBLIC_TEXT_MAX_CHARACTERS)
     run = entry["dedupe_key"].removeprefix("message:workspace:assistant:")
     private = db.execute("""SELECT 1 FROM agent_host_dispatch_events WHERE dispatch_id=?
         AND event_name='host_progress' AND json_extract(payload_json,'$.kind')='private_interaction'
@@ -93,10 +78,10 @@ def _project_text(db, pin, entry):
               t.agent_host=? AND t.origin_endpoint_id=? AND t.active_conversation_ref=? LIMIT 1""",
         (pin["dispatch_id"],pin["subject"],run,pin["host"],pin["source"],pin["conversation_ref"])).fetchone()
     if not private:
-        return public_mirror_text(entry["text"], maximum=200_000)
+        return public_mirror_text(entry["text"], maximum=PUBLIC_TEXT_MAX_CHARACTERS)
     from .tasks import TaskHubStore
     if TaskHubStore._workspace_oa_read_after_login(db, pin["subject"], pin["source"], pin, run, pin["host"]):
-        safe = public_mirror_text(entry["text"], maximum=200_000)
+        safe = public_mirror_text(entry["text"], maximum=PUBLIC_TEXT_MAX_CHARACTERS)
         if safe:
             return safe
     # A final response exists, but its prose may quote private fields even when
