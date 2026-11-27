@@ -3922,6 +3922,7 @@ class TaskHubStore:
     @staticmethod
     def inspect_runtime(db_path: Path | str) -> dict[str, Any]:
         """Read task-hub health without exposing message or business payloads."""
+        from .workspace_sync_diagnostics import snapshot as workspace_sync_snapshot
 
         resolved = Path(db_path).resolve().as_posix()
         now = _utc_now()
@@ -4120,6 +4121,7 @@ class TaskHubStore:
                             str(row["state"]): int(row["count"])
                             for row in outbox_rows
                         },
+                        "workspace_sync": workspace_sync_snapshot(connection, user_subject, now),
                         "task_continuations": [
                             {
                                 "state": str(row["state"]),

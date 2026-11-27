@@ -38,7 +38,20 @@ def initialize(db):
             due TEXT NOT NULL, issued INTEGER NOT NULL DEFAULT 0, receipt INTEGER, outcome TEXT,
             UNIQUE(question_id,entry_id,part_index));
         CREATE INDEX IF NOT EXISTS workspace_text_due ON workspace_text_deliveries(state,due);
+        CREATE TABLE IF NOT EXISTS workspace_text_projection_decisions(
+            entry_id TEXT PRIMARY KEY, question_id TEXT NOT NULL,
+            kind TEXT NOT NULL, decision TEXT NOT NULL, recorded_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS workspace_text_projection_question
+            ON workspace_text_projection_decisions(question_id);
     """)
+
+
+def _decision(db, pin, entry_id, kind, decision):
+    # A bounded disposition explains intentional omissions without persisting
+    # message bodies, trusted links, pair proofs or host error strings.
+    db.execute("""INSERT OR IGNORE INTO workspace_text_projection_decisions
+        (entry_id,question_id,kind,decision,recorded_at) VALUES(?,?,?,?,?)""",
+        (entry_id, pin["question_id"], kind, decision, actions._now().isoformat()))
 
 
 def _record(db, pin, entry_id, kind, request, original):
@@ -117,14 +130,18 @@ def enqueue_message(db, entry):
         AND payload_type='timeline_message' AND state='pending' AND attempt_count=0""",
         (entry["entry_id"], pin["subject"], pin["host"]))
     if pin["selection"] != "paired":
+        _decision(db, pin, entry["entry_id"], kind, pin["selection"])
         return
     metadata = json.loads(entry["payload_json"])
     if entry["task_id"] or set(metadata) - {"attachments"} or metadata.get("attachments"):
+        _decision(db, pin, entry["entry_id"], kind, "private_metadata")
         return
     text = _project_text(db, pin, entry)
     if not text:
+        _decision(db, pin, entry["entry_id"], kind, "not_public")
         return
     _record(db, pin, entry["entry_id"], kind, pin["dispatch_id"] if kind == "assistant" else None, text)
+    _decision(db, pin, entry["entry_id"], kind, "enqueued")
 
 
 def enqueue_status(db, dispatch, state):
@@ -136,6 +153,7 @@ def enqueue_status(db, dispatch, state):
         (dispatch["user_subject"], dispatch["message_key"], dispatch["origin_endpoint_id"], dispatch["agent_host"])).fetchone()
     if pin and pin["selection"] == "paired":
         _record(db, pin, dispatch["dispatch_id"], "status", dispatch["dispatch_id"], STATUS[state])
+        _decision(db, pin, dispatch["dispatch_id"], "status", "enqueued")
 
 
 def _current(service, db, row):

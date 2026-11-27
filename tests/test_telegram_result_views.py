@@ -696,6 +696,34 @@ class TelegramResultViewTests(unittest.TestCase):
         self.assertEqual(before, self.counts())
         self.assertEqual(len(self.fixture.oa.writes), 0)
 
+    def test_old_ticket_repeated_reads_show_current_terminal_state_without_issuing_or_executing(self):
+        token, _ = self.issue()
+        queued = self.views.prepare(token, self.body(token))
+        response = self.execute(queued)
+        self.service.present_interaction(user_subject=OWNER, agent_host="openclaw", endpoint_key=self.endpoint["endpoint_key"],
+            interaction_id=response["interaction"]["interactionId"], continuous_flow=True)
+        # Keep the old interaction pending deliberately: the authoritative task
+        # terminal state must win even if a saved card still refers to it.
+        for state in ("succeeded", "failed", "canceled", "expired", "superseded", "outcome_unknown"):
+            with self.subTest(state=state):
+                with self.service.tasks._connect() as db:
+                    db.execute("UPDATE agent_tasks SET status=? WHERE task_id=?", (state, queued["taskId"]))
+                before = self.counts()
+                with patch.object(self.service, "invoke", side_effect=AssertionError("old-card GET must not invoke")), \
+                     patch.object(self.service, "present_interaction", side_effect=AssertionError("GET must not issue")), \
+                     patch.object(self.views, "issue", side_effect=AssertionError("GET must not sign a new ticket")):
+                    for _ in range(2):
+                        status = self.views.status(token, queued["taskId"])
+                        self.assertEqual(status["state"], state)
+                        self.assertTrue(status["terminal"])
+                        self.assertNotIn("interaction", status)
+                        self.assertNotIn("canOpen", status)
+                        old = next(item for item in self.views.read(token)["preparations"] if item["taskId"] == queued["taskId"])
+                        self.assertEqual(old["state"], state)
+                        self.assertTrue(old["terminal"])
+                self.assertEqual(self.counts(), before)
+        self.assertEqual(len(self.fixture.oa.writes), 0)
+
     def test_real_l3_lease_prepare_uses_exact_telegram_endpoint_without_web_account(self):
         registration = self.register_host()
         token, _ = self.issue()
