@@ -130,6 +130,17 @@ class TelegramNavigation:
             send("无法核对这条机器人消息的原任务。发送 /pending 查看本人当前任务。")
             return
         kind = target.get("kind") if target else None
+        if kind == "workspace_public_message":
+            if verb != "continue" or ordinal:
+                send("这条消息可以引用查看。请回复原消息并发送“继续”。")
+                return
+            try:
+                response = pilot.gateway._request("telegram-task", {"binding": binding, "operation": "public_reference",
+                    "target": {"telegramReceipt": target["receipt"]}})
+            except GatewayRequestError:
+                response = {}
+            send(public_mirror_text(response.get("referenceText")) or "暂时无法核对这条原消息。")
+            return
         if kind in {"legacy_history", "history_choices", "history_task", "status_delivery"} and verb == "stop":
             send("旧状态通知只可查看。要停止待处理任务，请发送 /pending 并核对原任务。")
             return

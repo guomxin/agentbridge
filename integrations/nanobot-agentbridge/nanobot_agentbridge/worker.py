@@ -128,6 +128,21 @@ async def run(request: dict) -> None:
             answer = await run_workspace_trial(config,session,binding,request,meta,emit)
             print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
             return
+        from . import cross_endpoint_reference
+        selection = cross_endpoint_reference.parse(request["message"], channel)
+        if selection is not None and not request.get("media"):
+            if level != "L3":
+                answer = "当前宿主无法核对原消息。"
+            else:
+                from .skill_model import provider_completion
+                async def summarize(system, prompt):
+                    completion = await provider_completion(config, system, prompt)
+                    return completion["text"]
+                reference, question = selection
+                answer = await cross_endpoint_reference.answer(session, meta, host="nanobot", endpoint=request["endpointKey"],
+                    reference=reference, question=question, complete=summarize)
+            print(json.dumps({"kind":"final","text":answer},ensure_ascii=False),flush=True)
+            return
         coordinator_tool = None
         skill_args = {}
         if level=="L3" and request.get("coordinatorProgram") and (channel=="workspace" or request.get("workspaceEndpointId")):
