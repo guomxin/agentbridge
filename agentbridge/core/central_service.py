@@ -4186,6 +4186,8 @@ class CentralCapabilityService:
                 "interaction binding does not match its trusted resource"
             )
         envelope = build_interaction_envelope(record, resource)
+        from . import telegram_interaction_closures
+        telegram_interaction_closures.observe(self, record, envelope)
         task_id = self.tasks.task_id_for_interaction(interaction_id, user_subject=user_subject)
         batch = self.tasks.get_batch_for_task(parent_task_id=task_id, user_subject=user_subject) if task_id else None
         if batch:
