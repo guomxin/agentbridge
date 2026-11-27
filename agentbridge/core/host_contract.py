@@ -362,10 +362,10 @@ class HostContractStore:
             ("pi", "0.1.5", "L3", "sha256:b83707ad1dfe04f636d79bfa6ac43348c84e6d805e9c68b1f090b4093635d2e9"),
             ("pi", "0.1.6", "L3", "sha256:cb2c90bb19fcd1e85f707feed99f6ce6a4737250988c2a3e64bc68e43557b28d"),
             ("pi", "0.1.7", "L3", "sha256:7ce89797fea1904dd53e9e8c40d57686b4fe2fa1d23eeefb21b4e65de3039a48"),
-            ("pi", "0.1.8", "L3", "sha256:d33f527abc932158798950bc8d827e7a3238995862da033c2e1b3d60dd464720"),
+            ("pi", "0.1.8", "L3", "sha256:b40f02345f586cfd796f7d4dbc169e74f8d93b1d70a8667eb38a4390e13af243"),
             ("nanobot", "0.2.0", "L2", "nanobot-private-credential-poll-resume-v1"),
             ("nanobot", "0.3.0", "L3", "sha256:9046f611fd05c7a8ebafb4a3af979c77cdf12019d1309ca2be0c0e6b6d8beb34"),
-            ("nanobot", "0.3.1", "L3", "sha256:1e3e2c24772e5253cb17123e9d1289871c4c0849eca93fd95826323e61d43892"),
+            ("nanobot", "0.3.1", "L3", "sha256:77c7c54c9c7970b50ff613454121078995bdbe131d4fb1115a62fed0613a439b"),
             ("openclaw", "0.4.71", "L3", "shared-contract-h01-h29-task-plan-v1"),
             (
                 "openclaw",
@@ -616,7 +616,7 @@ class HostContractStore:
                 "openclaw", "0.4.133", "L3",
                 "shared-contract-h01-h29-instance-notification-routing-v1",
             ),
-            ("openclaw", "0.4.134", "L3", "sha256:084665693d19573da72b538e963e8a16270e68301e4c95882a5cd3cb2105f002"),
+            ("openclaw", "0.4.134", "L3", "sha256:9b5b69abab4123e76bd1a1aba047159bc1d41de81f64b396bc067727e92a394e"),
         )
         for name, version, level, evidence in builtins:
             connection.execute(
