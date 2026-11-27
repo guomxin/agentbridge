@@ -2480,6 +2480,25 @@ class CentralMcpTests(unittest.TestCase):
             limit=8,
         )
 
+    def test_host_interaction_state_only_uses_registered_identity_without_presentation(self):
+        observation = {"status": "succeeded", "interaction": {"state": "completed"}}
+        with self._server() as (service, _store, token, client), patch(
+            "agentbridge.core.native_telegram_card_state.read_state", return_value=observation
+        ) as read:
+            response = self._request(client, "tools/call", request_id=65, token=token, params={
+                "name": "agentbridge_host_interaction_present",
+                "arguments": {"agent_host": "openclaw", "endpoint_key": "telegram:default:1001",
+                              "interaction_id": "interaction-1234567890", "state_only": True},
+                "_meta": {"io.agentbridge/host-context": {"version": "1", "agentHost": "openclaw",
+                          "hostInstanceId": "openclaw-gateway", "hostVersion": "0.4.65"}},
+            })
+            self.assertFalse(response.json()["result"]["isError"])
+            self.assertEqual(read.call_args.kwargs["host_instance"], "openclaw-gateway")
+            self.assertEqual(read.call_args.kwargs["subject"], "user-a")
+            self.assertTrue(read.call_args.kwargs["token"])
+            service.present_interaction.assert_not_called()
+            service.get_interaction.assert_not_called()
+
     def test_host_interaction_presentation_uses_endpoint_identity(self):
         with self._server() as (service, _store, token, client):
             service.present_interaction.return_value = {

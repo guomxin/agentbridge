@@ -35,7 +35,7 @@ def read_state(service, *, subject, token, registration, host_instance, host, en
         task_info = {"taskId": task_id, "userSubject": subject, "agentHost": host,
                      "originEndpointId": task["origin_endpoint_id"],
                      "activeConversationRef": task["active_conversation_ref"]}
-    elif kind != "credential" or registration["acceptedLevel"] != "L2":
+    elif kind != "credential" or registration["acceptedLevel"] not in {"L2", "L3"}:
         raise PermissionError("A native task is required for this interaction")
 
     if record.get("operation_id"):

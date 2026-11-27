@@ -70,14 +70,49 @@ def test_native_state_refuses_other_routes(openclaw, change):
         read_state(service, **args)
 
 
-def test_standalone_native_login_keeps_l2_boundary(openclaw):
+@pytest.mark.parametrize("level", ["L2", "L3"])
+def test_standalone_native_login_at_supported_levels(openclaw, level):
     service, args, _ = setup_card(openclaw, standalone=True)
-    with pytest.raises(PermissionError):
-        read_state(service, **args)
     with service.tasks._connect() as db:
-        db.execute("UPDATE agent_host_registrations SET accepted_level='L2' WHERE token_id=?", (args["token"],))
-    args["registration"]["acceptedLevel"] = "L2"
+        db.execute("UPDATE agent_host_registrations SET accepted_level=? WHERE token_id=?", (level, args["token"]))
+    args["registration"]["acceptedLevel"] = level
     observed = read_state(service, **args)
     assert observed["task"] is None
     assert observed["interaction"] == {"interactionId": args["interaction_id"], "type": "credential",
                                        "state": "pending", "taskId": None}
+
+
+@pytest.mark.parametrize("kind", ["business_input", "execution_authorization"])
+def test_native_read_does_not_mint_field_or_authorization_presentations(openclaw, kind):
+    from agentbridge.core.user_grants import PERMISSIONS
+    from tests.authorization_fixtures import grant_permissions
+    from tests.support.interaction_acceptance import COMMIT, PREPARE
+
+    service, args, task = setup_card(openclaw)
+    grant_permissions(service.user_grants, OWNER, [name for name, value in PERMISSIONS.items()
+                      if "oa:write:draft" in value["legacy_scopes"] or "oa:write:approval" in value["legacy_scopes"]])
+    op, _ = service.operations.create(user_subject=OWNER, capability_name=PREPARE,
+                                      capability_version="1", input_summary={})
+    common = dict(user_subject=OWNER, system_id="oa", session_id="fixture-session",
+                  capability_version="1", card_base_url="https://fixture.invalid")
+    if kind == "business_input":
+        resource = service.field_submissions.create(**common, create_operation_id=op["operation_id"],
+                    capability_name=PREPARE, form_schema={"fields": [{"name": "reason", "label": "事项"}]})
+        card = service._business_input_interaction(resource)
+    else:
+        resource = service.write_authorizations.create(**common, prepare_operation_id=op["operation_id"],
+                    capability_name=COMMIT, plan={"synthetic": True}, summary={"title": "合成授权"})
+        card = service._execution_authorization_interaction(resource)
+    args["interaction_id"] = card["interactionId"]
+    record = service.interactions.get(card["interactionId"], user_subject=OWNER)
+    service.tasks.link_interaction(task_id=task, user_subject=OWNER, interaction_record=record, interaction=card)
+    with service.tasks._connect() as db:
+        def counts():
+            return tuple(db.execute("SELECT count(*) FROM " + table).fetchone()[0] for table in
+                         ("field_submission_presentations", "write_authorization_presentations", "operations", "task_events"))
+        before = counts()
+        for _ in range(2):
+            answer = read_state(service, **args)
+            assert answer["interaction"] == {"interactionId": card["interactionId"], "type": kind,
+                                            "state": "pending", "taskId": task}
+        assert counts() == before

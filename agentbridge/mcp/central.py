@@ -6654,7 +6654,8 @@ def create_central_mcp_server(
         title="Present Trusted Interaction for One Endpoint",
         description=(
             "Host-private trusted-interaction presentation. Execution "
-            "authorizations receive an endpoint-specific one-use URL."
+            "authorizations receive an endpoint-specific one-use URL. With state_only, "
+            "read a native Telegram card state without issuing another presentation."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=False,
