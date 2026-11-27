@@ -25,6 +25,7 @@ bscli = "bscli.cli.main:main"
 [project.optional-dependencies]
 postgresql = ["psycopg[binary]==3.3.5"]
 database-analysis = ["psycopg[binary]==3.3.5", "pglast==7.21"]
+test = ["aiohttp==3.14.5"]
 
 [tool.setuptools.packages.find]
 include = ["agentbridge*", "bscli", "bscli.cli"]

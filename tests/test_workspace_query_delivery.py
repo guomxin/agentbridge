@@ -305,7 +305,7 @@ def test_only_explicit_rate_limit_can_send_again_after_central_reclaim(setup, co
 
 @pytest.mark.parametrize("host_type", ["nanobot", "pi"])
 def test_handler_pins_central_claim_proof_and_only_allows_new_protocol_actions(tmp_path, host_type):
-    web = pytest.importorskip("aiohttp.web")
+    from aiohttp import web
     req = {"hostType": host_type, "subject": "first", "endpoint": ENDPOINT, "endpointKey": "telegram:8001:501",
            "instance": "test-host", "workspaceEndpointId": "web-first", "userDir": str(tmp_path), "pairingRef": PAIR}
     host = SimpleNamespace(coordinator=True, card_origins={ORIGIN}, worker_payload=lambda *_: req)

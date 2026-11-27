@@ -16,7 +16,7 @@ from nanobot_agentbridge.workspace_query_delivery import BINDING_FIELDS, acknowl
 @pytest.mark.parametrize("host_type", ["nanobot", "pi"])
 @pytest.mark.parametrize("mode", ["workspace_query_v2", "workspace_text_v2"])
 def test_only_exact_original_binding_and_credential_can_settle_after_revocation(tmp_path, monkeypatch, host_type, mode):
-    web = pytest.importorskip("aiohttp.web")
+    from aiohttp import web
     token = tmp_path / "owner.token"
     token.write_text("synthetic-original-owner-credential")
     token.chmod(0o600)

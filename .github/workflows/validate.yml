@@ -44,10 +44,10 @@ jobs:
           validation_venv="$RUNNER_TEMP/agentbridge-tests"
           python -m venv "$validation_venv"
           test_packages=('setuptools>=77' pytest)
-          project_spec=.
+          project_spec='.[test]'
           if [[ "$VALIDATION_PROFILE" == full ]]; then
             test_packages+=(pytest-xdist)
-            project_spec='.[database-analysis]'
+            project_spec='.[database-analysis,test]'
           fi
           "$validation_venv/bin/python" -m pip install --disable-pip-version-check "${test_packages[@]}"
           "$validation_venv/bin/python" -m pip install --disable-pip-version-check --no-build-isolation -e "$project_spec"

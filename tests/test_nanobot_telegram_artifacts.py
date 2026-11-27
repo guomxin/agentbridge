@@ -46,6 +46,7 @@ def origin(mirror):
     return SimpleNamespace(
         service=service,
         subject=subject,
+        token_id=token,
         ep=ep,
         task=task["task_id"],
         scope={
@@ -129,6 +130,10 @@ def host_gateway(origin, monkeypatch, tmp_path):
                 "agentbridge_host_notification_validate": origin.service.validate_host_notification,
                 "agentbridge_host_notification_ack": origin.service.acknowledge_host_notification,
             }[name]
+            arguments = dict(arguments)
+            if name == "agentbridge_host_notification_claim" and arguments.pop("include_workspace_query_v2", False):
+                # The actual MCP adapter derives this value from the authenticated session.
+                arguments["query_token_id"] = origin.token_id
             result = handler(host_instance_id=INSTANCE, user_subject=origin.subject, **arguments)
             return SimpleNamespace(structuredContent=result, isError=False)
 

@@ -109,13 +109,23 @@ def test_lost_apply_reply_compensates_through_native_host_transaction(tmp_path, 
     monkeypatch.setattr(host,"archive_bridge",lambda *_:candidate)
     monkeypatch.setattr(host,"configure_release",lambda *_:None)
     monkeypatch.setattr(host,"verify_subjects",lambda *_:{})
-    monkeypatch.setattr(host,"wait_for_route",lambda *_:{"ready":True})
+    def ready_route(pub, config, *, action="probe"):
+        # Renaming keeps the adapter/version unchanged. The new predecessor
+        # probe is reserved for an explicitly reviewed adapter route transition.
+        assert action == "probe"
+        actual = (tmp_path / "current").resolve()
+        assert actual in {candidate, previous}
+        events.append("probe:" + actual.name)
+        return {"ready": True}
+    monkeypatch.setattr(host,"wait_for_route",ready_route)
     monkeypatch.setattr(host,"wait_for_running_jobs",lambda *_:None)
     monkeypatch.setattr(host,"remote",remote)
     pub=SimpleNamespace(release=candidate.name,args=SimpleNamespace(resume=False))
     with pytest.raises(RuntimeError,match="synthetic lost native response"):
         host.admission(pub,spec,mac_for(),{})
-    assert events.index("name_apply") < events.index("name_restore")
+    assert [item for item in events if item.startswith("probe:")] == [
+        "probe:" + candidate.name, "probe:" + previous.name]
+    assert events.index("name_apply") < events.index("probe:" + previous.name) < events.index("name_restore")
     assert (tmp_path/"current").resolve()==previous and json.loads((tmp_path/"native-release.json").read_text())["stage"]=="rolled_back"
     actual=next(i for i in ws.hosts.admin_list() if i["instance_id"]==spec["instanceId"])
     assert actual["state"]=="enabled" and actual["display_name"]==spec["displayNameChange"]["from"]
