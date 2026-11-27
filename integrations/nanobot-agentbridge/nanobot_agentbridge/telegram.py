@@ -226,11 +226,13 @@ class TelegramPilot:
             self.result_cards = PiResultCards(self)
 
         self.navigation = TelegramNavigation(self)
-        # No host admission or bot send has started while in reading_media.
-        with self.db:
-            self.db.execute("DELETE FROM messages WHERE bot=? AND state='reading_media'", (self.bot_id,))
         self.timeline = TelegramTimeline(self)
         self.direct_replies = DirectReplies(self)
+        from .telegram_media_projection import MediaProjection
+        self.media_projection = MediaProjection(self)
+        # Only legacy reading rows have no independent source proof to retain.
+        with self.db:
+            self.db.execute("DELETE FROM messages WHERE bot=? AND state='reading_media'", (self.bot_id,))
         self.terminal = None
         if allow_pairing:
             from .notifications import TerminalMessages
@@ -747,6 +749,10 @@ class TelegramPilot:
         return list(self._mirror_peers_cache)
 
     def poll_once(self):
+        if self.host_type == "pi":
+            from .pi_workspace_images import recover_receipts
+            recover_receipts(self)
+        self.media_projection.drain()
         state = self.db.execute(
             "SELECT * FROM channel_meta WHERE bot=?", (self.bot_id,)
         ).fetchone()
@@ -795,6 +801,7 @@ class TelegramPilot:
                     (self.bot_id, offset, time.time()),
                 )
         self.reconcile()
+        self.media_projection.drain()
         if self.terminal and time.monotonic() >= self.next_notifications:
             active_now = bool(
                 self.db.execute(
@@ -943,6 +950,7 @@ def main():
             if consumer.update_reader is not None:
                 consumer.update_reader.close()
                 inbound_api.close()
+            consumer.media_projection.close()
             consumer.api.close()
             consumer.db.close()
 

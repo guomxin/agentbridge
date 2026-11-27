@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -40,6 +41,8 @@ class RunCoordinator:
                     state TEXT NOT NULL, answer TEXT,
                     UNIQUE (subject, request_key)
                 );
+                CREATE TABLE IF NOT EXISTS run_public_prompts (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(run_id), text_digest TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS run_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL REFERENCES runs(run_id),
@@ -57,7 +60,7 @@ class RunCoordinator:
             raise
 
     def accept(self, *, subject: str, endpoint: str, conversation: str,
-               request_key: str, payload_digest: str, execute: Execute) -> dict:
+               request_key: str, payload_digest: str, execute: Execute, public_prompt: str | None = None) -> dict:
         if self._closed:
             raise RuntimeError("NanoBot run coordinator is closing")
         if not all(isinstance(value, str) and value.strip() for value in
@@ -72,12 +75,21 @@ class RunCoordinator:
                     endpoint, conversation, payload_digest
                 ):
                     raise ValueError("IDEMPOTENCY_PAYLOAD_MISMATCH")
+                if public_prompt is not None:
+                    proof = self._db.execute("SELECT text_digest FROM run_public_prompts WHERE run_id=?",(existing["run_id"],)).fetchone()
+                    if proof and (not isinstance(public_prompt,str) or hashlib.sha256(public_prompt.encode()).hexdigest()!=proof[0]):
+                        raise ValueError("IDEMPOTENCY_PAYLOAD_MISMATCH")
                 return self._public(existing)
             run_id = str(uuid4())
             self._db.execute("""INSERT INTO runs
                 (run_id,subject,endpoint,conversation,request_key,payload_digest,state)
                 VALUES (?,?,?,?,?,?,'accepted')""",
                 (run_id, subject, endpoint, conversation, request_key, payload_digest))
+            if public_prompt is not None:
+                if not isinstance(public_prompt,str) or not public_prompt.strip():
+                    raise ValueError("Invalid original public prompt")
+                self._db.execute("INSERT INTO run_public_prompts VALUES(?,?)",
+                                 (run_id,hashlib.sha256(public_prompt.encode()).hexdigest()))
             self._event(run_id, "accepted")
         self._tasks[run_id] = loop.create_task(self._execute(run_id, execute))
         self._tasks[run_id].add_done_callback(lambda _: self._tasks.pop(run_id, None))
@@ -145,8 +157,8 @@ class RunCoordinator:
     def matches_message(self, run_id: str, message: str) -> bool:
         from hashlib import sha256
         digest = sha256(message.encode()).hexdigest()
-        return self._db.execute("SELECT 1 FROM runs WHERE run_id=? AND payload_digest=?",
-                                (run_id, digest)).fetchone() is not None
+        return self._db.execute("""SELECT 1 FROM runs r LEFT JOIN run_public_prompts p USING(run_id)
+            WHERE r.run_id=? AND COALESCE(p.text_digest,r.payload_digest)=?""", (run_id,digest)).fetchone() is not None
 
     def snapshot(self, run_id: str, *, subject: str, endpoint: str, conversation: str) -> dict:
         row = self._db.execute("""SELECT run_id,state,answer FROM runs

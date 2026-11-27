@@ -271,7 +271,12 @@ class Host:
         )
 
     async def action(self, action: str, body: dict) -> dict:
-        if action == "telegram-workspace-result-view" and body.get("action") == "ack" and "pairingRef" in body:
+        if action == "telegram-media-append":
+            from .telegram_media_receipts import recover_route
+            recovered = await recover_route(self,body,host_type="nanobot")
+            if recovered is not None:
+                return recovered
+        if action in {"telegram-workspace-result-view","telegram-workspace-media-v2"} and body.get("action") == "ack" and "pairingRef" in body:
             from .workspace_query_delivery import acknowledge_receipt
             return await acknowledge_receipt(self, body, host_type="nanobot")
         if action == "ready":
@@ -299,10 +304,13 @@ class Host:
             return await complete_for_binding(self, record, body["system"], body["prompt"])
         if action=="prepare-command":
             return await self.commands.accept(record,body)
+        if action in {"telegram-media-source","telegram-media-append"}:
+            from .telegram_media_receipts import prepare_source,publish_media
+            return await (prepare_source if action=="telegram-media-source" else publish_media)(self,record,body)
         if action == "telegram-timeline":
             from .telegram_timeline import publish_timeline
             return await publish_timeline(self, record, body)
-        if action in {"telegram-notifications","telegram-notification-receipt","telegram-chat-validate","telegram-chat-receipt","telegram-artifact-file","telegram-watch-validate","telegram-workspace-result-view"}:
+        if action in {"telegram-notifications","telegram-notification-receipt","telegram-chat-validate","telegram-chat-receipt","telegram-artifact-file","telegram-watch-validate","telegram-workspace-result-view","telegram-workspace-media-v2"}:
             from .notifications import notifications
             return await notifications(self,record,action,body)
         if action == "telegram-task":
@@ -351,6 +359,7 @@ class Host:
                     **binding,
                     request_key=request_key,
                     payload_digest=digest,
+                    public_prompt=message,
                     execute=lambda run_id, emit: self.execute(record, run_id, message, emit,trial=trial,request_key=request_key,images=images),
                 )
             except ValueError:
@@ -467,7 +476,7 @@ class Host:
 def create_app(spec: dict) -> web.Application:
     host = Host(spec)
     app = web.Application(client_max_size=18 * 1024 * 1024)
-    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-artifact-file|telegram-mirror-peers|telegram-task|telegram-watch-validate|telegram-workspace-result-view}", host.handle)
+    app.router.add_post("/v1/{action:prepare-command|ready|accept|events|lookup|cancel|card|result-view|telegram-binding|telegram-route|telegram-present|telegram-enroll|telegram-timeline|telegram-media-source|telegram-media-append|skill-model|artifact-reissue|telegram-notifications|telegram-notification-receipt|telegram-chat-validate|telegram-chat-receipt|telegram-artifact-file|telegram-mirror-peers|telegram-task|telegram-watch-validate|telegram-workspace-result-view|telegram-workspace-media-v2}", host.handle)
 
     if host.coordinator:
         from .recovery import recover

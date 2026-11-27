@@ -1,6 +1,7 @@
 """Receive media only from the verified sender and the pinned Telegram file origin."""
 
 import base64
+from datetime import datetime, timezone
 import http.client
 import re
 import time
@@ -27,7 +28,9 @@ UNREADABLE = "附件读取失败或超过 6 MiB，请缩小后重新发送。"
 
 
 class MediaError(ValueError):
-    pass
+    def __init__(self,message,failure="unreadable"):
+        super().__init__(message)
+        self.failure=failure
 
 
 def _select(msg):
@@ -49,7 +52,8 @@ def _select(msg):
             )
         ]
         if not choices:
-            raise MediaError(UNREADABLE)
+            oversized=any(isinstance(x,dict) and type(x.get("file_size")) is int and x["file_size"]>MAX_FILE for x in sizes)
+            raise MediaError(UNREADABLE,"too_large" if oversized else "unreadable")
         return max(choices, key=lambda x: x["width"] * x["height"]), "image/jpeg"
     sticker = msg.get("sticker")
     if (
@@ -73,7 +77,7 @@ def _select(msg):
             )
         if isinstance(mime, str) and (mime in FORMATS or mime in DOCUMENT_FORMATS):
             return document, mime
-    raise MediaError(UNSUPPORTED)
+    raise MediaError(UNSUPPORTED,"unsupported")
 
 
 def download(api, media):
@@ -84,7 +88,7 @@ def download(api, media):
     limit = MAX_FILE
     size = media.get("file_size")
     if size is not None and (type(size) is not int or not 0 < size <= limit):
-        raise MediaError(UNREADABLE)
+        raise MediaError(UNREADABLE,"too_large" if type(size) is int and size>limit else "unreadable")
     ref = api.call("getFile", file_id=identifier)
     path = ref.get("file_path") if isinstance(ref, dict) else None
     if (
@@ -148,63 +152,81 @@ def receive(pilot, msg, chat, message):
         ).rowcount:
             return
     caption = msg.get("caption", "")
-    if (
-        "reply_to_message" in msg
-        or not isinstance(caption, str)
-        or (
-            caption
-            and (
-                not telegram_text_fits(caption)
-                or caption.lstrip().startswith("/")
-                or public_mirror_text(caption) is None
-            )
-        )
-    ):
-        pilot.deliver(
-            chat, message, "请单独发送附件和普通说明，需要确认的操作请回到原任务。"
-        )
+    if ("reply_to_message" in msg or not isinstance(caption,str) or (caption and (
+            not telegram_text_fits(caption) or caption.lstrip().startswith("/") or public_mirror_text(caption) is None))):
+        pilot.deliver(chat,message,"请单独发送附件和普通说明，需要确认的操作请回到原任务。")
+        return
+    selected_error=None
+    try:
+        if sum(k in msg for k in MEDIA_FIELDS)!=1:
+            raise MediaError(UNSUPPORTED,"unsupported")
+        item,mime=_select(msg)
+    except MediaError as exc:
+        selected_error=exc
+        item,mime=None,None
+    text=caption.strip() or ("请查看我发送的图片。" if mime in FORMATS else
+                            "请阅读我发送的文档。" if mime in DOCUMENT_FORMATS else "我发送了一份附件。")
+    # Text is an independent original-reception fact even if the file is refused.
+    with pilot.db:
+        pilot.timeline.queue(chat,message,"user",text,projection_mode="telegram_received_v2")
+        pilot.direct_replies.admit(chat,message,digest)
+    try:
+        date=msg.get("date")
+        if type(date) is not int or date<=0:
+            raise ValueError("Missing original platform reception time")
+        received_at=datetime.fromtimestamp(date,timezone.utc).isoformat()
+        with pilot.db:
+            pilot.media_projection.begin(chat,message,binding,received_at)
+        pilot.media_projection.source(chat,message)
+    except (ValueError,OverflowError,RuntimeError,OSError):
+        pilot.deliver(chat,message,"附件的原接收信息暂时无法确认，说明文字已独立保留。")
         return
     try:
-        item, mime = _select(msg)
-        blob = download(pilot.api, item)
-        formats = FORMATS if mime in FORMATS else DOCUMENT_FORMATS
-        suffix, signature = formats[mime]
-        if (
-            not blob.startswith(signature)
-            or mime == "image/webp"
-            and blob[8:12] != b"WEBP"
-        ):
+        from .telegram_media_receipts import TTL
+        if time.time()>=date+TTL:
+            raise MediaError("原附件已超过保存期限，请重新发送所需材料。","expired")
+        if selected_error:
+            raise selected_error
+        blob=download(pilot.api,item)
+        formats=FORMATS if mime in FORMATS else DOCUMENT_FORMATS
+        suffix,signature=formats[mime]
+        if not blob.startswith(signature) or mime=="image/webp" and blob[8:12]!=b"WEBP":
             raise MediaError(UNREADABLE)
-        if mime in DOCUMENT_FORMATS and mime != "application/pdf":
+        if mime in DOCUMENT_FORMATS and mime!="application/pdf":
             try:
-                value = blob.decode("utf-8-sig")
+                value=blob.decode("utf-8-sig")
             except UnicodeError:
                 raise MediaError("请使用 UTF-8 文本文件或含文字的 PDF。") from None
-            if not value.strip() or any(
-                ord(c) < 32 and c not in "\n\r\t" for c in value
-            ):
+            if not value.strip() or any(ord(c)<32 and c not in "\n\r\t" for c in value):
                 raise MediaError(UNREADABLE)
     except MediaError as exc:
-        pilot.deliver(chat, message, str(exc))
+        pilot.media_projection.stage(chat,message,failure=exc.failure)
+        pilot.deliver(chat,message,str(exc))
         return
-    except (OSError, http.client.HTTPException, RuntimeError):
-        pilot.deliver(chat, message, UNREADABLE)
+    except (OSError,http.client.HTTPException,RuntimeError):
+        pilot.media_projection.stage(chat,message,failure="unreadable")
+        pilot.deliver(chat,message,UNREADABLE)
         return
-    binding, fresh = pilot._binding(chat)
-    if not binding or fresh != digest:
-        pilot._state(chat, message, "binding_changed")
+    binding,fresh=pilot._binding(chat)
+    if not binding or fresh!=digest:
+        pilot._state(chat,message,"binding_changed")
         return
-    is_image = mime in FORMATS
-    attachment = {
-        "type": "image" if is_image else "document",
-        "mimeType": mime,
-        "fileName": "attachment" + suffix,
-        "content": base64.b64encode(blob).decode("ascii"),
-    }
-    text = caption.strip() or (
-        "请查看我发送的图片。" if is_image else "请阅读我发送的文档。"
-    )
+    try:
+        pilot.media_projection.source(chat,message)  # Also fences NanoBot's legacy binding generation.
+    except (ValueError,RuntimeError,OSError):
+        pilot._state(chat,message,"binding_changed")
+        return
+    name=item.get("file_name")
+    if (not isinstance(name,str) or not 0<len(name)<=256 or name in {".",".."}
+            or "/" in name or "\\" in name or any(ord(c)<32 for c in name)):
+        name="attachment"+suffix
+    try:
+        name.encode("utf-8")
+    except UnicodeError:
+        name="attachment"+suffix
+    attachment={"type":"image" if mime in FORMATS else "document","mimeType":mime,"fileName":name,
+                "content":base64.b64encode(blob).decode("ascii")}
+    pilot.media_projection.stage(chat,message,attachment=attachment,blob=blob)
     with pilot.db:
-        pilot.timeline.queue(chat, message, "user", text)
-        pilot._state(chat, message, "accepting")
-    pilot._dispatch_ordinary(chat, message, binding, text, [attachment])
+        pilot._state(chat,message,"accepting")
+    pilot._dispatch_ordinary(chat,message,binding,text,[attachment])

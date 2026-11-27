@@ -28,6 +28,12 @@ def pairing_ref(value):
 
 
 def source_fields(body):
+    if body.get("deliveryMode",body.get("kind")) == "workspace_media_v2":
+        index,count=body.get("itemIndex"),body.get("itemCount")
+        if (any(k in body for k in ("sourceTaskId","sourceEventId","sourceEntryId"))
+                or type(index) is not int or type(count) is not int or not 1<=index<=count<=4):
+            return None
+        return body.get("deliveryId"),"workspace_media_v2",index,count
     if "sourceEventId" in body:
         if ("sourceEntryId" in body or not identifier(body.get("sourceTaskId"))
                 or body.get("notificationKind") not in {"public_status", "trusted_interaction"}):
@@ -180,7 +186,8 @@ async def handle_request(session, meta, req, path, body, origins):
         args["outcome"] = outcome
     elif action not in {"issue", "begin"}:
         raise web.HTTPBadRequest()
-    tool = "agentbridge_host_notification_delivery" if mode == "host_notification_v2" else "agentbridge_host_workspace_result_view"
+    tool = {"host_notification_v2":"agentbridge_host_notification_delivery",
+            "workspace_media_v2":"agentbridge_host_workspace_media_delivery"}.get(mode,"agentbridge_host_workspace_result_view")
     reply = await session.call_tool(tool, args, meta=meta)
     value = reply.structuredContent
     if reply.isError or not isinstance(value, dict):
@@ -195,6 +202,12 @@ async def handle_request(session, meta, req, path, body, origins):
     if value.get("available") is not True or timestamp(value.get("leaseExpiresAt")) is None:
         raise web.HTTPBadGateway()
     result = {"available": True, "leaseExpiresAt": value["leaseExpiresAt"]}
+    if mode == "workspace_media_v2":
+        from .workspace_media_delivery import resource
+        item=resource(value.get("resource"))
+        if not item or any(value.get(k) is not None for k in ("publicText","resultView","interaction")):
+            raise web.HTTPBadGateway()
+        return {**result,"resource":item}
     if mode == "host_notification_v2":
         if (value.get("sourceEventId"),value.get("sourceTaskId"),value.get("notificationKind")) != (task,*original):
             raise web.HTTPBadGateway()
@@ -252,9 +265,12 @@ class Claim:
     part_count: int = 1
     event_task: str | None = None
     notification_kind: str | None = None
+    media: bool = False
 
     @property
     def dedupe_key(self):
+        if self.media:
+            return "workspace_media:" + self.delivery
         if self.event_task:
             return "notification_event:" + self.task
         if self.entry:
@@ -266,6 +282,8 @@ class Claim:
         source = {"sourceEntryId": self.entry, "partIndex": self.part_index, "partCount": self.part_count} if self.entry else {"sourceTaskId": self.task}
         if self.event_task:
             source = {"sourceEventId":self.task,"sourceTaskId":self.event_task,"notificationKind":self.notification_kind}
+        if self.media:
+            source={"deliveryMode":"workspace_media_v2","itemIndex":self.part_index,"itemCount":self.part_count}
         return {"binding": self.binding, "deliveryId": self.delivery, "attempt": self.attempt,
                 **source, "pairingRef": self.pairing}
 
@@ -291,7 +309,8 @@ class WorkspaceQueries:
                     WHERE bot=? AND chat=? AND delivery=? AND attempt=?""",
                     (time.time() + 5, self.pilot.bot_id, claim.chat, claim.delivery, claim.attempt))
         options = {"timeout": PiGatewayClient.result_view_timeout} if action == "issue" else {}
-        future = self.executor.submit(self.pilot.gateway._request, "telegram-workspace-result-view",
+        route = "telegram-workspace-media-v2" if claim.media else "telegram-workspace-result-view"
+        future = self.executor.submit(self.pilot.gateway._request, route,
                                       {**claim.payload(), "action": action, **fields}, **options)
         self.pending[claim.delivery] = (claim, action, future)
 
@@ -338,7 +357,7 @@ class WorkspaceQueries:
         claim = Claim(chat, dict(binding), digest, delivery, attempt, task, pairing,
                       task if mode == "workspace_text_v2" else None, part_index, part_count,
                       event.get("sourceTaskId") if mode == "host_notification_v2" else None,
-                      event.get("notificationKind") if mode == "host_notification_v2" else None)
+                      event.get("notificationKind") if mode == "host_notification_v2" else None, mode=="workspace_media_v2")
         row = self._receipt(claim)
         if row and row[0] == delivery and row[1] == "retry_after":
             retry = self._retry(claim)
@@ -355,6 +374,13 @@ class WorkspaceQueries:
     def _message(self, claim, value):
         if value.get("available") is not True:
             return None
+        if claim.media:
+            from .workspace_media_delivery import message
+            media=message(value)
+            lease=timestamp(value.get("leaseExpiresAt"))
+            if not media or lease is None or time.time()>=min(lease,media[1]):
+                return None
+            return media[0],min(lease,media[1])
         text = public_mirror_text(value.get("publicText"))
         if value.get("publicText") is not None and text is None:
             return None
@@ -434,19 +460,30 @@ class WorkspaceQueries:
         self._state(claim, "sending")
         state, receipt, delay = "delivery_unknown", None, None
         try:
-            result = self.pilot.api.call("sendMessage", chat_id=claim.chat, **params)
-            if (isinstance(result, dict) and numeric(result.get("message_id"))
-                    and (result.get("from") or {}).get("id") == self.pilot.bot_id
-                    and (result.get("chat") or {}).get("id") == claim.chat
-                    and (result.get("chat") or {}).get("type") == "private"):
-                state, receipt = "delivered", result["message_id"]
+            if claim.media:
+                from .telegram_files import document_receipt
+                result=self.pilot.api.send_document(claim.chat,**params)
+                receipt=document_receipt(result,self.pilot.bot_id,claim.chat,len(params["data"]))
+                if receipt and not self.pilot.db.execute("""SELECT 1 FROM telegram_card_deliveries
+                        WHERE bot=? AND chat=? AND receipt=? AND dedupe_key!=?""",
+                        (self.pilot.bot_id,claim.chat,receipt,claim.dedupe_key)).fetchone():
+                    state="delivered"
+                else:
+                    receipt=None
+            else:
+                result = self.pilot.api.call("sendMessage", chat_id=claim.chat, **params)
+                if (isinstance(result, dict) and numeric(result.get("message_id"))
+                        and (result.get("from") or {}).get("id") == self.pilot.bot_id
+                        and (result.get("chat") or {}).get("id") == claim.chat
+                        and (result.get("chat") or {}).get("type") == "private"):
+                    state, receipt = "delivered", result["message_id"]
         except TelegramRejected as exc:
             delay = exc.retry_after if exc.error_code == 429 else None
             state = "retry_after" if delay is not None else "rejected"
         except TelegramUnavailable:
             pass
         self._state(claim, state, receipt=receipt, retry_seconds=delay)
-        if receipt and not claim.entry:
+        if receipt and not claim.entry and not claim.media:
             with self.pilot.db:
                 self.pilot.navigation.remember(claim.chat, receipt, claim.digest,
                     {"kind": "task" if claim.event_task else "result", "id": claim.event_task or claim.task})

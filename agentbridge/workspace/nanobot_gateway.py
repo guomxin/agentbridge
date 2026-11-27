@@ -159,7 +159,7 @@ class NanoBotGatewayClient:
             response = connection.getresponse()
             # A private file read carries one task artifact (32 MiB maximum) as base64.
             limit = 45 * 1024 * 1024 if action == "telegram-artifact-file" else 2_097_152
-            if action == "telegram-workspace-media":
+            if action in {"telegram-workspace-media","telegram-workspace-media-v2"}:
                 limit = 9 * 1024 * 1024
             data = response.read(limit + 1)
             if response.status >= 500 or len(data) > limit:

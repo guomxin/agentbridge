@@ -1,6 +1,9 @@
 """A loopback Telegram Bot API double, with optional local NanoBot HTTP service."""
 
 import json
+from datetime import datetime,timedelta
+import secrets
+from uuid import uuid4
 import sys
 import threading
 import time
@@ -24,6 +27,7 @@ def update(number, who=501, message=9, **extra):
         "update_id": number,
         "message": {
             "message_id": message,
+            "date": int(time.time()),
             "chat": {"type": "private", "id": who},
             "from": {"id": who, "is_bot": False},
             "text": "查询我的待办",
@@ -54,6 +58,9 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
         "calls": [],
         "admissions": {},
         "timeline": {},
+        "media_sources": {},
+        "media_receipts": {},
+        "media_metadata": {},
         "deliveries": [],
         "files": {},
         "downloads": [],
@@ -159,6 +166,29 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
                         self.close_connection = True
                         return
                     answer = {"recorded": True}
+                elif self.path == "/v1/telegram-media-source":
+                    key=(binding["endpoint_id"],body["messageId"])
+                    source={"recorded":True,"pairingRef":"1"*64,"receivedAt":body["receivedAt"]}
+                    if key in state["media_sources"] and state["media_sources"][key]!=source:
+                        self.send_error(403);return
+                    state["media_sources"][key]=source
+                    answer=dict(source)
+                elif self.path == "/v1/telegram-media-append":
+                    key=(binding["endpoint_id"],body["messageId"],body["ordinal"])
+                    metadata={k:body.get(k) for k in ("fileName","mimeType","byteSize","sha256","receivedAt","failure")}
+                    if key in state["media_metadata"] and state["media_metadata"][key]!=metadata:
+                        self.send_error(409);return
+                    if key not in state["media_receipts"] and body.get("contentBase64") is None and not body.get("failure"):
+                        answer={"recorded":False}
+                    else:
+                        state["media_metadata"][key]=metadata
+                        state["media_receipts"].setdefault(key,{"sourceEndpointId":key[0],"sourceMessageId":key[1],"ordinal":key[2],
+                            **metadata,"entryId":str(uuid4()),"attachmentId":None if body.get("failure") else secrets.token_urlsafe(32),
+                            "state":"unavailable" if body.get("failure") else "stored",
+                            "expiresAt":(datetime.fromisoformat(body["receivedAt"])+timedelta(days=7)).isoformat()})
+                        if state.get("lost_media_receipt"):
+                            self.close_connection=True;return
+                        answer={"recorded":True,"mediaReceipt":state["media_receipts"][key]}
                 elif self.path == "/v1/accept":
                     if key in state["admissions"]:
                         self.send_error(409)
@@ -204,8 +234,9 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
         instance_id="nanobot-pilot",
     )
 
+    pilots=[]
     def create():
-        return TelegramPilot(
+        pilot=TelegramPilot(
             home / "messages.db",
             api=api,
             bot_id=BOT,
@@ -215,10 +246,14 @@ def fixture(home, *, actual_gateway=None, actual_bindings=None, allow_pairing=Fa
             bot_username="fixture_bot",
             allow_pairing=allow_pairing,
         )
+        pilots.append(pilot)
+        return pilot
 
     try:
         yield state, bindings, create
     finally:
+        for pilot in pilots:
+            pilot.media_projection.close()
         server.shutdown()
         thread.join()
         server.server_close()
