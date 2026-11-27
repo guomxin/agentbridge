@@ -4325,6 +4325,50 @@ test("Telegram successful sends cover tool and normal replies without failures, 
   coordinator.stopAll();
 });
 
+test("native Telegram confirmed sends resolve the received hook prefix without crossing routes", async () => {
+  const requests = [];
+  const harness = fakeApi({ autoPoll: false, syncTimeline: true,
+    mcpUrl: "https://bridge.test/mcp",
+    identityBindings: [{ channel: "telegram", senderId: "1001", accountId: "default", tokenEnv: "USER_TOKEN" }],
+  });
+  const coordinator = registerAgentBridgeInteractions(harness.api, {
+    env: { USER_TOKEN: "token-a" },
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      requests.push(body.params.arguments);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id,
+        result: { structuredContent: { status: "succeeded" } } }),
+      { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  const sessionKey = "agent:main:telegram:direct:1001";
+  harness.hooks.message_received({ from: "telegram:1001", senderId: "1001", sessionKey,
+    content: "OA pending", messageId: "201" },
+  { channelId: "telegram", accountId: "default", conversationId: "telegram:1001" });
+  await coordinator.waitForIdle();
+  requests.length = 0;
+  const sent = { to: "1001", content: "Five pending items", success: true, messageId: "501" };
+  const context = { channelId: "telegram", accountId: "default", conversationId: "1001" };
+  harness.hooks.message_sent(sent, context);
+  harness.hooks.message_sent(sent, context);
+  await coordinator.waitForIdle();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].conversation_ref, sessionKey);
+  assert.equal(requests[0].role, "assistant");
+  assert.equal(requests[0].text, sent.content);
+  assert.equal(coordinator.sessionRoutes.get(sessionKey).to, "telegram:1001");
+  for (const to of ["1002", "telegram:telegram:1001", "user:1001", "telegram:-1001"]) {
+    harness.hooks.message_sent({ ...sent, to, messageId: "502" }, context);
+  }
+  harness.hooks.message_sent({ ...sent, messageId: "503" }, { ...context, accountId: "other" });
+  coordinator.bindDeliveryRoute({ sessionKey: "agent:other:telegram:direct:1001",
+    channel: "telegram", to: "1001", accountId: "default" });
+  harness.hooks.message_sent({ ...sent, messageId: "504" }, context);
+  await coordinator.waitForIdle();
+  assert.equal(requests.length, 1);
+  coordinator.stopAll();
+});
+
 test("synchronizes user and assistant text once across duplicate WeChat hooks", async () => {
   const requests = [];
   const senderId = "wechat-user-a";

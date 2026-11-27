@@ -317,7 +317,10 @@ export class InteractionCoordinator {
 
   deliverySessionKeyForRoute({ channel, to, accountId }) {
     const normalizedChannel = safeRoutePart(channel);
-    const normalizedTo = safeRoutePart(to);
+    // The native Telegram received hook uses `telegram:<peer>`, while its
+    // confirmed-send hook uses the bare chat ID. Compare that one known alias
+    // without replacing the stored route or admitting ambiguous sessions.
+    const normalizedTo = comparableDeliveryTo(normalizedChannel, to);
     const normalizedAccountId = safeRoutePart(accountId);
     if (!normalizedChannel || !normalizedTo) {
       return null;
@@ -325,7 +328,7 @@ export class InteractionCoordinator {
     const matches = [...this.sessionRoutes.entries()].filter(
       ([, route]) =>
         route.channel === normalizedChannel &&
-        route.to === normalizedTo &&
+        comparableDeliveryTo(normalizedChannel, route.to) === normalizedTo &&
         (!normalizedAccountId ||
           !route.accountId ||
           route.accountId === normalizedAccountId),
@@ -3812,6 +3815,13 @@ function normalizeToolCallId(value) {
   }
   const normalized = value.trim();
   return normalized ? normalized.slice(0, 256) : null;
+}
+
+function comparableDeliveryTo(channel, value) {
+  const target = safeRoutePart(value);
+  return channel === "telegram"
+    ? /^telegram:([1-9]\d*)$/u.exec(target || "")?.[1] || target
+    : target;
 }
 
 function safeRoutePart(value) {
