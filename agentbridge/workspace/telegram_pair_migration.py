@@ -117,6 +117,20 @@ def permits_delivery(db, host, subject, instance, key, token, protocol):
             and verified_pair(db, subject, instance, bot, sender, allow_new_pair=True))
 
 
+def private_telegram_allowed(db, host, subject, instance, endpoint, token, protocol):
+    """Enforce active private pairing and migration protocol on host-private Telegram endpoints."""
+    if host not in {"nanobot", "pi"} or endpoint["client_type"] != "telegram":
+        return True
+    if not instance or not permits_delivery(db, host, subject, instance, endpoint["endpoint_key"], token, protocol):
+        return False
+    if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_host_instances'").fetchone()
+            and db.execute("SELECT 1 FROM workspace_host_instances WHERE instance_id=?", (instance,)).fetchone()):
+        from .telegram_pilot_links import verified_pair
+        if not verified_pair(db, subject, instance, endpoint["account_id"], endpoint["external_subject"], allow_new_pair=True):
+            return False
+    return True
+
+
 def grant_generation(db, owner, instance, bot, sender):
     row = db.execute("""SELECT r.generation, l.confirmed_at FROM workspace_telegram_pilot_revocations r
         JOIN workspace_telegram_pilot_links l USING(instance,bot,owner)

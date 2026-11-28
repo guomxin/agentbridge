@@ -54,6 +54,22 @@ class ResultViewService:
             if host_context and (host_context.get("endpointId") != endpoint_id
                     or host_context.get("tokenId") != endpoint["token_id"]):
                 actions._fail("ACTION_ENDPOINT_INVALID", "宿主身份与办理入口不一致。")
+            if endpoint["agent_host"] in {"nanobot", "pi"} and not workspace_delivery_id:
+                from agentbridge.core.endpoint_instances import endpoint_instances
+                from agentbridge.workspace.telegram_pair_migration import grant_generation, private_telegram_allowed
+                owner_scope = ((endpoint["agent_host"], endpoint["_instance_id"]) if "_instance_id" in endpoint
+                               else endpoint_instances(connection, subject).get(endpoint["endpoint_id"]))
+                instance_id = (host_context or {}).get("hostInstanceId") or (owner_scope[1] if owner_scope else None)
+                if not instance_id or (owner_scope and owner_scope != (endpoint["agent_host"], instance_id)):
+                    actions._fail("ACTION_ENDPOINT_INVALID", "宿主实例与办理入口不一致。")
+                protocol = (host_context or {}).get("pairingProtocol")
+                if not private_telegram_allowed(connection, endpoint["agent_host"], subject, instance_id,
+                                                endpoint, endpoint["token_id"], protocol):
+                    actions._fail("ACTION_ENDPOINT_INVALID", "原 Telegram 配对或协议已变化。")
+                if endpoint["agent_host"] == "nanobot":
+                    grant = grant_generation(connection, subject, instance_id, endpoint["account_id"], endpoint["external_subject"])
+                    if grant and actions._date(task["created_at"]).timestamp() <= grant["confirmed_at"]:
+                        actions._fail("ACTION_ENDPOINT_INVALID", "该任务属于旧配对代次，无法在当前配对打开。")
             groups = self._groups(subject, task_id)
             if workspace_source:
                 groups = [group for group in groups if group["operationId"] == workspace_source["operationId"]]

@@ -351,3 +351,55 @@ test('a known skill anchor on an earlier page still restores its original offset
   assert.equal(h.requests.length,3);assert.deepEqual(h.errors,[]);
   assert.equal(h.container.scrollTop,h.state.skillCards.get('old-anchor').offsetTop+reading.offset);
 });
+
+test('workspace:assistant:error reconciles by workspaceDispatch.runId without duplicate bubbles or stuck spinners',()=>{
+  const document=createDocument();
+  const state={
+    pendingOriginUsers:new Map(),
+    activeStreams:new Map(),
+    liveMessages:new Map(),
+    syncedMessages:new Map(),
+    historyMessages:new Map(),
+  };
+  const failures=[], timelineNodes=[];
+  let rendered=0;
+  const bindings={
+    document, state,
+    messageElement({role,text}){const el=document.createElement('article');el.dataset.role=role;el.textContent=text;return el;},
+    setTimelineNode(node,meta){timelineNodes.push({node,meta});},
+    renderChatTimeline(){rendered+=1;},
+    renderRunFailure(runId,text,canRetry){failures.push({runId,text,canRetry});},
+    handleChatDelta(){},
+    removeMatchingHistoryMessage(){},
+    renderSkillTrialStatus(){},
+  };
+  const fn=new Function(...Object.keys(bindings),`${implementation('reconcileOriginChatMessage',false)}\nreturn reconcileOriginChatMessage;`)(...Object.values(bindings));
+
+  let aborted=false;
+  state.activeStreams.set('run-101',{
+    terminal:false, timelineCompleted:false, requestMessage:'hi',
+    requestAttachments:[], controller:{abort(){aborted=true;}},
+  });
+  fn({
+    entry_id:'entry-err-1', role:'assistant', text:'未接收', created_at:'2026-11-28T04:00:00+00:00', sequence:10,
+    message_key:'workspace:assistant:error:dispatch-999',
+    payload:{workspaceDispatch:{dispatchId:'dispatch-999',runId:'run-101',state:'failed_before_accept'}},
+  }, true);
+  assert.equal(aborted,true);
+  assert.equal(state.activeStreams.get('run-101').terminal,true);
+  assert.deepEqual(failures,[{runId:'run-101',text:'未接收',canRetry:true}]);
+  assert.equal(state.syncedMessages.size,0);
+
+  const liveItem=document.createElement('article');
+  liveItem.classList.add('failed');
+  liveItem.isConnected=true;
+  state.liveMessages.set('run-202',{item:liveItem});
+  fn({
+    entry_id:'entry-err-2', role:'assistant', text:'运行失败', created_at:'2026-11-28T04:01:00+00:00', sequence:11,
+    message_key:'workspace:assistant:error:dispatch-888',
+    payload:{workspaceDispatch:{dispatchId:'dispatch-888',runId:'run-202',state:'failed'}},
+  }, true);
+  assert.equal(state.liveMessages.has('run-202'),false);
+  assert.equal(state.syncedMessages.get('entry-err-2'),liveItem);
+  assert.equal(rendered,1);
+});

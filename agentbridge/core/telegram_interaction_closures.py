@@ -157,10 +157,11 @@ def observe(service, record, interaction):
 def poll(service, *, subject, host, instance, endpoint, token, pairing_protocol):
     """Bounded local resource observations, never a model/business/ticket call."""
     from .endpoint_instances import endpoint_instances, instance_key
+    from .store_transactions import store_transaction
     from .workspace_query_delivery import pair, registered
     from agentbridge.workspace.telegram_pair_migration import permits_delivery
     from .interactions import InteractionIntegrityError
-    with service.tasks._connect() as db:
+    with store_transaction(service.tasks) as db:
         if (not registered(db,subject,host,instance_key(host,instance),token)
                 or not permits_delivery(db,host,subject,instance,endpoint,token,pairing_protocol)):
             return

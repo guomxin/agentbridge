@@ -1266,8 +1266,11 @@ function reconcileOriginChatMessage(entry, render = true) {
   const failurePrefix = "workspace:assistant:error:";
   const finalPrefix = "workspace:assistant:";
   const failed = messageKey.startsWith(failurePrefix);
+  const dispatchMeta = entry.payload?.workspaceDispatch;
+  const dispatchRunId =
+    typeof dispatchMeta?.runId === "string" ? dispatchMeta.runId.trim() : "";
   const runId = failed
-    ? messageKey.slice(failurePrefix.length)
+    ? (dispatchRunId || messageKey.slice(failurePrefix.length))
     : messageKey.startsWith(finalPrefix)
       ? messageKey.slice(finalPrefix.length)
       : "";
@@ -1277,10 +1280,13 @@ function reconcileOriginChatMessage(entry, render = true) {
       activeStream.terminal = true;
       activeStream.timelineCompleted = true;
       if (failed) {
+        const canRetry = ["failed_before_accept", "expired", "canceled"].includes(
+          dispatchMeta?.state,
+        );
         renderRunFailure(
           runId,
           entry.text,
-          false,
+          canRetry,
           activeStream.requestMessage,
           activeStream.requestAttachments,
           activeStream.requestSkillTrial,
@@ -1297,20 +1303,33 @@ function reconcileOriginChatMessage(entry, render = true) {
     return;
   }
   const restoredLive = state.liveMessages.get(runId);
-  if (restoredLive?.item?.isConnected) {
-    restoredLive.item.remove();
-    state.liveMessages.delete(runId);
+  if (!entry.entry_id) {
+    if (restoredLive?.item?.isConnected && !failed) {
+      restoredLive.item.remove();
+      state.liveMessages.delete(runId);
+    }
+    return;
   }
-  if (!entry.entry_id) return;
   removeMatchingHistoryMessage(entry);
   let item = state.syncedMessages.get(entry.entry_id);
+  if (restoredLive?.item?.isConnected) {
+    if (!item && failed && restoredLive.item.classList.contains("failed")) {
+      item = restoredLive.item;
+      state.syncedMessages.set(entry.entry_id, item);
+      state.liveMessages.delete(runId);
+    } else {
+      restoredLive.item.remove();
+      state.liveMessages.delete(runId);
+    }
+  }
   if (!item) {
     item = messageElement({
       role: "assistant",
       text: entry.text,
       timestamp: entry.created_at,
-        sourceLabel: entry.source?.host?.display_name,
+      sourceLabel: entry.source?.host?.display_name,
     });
+    if (failed) item.classList.add("failed");
     state.syncedMessages.set(entry.entry_id, item);
     renderSkillTrialStatus(document, {item}, entry.payload?.skillTrial);
   }

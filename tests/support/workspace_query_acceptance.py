@@ -170,7 +170,12 @@ class Fixture:
                 spec["telegram"]["allowedSenders"] = {self.owner: sender}
             path = self.home / (host + "-routes.json")
             private_file(path, json.dumps({"routes": {instance: spec}}).encode())
-            os.environ["AGENTBRIDGE_" + host.upper() + "_ROUTES_FILE"] = str(path)
+            env_key = "AGENTBRIDGE_" + host.upper() + "_ROUTES_FILE"
+            previous = os.environ.get(env_key)
+            self.stack.callback(
+                lambda k=env_key, v=previous: os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            )
+            os.environ[env_key] = str(path)
             directory.save_instance(instance, host_type=host, display_name=host.title(), route_ref=instance,
                 adapter_version=delivery.VERSIONS[host], state="enabled", subjects=list(subjects),
                 expected_revision=1 if host == "nanobot" else 0, actor="fixture", reason="isolated query UI acceptance")

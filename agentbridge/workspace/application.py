@@ -1248,16 +1248,51 @@ class WorkspaceApplication:
             for item in _timeline_attachments(entry)]
         media = self.service.timeline_attachments.public_metadata(user_subject=account["user_subject"],
             attachment_ids=attachment_ids)
+        from agentbridge.core import actionable_results as actions
+        from agentbridge.core import workspace_query_delivery as query_delivery
+        from agentbridge.core.endpoint_instances import endpoint_instances
+        cutoff_24h = (actions._now() - timedelta(hours=24)).isoformat()
         candidates = [e["dedupe_key"].removeprefix("message:") for e in entries
                       if e.get("entry_type") == "chat_message" and
                       endpoints.get(e.get("source_endpoint_id"), {}).get("client_type") == "telegram"
-                      and str(e.get("dedupe_key") or "").startswith("message:")]
+                      and str(e.get("dedupe_key") or "").startswith("message:")
+                      and str(e.get("created_at") or "") >= cutoff_24h]
         reference_ids = set()
         if candidates:
+            subject = account["user_subject"]
             with self.service.tasks._connect() as db:
-                reference_ids = {r[0] for r in db.execute(
-                    "SELECT entry_id FROM telegram_history_receipts WHERE subject=? AND message_key IN (" +
-                    ",".join("?" for _ in candidates) + ")", (account["user_subject"], *candidates))}
+                ownership = endpoint_instances(db, subject)
+                valid_pairs = set()
+                web_endpoints = [
+                    ep for ep in endpoints.values()
+                    if ep.get("state") == "active" and ep.get("client_type") in {"web", "webchat"}
+                    and (ep.get("account_id") == account["account_id"] or ep.get("endpoint_id") == account.get("endpoint_id"))
+                ]
+                tg_endpoints = [
+                    ep for ep in endpoints.values()
+                    if ep.get("state") == "active" and ep.get("client_type") == "telegram"
+                ]
+                for web_ep in web_endpoints:
+                    scope = ownership.get(web_ep["endpoint_id"])
+                    if not scope:
+                        continue
+                    peers = []
+                    for tg_ep in tg_endpoints:
+                        if ownership.get(tg_ep["endpoint_id"]) != scope:
+                            continue
+                        paired = query_delivery.pair(db, subject, web_ep["endpoint_id"], tg_ep["endpoint_id"], ownership)
+                        if paired:
+                            peers.append((paired[0]["endpoint_id"], paired[1]))
+                    if len(peers) == 1:
+                        valid_pairs.add(peers[0])
+                if valid_pairs:
+                    for row in db.execute(
+                        "SELECT entry_id, endpoint_id, authority FROM telegram_history_receipts WHERE subject=? AND message_key IN ("
+                        + ",".join("?" for _ in candidates) + ")",
+                        (subject, *candidates),
+                    ):
+                        if (row["endpoint_id"], row["authority"]) in valid_pairs:
+                            reference_ids.add(row["entry_id"])
         projected = []
         for entry in entries:
             if _timeline_attachments(entry):
@@ -1271,7 +1306,7 @@ class WorkspaceApplication:
                 is_origin=own_web or entry.get("source_endpoint_id") == account.get("endpoint_id"))
             if entry.get("source_endpoint_id") in hosts:
                 public["source"]["host"] = hosts[entry["source_endpoint_id"]]
-            if public["entry_id"] in reference_ids:
+            if public["entry_id"] in reference_ids and str(entry.get("created_at") or "") >= cutoff_24h:
                 public["referenceable"] = True
             projected.append(public)
         return projected

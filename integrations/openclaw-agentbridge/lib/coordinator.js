@@ -344,9 +344,11 @@ export class InteractionCoordinator {
       ([, route]) =>
         route.channel === normalizedChannel &&
         comparableDeliveryTo(normalizedChannel, route.to) === normalizedTo &&
-        (!normalizedAccountId ||
-          !route.accountId ||
-          route.accountId === normalizedAccountId),
+        (normalizedChannel === "telegram"
+          ? sameTelegramAccount(route.accountId, normalizedAccountId)
+          : !normalizedAccountId ||
+            !route.accountId ||
+            route.accountId === normalizedAccountId),
     );
     return matches.length === 1 ? matches[0][0] : null;
   }
@@ -1134,6 +1136,23 @@ export class InteractionCoordinator {
     );
   }
 
+  activeOriginTaskForSession(sessionKey) {
+    this.prune();
+    if (!isPrivateSessionKey(sessionKey)) {
+      return null;
+    }
+    const matches = [...this.records.values()]
+      .filter(
+        (record) =>
+          record.sessionKey === sessionKey &&
+          record.taskId &&
+          (!record.originConversationRef || record.originConversationRef === sessionKey) &&
+          ["pending", "processing"].includes(record.interaction.state),
+      )
+      .sort((left, right) => right.capturedAt - left.capturedAt);
+    return matches[0]?.taskId || null;
+  }
+
   bindTaskContinuation({
     sessionKey,
     taskId,
@@ -1236,6 +1255,7 @@ export class InteractionCoordinator {
     sessionKey,
     runId = null,
     mcpClient = null,
+    originConversationRef = null,
   }) {
     if (
       !isPrivateSessionKey(sessionKey) ||
@@ -1261,6 +1281,7 @@ export class InteractionCoordinator {
       sessionKey,
       runId,
       taskId,
+      originConversationRef,
     });
     record.mcpClient ||= mcpClient;
     if (interactionResumeAllowed(record.interaction)) {
@@ -1512,10 +1533,17 @@ export class InteractionCoordinator {
     signal,
     { enqueue = false, waitSeconds = 0, limit = 10 } = {},
   ) {
-    let response;
     try {
       await this.workspaceQueryDelivery.recover(binding, client, signal);
-      if(this.artifactDelivery.store)await this.artifactDelivery.recoverReports();
+    } catch (error) {
+      if (!signal.aborted) {
+        this.api.logger.debug?.(
+          `AgentBridge workspace query recovery deferred (${safeErrorCode(error)})`,
+        );
+      }
+    }
+    let response;
+    try {
       response = await client.callTool(
         "agentbridge_host_notification_claim",
         {
@@ -1541,6 +1569,23 @@ export class InteractionCoordinator {
     const notifications = Array.isArray(response?.notifications)
       ? response.notifications
       : [];
+    if (this.artifactDelivery.store) {
+      try {
+        await this.artifactDelivery.recoverReports({
+          binding,
+          client,
+          endpoint,
+          identityRouter,
+          restoreRoute: (sessionKey, route) => this.bindDeliveryRoute({ sessionKey, ...route }),
+        });
+      } catch (error) {
+        if (!signal.aborted) {
+          this.api.logger.debug?.(
+            `AgentBridge artifact report recovery deferred (${safeErrorCode(error)})`,
+          );
+        }
+      }
+    }
     await this.telegramReferenceReply?.recover({ binding, endpoint });
     await this.nativeCards.recover({ binding, client, endpoint, identityRouter, signal,
       withDirectDelivery: (sessionKey, send) => this.withNativeDirectDelivery(sessionKey, send) });
@@ -1888,6 +1933,7 @@ export class InteractionCoordinator {
       interaction,
       sessionKey,
       mcpClient: client,
+      originConversationRef: notification.task?.activeConversationRef || null,
     });
     if (restored) {
       this.api.logger.info(
@@ -1913,6 +1959,7 @@ export class InteractionCoordinator {
     runId,
     readContinuation = null,
     taskId = null,
+    originConversationRef = null,
   }) {
     const existing = this.records.get(interaction.interactionId);
     if (existing) {
@@ -1920,6 +1967,7 @@ export class InteractionCoordinator {
       existing.sessionKey = sessionKey || existing.sessionKey;
       existing.runId = runId || existing.runId;
       existing.taskId ||= taskId;
+      existing.originConversationRef ||= originConversationRef;
       existing.readContinuation ||= readContinuation;
       existing.mcpClient ||= this.clientForSession(existing.sessionKey);
       return existing;
@@ -1929,6 +1977,7 @@ export class InteractionCoordinator {
       sessionKey,
       runId,
       taskId,
+      originConversationRef,
       readContinuation,
       mcpClient: this.clientForSession(sessionKey),
       delivered: false,
@@ -2215,7 +2264,8 @@ export class InteractionCoordinator {
     ) {
       return;
     }
-    const nativeClose = ["completed", "declined", "expired", "failed", "superseded"].includes(status) &&
+    const nativeClose = !response && !errorCode &&
+      ["completed", "declined", "expired", "failed", "superseded"].includes(status) &&
       nextInteractions.length === 0 && this.nativeCards.owns(record);
     if (resumeOriginalRequest && this.config.wakeAgentOnComplete) {
       if (record.continuationQueued) {
@@ -2792,8 +2842,8 @@ export class InteractionCoordinator {
         (!/^agent:[^:]+:telegram:(?:direct|dm):[1-9][0-9]*$/iu.test(sessionKey || "") ||
           !this.nativeCards.original(sessionKey, interaction.interactionId))) return true;
     if (this.nativeCardSourceUnavailable(record)) return false;
-    const allowed = await this.nativeCards.presentationAllowed({ sessionKey, interaction, taskId: record.taskId,
-      standalone: Boolean(record.nativeCardIdentityScope) });
+    const allowed = await this.nativeCards.presentationAllowed({ sessionKey, interaction, taskId: record?.taskId,
+      standalone: Boolean(record?.nativeCardIdentityScope) });
     return allowed && !this.nativeCardSourceUnavailable(record);
   }
 

@@ -6158,7 +6158,9 @@ def create_central_mcp_server(
             agent_host=caller_host, minimum_level="L3", task_id=task_id)
         from agentbridge.core.telegram_result_views import ResultViewService
         return await asyncio.to_thread(ResultViewService(service).issue, identity["user_subject"], task_id, endpoint_id,
-            {**runtime_context, "tokenId": identity["token_id"]})
+            {**runtime_context, "tokenId": identity["token_id"],
+             "hostInstanceId": host_context.get("hostInstanceId"),
+             "pairingProtocol": _request_meta(ctx).get(PROTOCOL_META)})
 
     @mcp.tool(
         name="agentbridge_host_task_prepare",
@@ -6645,6 +6647,8 @@ def create_central_mcp_server(
             agent_host=agent_host,
             endpoint_key=endpoint_key,
             host_instance_id=registration["hostInstanceId"],
+            token_id=identity["token_id"],
+            pairing_protocol=_request_meta(ctx).get(PROTOCOL_META),
             max_age_minutes=max_age_minutes,
             limit=limit,
         )
@@ -6680,6 +6684,7 @@ def create_central_mcp_server(
             agent_host=agent_host,
             minimum_level="L2",
         )
+        pairing_protocol = _request_meta(ctx).get(PROTOCOL_META)
         if state_only:
             from agentbridge.core.native_telegram_card_state import read_state
 
@@ -6687,6 +6692,7 @@ def create_central_mcp_server(
                 read_state, service, subject=identity["user_subject"], token=identity["token_id"],
                 registration=registration, host_instance=host["hostInstanceId"], host=agent_host,
                 endpoint_key=endpoint_key, interaction_id=interaction_id,
+                pairing_protocol=pairing_protocol,
             )
         return await asyncio.to_thread(
             service.present_interaction,
@@ -6694,6 +6700,11 @@ def create_central_mcp_server(
             agent_host=agent_host,
             endpoint_key=endpoint_key,
             interaction_id=interaction_id,
+            **({
+                "host_instance_id": host["hostInstanceId"],
+                "token_id": identity["token_id"],
+                "pairing_protocol": pairing_protocol,
+            } if agent_host in PRIVATE_BOT_HOSTS else {}),
         )
 
     @mcp.tool(
@@ -6871,6 +6882,7 @@ def create_central_mcp_server(
         return await _run_host_control('agentbridge_host_notification_validate',service.validate_host_notification,
             user_subject=identity['user_subject'],agent_host=agent_host,endpoint_key=endpoint_key,
             delivery_id=delivery_id,attempt_count=attempt_count,host_instance_id=host["hostInstanceId"],
+            token_id=identity['token_id'],pairing_protocol=_request_meta(ctx).get(PROTOCOL_META),
             **({"include_artifact":True} if include_artifact else {}),
             **({"lookup_acknowledged_task":True} if lookup_acknowledged_task else {}))
 

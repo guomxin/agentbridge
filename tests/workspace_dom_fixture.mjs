@@ -6,7 +6,10 @@ export function createDocument() {
       this.tag = tag; this.dataset = {}; this.childNodes = []; this.parentNode = null;
       this.attributes = {}; this.events = {}; this.open = false; this.hidden = false;
       this.className = ""; this._text = "";
-      this.classList = {add: value => {this.className += ` ${value}`;}};
+      this.classList = {
+        add: value => { this.className += ` ${value}`; },
+        contains: value => this.className.split(/\s+/).includes(value),
+      };
     }
     get children() { return this.childNodes; }
     get childElementCount() { return this.childNodes.length; }

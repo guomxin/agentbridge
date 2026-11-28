@@ -78,6 +78,13 @@ def no_listener(config):
     with socket.socket() as probe:
         if probe.connect_ex(('127.0.0.1', config['port'])) == 0:
             raise ValueError('Gateway maintenance requires a released listener')
+    try:
+        probe6 = socket.socket(socket.AF_INET6)
+    except (OSError, TypeError):
+        return
+    with probe6:
+        if probe6.connect_ex(('::1', config['port'])) == 0:
+            raise ValueError('Gateway maintenance requires a released listener')
 
 
 def original_exited(original):

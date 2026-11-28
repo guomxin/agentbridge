@@ -353,6 +353,8 @@ def profile_for(pub):
 
 
 def observability(pub, spec, *, offline):
+    if "routeTransition" in spec and spec["routeTransition"].get("toRelease") != pub.release:
+        raise ValueError("Route transition belongs to a different publication candidate")
     return {
         "compatibility": reviewed_contract(spec),
         "instance": spec["instanceId"],

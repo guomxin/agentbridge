@@ -1770,12 +1770,35 @@ class CentralCapabilityService:
         endpoint_key: str,
         interaction_id: str,
         continuous_flow: bool = False,
+        host_instance_id: str | None = None,
+        token_id: str | None = None,
+        pairing_protocol: Any = None,
     ) -> dict:
         endpoint = self.tasks.endpoint_for_key(
             user_subject=user_subject,
             agent_host=agent_host,
             endpoint_key=endpoint_key,
         )
+        grant = None
+        if agent_host in PRIVATE_BOT_HOSTS and endpoint["client_type"] == "telegram" and host_instance_id:
+            if endpoint["state"] != "active" or (token_id and endpoint["token_id"] != token_id):
+                raise PermissionError("An active original private Telegram endpoint is required")
+            from agentbridge.core.endpoint_instances import endpoint_instances, instance_key
+            from agentbridge.workspace.telegram_pair_migration import grant_generation, private_telegram_allowed
+            with self.tasks._connect() as db:
+                owner = endpoint_instances(db, user_subject).get(endpoint["endpoint_id"])
+                if owner != instance_key(agent_host, host_instance_id):
+                    raise PermissionError("The original host registration and endpoint must still match")
+                if not private_telegram_allowed(
+                    db, agent_host, user_subject, host_instance_id,
+                    endpoint, token_id or endpoint["token_id"], pairing_protocol,
+                ):
+                    raise PermissionError("Current private Telegram pairing and protocol required")
+                if agent_host == "nanobot":
+                    grant = grant_generation(
+                        db, user_subject, host_instance_id,
+                        endpoint["account_id"], endpoint["external_subject"],
+                    )
         record, resource, interaction = self._load_interaction(
             user_subject=user_subject,
             interaction_id=interaction_id,
@@ -1787,6 +1810,14 @@ class CentralCapabilityService:
             interaction_id,
             user_subject=user_subject,
         )
+        if grant is not None:
+            from agentbridge.core.actionable_results import _date
+            if task_id:
+                task = self.tasks.get_task(task_id, user_subject=user_subject)
+                if _date(task["created_at"]).timestamp() <= grant["confirmed_at"]:
+                    raise PermissionError("The interaction belongs to an earlier pairing generation")
+            elif _date(record["created_at"]).timestamp() <= grant["confirmed_at"]:
+                raise PermissionError("The interaction belongs to an earlier pairing generation")
         return {
             "protocolVersion": "0.1",
             "status": "succeeded",
@@ -2069,7 +2100,7 @@ class CentralCapabilityService:
         }
 
     def validate_host_notification(self,*,user_subject,agent_host,endpoint_key,delivery_id,attempt_count,host_instance_id=None,
-                                   include_artifact=False,lookup_acknowledged_task=False):
+                                   include_artifact=False,lookup_acknowledged_task=False,token_id=None,pairing_protocol=None):
         endpoint=self.tasks.endpoint_for_key(user_subject=user_subject,agent_host=agent_host,endpoint_key=endpoint_key)
         delivery=self.tasks.get_delivery(delivery_id)
         if delivery['user_subject']!=user_subject or delivery['endpoint_id']!=endpoint['endpoint_id']:
@@ -2103,6 +2134,14 @@ class CentralCapabilityService:
         if not self.tasks.notification_route_allowed(user_subject=user_subject,endpoint_id=endpoint["endpoint_id"],
                                                     delivery_id=delivery_id,host_instance_id=host_instance_id):
             return {"allowed":False,"stale":True}
+        if agent_host in PRIVATE_BOT_HOSTS and endpoint["client_type"] == "telegram" and host_instance_id:
+            from agentbridge.workspace.telegram_pair_migration import private_telegram_allowed
+            with self.tasks._connect() as db:
+                if not private_telegram_allowed(
+                    db, agent_host, user_subject, host_instance_id,
+                    endpoint, token_id or endpoint["token_id"], pairing_protocol,
+                ):
+                    return {"allowed": False, "stale": True}
         if delivery["payload_type"] == "workspace_result_view":
             return {"allowed": False}
         if delivery["payload"].get("artifactPairProof"):
@@ -2159,15 +2198,22 @@ class CentralCapabilityService:
             raise ValueError("Task file requires a confirmed Telegram receipt")
         if artifact_outcome is not None:
             if (artifact_outcome not in {"attachment_sent", "delivery_unknown"} or not host_instance_id
-                    or succeeded != (artifact_outcome == "attachment_sent") or not pending["payload"].get("artifactPairProof")
-                    or agent_host not in PRIVATE_BOT_HOSTS or endpoint["client_type"] != "telegram" or pending["state"] != "delivering"
+                    or succeeded != (artifact_outcome == "attachment_sent") or pending["state"] != "delivering"
                     or attempt_count != pending["attempt_count"]
                     or datetime.fromisoformat(pending["next_attempt_at"]) <= datetime.now(timezone.utc)):
                 raise ValueError("Invalid task file receipt")
-            self.report_host_artifact_delivery(user_subject=user_subject, agent_host=agent_host, task_id=pending["task_id"],
-                delivery_ref=delivery_id, channel="telegram", files=[{"artifact_id": pending["payload"]["payload"]["artifactId"],
-                    "state": "attachment_sent" if succeeded else "failed", "attempt_count": 1,
-                    "error_code": None if succeeded else "TELEGRAM_DELIVERY_UNKNOWN"}])
+            if agent_host in PRIVATE_BOT_HOSTS:
+                if not pending["payload"].get("artifactPairProof") or endpoint["client_type"] != "telegram":
+                    raise ValueError("Invalid task file receipt")
+                self.report_host_artifact_delivery(user_subject=user_subject, agent_host=agent_host, task_id=pending["task_id"],
+                    delivery_ref=delivery_id, channel="telegram", files=[{"artifact_id": pending["payload"]["payload"]["artifactId"],
+                        "state": "attachment_sent" if succeeded else "failed", "attempt_count": 1,
+                        "error_code": None if succeeded else "TELEGRAM_DELIVERY_UNKNOWN"}])
+            elif agent_host == "openclaw":
+                if pending["payload_type"] != "task_event" or pending["payload"].get("eventType") != "task.artifact.ready":
+                    raise ValueError("Invalid task file receipt")
+            else:
+                raise ValueError("Invalid task file receipt")
         from agentbridge.core.business_watch_notifications import WATCH_EVENT_TYPES, validate_watch_delivery
         watch_delivery=pending['payload'].get('eventType') in WATCH_EVENT_TYPES
         if watch_delivery:
@@ -2182,7 +2228,7 @@ class CentralCapabilityService:
             succeeded=succeeded,
             retry_after_seconds=retry_after_seconds,
             defer_until_activity=defer_until_activity,
-            expected_attempt_count=attempt_count if watch_delivery or agent_host in PRIVATE_BOT_HOSTS else None,
+            expected_attempt_count=attempt_count if watch_delivery or artifact_outcome is not None or agent_host in PRIVATE_BOT_HOSTS else None,
             terminal_failure=artifact_outcome == "delivery_unknown",
         )
         if delivery.get("task_id"):
@@ -3709,6 +3755,8 @@ class CentralCapabilityService:
         agent_host: str,
         endpoint_key: str,
         host_instance_id: str | None = None,
+        token_id: str | None = None,
+        pairing_protocol: Any = None,
         max_age_minutes: int = 360,
         limit: int = 12,
     ) -> dict:
@@ -3732,6 +3780,48 @@ class CentralCapabilityService:
         allowed = context_endpoint_ids(self, user_subject, agent_host, host_instance_id, endpoints)
         if endpoint["endpoint_id"] not in allowed:
             raise PermissionError("Conversation does not belong to the registered host instance")
+        min_epoch = None
+        if agent_host in PRIVATE_BOT_HOSTS and host_instance_id:
+            from agentbridge.workspace.telegram_pair_migration import grant_generation, private_telegram_allowed
+            with self.tasks._connect() as db:
+                if endpoint["client_type"] == "telegram":
+                    if endpoint["state"] != "active" or (token_id and endpoint["token_id"] != token_id):
+                        raise PermissionError("An active original private Telegram endpoint is required")
+                    if not private_telegram_allowed(
+                        db, agent_host, user_subject, host_instance_id,
+                        endpoint, token_id or endpoint["token_id"], pairing_protocol,
+                    ):
+                        raise PermissionError("Current private Telegram pairing and protocol required")
+                    if agent_host == "nanobot":
+                        grant = grant_generation(
+                            db, user_subject, host_instance_id,
+                            endpoint["account_id"], endpoint["external_subject"],
+                        )
+                        if grant:
+                            min_epoch = grant["confirmed_at"]
+                else:
+                    filtered = set()
+                    for ep_id in allowed:
+                        candidate = endpoints.get(ep_id)
+                        if not candidate or candidate.get("client_type") != "telegram":
+                            filtered.add(ep_id)
+                            continue
+                        if candidate.get("state") != "active":
+                            continue
+                        if not private_telegram_allowed(
+                            db, agent_host, user_subject, host_instance_id,
+                            candidate, token_id or candidate["token_id"], pairing_protocol,
+                        ):
+                            continue
+                        filtered.add(ep_id)
+                        if agent_host == "nanobot":
+                            grant = grant_generation(
+                                db, user_subject, host_instance_id,
+                                candidate["account_id"], candidate["external_subject"],
+                            )
+                            if grant:
+                                min_epoch = max(min_epoch or 0.0, float(grant["confirmed_at"]))
+                    allowed = filtered
         selected = []
         for entry in reversed(
             self.tasks.list_timeline(
@@ -3746,6 +3836,8 @@ class CentralCapabilityService:
                 continue
             created_at = _parse_utc(entry.get("created_at"))
             if created_at is None or created_at < cutoff:
+                continue
+            if min_epoch is not None and created_at.timestamp() <= min_epoch:
                 continue
             role = str(entry.get("role") or "").strip()
             text = str(entry.get("text") or "").strip()

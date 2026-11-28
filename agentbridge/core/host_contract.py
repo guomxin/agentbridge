@@ -618,6 +618,7 @@ class HostContractStore:
             ),
             ("openclaw", "0.4.134", "L3", "sha256:2900d9eb0c5cce44f6a0863d546146c47b75577e8f1dd32efcaac8db8c9a9f08"),
             ("openclaw", "0.4.135", "L3", "sha256:5629655b40443a2c58e427cd42ec1ff72c90edb36056e84e0431926a35970bd4"),
+            ("openclaw", "0.4.136", "L3", "sha256:721ae22f6acc4f04c3574571b732ce210bc628969c004306011b0b368fcda753"),
         )
         for name, version, level, evidence in builtins:
             connection.execute(

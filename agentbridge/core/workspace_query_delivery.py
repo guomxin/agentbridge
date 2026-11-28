@@ -10,7 +10,7 @@ from .store_transactions import store_transaction
 
 MODE = "workspace_query_v2"
 SUPPORTED_VERSIONS = {
-    "openclaw": ("0.4.134", "0.4.135"),
+    "openclaw": ("0.4.134", "0.4.135", "0.4.136"),
     "nanobot": ("0.3.1",),
     "pi": ("0.1.8",),
 }
@@ -293,22 +293,31 @@ def checked_card(db, subject, target, task, delivery):
     return {"operationId":op["operation_id"],"deliveryId":delivery}
 
 
+SENDING_GRACE_SECONDS = 120
+
+
 def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
     now = actions._now()
+    scope = instance_key(host, instance)
     with store_transaction(service.tasks) as db:
         from agentbridge.workspace.telegram_pair_migration import permits_delivery
         if not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol):
             return []
+        if not registered(db, subject, host, scope, token):
+            return []
+        db.execute("""UPDATE workspace_query_deliveries SET state='unknown',outcome='delivery_unknown'
+            WHERE state='sending' AND due<=? AND question_id IN
+            (SELECT question_id FROM workspace_query_destinations WHERE subject=? AND host=? AND instance=?
+                AND endpoint_key=? AND token_id=?)""",
+            (now.isoformat(), subject, host, scope[1], endpoint, token))
         rows = db.execute(_JOIN + """ WHERE p.subject=? AND p.host=? AND p.instance=? AND p.endpoint_key=?
             AND p.token_id=? AND d.state IN ('pending','leased','retry_wait') AND d.due<=?
             AND NOT EXISTS (SELECT 1 FROM workspace_text_deliveries m WHERE m.question_id=p.question_id
                 AND m.kind='user' AND m.state IN ('pending','leased','retry_wait','sending'))
             ORDER BY d.due,d.rowid LIMIT ?""",
-            (subject,host,instance_key(host,instance)[1],endpoint,token,now.isoformat(),max(1,min(limit,100)))).fetchall()
+            (subject,host,scope[1],endpoint,token,now.isoformat(),max(1,min(limit,100)))).fetchall()
         result = []
         for row in rows:
-            if not registered(db,subject,host,(host,row["instance"]),row["token_id"]):
-                continue
             if row["attempt"] >= 5 or now >= actions._date(row["source_finished"])+timedelta(seconds=actions.SOURCE_TTL_SECONDS):
                 db.execute("UPDATE workspace_query_deliveries SET state='expired' WHERE delivery_id=?", (row["delivery_id"],))
                 continue
@@ -405,7 +414,8 @@ def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_
                     return refused
                 if not any(g["operationId"] == row["operation_id"] and any(t["enabled"] for t in g["targets"]) for g in groups):
                     return refused
-            db.execute("UPDATE workspace_query_deliveries SET state='sending' WHERE delivery_id=?", (delivery_id,))
+            due = max(actions._date(row["due"]), now + timedelta(seconds=SENDING_GRACE_SECONDS)).isoformat()
+            db.execute("UPDATE workspace_query_deliveries SET state='sending', due=? WHERE delivery_id=?", (due, delivery_id))
             return {"allowed":True}
 
         reply = {"available":True,"leaseExpiresAt":row["due"]}

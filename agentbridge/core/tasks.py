@@ -3148,7 +3148,7 @@ class TaskHubStore:
             )
             if role == "user" and _workspace_chat:
                 workspace_query_delivery.pin(connection, entry_id, user_subject, source_endpoint_id,
-                    media_tasks=self if json.loads(payload_json).get("attachments") else None)
+                    media_tasks=self)
             if _workspace_chat or _workspace_response:
                 workspace_text_delivery.enqueue_message(connection, row)
         else:
@@ -5335,7 +5335,7 @@ class TaskHubStore:
         binding = mirror_binding(db, subject, instance, ownership)
         if not binding or binding["endpoint_id"] != source:
             return
-        if quick_question and not workspace_query_delivery.registered(db, subject, host, scope, binding["token_id"]):
+        if quick_question and not workspace_query_delivery.registered(db, subject, host, scope, None):
             return
         if role == "assistant":
             # Require the original admitted plain question and keep private interactions

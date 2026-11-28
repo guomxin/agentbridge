@@ -152,3 +152,19 @@ test('official SDK 0644 files remain readable only within private 0700 media dir
   chmodSync(file.localPath,0o666);assert.equal(readTelegramMedia(file,h.root).failure,'unreadable');
   chmodSync(file.localPath,0o644);chmodSync(h.root,0o755);assert.equal(readTelegramMedia(file,h.root).failure,'unreadable');
 });
+
+test('whitespace-only filenames become unreadable locally and permanent Central rejections do not block later media',async t=>{
+  const h=fixture(t);
+  assert.equal(readTelegramMedia(h.file('   ',PNG,'image/png'),h.root).failure,'unreadable');
+  const blocked=fixture(t,{source(request){
+    if(request.source_message_id===1){
+      return {isError:true,content:[{type:'text',text:'Error executing tool agentbridge_host_telegram_media_source: Original message predates the current authorization'}]};
+    }
+    return {recorded:true,sourceEndpointId:ENDPOINT,pairingRef:'a'.repeat(64),receivedAt:request.received_at};
+  }});
+  await Promise.all([blocked.capture(1,[blocked.file('old.png')]),blocked.capture(2,[blocked.file('new.png')])]);
+  assert.equal(blocked.saved.has('2:0'),true);
+  assert.equal(blocked.publisher.pending().length,0);
+  const rows=blocked.store.entries().filter(row=>row.value?.kind==='telegram-media-source');
+  assert.equal(rows.find(row=>row.value.sourceMessageId===1)?.value.state,'rejected');
+});

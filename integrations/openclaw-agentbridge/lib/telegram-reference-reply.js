@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { openProjectionLocalStore } from './timeline-storage.js';
+import { compactCompletedEntries, openProjectionLocalStore } from './timeline-storage.js';
 import { checkedReceipt, sendFailure, singleAttemptConfig } from './workspace-query-delivery.js';
 import { canonicalTelegramAccount, sameTelegramAccount, telegramBotRouteRef } from './telegram-identity.js';
 import { hostContextMeta, HOST_CONTEXT_META_KEY } from './host-contract.js';
@@ -194,7 +194,7 @@ export class TelegramReferenceReply {
       context: { channelId: 'telegram', conversationId: record.route.to, accountId: record.route.accountId }, taskId: null });
     if (ok) this.store.update(key, value => {
       if (value?.receipt !== record.receipt || value.state !== 'sent') return undefined;
-      const { text, ...rest } = value; return { ...rest, projected: true };
+      const { text, ...rest } = value; return { ...rest, projected: true, completedAt: this.now() };
     });
   }
   async recover({ binding, endpoint }) {
@@ -204,7 +204,12 @@ export class TelegramReferenceReply {
         !sameTelegramAccount(endpoint.accountId, binding.accountId) || !sameTelegramAccount(endpoint.route.accountId, binding.accountId) ||
         ![undefined, null, ''].includes(endpoint.route.threadId)) return;
     try {
+      const completed = [];
       for (const { key, value } of this.store.entries()) {
+        if (value.state === 'sent' && value.projected) {
+          completed.push({ key, order: value.completedAt ?? value.receipt ?? 0, completedAt: value.completedAt });
+          continue;
+        }
         if (value.state !== 'sent' || value.projected || value.endpointKey !== binding.key || value.sessionKey !== endpoint.conversationRef) continue;
         const originalIdentity = hash(JSON.stringify([binding.key, value.endpointKey, this.router.catalogCacheKeyForBinding(binding) || null]));
         if (value.identityRef !== originalIdentity || value.botRouteRef !== telegramBotRouteRef(this.api.config, binding.accountId, binding.senderId) ||
@@ -213,6 +218,7 @@ export class TelegramReferenceReply {
         this.coordinator.bindDeliveryRoute({ sessionKey: value.sessionKey, ...endpoint.route });
         await this.project(key, value);
       }
+      compactCompletedEntries(this.store, completed, { now: this.now() });
     } catch { this.api.logger.debug?.('AgentBridge reference projection retained for recovery'); }
   }
 }

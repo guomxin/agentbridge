@@ -166,3 +166,37 @@ def test_actual_private_mcp_history_ack_does_not_bypass_original_report_lease(op
             assert call('agentbridge_host_artifact_delivery_report',{**body,**extra})['isError']
         assert call('agentbridge_host_artifact_delivery_report',body,meta={})['isError']
         assert counts(service)==before
+
+
+def test_openclaw_artifact_outcome_ack_accepts_sent_and_terminal_unknown(openclaw):
+    fixture,token,origin=openclaw;service=fixture.service
+    with service.tasks._connect() as db:
+        target,_=service.tasks.ensure_endpoint(user_subject=OWNER,token_id=token,agent_host='openclaw',
+            endpoint_key='telegram:default:503',client_type='telegram',external_subject='503',account_id='default',
+            conversation_ref='agent:main:telegram:direct:503',route={'channel':'telegram','to':'503','accountId':'default'},
+            capabilities=['timeline_message','trusted_interaction'])
+    service,args,_=original((fixture,token,origin))
+    claimed=service.claim_host_notifications(user_subject=OWNER,agent_host='openclaw',endpoint_key=target['endpoint_key'],
+        host_instance_id='openclaw-gateway',limit=10,lease_seconds=60)
+    artifact=[item for item in claimed['notifications'] if item.get('deliveryMode')=='artifact']
+    assert len(artifact)==1
+    ack=service.acknowledge_host_notification(user_subject=OWNER,agent_host='openclaw',endpoint_key=target['endpoint_key'],
+        delivery_id=artifact[0]['deliveryId'],succeeded=True,attempt_count=artifact[0]['attemptCount'],
+        artifact_outcome='attachment_sent',host_instance_id='openclaw-gateway')
+    assert ack['delivery']['state']=='acknowledged'
+
+    service.tasks.link_artifact(task_id=args['task_id'],user_subject=OWNER,artifact={
+        'artifact_type':'certificate_scan','source_ref':'synthetic-original-unknown','filename':'unknown.pdf',
+        'content_type':'application/pdf','byte_size':16,'download_url':'https://fixture.invalid/download/unknown/file',
+        'expires_at':'2099-01-01T00:00:00+00:00'})
+    claimed2=service.claim_host_notifications(user_subject=OWNER,agent_host='openclaw',endpoint_key=target['endpoint_key'],
+        host_instance_id='openclaw-gateway',limit=10,lease_seconds=60)
+    artifact2=[item for item in claimed2['notifications'] if item.get('deliveryMode')=='artifact']
+    assert len(artifact2)==1
+    ack2=service.acknowledge_host_notification(user_subject=OWNER,agent_host='openclaw',endpoint_key=target['endpoint_key'],
+        delivery_id=artifact2[0]['deliveryId'],succeeded=False,attempt_count=artifact2[0]['attemptCount'],
+        artifact_outcome='delivery_unknown',host_instance_id='openclaw-gateway')
+    assert ack2['delivery']['state']=='failed'
+    again=service.claim_host_notifications(user_subject=OWNER,agent_host='openclaw',endpoint_key=target['endpoint_key'],
+        host_instance_id='openclaw-gateway',limit=10,lease_seconds=60)
+    assert not [item for item in again['notifications'] if item.get('deliveryId')==artifact2[0]['deliveryId']]

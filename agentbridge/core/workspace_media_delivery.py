@@ -169,7 +169,8 @@ def handle(service,*,subject,host,instance,endpoint_key,token_id,pairing_ref,del
         if action=='begin':
             if not row['issued']:
                 return {key:False}
-            db.execute("UPDATE workspace_media_deliveries SET state='sending' WHERE delivery_id=?",(delivery_id,))
+            due=max(actions._date(row['due']),actions._now()+timedelta(seconds=120)).isoformat()
+            db.execute("UPDATE workspace_media_deliveries SET state='sending',due=? WHERE delivery_id=?",(due,delivery_id))
             return {key:True}
         db.execute('UPDATE workspace_media_deliveries SET issued=1 WHERE delivery_id=?',(delivery_id,))
         return {key:True,'leaseExpiresAt':row['due'],'resource':resource}

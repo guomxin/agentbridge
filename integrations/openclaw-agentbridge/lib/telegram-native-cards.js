@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { openProjectionLocalStore } from './timeline-storage.js';
+import { compactCompletedEntries, openProjectionLocalStore } from './timeline-storage.js';
 import { checkedReceipt, sendFailure, singleAttemptConfig } from './workspace-query-delivery.js';
 import { canonicalTelegramAccount, sameTelegramAccount, telegramBotRouteRef } from './telegram-identity.js';
 import { hostContextMeta, HOST_CONTEXT_META_KEY } from './host-contract.js';
@@ -150,7 +150,15 @@ export class TelegramNativeCards {
     if (!['prepared', 'retry_after'].includes(record.card.state)) return record.card.state;
     if (record.card.dueAt > this.now()) return 'retry_after';
     const original = await this.authority(record, this.clientFor(record.sessionKey), signal);
-    if (!original || !['pending', 'processing'].includes(original.interaction.state)) return 'unavailable';
+    if (!original) return 'unavailable';
+    if (!['pending', 'processing'].includes(original.interaction.state)) {
+      this.store.update(key, current => {
+        if (!current || !['prepared', 'retry_after'].includes(current.card?.state)) return undefined;
+        current.card = { ...current.card, state: 'unavailable', completedAt: this.now() };
+        return current;
+      });
+      return 'unavailable';
+    }
     if (!record.endpointId) {
       this.store.update(key, current => {
         if (!current || current.endpointId || !this.current(current)) return undefined;
@@ -172,8 +180,15 @@ export class TelegramNativeCards {
       originalPresentation = issued.interaction;
     }
     const interaction = normalizeInteraction(originalPresentation, new Set(this.config.allowedCardOrigins));
-    if (!interaction || interaction.interactionId !== record.interactionId || interaction.type !== record.type ||
-        !['pending', 'processing'].includes(interaction.state) || !(Date.parse(interaction.expiresAt) > this.now())) return 'unavailable';
+    if (!interaction || interaction.interactionId !== record.interactionId || interaction.type !== record.type) return 'unavailable';
+    if (!['pending', 'processing'].includes(interaction.state) || !(Date.parse(interaction.expiresAt) > this.now())) {
+      this.store.update(key, current => {
+        if (!current || !['prepared', 'retry_after'].includes(current.card?.state)) return undefined;
+        current.card = { ...current.card, state: 'unavailable', completedAt: this.now() };
+        return current;
+      });
+      return 'unavailable';
+    }
     const adapter = await this.api.runtime.channel.outbound.loadAdapter('telegram');
     if (!adapter?.sendPayload || !adapter.renderPresentation) return 'unavailable';
     const presentation = buildPresentation([interaction], 'telegram');
@@ -188,7 +203,7 @@ export class TelegramNativeCards {
     if (attempt > 3) {
       this.store.update(key, current => {
         if (!current || current[part]?.attempt !== prior.attempt || current[part].state !== 'retry_after') return undefined;
-        current[part].state = 'rejected'; return current;
+        current[part].state = 'rejected'; current[part].completedAt = this.now(); return current;
       });
       return 'rejected';
     }
@@ -212,7 +227,7 @@ export class TelegramNativeCards {
               value?.receipt === receipt && (row.key !== key || name !== part)))) {
           throw Error('NATIVE_CARD_RECEIPT_REUSED');
         }
-        current[part] = { ...current[part], state: 'sent', receipt }; record = current; return current;
+        current[part] = { ...current[part], state: 'sent', receipt, completedAt: this.now() }; record = current; return current;
       });
     };
     try {
@@ -226,7 +241,7 @@ export class TelegramNativeCards {
         if (!current || current[part].attempt !== attempt || current[part].state === 'sent') return undefined;
         const failure = sendFailure(error);
         current[part] = { ...current[part], state: failure.outcome,
-          ...(failure.outcome === 'retry_after' ? { dueAt: this.now() + failure.retryAfterSeconds * 1000 } : {}) };
+          ...(failure.outcome === 'retry_after' ? { dueAt: this.now() + failure.retryAfterSeconds * 1000 } : { completedAt: this.now() }) };
         record = current; return current;
       });
     }
@@ -234,12 +249,28 @@ export class TelegramNativeCards {
   }
   async recover({ binding, client, endpoint, identityRouter, withDirectDelivery, signal }) {
     if (!this.store || binding.channel !== 'telegram' || signal?.aborted) return;
-    let rows;
-    try { rows = this.store.entries().filter(row => row.value.kind === 'native-card-v1' && row.value.endpointKey === binding.key); }
+    let allRows;
+    try { allRows = this.store.entries().filter(row => row.value.kind === 'native-card-v1'); }
     catch { this.api.logger.debug?.('AgentBridge native card storage unavailable; delivery retained without replay'); return; }
-    const start = (this.cursor.get(binding.key) || 0) % Math.max(1, rows.length);
-    const batch = [...rows.slice(start), ...rows.slice(0, start)].slice(0, 16);
-    this.cursor.set(binding.key, start + batch.length);
+    const actionable = [];
+    const completed = [];
+    for (const row of allRows) {
+      const r = row.value;
+      const cardPending = ['prepared', 'retry_after'].includes(r.card?.state);
+      const closureActive = r.card?.state === 'sent' && Number.isSafeInteger(r.card.receipt) && r.card.receipt > 0 &&
+        (!r.closure || ['prepared', 'retry_after'].includes(r.closure.state));
+      if (r.endpointKey === binding.key && (cardPending || closureActive)) {
+        actionable.push(row);
+      } else if ((r.card?.state === 'sent' && r.closure?.state === 'sent') ||
+                 (['rejected', 'unavailable'].includes(r.card?.state) && !r.closure)) {
+        const doneAt = r.closure?.completedAt ?? r.card?.completedAt ?? r.createdAt;
+        completed.push({ key: row.key, order: doneAt ?? 0, completedAt: doneAt });
+      }
+    }
+    compactCompletedEntries(this.store, completed, { now: this.now() });
+    const start = (this.cursor.get(binding.key) || 0) % Math.max(1, actionable.length);
+    const batch = [...actionable.slice(start), ...actionable.slice(0, start)].slice(0, 16);
+    this.cursor.set(binding.key, actionable.length ? (start + batch.length) % actionable.length : 0);
     for (const { key, value: record } of batch) {
       const lock = `${this.store.filename}:${key}`;
       if (active.has(lock) || signal?.aborted || !endpoint || record.endpointId && endpoint.endpointId !== record.endpointId ||

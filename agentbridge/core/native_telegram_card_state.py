@@ -6,11 +6,15 @@ from .endpoint_instances import endpoint_instances, instance_key
 from .interactions import project_interaction_state
 
 
-def read_state(service, *, subject, token, registration, host_instance, host, endpoint_key, interaction_id):
+def read_state(service, *, subject, token, registration, host_instance, host, endpoint_key, interaction_id, pairing_protocol=None):
+    from agentbridge.workspace.telegram_pair_migration import grant_generation, private_telegram_allowed
+    from .actionable_results import _date
+
     endpoint = service.tasks.endpoint_for_key(user_subject=subject, agent_host=host, endpoint_key=endpoint_key)
     if (host not in {"openclaw", "nanobot", "pi"} or endpoint["client_type"] != "telegram"
             or endpoint["token_id"] != token or endpoint["state"] != "active"):
         raise PermissionError("An active original private Telegram endpoint is required")
+    grant = None
     with service.tasks._connect() as db:
         db.execute("BEGIN")
         endpoint = _telegram_endpoint(db, subject, endpoint["endpoint_id"])
@@ -21,6 +25,10 @@ def read_state(service, *, subject, token, registration, host_instance, host, en
                  else endpoint_instances(db, subject).get(endpoint["endpoint_id"]))
         if not registered or endpoint["token_id"] != token or owner != instance_key(host, host_instance):
             raise PermissionError("The original host registration and endpoint must still match")
+        if not private_telegram_allowed(db, host, subject, host_instance, endpoint, token, pairing_protocol):
+            raise PermissionError("Current private Telegram pairing and protocol required")
+        if host == "nanobot":
+            grant = grant_generation(db, subject, host_instance, endpoint["account_id"], endpoint["external_subject"])
 
     record = service.interactions.get(interaction_id, user_subject=subject)
     kind = record["interaction_type"]
@@ -31,12 +39,16 @@ def read_state(service, *, subject, token, registration, host_instance, host, en
         if (task["agent_host"] != host or task["origin_endpoint_id"] != endpoint["endpoint_id"]
                 or task["active_conversation_ref"] != endpoint["conversation_ref"]):
             raise PermissionError("The interaction belongs to another task origin")
+        if grant and _date(task["created_at"]).timestamp() <= grant["confirmed_at"]:
+            raise PermissionError("The interaction belongs to an earlier pairing generation")
         service.require_task_result_access(user_subject=subject, task_id=task_id)
         task_info = {"taskId": task_id, "userSubject": subject, "agentHost": host,
                      "originEndpointId": task["origin_endpoint_id"],
                      "activeConversationRef": task["active_conversation_ref"]}
     elif kind != "credential" or registration["acceptedLevel"] not in {"L2", "L3"}:
         raise PermissionError("A native task is required for this interaction")
+    elif grant and _date(record["created_at"]).timestamp() <= grant["confirmed_at"]:
+        raise PermissionError("The interaction belongs to an earlier pairing generation")
 
     if record.get("operation_id"):
         op = service.operations.get(record["operation_id"])

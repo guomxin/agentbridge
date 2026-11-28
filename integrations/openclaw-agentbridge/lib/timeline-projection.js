@@ -1,13 +1,24 @@
 import { createHash } from 'node:crypto';
 import { hostContextMeta } from './host-contract.js';
-import {openTimelineLocalStore} from './timeline-storage.js';
+import { compactCompletedEntries, openTimelineLocalStore } from './timeline-storage.js';
+import { telegramBotToken } from './telegram-identity.js';
 
 const hash = value => createHash('sha256').update(value, 'utf8').digest('hex');
 const NAMESPACE = 'agentbridge.timeline.projection.v2';
 const MAXIMUM_TEXT = 200_000;
 const PRIVATE = /\/(?:flow\/)?(?:auth|authorize|input|download|media|results|result-view)\/[a-z0-9_-]+|\/api\/(?:enrollment|private-cards?)\/|[?&#](?:start|ticket|presentation|token|code|signature|sig|key)=[^\s&]+|\bBearer\s+[^\s,;]+|\b(?:set-cookie|cookie|authorization)\s*:|io\.agentbridge\/(?:interaction|telegram-confirmation)|(?:\/agentbridge\s+link|\/start)\s+\S+|(?:确认码|验证码|配对码)\s*[:：]?\s*[0-9]{4,8}|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
 const SECRET_LABEL = '(?:账号|帐号|用户名|帐密|账密|密码|口令|密钥|(?:[A-Za-z0-9]+[_-])*(?:user(?:name)?|password|passwd|pwd|access[_ -]?key(?:[_ -]?id)?|secret(?:[_ -]?key)?|api[_ -]?key|token|bearer))';
-const SECRET = new RegExp(`(?:^|[^\\w])${SECRET_LABEL}["']?[ \\t]*[:：=][ \\t]*\\S|\\|[ *\u0060]*${SECRET_LABEL}[ *\u0060]*\\||\\b[a-z][a-z0-9+.-]*:\\/\\/[^/\\s:@]+:[^@\\s/]+@`, 'im');
+const SECRET = new RegExp(`(?<![\\p{L}\\p{N}_])${SECRET_LABEL}["']?[ \\t]*[:：=][ \\t]*\\S|\\|[ *\u0060]*${SECRET_LABEL}[ *\u0060]*\\||\\b[a-z][a-z0-9+.-]*:\\/\\/[^/\\s:@]+:[^@\\s/]+@`, 'imu');
+const PERMANENT_TIMELINE_REJECTION = /(?:History task belongs to another source|Original history identity or payload changed|Existing history has a different source or payload|Only public conversation text can be projected|Invalid private history key)/i;
+
+function toolErrorText(result) {
+  if (!result || result.isError !== true) return '';
+  if (typeof result.error === 'string') return result.error;
+  if (Array.isArray(result.content)) {
+    return result.content.map(block => (block?.type === 'text' && typeof block.text === 'string' ? block.text : '')).join('\n');
+  }
+  return '';
+}
 
 // Select public text before durable storage. Central performs the authoritative
 // check again. Neither rejected text nor a trusted card URL enters this journal.
@@ -40,7 +51,7 @@ export class TimelineProjectionJournal {
     let old=this.store.lookup(key);
     if (old) {
       this.check(old,record);
-      if (old.state==='sent') return old;
+      if (old.state==='sent' || old.state==='rejected') return old;
       if (old.state==='pending') return this.hydrate(old);
     }
     const chunks=bodyChunks(record.request.text);
@@ -66,7 +77,7 @@ export class TimelineProjectionJournal {
       return value.state==='assembling' ? {...value,state:'pending'} : undefined;
     });
     const stored=this.store.lookup(key);
-    return stored.state==='sent' ? stored : this.hydrate(stored);
+    return stored.state==='sent' || stored.state==='rejected' ? stored : this.hydrate(stored);
   }
   check(stored, expected) {
     if (!stored || stored.payloadHash !== expected.payloadHash || stored.namespace !== expected.namespace) {
@@ -90,30 +101,52 @@ export class TimelineProjectionJournal {
     }
     return {...record,request};
   }
-  pending() { return this.store.entries().map(entry=>entry.value).filter(value=>value?.state==='pending').sort((a,b)=>a.sequence-b.sequence).map(value=>this.hydrate(value)); }
+  pending(namespace = null) {
+    return this.store.entries()
+      .map(entry=>entry.value)
+      .filter(value=>value?.state==='pending' && (namespace === null || value.namespace === namespace))
+      .sort((a,b)=>a.sequence-b.sequence)
+      .map(value=>this.hydrate(value));
+  }
   attempted(record) {
     this.store.update(this.key(record.messageKey),value=>value?.state==='pending' ? {...value,attempts:value.attempts+1} : undefined);
   }
-  complete(record,receipt) {
+  complete(record,receipt,completedAt=Date.now()) {
     this.store.update(this.key(record.messageKey),value=>{
       this.check(value,record);
       if (value.state==='sent') return undefined;
       const {request,...metadata}=value;
-      return {...metadata,state:'sent',receipt};
+      return {...metadata,state:'sent',receipt,completedAt};
     });
     // The receipt must survive even if later body cleanup fails. Cleanup never
     // changes delivery state or makes an already acknowledged entry replayable.
     try { this.pruneBody(this.store.lookup(this.key(record.messageKey))); } catch {}
   }
+  reject(record,completedAt=Date.now()) {
+    this.store.update(this.key(record.messageKey),value=>{
+      this.check(value,record);
+      if (value.state==='sent' || value.state==='rejected') return undefined;
+      const {request,...metadata}=value;
+      return {...metadata,state:'rejected',completedAt};
+    });
+    try { this.pruneBody(this.store.lookup(this.key(record.messageKey))); } catch {}
+  }
   pruneBody(record) {
     for (const key of record.bodyKeys || []) this.store.delete(key);
     this.store.update(this.key(record.messageKey),value=>{
-      if (value?.state!=='sent' || !value.bodyKeys) return undefined;
+      if (!['sent','rejected'].includes(value?.state) || !value.bodyKeys) return undefined;
       const {bodyKeys,...metadata}=value;return metadata;
     });
   }
-  pruneCompleted() {
-    for (const entry of this.store.entries()) if (entry.value?.state==='sent' && entry.value.bodyKeys) this.pruneBody(entry.value);
+  pruneCompleted(now = Date.now()) {
+    const completed = [];
+    for (const entry of this.store.entries()) {
+      if (['sent','rejected'].includes(entry.value?.state)) {
+        if (entry.value.bodyKeys) this.pruneBody(entry.value);
+        completed.push({ key: entry.key, order: entry.value.sequence ?? 0, completedAt: entry.value.completedAt ?? entry.value.createdAt });
+      }
+    }
+    compactCompletedEntries(this.store, completed, { now });
   }
 }
 
@@ -138,11 +171,10 @@ export class DurableTimelineProjection {
   }
   identity(binding, sessionKey, endpointKey) {
     const credential=this.router.catalogCacheKeyForBinding(binding);
-    const account=binding.accountId || 'default', telegram=this.hostConfig.channels?.telegram;
-    const accountConfig=telegram?.accounts?.[account] || telegram;
-    const token=accountConfig?.botToken ?? telegram?.botToken;
+    const account=binding.accountId || 'default';
+    const token=telegramBotToken(this.hostConfig, account);
     // A configured Bot id is a route namespace, never a credential in the journal.
-    const botId=typeof token==='string' && /^[0-9]+:/.test(token) ? token.split(':',1)[0] : null;
+    const botId=token ? token.split(':',1)[0] : null;
     if (!credential || !botId) throw new Error('TIMELINE_SOURCE_IDENTITY_UNAVAILABLE');
     const routeNamespace=hash(JSON.stringify([this.router.endpoint?.url,binding.channel,account,botId,sessionKey,endpointKey]));
     return {routeNamespace,namespace:hash(JSON.stringify([credential,routeNamespace]))};
@@ -170,6 +202,7 @@ export class DurableTimelineProjection {
       record=this.journal.reserve({schemaVersion:NAMESPACE,namespace,messageKey,bindingKey:binding.key,sessionKey,endpointKey,
         payloadHash:requestHash(request,hash(text)),sourceTextSha256:hash(text),textSha256:hash(selected),request,createdAt:this.now()});
       if (record.state==='sent') return Promise.resolve(true);
+      if (record.state==='rejected') return Promise.resolve(false);
     } catch(error) {this.warn(error);return Promise.resolve(false);}
     // reserve above is synchronous: no network or async hook continuation can
     // precede durable admission once this observation callback has been invoked.
@@ -192,13 +225,18 @@ export class DurableTimelineProjection {
         this.journal.attempted(record);
         const result=await client.callTool('agentbridge_host_timeline_append',record.request,
           {signal:AbortSignal.timeout(5000),meta:hostContextMeta()});
+        if (PERMANENT_TIMELINE_REJECTION.test(toolErrorText(result))) {
+          this.journal.reject(record, this.now());
+          this.warn('TIMELINE_PROJECTION_REJECTED');
+          return true;
+        }
         const receipt=result?.projectionReceipt;
         if (result?.status!=='succeeded' || !receipt || !receipt.entryId || !receipt.sourceEndpointId || receipt.messageKey!==record.messageKey ||
             receipt.textSha256!==record.textSha256 || receipt.role!==record.request.role ||
             result.entry?.entryId!==receipt.entryId || result.endpoint?.endpointId!==receipt.sourceEndpointId) {
           throw new Error('TIMELINE_PROJECTION_RECEIPT_INVALID');
         }
-        this.journal.complete(record,receipt);return true;
+        this.journal.complete(record,receipt,this.now());return true;
       } catch(error) {
         if (attempt<2) await this.sleep(attempt===0?250:1000);
         else this.warn(error);
@@ -210,7 +248,7 @@ export class DurableTimelineProjection {
     if (this.queues.has(namespace)) return this.queues.get(namespace);
     const work=Promise.resolve().then(async()=>{
       for (;;) {
-        const record=this.journal.pending().find(value=>value.namespace===namespace);
+        const record=this.journal.pending(namespace)[0];
         if (!record) return true;
         if (!await this.send(record)) return false;
       }
@@ -218,7 +256,7 @@ export class DurableTimelineProjection {
     this.queues.set(namespace,work);return work;
   }
   async recover() {
-    this.journal.pruneCompleted();
+    this.journal.pruneCompleted(this.now());
     return Promise.allSettled([...new Set(this.journal.pending().map(value=>value.namespace))].map(value=>this.schedule(value)));
   }
   start() {

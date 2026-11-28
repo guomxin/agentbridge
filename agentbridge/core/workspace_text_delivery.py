@@ -200,6 +200,15 @@ def _current(service, db, row):
     return label + "\n" + part
 
 
+SENDING_GRACE_SECONDS = 120
+
+
+def _block_later_parts(db, row):
+    db.execute("""UPDATE workspace_text_deliveries SET state='blocked' WHERE question_id=? AND entry_id=?
+        AND part_index>? AND attempt=0 AND state='pending'""",
+        (row["question_id"], row["entry_id"], row["part_index"]))
+
+
 def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
     scope = instance_key(host, instance)
     now = actions._now()
@@ -209,6 +218,13 @@ def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pa
             return []
         if not query.registered(db, subject, host, scope, token):
             return []
+        overdue = db.execute(_JOIN + """ WHERE p.subject=? AND p.host=? AND p.instance=? AND p.endpoint_key=?
+            AND p.token_id=? AND d.state='sending' AND d.due<=?""",
+            (subject, host, scope[1], endpoint, token, now.isoformat())).fetchall()
+        for row in overdue:
+            db.execute("UPDATE workspace_text_deliveries SET state='unknown',outcome='delivery_unknown' WHERE delivery_id=?",
+                       (row["delivery_id"],))
+            _block_later_parts(db, row)
         rows = db.execute(_JOIN + """ WHERE p.subject=? AND p.host=? AND p.instance=? AND p.endpoint_key=?
             AND p.token_id=? AND d.state IN ('pending','leased','retry_wait') AND d.due<=?
             AND NOT EXISTS (SELECT 1 FROM workspace_text_deliveries previous WHERE previous.question_id=d.question_id
@@ -220,6 +236,7 @@ def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pa
             if row["attempt"] >= 5 or not _current(service, db, row):
                 db.execute("UPDATE workspace_text_deliveries SET state=? WHERE delivery_id=?",
                            ("expired" if row["attempt"] >= 5 else "revoked", row["delivery_id"]))
+                _block_later_parts(db, row)
                 continue
             due = (now + timedelta(seconds=max(5, min(300, lease)))).isoformat()
             db.execute("""UPDATE workspace_text_deliveries SET state='leased',attempt=attempt+1,issued=0,due=?
@@ -245,14 +262,26 @@ def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_
         if action != "ack" and not permits_delivery(db, host, subject, instance, endpoint_key, token_id, pairing_protocol):
             return {key: False}
         if action == "ack":
+            previous_state = row["state"]
             recorded = query.settle(db, row, outcome, receipt, retry_after_seconds, table=TABLE)
             if recorded and outcome in {"unavailable", "rejected", "delivery_unknown", "sent"}:
-                # A terminal part prevents later parts of the same message from
-                # leaking through. A matched late receipt can release unattempted parts.
-                old, new = ("blocked", "pending") if outcome == "sent" else ("pending", "blocked")
-                db.execute("""UPDATE workspace_text_deliveries SET state=? WHERE question_id=? AND entry_id=?
-                    AND part_index>? AND attempt=0 AND state=?""",
-                    (new, row["question_id"], row["entry_id"], row["part_index"], old))
+                current_state = db.execute("SELECT state FROM workspace_text_deliveries WHERE delivery_id=?",
+                                           (delivery_id,)).fetchone()[0]
+                if current_state != previous_state:
+                    # A terminal part prevents later parts of the same message from
+                    # leaking through. A matched late receipt releases unattempted parts
+                    # only once every earlier part of the same message is sent.
+                    if outcome == "sent":
+                        db.execute("""UPDATE workspace_text_deliveries SET state='pending'
+                            WHERE question_id=? AND entry_id=? AND part_index>? AND attempt=0 AND state='blocked'
+                              AND NOT EXISTS (SELECT 1 FROM workspace_text_deliveries prior
+                                WHERE prior.question_id=workspace_text_deliveries.question_id
+                                  AND prior.entry_id=workspace_text_deliveries.entry_id
+                                  AND prior.part_index<workspace_text_deliveries.part_index
+                                  AND prior.state!='sent')""",
+                            (row["question_id"], row["entry_id"], row["part_index"]))
+                    else:
+                        _block_later_parts(db, row)
             return {key:recorded}
         if (any(v is not None for v in (outcome, receipt, retry_after_seconds)) or row["state"] != "leased"
                 or actions._date(row["due"]) <= actions._now() or not query.registered(db, subject, host, scope, token_id)):
@@ -263,7 +292,8 @@ def handle(service, *, subject, instance, host, endpoint_key, token_id, pairing_
         if action == "begin":
             if not row["issued"]:
                 return {key:False}
-            db.execute("UPDATE workspace_text_deliveries SET state='sending' WHERE delivery_id=?", (delivery_id,))
+            due = max(actions._date(row["due"]), actions._now() + timedelta(seconds=SENDING_GRACE_SECONDS)).isoformat()
+            db.execute("UPDATE workspace_text_deliveries SET state='sending', due=? WHERE delivery_id=?", (due, delivery_id))
             return {key:True}
         db.execute("UPDATE workspace_text_deliveries SET issued=1 WHERE delivery_id=?", (delivery_id,))
         return {key:True, "leaseExpiresAt":row["due"], "publicText":text}

@@ -24,8 +24,12 @@ def required_runtime_hooks(version):
     # Preserve inspected pre-0.4.135 predecessors. The new reply path needs
     # source capture, model-free dispatch, its fail-closed fallback and reset
     # cleanup. Later stable versions inherit these requirements.
-    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', str(version or ''))
-    if match and tuple(map(int, match.groups())) >= (0, 4, 135):
+    if version is None:
+        return REQUIRED_AGENTBRIDGE_HOOKS
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', str(version))
+    if not match:
+        raise ValueError('Invalid AgentBridge plugin version for runtime hook verification')
+    if tuple(map(int, match.groups())) >= (0, 4, 135):
         return REQUIRED_AGENTBRIDGE_HOOKS | REFERENCE_REPLY_HOOKS
     return REQUIRED_AGENTBRIDGE_HOOKS
 

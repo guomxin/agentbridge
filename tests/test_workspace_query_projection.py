@@ -67,7 +67,7 @@ def claim(service, subject, host, instance, token, endpoint):
 
 
 @pytest.mark.parametrize(("version", "supported"), [
-    ("0.4.134", True), ("0.4.135", True), ("0.4.133", False), ("0.4.136", False),
+    ("0.4.134", True), ("0.4.135", True), ("0.4.136", True), ("0.4.133", False), ("0.4.137", False),
 ])
 def test_openclaw_query_protocol_requires_exact_supported_version(openclaw, version, supported):
     fixture, token, _ = openclaw

@@ -1922,8 +1922,10 @@ class WorkspaceStore:
                         t.active_conversation_ref=? AND t.host_task_key=?""", (row["message_key"], row["user_subject"],
                         row["agent_host"], row["origin_endpoint_id"], row["conversation_ref"], run_id)).fetchone()
                 if terminal:
+                    from agentbridge.core.commit_notifications import mark_transaction_change
                     from agentbridge.core.workspace_query_delivery import project
                     project(connection, terminal)
+                    mark_transaction_change(connection, user_subject=row["user_subject"], topics=("notifications",))
             updated = connection.execute(
                 "SELECT * FROM agent_host_dispatches WHERE dispatch_id = ?",
                 (dispatch_id,),

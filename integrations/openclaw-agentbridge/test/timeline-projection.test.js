@@ -158,3 +158,47 @@ test('receipt survives interrupted body cleanup and restart prunes without repub
   h.store.delete=remove;await new DurableTimelineProjection(h.options).recover();
   assert.equal(h.requests.length,1);assert(!h.store.entries().some(e=>e.value.kind==='timeline-body'));
 });
+
+test('publicTimelineText matches Python Unicode word boundaries without false-rejecting Chinese prose',()=>{
+  assert.equal(publicTimelineText('我的账号：状态正常'),'我的账号：状态正常');
+  assert.equal(publicTimelineText('账号：secret123'),null);
+  assert.equal(publicTimelineText('密码=synthetic'),null);
+});
+
+test('permanent Central rejection quarantines the bad message and advances subsequent Telegram sync',async()=>{
+  const h=setup({send:(request,receipt)=>request.text==='bad'?{isError:true,content:[{type:'text',text:'Error executing tool agentbridge_host_timeline_append: History task belongs to another source'}]}:receipt(request)});
+  await Promise.all([h.capture('1','bad'),h.capture('2','good')]);
+  assert.equal(h.requests.length,2);
+  assert.equal(h.publisher.journal.pending().length,0);
+  assert.equal(h.store.entries().filter(e=>e.value.state==='rejected').length,1);
+  assert.equal(h.store.entries().filter(e=>e.value.state==='sent').length,1);
+  assert(!h.store.entries().some(e=>e.value.kind==='timeline-body'));
+});
+
+test('schedule isolates corrupt body chunks in another namespace and custom Telegram accounts never borrow root botToken',async()=>{
+  const store=memoryStore();
+  const broken=setup({bot:'123',store,send:()=>{throw Error('OFFLINE');}});
+  await broken.capture('1','first');
+  const bodyKey=store.entries().find(e=>e.value.kind==='timeline-body').key;
+  store.delete(bodyKey);
+  const healthy=setup({bot:'999',store});
+  assert.equal(await healthy.capture('2','healthy'),true);
+  assert.equal(healthy.requests.length,1);
+  const custom=setup({store:memoryStore()});
+  custom.binding.accountId='work';
+  custom.hostConfig.channels.telegram={botToken:'123:root-token',accounts:{work:{}}};
+  assert.equal(await custom.capture('3','hello',{context:{conversationId:'101',accountId:'work'}}),false);
+  assert.equal(custom.requests.length,0);
+});
+
+test('recover compacts oldest completed sent records near capacity while preserving pending entries',async()=>{
+  const store=memoryStore();store.maxEntries=10;
+  let now=10_000;
+  const h=setup({store});
+  h.publisher.now=()=>now;
+  for(let i=1;i<=8;i++){now+=1000;assert.equal(await h.capture(String(i),`msg-${i}`),true);}
+  await h.publisher.recover();
+  const remainingSent=store.entries().filter(e=>e.value?.state==='sent');
+  assert(remainingSent.length<=5,`expected compaction down to target, got ${remainingSent.length}`);
+  assert(remainingSent.some(e=>e.value.sequence===8));
+});

@@ -33,6 +33,7 @@ export class TimelineLocalStore {
       let current=directory;
       for (;;) {syncDirectory(current);if(current===path.dirname(first))break;current=path.dirname(current);}
     }
+    this.directory=directory;
     this.filename=path.join(directory,'projection.sqlite');this.maxEntries=maxEntries;
     for(const suffix of ['', '-wal', '-shm', '-journal'])privateRegular(this.filename+suffix);
     const db=new DatabaseSync(this.filename);
@@ -49,7 +50,7 @@ export class TimelineLocalStore {
   transaction(fn) {
     this.db.exec('BEGIN IMMEDIATE');
     try {const result=fn();this.db.exec('COMMIT');return result;}
-    catch(error){this.db.exec('ROLLBACK');throw error;}
+    catch(error){try{this.db.exec('ROLLBACK');}catch{}throw error;}
   }
   lookup(key) {
     const row=this.db.prepare('SELECT value FROM timeline_projection_entries WHERE key=?').get(key);
@@ -81,7 +82,32 @@ export class TimelineLocalStore {
     .all(prefix.length,prefix).map(row=>({key:row.key,value:JSON.parse(row.value)}));}
   keysWithPrefix(prefix) {return this.db.prepare('SELECT key FROM timeline_projection_entries WHERE substr(key,1,?)=? ORDER BY key')
     .all(prefix.length,prefix).map(row=>row.key);}
-  close() {this.db.close();}
+  close() {
+    if (opened.get(this.directory) === this) opened.delete(this.directory);
+    this.db.close();
+  }
+}
+
+export function compactCompletedEntries(store, candidates, { now = Date.now(), retentionMs = 30 * 86400_000 } = {}) {
+  if (!store || typeof store.delete !== 'function' || !Array.isArray(candidates) || !candidates.length) return 0;
+  const maxEntries = Number.isSafeInteger(store.maxEntries) && store.maxEntries >= 2 ? store.maxEntries : 10_000;
+  const highWater = Math.max(2, Math.floor(maxEntries * 0.8));
+  const target = Math.max(1, Math.floor(maxEntries * 0.5));
+  let total = store.entries().length;
+  const compacting = total > highWater;
+  const sorted = [...candidates].sort((a, b) => (a.completedAt ?? a.order ?? 0) - (b.completedAt ?? b.order ?? 0));
+  let removed = 0;
+  for (const item of sorted) {
+    const expired = Number.isFinite(item.completedAt) && now - item.completedAt >= retentionMs;
+    if (!expired && (!compacting || total <= target)) break;
+    let deleted = false;
+    for (const extraKey of item.extraKeys || []) {
+      try { if (store.delete(extraKey)) total--; } catch {}
+    }
+    try { deleted = store.delete(item.key); } catch {}
+    if (deleted) { total--; removed++; }
+  }
+  return removed;
 }
 
 export function openTimelineLocalStore(api) {

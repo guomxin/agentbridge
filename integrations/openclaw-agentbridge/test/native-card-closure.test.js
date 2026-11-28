@@ -321,3 +321,45 @@ test('pending cannot turn an unknown native attempt into a legacy card repost', 
   const pending = await h.command.handler({ sessionKey: h.sessionKey, channelId: 'telegram', args: 'pending' });
   assert.equal(pending.presentation, undefined); assert.equal(h.sends.length, 1);
 });
+
+test('post-resume business failure on a native-card task is never swallowed by nativeClose', async t => {
+  const h = fixture(t), card = h.card(1, 'execution_authorization');
+  await h.reply(card);
+  const record = h.bridge.records.get(card.interactionId);
+  await h.bridge.notify(record, 'failed', 'OA_BUSINESS_RULE_REJECTED', [], {
+    response: { status: 'failed', error: { code: 'OA_BUSINESS_RULE_REJECTED', message: '余额不足' } },
+  });
+  assert.equal(h.sends.length, 2);
+  assert.match(h.sends[1].text, /余额不足/);
+  assert.match(h.sends[1].text, /OA_BUSINESS_RULE_REJECTED/);
+});
+
+test('closed historical native cards do not starve newly closed cards and expired unsent cards stop polling', async t => {
+  const h = fixture(t);
+  for (let i = 1; i <= 20; i++) {
+    await h.reply(h.card(i));
+    h.finish(i, 'completed');
+  }
+  await h.observe(); await h.observe();
+  const fresh = h.card(21);
+  await h.reply(fresh);
+  h.finish(21, 'completed');
+  const sendsBefore = h.sends.length;
+  await h.observe();
+  assert.equal(h.sends.length, sendsBefore + 1);
+  assert.equal(h.rows().find(r => r.interactionId === fresh.interactionId).closure.state, 'sent');
+
+  h.authorityChange = () => { throw Error('temporary outage'); };
+  const unsent = h.card(22);
+  await h.reply(unsent);
+  h.authorityChange = null;
+  h.finish(22, 'expired');
+  const callsBefore = h.calls.length;
+  await h.observe();
+  assert.equal(h.rows().find(r => r.interactionId === unsent.interactionId).card.state, 'unavailable');
+  const callsAfterFirst = h.calls.length;
+  assert(callsAfterFirst > callsBefore);
+  await h.observe();
+  assert.equal(h.calls.filter(c => c.args?.interaction_id === unsent.interactionId).length,
+    h.calls.slice(0, callsAfterFirst).filter(c => c.args?.interaction_id === unsent.interactionId).length);
+});

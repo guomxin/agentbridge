@@ -55,7 +55,13 @@ def append(service, *, subject, host, instance, token, endpoint_key, sender, acc
     if not public or role not in {"assistant", "user"}:
         raise ValueError("Only public conversation text can be projected")
     digest = hashlib.sha256(public.encode()).hexdigest()
-    original_scope=json.dumps([subject,host,instance,token,endpoint_key,sender,account,conversation,route,source_message_id,received_at,pairing_ref],sort_keys=True,separators=(",",":"))
+    normalized_received_at = None
+    stamp = None
+    if received_at is not None:
+        from .telegram_media_receipts import _received_time
+        stamp = _received_time(received_at)
+        normalized_received_at = stamp.isoformat()
+    original_scope=json.dumps([subject,host,instance,token,endpoint_key,sender,account,conversation,route,source_message_id,normalized_received_at,pairing_ref],sort_keys=True,separators=(",",":"))
     with store_transaction(service.tasks) as db:
         previous=db.execute("SELECT * FROM telegram_history_receipts WHERE subject=? AND message_key=?",(subject,message_key)).fetchone()
         if receipt_only and not previous:
@@ -80,14 +86,12 @@ def append(service, *, subject, host, instance, token, endpoint_key, sender, acc
             from agentbridge.workspace.telegram_pair_migration import reception_boundary
             boundary = reception_boundary(db, subject, instance, account, sender, token)
             if boundary['generationScoped']:
-                from .telegram_media_receipts import _received_time
-                if type(source_message_id) is not int or not 0 < source_message_id < 2**53:
+                if type(source_message_id) is not int or not 0 < source_message_id < 2**53 or stamp is None:
                     raise PermissionError("Original platform source is required for first history")
-                stamp = _received_time(received_at)
                 original = db.execute("""SELECT endpoint_id,token_id,pair_proof,received_at FROM telegram_media_sources
                     WHERE subject=? AND host=? AND instance=? AND endpoint_key=? AND source_message_id=?""",
                     (subject,host,instance,endpoint_key,source_message_id)).fetchone()
-                if (not original or tuple(original) != (endpoint_id,token,proof,received_at) or pairing_ref != proof
+                if (not original or tuple(original) != (endpoint_id,token,proof,normalized_received_at) or pairing_ref != proof
                         or stamp.microsecond or stamp.timestamp() <= boundary['receptionFloor']):
                     raise PermissionError("Original history source does not prove the current grant")
         if task_id and not db.execute("""SELECT 1 FROM agent_tasks WHERE task_id=? AND user_subject=?

@@ -47,10 +47,13 @@ def _from_workspace(service, db, endpoint, token, key, ident, cutoff, limit):
     if text_key != "taskId":
         condition = {"entryId": "t.entry_id=? AND t.part_index=1",
                      "telegramReceipt": "t.receipt=?"}.get(text_key, "t.kind='user' AND t.part_index=1")
-        sql = "SELECT t.*,e.created_at FROM (" + texts._JOIN + """) t
-            JOIN user_timeline e ON e.entry_id=t.entry_id AND e.user_subject=t.subject AND e.source_endpoint_id=t.source
-            WHERE t.subject=? AND t.endpoint_id=? AND t.token_id=? AND e.created_at>=?
-              AND t.state='sent' AND t.receipt>0 AND """ + condition + " ORDER BY e.created_at DESC LIMIT ?"
+        sql = "SELECT t.*,COALESCE(e.created_at,d.updated_at) AS created_at FROM (" + texts._JOIN + """) t
+            LEFT JOIN user_timeline e ON t.kind!='status' AND e.entry_id=t.entry_id AND e.user_subject=t.subject AND e.source_endpoint_id=t.source
+            LEFT JOIN agent_host_dispatches d ON t.kind='status' AND d.dispatch_id=t.request_id AND d.user_subject=t.subject AND d.agent_host=t.host AND d.origin_endpoint_id=t.source
+            WHERE t.subject=? AND t.endpoint_id=? AND t.token_id=?
+              AND ((t.kind!='status' AND e.entry_id IS NOT NULL) OR (t.kind='status' AND d.dispatch_id IS NOT NULL))
+              AND COALESCE(e.created_at,d.updated_at)>=?
+              AND t.state='sent' AND t.receipt>0 AND """ + condition + " ORDER BY created_at DESC LIMIT ?"
         rows = db.execute(sql, (*args, *((text_id,) if text_key else ()), limit + 1))
         for row in rows:
             public = texts._current(service, db, row)

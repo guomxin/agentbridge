@@ -161,3 +161,21 @@ test('explicit cross-end text with an unrecognized native receipt remains reject
   assert.match((await h.subject.prompt('继续网页刚才那个',{sessionKey:session})).prependContext,/失效/);
   assert.equal(h.calls.length,0);assert.ok(h.subject.guard({sessionKey:session}));
 });
+
+test('ordinary Telegram sentences and WeChat continuation phrasing are not hijacked as cross-end references',()=>{
+  for (const text of [
+    '刚才手机卡了，帮我查下 OA 待办',
+    '把之前微信里说的那个请假单撤回',
+    '这个网页打不开，帮我查一下待办',
+    '继续刚才微信那个任务',
+    '继续看刚才 Telegram 那个',
+  ]) {
+    assert.equal(parseProjectionReference(text, session), null, text);
+  }
+  assert.equal(parseProjectionReference('继续刚才微信那个任务', workspace), null);
+  assert.deepEqual(parseProjectionReference('刚才在网页上发的那条消息什么意思', session), {
+    reference: {},
+    question: '刚才在网页上发的那条消息什么意思',
+    invalid: false,
+  });
+});

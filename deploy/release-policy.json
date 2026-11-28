@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "5f72623e7ad9"
+    "efb52fdcfd55"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Repair the OpenClaw reply path for an explicitly referenced public message. Preserve the deployed 5f72623e7ad9 four-database SQL structures, existing delivery and history receipts, pairing identities and data semantics. No historical send is adopted or replayed, and no new business operation is authorized. The previous 87765c133e20 schema transition has already completed and is not reused."
+  "reason": "Harden OpenClaw 0.4.136 sync/reference/card/storage paths, Central delivery state-machine leases and revocation/protocol fences, and Workspace error/reference UI reconciliation. Preserve the deployed efb52fdcfd55 four-database SQL schemas, existing delivery and history receipts, pairing identities, and data semantics with no schema migration or historical replay."
 }

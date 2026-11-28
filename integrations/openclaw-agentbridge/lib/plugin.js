@@ -30,7 +30,7 @@ import { createHostPerformance, observeHostSync } from "./performance.js";
 import { createTaskCommandRunner } from "./task-commands.js";
 import { canonicalTelegramAccount, sameTelegramAccount } from "./telegram-identity.js";
 
-export const PLUGIN_VERSION = "0.4.135";
+export const PLUGIN_VERSION = "0.4.136";
 
 // Only fixed host guidance enters system context. Catalogs, trial material and
 // task history keep their existing data context and do not gain authority.
@@ -324,7 +324,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       text: event.content ?? event.text,
       event,
       context,
-      taskId: coordinator.activeTaskForSession(
+      taskId: coordinator.activeOriginTaskForSession(
         event.sessionKey || context.sessionKey,
       ),
     });
@@ -414,7 +414,7 @@ export function registerAgentBridgeInteractions(api, dependencies = {}) {
       event,
       context,
       taskId: sourceSession === sessionKey
-        ? coordinator.activeTaskForSession(sessionKey)
+        ? coordinator.activeOriginTaskForSession(sessionKey)
         : null,
     });
   });

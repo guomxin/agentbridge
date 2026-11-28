@@ -13,12 +13,22 @@ export function sameTelegramAccount(left, right) {
   return expected !== undefined && expected === canonicalTelegramAccount(right);
 }
 
+export function telegramBotToken(config, accountId) {
+  const account = canonicalTelegramAccount(accountId);
+  const root = config?.channels?.telegram;
+  if (!account || !root || typeof root !== "object") return null;
+  const accounts = root.accounts && typeof root.accounts === "object" ? root.accounts : null;
+  const token = account === "default"
+    ? (accounts && Object.hasOwn(accounts, "default") ? accounts.default?.botToken : undefined) ?? root.botToken
+    : (accounts && Object.hasOwn(accounts, account) ? accounts[account]?.botToken : undefined);
+  return typeof token === "string" && /^[1-9][0-9]*:/.test(token) ? token : null;
+}
+
 // Route identity only, never a Bot credential or a display name. Unknown secret
 // references cannot prove that an old message id belongs to the current Bot.
 export function telegramBotRouteRef(config, accountId, chatId) {
-  const account=canonicalTelegramAccount(accountId), peer=String(chatId || '');
-  const root=config?.channels?.telegram, selected=root?.accounts?.[account] || root;
-  const token=selected?.botToken ?? root?.botToken;
-  if (!account || !/^[1-9][0-9]*$/.test(peer) || typeof token!=='string' || !/^[1-9][0-9]*:/.test(token)) return null;
-  return createHash('sha256').update(JSON.stringify([account,peer,token.split(':',1)[0]])).digest('hex');
+  const account = canonicalTelegramAccount(accountId), peer = String(chatId || '');
+  const token = telegramBotToken(config, account);
+  if (!account || !/^[1-9][0-9]*$/.test(peer) || !token) return null;
+  return createHash('sha256').update(JSON.stringify([account, peer, token.split(':', 1)[0]])).digest('hex');
 }

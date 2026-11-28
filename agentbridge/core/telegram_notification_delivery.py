@@ -208,10 +208,15 @@ def _covered(service,db,row):
     if not status or not task or task["status"] != status:
         return None
     from . import workspace_query_delivery as query, workspace_text_delivery as text
+    now = actions._now()
     def same(pin):
         return all(pin[k]==row[k] for k in ("subject","source","host","instance","endpoint_id","token_id","pair_proof","endpoint_hash"))
     query_row=db.execute(query._JOIN+" WHERE d.task_id=? AND p.endpoint_id=?",(row["task_id"],row["endpoint_id"])).fetchone()
-    if query_row and same(query_row) and query_row["state"] in {"pending","leased","retry_wait","sending","sent","unknown"}:
+    if query_row and same(query_row) and (
+            query_row["state"] in {"sending","sent","unknown"} or (
+                query_row["state"] in {"pending","leased","retry_wait"}
+                and query_row["attempt"] < 5
+                and now < actions._date(query_row["source_finished"]) + timedelta(seconds=actions.SOURCE_TTL_SECONDS))):
         try:
             query.current(db,query_row)
             return query_row["delivery_id"]
@@ -227,7 +232,8 @@ def _covered(service,db,row):
     parts=db.execute(text._JOIN+" WHERE d.request_id=? AND p.endpoint_id=? AND d.kind=? ORDER BY d.part_index",
                      (dispatch[0][0],row["endpoint_id"],"assistant" if status=="succeeded" else "status")).fetchall()
     if (parts and len(parts)==parts[0]["part_count"] and [p["part_index"] for p in parts]==list(range(1,len(parts)+1))
-            and all(same(p) and p["state"] in {"pending","leased","retry_wait","sending","sent","unknown"}
+            and all(same(p) and (p["state"] in {"sending","sent","unknown"}
+                                 or (p["state"] in {"pending","leased","retry_wait"} and p["attempt"] < 5))
                     and text._current(service,db,p) for p in parts)):
         return parts[0]["delivery_id"]
     return None
@@ -241,21 +247,29 @@ def _mark_covered(service,db,row):
     return bool(covered)
 
 
+SENDING_GRACE_SECONDS = 120
+
+
 def claim(service, subject, host, instance, endpoint, token, limit, lease, *, pairing_protocol=None):
     closures.poll(service,subject=subject,host=host,instance=instance,endpoint=endpoint,
                   token=token,pairing_protocol=pairing_protocol)
     now = actions._now()
+    scope = instance_key(host, instance)
     with store_transaction(service.tasks) as db:
         if not permits_delivery(db, host, subject, instance, endpoint, token, pairing_protocol):
             return []
+        if not registered(db, subject, host, scope, token):
+            return []
+        db.execute("""UPDATE telegram_notification_deliveries SET state='unknown',outcome='delivery_unknown'
+            WHERE subject=? AND host=? AND instance=? AND endpoint_key=? AND token_id=? AND protocol=?
+              AND state='sending' AND due<=?""",
+            (subject, host, scope[1], endpoint, token, MODE, now.isoformat()))
         rows = db.execute("""SELECT * FROM telegram_notification_deliveries WHERE subject=? AND host=? AND instance=?
             AND endpoint_key=? AND token_id=? AND protocol=? AND state IN ('pending','leased','retry_wait')
             AND due<=? ORDER BY created_at,rowid LIMIT ?""",
-            (subject,host,instance_key(host,instance)[1],endpoint,token,MODE,now.isoformat(),max(1,min(limit,100)))).fetchall()
+            (subject,host,scope[1],endpoint,token,MODE,now.isoformat(),max(1,min(limit,100)))).fetchall()
         result = []
         for row in rows:
-            if not registered(db,subject,host,(host,row["instance"]),token):
-                continue
             expires = actions._date(row["expires_at"])
             # A freshly observed public closure can wait offline before its first
             # lease. Its dispatch budget is independent of the old card's TTL.
@@ -334,7 +348,8 @@ def handle(service, *, subject, host, instance, endpoint_key, token_id, pairing_
         if action == "begin":
             if not current["issued"]:
                 return denied
-            db.execute("UPDATE telegram_notification_deliveries SET state='sending' WHERE delivery_id=?",(delivery_id,))
+            due = max(actions._date(current["due"]), actions._now() + timedelta(seconds=SENDING_GRACE_SECONDS)).isoformat()
+            db.execute("UPDATE telegram_notification_deliveries SET state='sending', due=? WHERE delivery_id=?",(due,delivery_id))
             if current["kind"] == "trusted_interaction":
                 closures.arm(db,current)
             return {"allowed":True}

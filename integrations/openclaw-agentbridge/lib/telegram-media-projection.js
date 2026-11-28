@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {constants,openSync,closeSync,fstatSync,readSync,lstatSync,realpathSync} from 'node:fs';
 import path from 'node:path';
 import {hostContextMeta} from './host-contract.js';
-import {openProjectionLocalStore} from './timeline-storage.js';
+import {compactCompletedEntries,openProjectionLocalStore} from './timeline-storage.js';
 import {DurableTimelineProjection} from './timeline-projection.js';
 import {MAX_TELEGRAM_MEDIA_BYTES} from './telegram-media-delivery.js';
 
@@ -13,6 +13,14 @@ const TYPES=new Set(['image/png','image/jpeg','image/webp','application/pdf','te
 const utc=value=>new Date(Math.floor(value/1000)*1000).toISOString().replace('.000Z','+00:00');
 const UUID=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const bodyKeys=item=>Array.from({length:item.bodyCount||0},(_,index)=>`${item.bodyPrefix}:${index}`);
+const PERMANENT_MEDIA_REJECTION=/(?:Original message predates the current authorization|Original received source cannot be replaced|Original media receipt identity or content changed|Invalid original media identity|Unsupported original media metadata|Original message exceeds total media budget|Original image signature does not match|Original PDF signature does not match|Original text file must be UTF-8|Invalid original text document|Received time is in the future|Original platform second does not prove the current grant)/i;
+
+function toolErrorText(result){
+  if(!result || result.isError!==true)return '';
+  if(typeof result.error==='string')return result.error;
+  if(Array.isArray(result.content))return result.content.map(block=>block?.type==='text'&&typeof block.text==='string'?block.text:'').join('\n');
+  return '';
+}
 
 // The only read source is an official SDK local media path below this host's
 // inbound directory. URLs, remote staging paths and caption text are not inputs.
@@ -49,7 +57,7 @@ export function readTelegramMedia(file,root) {
       // OpenClaw sanitizes the original basename and appends ---UUID. Preserve
       // that safe displayed name, without claiming the unsanitized filename.
       const fileName=path.basename(file.localPath).replace(/---[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}(?=\.[^.]+$|$)/i,'');
-      if(!fileName || [...fileName].length>256 || /[\u0000-\u001f\u007f/\\]/u.test(fileName))return {failure:'unreadable'};
+      if(!fileName || !fileName.trim() || [...fileName].length>256 || /[\u0000-\u001f\u007f/\\]/u.test(fileName))return {failure:'unreadable'};
       return {body,fileName,mimeType:file.mimeType,byteSize:body.length,sha256:hash(body),failure:null};
     } finally {closeSync(fd);}
   } catch {return {failure:'unreadable'};}
@@ -97,6 +105,7 @@ export class TelegramMediaProjection {
       const old=this.store.lookup(this.key(record));
       if(old){if(old.sourceHash!==sourceHash || old.namespace!==namespace)throw Error('MEDIA_SOURCE_CONFLICT');
         if(old.state==='sent')return Promise.resolve(true);
+        if(old.state==='rejected')return Promise.resolve(false);
       } else {
         let sequence;this.store.update('sequence',value=>({sequence:sequence=(value?.sequence||0)+1}));
         if(!Number.isSafeInteger(sequence))throw Error('MEDIA_SEQUENCE_INVALID');
@@ -106,16 +115,23 @@ export class TelegramMediaProjection {
     } catch(error){this.warn(error);return Promise.resolve(false);}
   }
   entries(){return this.store.entriesWithPrefix?this.store.entriesWithPrefix('media:'):this.store.entries().filter(row=>row.key.startsWith('media:'));}
-  pending(){return this.entries().map(row=>row.value).filter(row=>row.kind==='telegram-media-source'&&row.state!=='sent').sort((a,b)=>a.sequence-b.sequence);}
+  pending(){return this.entries().map(row=>row.value).filter(row=>row.kind==='telegram-media-source'&&row.state!=='sent'&&row.state!=='rejected').sort((a,b)=>a.sequence-b.sequence);}
   async call(record,name,args){
     const client=this.identity.resolve(record);if(!client)throw Error('MEDIA_IDENTITY_CHANGED');
     return client.callTool(name,{agent_host:'openclaw',endpoint_key:record.endpointKey,...args},
       {signal:AbortSignal.timeout(5000),meta:hostContextMeta()});
   }
+  reject(record){
+    record.state='rejected';record.completedAt=this.now();delete record.files;
+    for(const item of record.items){for(const key of bodyKeys(item))this.store.delete(key);delete item.bodyPrefix;delete item.bodyCount;}
+    this.save(record);try{this.pruneOrphans(record);}catch{}
+  }
   async source(record){
     const result=await this.call(record,'agentbridge_host_telegram_media_source',{source_message_id:record.sourceMessageId,received_at:record.receivedAt});
+    if(PERMANENT_MEDIA_REJECTION.test(toolErrorText(result))){this.reject(record);this.warn(Error('MEDIA_PROJECTION_REJECTED'));return false;}
     if(result?.recorded!==true || !UUID.test(result.sourceEndpointId||'') || !/^[a-f0-9]{64}$/.test(result.pairingRef||'') || result.receivedAt!==record.receivedAt)throw Error('MEDIA_SOURCE_RECEIPT_INVALID');
     record.sourceEndpointId=result.sourceEndpointId;record.pairingRef=result.pairingRef;record.state='preparing';this.save(record);
+    return true;
   }
   prepare(record){
     let total=record.items.reduce((sum,item)=>sum+item.request.byte_size,0);
@@ -169,7 +185,7 @@ export class TelegramMediaProjection {
     for(const key of keys)if(!keep.has(key))this.store.delete(key);
   }
   async publish(record){
-    if(record.state==='source')await this.source(record);
+    if(record.state==='source' && !await this.source(record))return true;
     if(record.state==='preparing')this.prepare(record);
     for(const item of record.items){
       if(item.state==='sent')continue;
@@ -178,6 +194,7 @@ export class TelegramMediaProjection {
       // Probe the original manifest first: a response lost before expiry still
       // settles its original receipt after revocation or the seven-day deadline.
       let result=await this.call(record,'agentbridge_host_telegram_media_append',request);
+      if(PERMANENT_MEDIA_REJECTION.test(toolErrorText(result))){this.reject(record);this.warn(Error('MEDIA_PROJECTION_REJECTED'));return true;}
       if(result?.recorded!==true){
         if(result?.recorded!==false)throw Error('MEDIA_APPEND_RECEIPT_INVALID');
         if(!request.failure && Date.parse(record.expiresAt)<=this.now()){
@@ -186,11 +203,12 @@ export class TelegramMediaProjection {
         }
         result=await this.call(record,'agentbridge_host_telegram_media_append',{
           ...request,...(!request.failure?{content_base64:this.body(item)}:{})});
+        if(PERMANENT_MEDIA_REJECTION.test(toolErrorText(result))){this.reject(record);this.warn(Error('MEDIA_PROJECTION_REJECTED'));return true;}
       }
       item.receipt=this.receipt(record,request,result);item.state='sent';this.save(record);
       try{this.prune(record);}catch{}
     }
-    record.state='sent';this.save(record);try{this.prune(record);}catch{}
+    record.state='sent';record.completedAt=this.now();this.save(record);try{this.prune(record);}catch{}
     return true;
   }
   schedule(namespace){
@@ -209,10 +227,13 @@ export class TelegramMediaProjection {
   }
   async recover(){
     if(!this.store)return;
-    for(const {value} of this.entries())if(value.kind==='telegram-media-source'){
+    const completed=[];
+    for(const {key,value} of this.entries())if(value.kind==='telegram-media-source'){
       if(value.items.some(item=>(item.state==='sent'||item.expiryRequest)&&item.bodyCount))this.prune(value);
-      if(['pending','sent'].includes(value.state))this.pruneOrphans(value);
+      if(['pending','sent','rejected'].includes(value.state) || (value.state==='preparing' && !this.queues.has(value.namespace)))this.pruneOrphans(value);
+      if(['sent','rejected'].includes(value.state))completed.push({key,order:value.sequence??0,completedAt:value.completedAt??Date.parse(value.receivedAt)});
     }
+    compactCompletedEntries(this.store,completed,{now:this.now()});
     return Promise.allSettled([...new Set(this.pending().map(value=>value.namespace))].map(value=>this.schedule(value)));
   }
   start(){if(!this.store||this.timer)return;void this.recover().catch(error=>this.warn(error));this.timer=setInterval(()=>void this.recover().catch(error=>this.warn(error)),30_000);this.timer.unref?.();}

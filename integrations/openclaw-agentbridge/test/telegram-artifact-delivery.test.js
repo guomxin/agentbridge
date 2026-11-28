@@ -87,3 +87,35 @@ test('the atomic durable send boundary rejects another process claiming the same
   });
   const result=await h.delivery.deliver(h.args);assert.equal(result.deliveryUnknown,true);assert.equal(h.sends,0);
 });
+
+test('artifact upload escapes HTML caption with HTML parseMode and recoverReports restores route after restart',async t=>{
+  let lose=true;
+  const h=fixture(t,{report:result=>{if(lose)throw Error('ACK_LOST');return result;}});
+  const file={...h.args.file,filename:'oa_report_<2026>&1.pdf'};
+  const result=await h.delivery.deliver({...h.args,file});
+  assert.equal(result.state,'attachment_sent');
+  assert.deepEqual(h.contexts[0].formatting,{parseMode:'HTML'});
+  assert.equal(h.contexts[0].text,'AgentBridge 文件已准备完成：oa_report_&lt;2026&gt;&amp;1.pdf');
+  const args={agent_host:'openclaw',task_id:'task-original',delivery_ref:'original-ref',channel:'telegram',
+    files:[{artifact_id:file.artifactId,state:result.state,attempt_count:result.attemptCount,error_code:result.errorCode}]};
+  assert.equal(await h.delivery.report({sessionKey:h.args.sessionKey,client:h.client,args}),false);
+  lose=false;
+  const routes=new Map();
+  let restoredBinding=false;
+  const restarted=new TelegramArtifactDelivery({
+    ...h.options,
+    routeFor:sessionKey=>routes.get(sessionKey)||null,
+    clientFor:()=>null,
+  });
+  await restarted.recoverReports({
+    binding:{key:'telegram:default:101',channel:'telegram',senderId:'101',accountId:'default'},
+    client:h.client,
+    endpoint:{state:'active',clientType:'telegram',agentHost:'openclaw',externalSubject:'101',accountId:'default',
+      conversationRef:h.args.sessionKey,route:{channel:'telegram',to:'101',accountId:'default'}},
+    identityRouter:{restoreSessionBinding(){restoredBinding=true;return true;}},
+    restoreRoute:(sessionKey,route)=>routes.set(sessionKey,route),
+  });
+  assert.equal(restoredBinding,true);
+  assert.equal(h.reports.length,2);
+  assert(h.store.entries().some(row=>row.value.kind==='artifact-report'&&row.value.state==='sent'));
+});
