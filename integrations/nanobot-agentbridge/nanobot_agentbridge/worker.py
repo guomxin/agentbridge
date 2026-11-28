@@ -31,7 +31,7 @@ def channel_for(endpoint_key: str) -> str:
 async def verify_subject(session, request) -> tuple[dict,str]:
     instance = request["instance"]
     coordinator = bool(request.get("coordinatorProgram"))
-    context = {"version":"1","agentHost":"nanobot","hostInstanceId":instance,"hostVersion":"0.3.1" if coordinator else VERSION}
+    context = {"version":"1","agentHost":"nanobot","hostInstanceId":instance,"hostVersion":"0.3.2" if coordinator else VERSION}
     names = ("mcpApps","privateResultMeta","interactionPollResume","taskTimeline","proactiveDelivery","artifactDelivery",
              "restartRecovery","coordinatorLease","batchTaskTimeline","runtimeSignals","boundedTransportRecovery")
     capabilities = dict.fromkeys(names,False)

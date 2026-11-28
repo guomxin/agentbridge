@@ -49,6 +49,48 @@ def source_fields(body):
     return body.get("sourceTaskId"), "workspace_query_v2", 1, 1
 
 
+def _ensure_claims_schema(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(workspace_query_claims)")}
+    for name, definition in (("mode", "TEXT NOT NULL DEFAULT 'workspace_query_v2'"),
+                             ("part_index", "INTEGER NOT NULL DEFAULT 1"), ("part_count", "INTEGER NOT NULL DEFAULT 1")):
+        if name not in columns:
+            db.execute(f"ALTER TABLE workspace_query_claims ADD COLUMN {name} {definition}")
+
+
+def web_owners(host, subject):
+    seen = set()
+    sources = list(getattr(host, "bindings", {}).values())
+    routes = getattr(host, "telegram_routes", None)
+    if routes is not None and isinstance(getattr(routes, "web", None), dict):
+        sources.extend(routes.web.values())
+    owners = []
+    for record in sources:
+        if (record.get("user_subject") != subject
+                or record.get("endpoint_key", "").startswith("telegram:")):
+            continue
+        identity = (record.get("endpoint_id"), record.get("endpoint_key"), record.get("tokenFile"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        owners.append(record)
+    return owners
+
+
+async def ensure_web_owners(host, subject):
+    owners = web_owners(host, subject)
+    if owners:
+        return owners
+    enrollment = getattr(host, "enrollment", None)
+    seed = getattr(enrollment, "identities", {}).get(subject) if enrollment is not None else None
+    if seed and ":" in str(seed.get("endpoint_key", "")):
+        try:
+            await enrollment.web_record(seed["endpoint_key"].rsplit(":", 1)[1])
+        except Exception:
+            pass
+        return web_owners(host, subject)
+    return owners
+
+
 def record_claim(path, endpoint, delivery, attempt, task, pairing, *, record=None,
                  mode="workspace_query_v2", part_index=1, part_count=1, event_task=None, notification_kind=None):
     """Persist only the proof returned by this endpoint's authenticated central claim."""
@@ -59,11 +101,7 @@ def record_claim(path, endpoint, delivery, attempt, task, pairing, *, record=Non
             part_index INTEGER NOT NULL DEFAULT 1, part_count INTEGER NOT NULL DEFAULT 1)""")
         # An interrupted candidate can have a prior v2 claim ledger. Add only
         # metadata; never reset receipts or reinterpret its existing source.
-        columns = {row[1] for row in db.execute("PRAGMA table_info(workspace_query_claims)")}
-        for name, definition in (("mode", "TEXT NOT NULL DEFAULT 'workspace_query_v2'"),
-                                 ("part_index", "INTEGER NOT NULL DEFAULT 1"), ("part_count", "INTEGER NOT NULL DEFAULT 1")):
-            if name not in columns:
-                db.execute(f"ALTER TABLE workspace_query_claims ADD COLUMN {name} {definition}")
+        _ensure_claims_schema(db)
         db.execute("""INSERT INTO workspace_query_claims VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(delivery) DO UPDATE SET attempt=excluded.attempt
             WHERE endpoint=excluded.endpoint AND task=excluded.task AND pairing=excluded.pairing
@@ -96,18 +134,19 @@ def receipt_route(host, body):
     if not source:
         raise web.HTTPForbidden()
     binding = body["binding"]
-    for original in host.bindings.values():
-        if original.get("user_subject") != binding.get("user_subject") or original.get("endpoint_key", "").startswith("telegram:"):
-            continue
+    for original in web_owners(host, binding.get("user_subject")):
         request = host.worker_payload(original, None)
         path = Path(request["userDir"]) / "coordinated-runs.sqlite3"
         if not path.is_file():
             continue
         with sqlite3.connect(path) as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_query_receipt_routes'").fetchone()
+            claims_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_query_claims'").fetchone()
+            if exists and claims_exists:
+                _ensure_claims_schema(db)
             row = db.execute("""SELECT r.route_json,r.token_hash,c.endpoint,c.task,c.pairing,c.attempt,c.mode,c.part_index,c.part_count
                 FROM workspace_query_receipt_routes r JOIN workspace_query_claims c USING(delivery)
-                WHERE r.delivery=?""", (body.get("deliveryId"),)).fetchone() if exists else None
+                WHERE r.delivery=?""", (body.get("deliveryId"),)).fetchone() if exists and claims_exists else None
         if not row or (row[2], row[3], row[4], row[5], *row[6:]) != (
                 binding.get("endpoint_id"), source[0], body.get("pairingRef"), body.get("attempt"), *source[1:]):
             continue
@@ -129,6 +168,9 @@ async def acknowledge_receipt(host, body, *, host_type):
     from aiohttp import web
     from .session_pool import open_host_session
 
+    binding = body.get("binding") if isinstance(body, dict) else None
+    if isinstance(binding, dict) and isinstance(binding.get("user_subject"), str):
+        await ensure_web_owners(host, binding["user_subject"])
     original, record, path = receipt_route(host, body)
     req = host.worker_payload(record, None)
     req["hostType"] = host_type
@@ -161,6 +203,8 @@ async def handle_request(session, meta, req, path, body, origins):
         raise web.HTTPForbidden()
     with sqlite3.connect(path) as db:
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_query_claims'").fetchone()
+        if exists:
+            _ensure_claims_schema(db)
         claim = db.execute("SELECT endpoint,task,pairing,attempt,mode,part_index,part_count FROM workspace_query_claims WHERE delivery=?",
                            (delivery,)).fetchone() if exists else None
     if claim != (req["endpoint"], task, pairing, attempt, mode, part_index, part_count):
@@ -365,8 +409,18 @@ class WorkspaceQueries:
                 with self.pilot.db:
                     self.pilot.db.execute("DELETE FROM telegram_card_deliveries WHERE bot=? AND chat=? AND dedupe_key=?",
                                           (self.pilot.bot_id, chat, claim.dedupe_key))
+                    self.pilot.db.execute("""UPDATE telegram_workspace_query_attempts
+                        SET attempt=?,claim_json=?,retry_seconds=NULL,not_before=NULL,acknowledged=0,next_ack=0
+                        WHERE bot=? AND chat=? AND delivery=? AND attempt<?""",
+                        (claim.attempt, json.dumps(asdict(claim)), self.pilot.bot_id, chat, delivery, claim.attempt))
                 row = None
         if row:
+            if row[0] == delivery:
+                with self.pilot.db:
+                    self.pilot.db.execute("""UPDATE telegram_workspace_query_attempts
+                        SET attempt=?,claim_json=?,acknowledged=0,next_ack=0
+                        WHERE bot=? AND chat=? AND delivery=? AND attempt<?""",
+                        (claim.attempt, json.dumps(asdict(claim)), self.pilot.bot_id, chat, delivery, claim.attempt))
             self._ack_known(claim, row)
         else:
             self._request(claim, "issue")
@@ -479,7 +533,11 @@ class WorkspaceQueries:
                         and (result.get("from") or {}).get("id") == self.pilot.bot_id
                         and (result.get("chat") or {}).get("id") == claim.chat
                         and (result.get("chat") or {}).get("type") == "private"):
-                    state, receipt = "delivered", result["message_id"]
+                    candidate = result["message_id"]
+                    if not self.pilot.db.execute("""SELECT 1 FROM telegram_card_deliveries
+                            WHERE bot=? AND chat=? AND receipt=? AND dedupe_key!=?""",
+                            (self.pilot.bot_id, claim.chat, candidate, claim.dedupe_key)).fetchone():
+                        state, receipt = "delivered", candidate
         except TelegramRejected as exc:
             delay = exc.retry_after if exc.error_code == 429 else None
             state = "retry_after" if delay is not None else "rejected"

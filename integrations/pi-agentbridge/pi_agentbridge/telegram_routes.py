@@ -83,6 +83,7 @@ class PiTelegramRoutes:
         if (result.isError or value.get("endpointKey") != key or value.get("workspaceEndpointId") != self.web["endpoint_id"]
                 or value.get("workspaceEndpointKey") != self.web["endpoint_key"]
                 or not re.fullmatch(r"[a-f0-9]{64}", str(value.get("pairingRef", "")))):
+            self._last_routed = None
             return None
         try:
             endpoint = str(UUID(value["endpointId"]))
@@ -90,8 +91,10 @@ class PiTelegramRoutes:
             expected = telegram_conversation_ref(self.host.instance, self.web["user_subject"],
                                                  self.web["endpoint_id"], self.bot, self.sender)
             if conversation != expected:
+                self._last_routed = None
                 return None
         except (KeyError, TypeError, ValueError, AttributeError):
+            self._last_routed = None
             return None
         self._last_routed = {**self.web, "endpoint_id": endpoint, "endpoint_key": key, "session_key": conversation,
                 "credential_ref": "tg-" + value["pairingRef"], "workspaceEndpointId": self.web["endpoint_id"],

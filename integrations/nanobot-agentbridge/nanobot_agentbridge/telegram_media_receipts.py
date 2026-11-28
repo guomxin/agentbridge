@@ -66,6 +66,9 @@ async def prepare_source(host,record,body):
         if level!="L3" or not await verify_telegram_binding(session,host.instance,record["user_subject"],meta,
                                                            record["endpoint_key"],host_type=host_type):
             raise web.HTTPForbidden()
+        if record.get("pairingRef"):
+            from .telegram_reception import scope
+            await scope(session, meta, record)
         answer=await session.call_tool("agentbridge_host_telegram_media_source",{
             "agent_host":host_type,"endpoint_key":record["endpoint_key"],
             "source_message_id":body["messageId"],"received_at":body["receivedAt"]},meta=meta)
@@ -199,13 +202,12 @@ async def publish_media(host,record,body):
 async def recover_route(host,body,*,host_type):
     """Original exact manifest/token may reconcile; an absent source returns no route."""
     from aiohttp import web
+    from .workspace_query_delivery import ensure_web_owners
     binding=body.get("binding")
     if not isinstance(binding,dict) or set(binding)!=set(BINDING_FIELDS):
         raise web.HTTPForbidden()
     metadata=manifest(body)
-    for owner in host.bindings.values():
-        if owner.get("user_subject")!=binding.get("user_subject") or owner.get("endpoint_key","").startswith("telegram:"):
-            continue
+    for owner in await ensure_web_owners(host,binding.get("user_subject")):
         path=_path(host,owner)
         if not path.is_file() or path.is_symlink():
             continue

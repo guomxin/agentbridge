@@ -6130,6 +6130,8 @@ def create_central_mcp_server(
             **({"planning_report_plan_id": planning_report_plan_id} if planning_report_plan_id else {}),
             host_instance_id=host_context["hostInstanceId"],
             host_version=host_context["hostVersion"],
+            **({"pairing_protocol": _request_meta(ctx).get(PROTOCOL_META)}
+               if agent_host in PRIVATE_BOT_HOSTS else {}),
         )
 
     @mcp.tool(

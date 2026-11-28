@@ -119,17 +119,27 @@ class TelegramNavigation:
             pilot._state(chat, message, "sending")
             params = formatted or {}
             key = "interaction:" + str((native_source or {}).get("interactionId"))
-            inserted = False
+            claim_row = False
             if native_source:
                 with pilot.db:
                     inserted = pilot.db.execute("INSERT OR IGNORE INTO telegram_card_deliveries VALUES(?,?,?,NULL,'sending',NULL)",
                                                 (pilot.bot_id, chat, key)).rowcount
                     if inserted:
+                        claim_row = True
                         pilot.native_card_closures.arm(chat, digest, key, native_source)
+                    else:
+                        reclaimed = pilot.db.execute(
+                            """UPDATE telegram_card_deliveries SET state='sending', receipt=NULL
+                            WHERE bot=? AND chat=? AND dedupe_key=? AND state='delivery_unknown' AND receipt IS NULL""",
+                            (pilot.bot_id, chat, key),
+                        ).rowcount
+                        if reclaimed:
+                            claim_row = True
+                            pilot.native_card_closures.arm(chat, digest, key, native_source)
             receipt = pilot._confirmed_send(chat, message, text, parse_mode=params.get("parse_mode"),
                                             reply_markup=params.get("reply_markup"))
             with pilot.db:
-                if inserted:
+                if claim_row:
                     pilot.db.execute("UPDATE telegram_card_deliveries SET state=?,receipt=? WHERE bot=? AND chat=? AND dedupe_key=?",
                                      ("delivered" if receipt else "delivery_unknown",receipt,pilot.bot_id,chat,key))
                 self.remember(chat, receipt, digest, target)

@@ -23,11 +23,11 @@ from .state import ReferenceHostState
 from .task_driver import ReferenceTaskDriver
 
 IMPLEMENTATION = CoordinatorImplementation(
-    "nanobot", "0.3.1", ("web_private", "telegram_private")
+    "nanobot", "0.3.2", ("web_private", "telegram_private")
 )
 
 
-PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.8", ("web_private", "telegram_private"))
+PI_IMPLEMENTATION = CoordinatorImplementation("pi", "0.1.9", ("web_private", "telegram_private"))
 
 
 class PersonalIdentity(IdentityConfig):
@@ -52,6 +52,12 @@ class BoundDriver(ReferenceTaskDriver):
         super().__init__(**kwargs)
         self.req = req
         self.journal = journal
+
+    def host_context(self):
+        meta = super().host_context()
+        if self.implementation.name == "nanobot":
+            meta["io.agentbridge/telegram-pairing-version"] = 2
+        return meta
 
     async def begin_governed(self, local_id, tool, arguments, governed):
         # The coordinator reuses the original prepare and its stable idempotency key after login.
@@ -118,7 +124,7 @@ class BoundDriver(ReferenceTaskDriver):
                 or result.payload().get("telegramIdentityVerified") is not True
             ):
                 raise PermissionError("Original Telegram pairing is no longer active")
-            if self.implementation.name == "pi":
+            if self.implementation.name == "pi" or self.req.get("pairingRef") is not None:
                 current = await self.client("owner").call_tool(
                     "agentbridge_host_telegram_endpoint", {"bot_id": match.group(1), "sender_id": match.group(2)},
                     meta=self.host_context(), recovery_class="read")
@@ -128,7 +134,7 @@ class BoundDriver(ReferenceTaskDriver):
                         endpoint.get("workspaceEndpointId"), endpoint.get("pairingRef")) != (
                         self.req["endpoint"], self.req["endpointKey"], self.req["conversation"],
                         self.req.get("workspaceEndpointId"), self.req["pairingRef"]):
-                    raise PermissionError("Original Pi private endpoint or pairing generation changed")
+                    raise PermissionError("Original private endpoint or pairing generation changed")
 
     async def present_interaction(self, local_task_id, interaction_id):
         await self.check_telegram()

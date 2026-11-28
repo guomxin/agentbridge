@@ -22,7 +22,8 @@ MEDIA_FIELDS = (
     "sticker",
 )
 FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,512}")
-FILE_PATH = re.compile(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)+\.[A-Za-z0-9]{1,12}")
+FILE_PATH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9_][A-Za-z0-9._-]*)+")
+EXTRA_EXTENSIONS = {".jpeg": "image/jpeg", ".yml": "text/yaml", ".htm": "text/html"}
 UNSUPPORTED = "目前可发送照片、截图、PNG/JPEG/WebP 图片、文本文件或含文字的 PDF。语音可先转成文字。"
 UNREADABLE = "附件读取失败或超过 6 MiB，请缩小后重新发送。"
 
@@ -73,22 +74,16 @@ def _select(msg):
                     for m, (s, _) in {**FORMATS, **DOCUMENT_FORMATS}.items()
                     if s == ext
                 ),
-                None,
+                EXTRA_EXTENSIONS.get(ext),
             )
         if isinstance(mime, str) and (mime in FORMATS or mime in DOCUMENT_FORMATS):
             return document, mime
     raise MediaError(UNSUPPORTED,"unsupported")
 
 
-def download(api, media):
-    """Both Bot API operations use a fixed origin. Never follow redirects or echo credentials."""
-    identifier = media.get("file_id")
-    if not isinstance(identifier, str) or not FILE_ID.fullmatch(identifier):
-        raise MediaError(UNREADABLE)
-    limit = MAX_FILE
-    size = media.get("file_size")
-    if size is not None and (type(size) is not int or not 0 < size <= limit):
-        raise MediaError(UNREADABLE,"too_large" if type(size) is int and size>limit else "unreadable")
+def _download_once(api, identifier, size, limit):
+    from .telegram import TelegramUnavailable
+
     ref = api.call("getFile", file_id=identifier)
     path = ref.get("file_path") if isinstance(ref, dict) else None
     if (
@@ -111,6 +106,8 @@ def download(api, media):
     try:
         conn.request("GET", f"/file/bot{api._token}/{path}")
         response = conn.getresponse()
+        if response.status == 429 or 500 <= response.status < 600:
+            raise TelegramUnavailable("Transient Telegram file error")
         if response.status != 200:
             raise MediaError(UNREADABLE)
         header = response.getheader("Content-Length")
@@ -122,7 +119,7 @@ def download(api, media):
         raw = bytearray()
         while len(raw) <= limit:
             if time.monotonic() - start > 15:
-                raise MediaError(UNREADABLE)
+                raise TelegramUnavailable("Telegram file download timed out")
             chunk = response.read1(min(65536, limit + 1 - len(raw)))
             if not chunk:
                 break
@@ -139,6 +136,37 @@ def download(api, media):
         return bytes(raw)
     finally:
         conn.close()
+
+
+def download(api, media):
+    """Both Bot API operations use a fixed origin. Never follow redirects or echo credentials."""
+    from .telegram import TelegramRejected
+
+    identifier = media.get("file_id")
+    if not isinstance(identifier, str) or not FILE_ID.fullmatch(identifier):
+        raise MediaError(UNREADABLE)
+    limit = MAX_FILE
+    size = media.get("file_size")
+    if size is not None and (type(size) is not int or not 0 < size <= limit):
+        raise MediaError(UNREADABLE,"too_large" if type(size) is int and size>limit else "unreadable")
+    deadline = time.monotonic() + 20.0
+    for attempt in range(3):
+        try:
+            return _download_once(api, identifier, size, limit)
+        except MediaError:
+            raise
+        except TelegramRejected as exc:
+            if exc.error_code != 429 or attempt == 2 or time.monotonic() >= deadline:
+                raise
+            delay = min(float(exc.retry_after or 1), 1.0, max(0.0, deadline - time.monotonic()))
+            if delay > 0:
+                time.sleep(delay)
+        except (OSError, http.client.HTTPException, RuntimeError):
+            if attempt == 2 or time.monotonic() >= deadline:
+                raise
+            delay = min(0.25 * (attempt + 1), max(0.0, deadline - time.monotonic()))
+            if delay > 0:
+                time.sleep(delay)
 
 
 def receive(pilot, msg, chat, message):
@@ -210,7 +238,11 @@ def receive(pilot, msg, chat, message):
         pilot.media_projection.stage(chat,message,failure="unreadable")
         pilot.deliver(chat,message,UNREADABLE)
         return
-    binding,fresh=pilot._binding(chat)
+    try:
+        binding,fresh=pilot._binding(chat)
+    except RuntimeError:
+        pilot._state(chat,message,"binding_changed")
+        return
     if not binding or fresh!=digest:
         pilot._state(chat,message,"binding_changed")
         return
@@ -220,7 +252,7 @@ def receive(pilot, msg, chat, message):
         pilot._state(chat,message,"binding_changed")
         return
     name=item.get("file_name")
-    if (not isinstance(name,str) or not 0<len(name)<=256 or name in {".",".."}
+    if (not isinstance(name,str) or not name.strip() or not 0<len(name)<=256 or name in {".",".."}
             or "/" in name or "\\" in name or any(ord(c)<32 for c in name)):
         name="attachment"+suffix
     try:

@@ -61,6 +61,9 @@ async def navigate(host, record, body):
             session, host.instance, request["subject"], meta, request["endpointKey"], host_type=request.get("hostType", "nanobot")
         ):
             raise web.HTTPForbidden()
+        if record.get("pairingRef"):
+            from .telegram_reception import scope
+            await scope(session, meta, record)
         endpoint = {"agent_host": request.get("hostType", "nanobot"), "endpoint_key": request["endpointKey"]}
 
         if operation == "public_reference":

@@ -10,9 +10,9 @@ def seed(fixture):
     a = fixture.subjects["a"]
     with sqlite3.connect(service.db_path) as db:
         db.execute("""INSERT OR IGNORE INTO agent_host_compatibility VALUES
-            ('nanobot','0.3.1','L3','isolated-candidate-conformance','isolated-fixture',CURRENT_TIMESTAMP)""")
+            ('nanobot','0.3.2','L3','isolated-candidate-conformance','isolated-fixture',CURRENT_TIMESTAMP)""")
         level = db.execute("""SELECT accepted_level FROM agent_host_compatibility
-            WHERE implementation_name='nanobot' AND implementation_version='0.3.1'""").fetchone()
+            WHERE implementation_name='nanobot' AND implementation_version='0.3.2'""").fetchone()
         assert level and level[0] == "L3"
     service.tasks.ensure_endpoint(
         user_subject=a,

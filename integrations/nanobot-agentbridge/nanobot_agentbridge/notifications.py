@@ -94,6 +94,9 @@ async def notifications(host, record, action, body, *, paired_session=None):
             session, req["instance"], req["subject"], meta, req["endpointKey"], host_type=req.get("hostType", "nanobot")
         )):
             raise web.HTTPForbidden()
+        if paired_session is None and record.get("pairingRef"):
+            from .telegram_reception import scope
+            await scope(session, meta, record)
         endpoint_params = {"agent_host": req.get("hostType", "nanobot"), "endpoint_key": req["endpointKey"]}
 
         async def ack(delivery, attempt, succeeded, artifact_outcome=None):

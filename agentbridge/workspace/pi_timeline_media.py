@@ -119,7 +119,7 @@ def _v2_predecessor_pending(db, row):
         LIMIT 1''', (row['dispatch_id'],row['entry_id'],row['destination'],row['ordinal'])).fetchone() is not None
 
 
-def _claim(db, scope):
+def _claim(db, scope, token_id=None):
     now = time.time()
     db.execute(
         f"""UPDATE pi_workspace_image_deliveries SET state='unknown' WHERE {_SCOPE}
@@ -134,6 +134,13 @@ def _claim(db, scope):
         ).fetchone()
         if not row or row["state"] == "sending" or row["state"] == "claimed" and row["lease_until"] > now:
             return {"available": False}
+        if token_id is not None and row["token_id"] not in (None, token_id):
+            # A rotated personal token cannot read/begin an un-sent row pinned to an older token.
+            db.execute(
+                "UPDATE pi_workspace_image_deliveries SET state='unavailable' WHERE delivery_id=?",
+                (row["delivery_id"],),
+            )
+            continue
         if _v2_predecessor_pending(db, row):
             return {"available": False}
         if not _original_image(db, row):
@@ -182,7 +189,7 @@ def delivery(
                 (subject, instance, endpoint_key, pairing_ref, token_id, delivery_id, attempt)).fetchone()
         scope = _scope(service, db, *params) if row is None else None
         if action == "claim":
-            return _claim(db, scope)
+            return _claim(db, scope, token_id=token_id)
         if row is None:
             row = db.execute(
                 f"SELECT * FROM pi_workspace_image_deliveries WHERE {_SCOPE} AND delivery_id=? AND attempt=?",

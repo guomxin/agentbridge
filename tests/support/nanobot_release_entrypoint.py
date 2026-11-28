@@ -28,7 +28,7 @@ def worker_argv(root, python, instance, port, config):
 
 def exercise(*, gateway, instance, **_):
     ready = gateway.readiness()
-    assert ready["available"] and ready["adapterVersion"] == "0.3.1"
+    assert ready["available"] and ready["adapterVersion"] == "0.3.2"
     connection = HTTPConnection("127.0.0.1", gateway.port, timeout=3)
     try:
         connection.request("POST", "/v1/ready", body=json.dumps({"instance": instance}),

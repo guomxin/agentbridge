@@ -60,7 +60,8 @@ def _exercise(fixture, host_type):
     req = {**original.req, "workspaceEndpointId": original.record["workspaceEndpointId"]}
     token = Path(fixture.token_files[host_type, subject]).read_text().strip()
     profile = json.loads((Path(__file__).parents[1] / "schemas/agent-host/v1/test-vectors.json").read_text())["profiles"][0]["value"]
-    profile.update(implementation={"name": host_type, "version": {"nanobot": "0.3.1", "pi": "0.1.8"}[host_type]},
+    from agentbridge.core.workspace_query_delivery import VERSIONS
+    profile.update(implementation={"name": host_type, "version": VERSIONS[host_type]},
                    hostInstanceId=INSTANCES[host_type])
     meta = {"io.agentbridge/host-context": {"version": "1", "agentHost": host_type,
         "hostInstanceId": INSTANCES[host_type], "hostVersion": profile["implementation"]["version"]},

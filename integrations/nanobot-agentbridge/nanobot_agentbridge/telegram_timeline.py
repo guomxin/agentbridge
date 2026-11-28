@@ -202,9 +202,10 @@ class TelegramTimeline:
             if row["next_attempt"] > time.time():
                 blocked.add(row["id"])
                 continue
+            run_id = None if row["projection_mode"] == "telegram_received_v2" else row["run_id"]
             try:
                 recorded = pilot.gateway.publish_telegram_timeline(json.loads(row["binding_json"]), row["message"],
-                    row["role"], row["text"], row["run_id"], [], projection_mode=row["projection_mode"],
+                    row["role"], row["text"], run_id, [], projection_mode=row["projection_mode"],
                     source_state=row["source_state"], receipt_only=True)
                 if recorded:
                     self._finish(row, "acknowledged")
@@ -253,8 +254,9 @@ class TelegramTimeline:
                                 WHERE bot=? AND chat=? AND message=? ORDER BY part""",
                                 (pilot.bot_id, row["chat"], row["message"]))]
                         options = {"projection_mode":row["projection_mode"], "source_state":row["source_state"]} if row["projection_mode"] else {}
+                        run_id = None if row["projection_mode"] == "telegram_received_v2" else row["run_id"]
                         pilot.gateway.publish_telegram_timeline(binding, row["message"], row["role"], row["text"],
-                                                                row["run_id"], receipts, **options)
+                                                                run_id, receipts, **options)
                 except (RuntimeError, OSError) as error:
                     if not isinstance(error, GatewayRequestError) or error.code not in {
                             pilot.host_type.upper() + "_BINDING_UNAVAILABLE", pilot.host_type.upper() + "_INVALID_REQUEST"}:

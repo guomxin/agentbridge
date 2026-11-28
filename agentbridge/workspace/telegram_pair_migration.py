@@ -4,7 +4,7 @@ from datetime import datetime
 import math
 import json
 
-from agentbridge.core.workspace_query_delivery import VERSIONS, registered
+from agentbridge.core.workspace_query_delivery import SUPPORTED_VERSIONS, registered
 
 
 PROTOCOL_META = "io.agentbridge/telegram-pairing-version"
@@ -38,7 +38,8 @@ def deployment_token(db, subject, instance, bot):
         AND h.state='enabled' AND h.all_subjects=0 AND e.user_subject=a.user_subject AND e.state='active'
         AND EXISTS(SELECT 1 FROM workspace_host_visibility v WHERE v.instance_id=h.instance_id AND v.user_subject=a.user_subject)""",
         (subject, instance)).fetchone()
-    if not row or row["adapter_version"] != VERSIONS["nanobot"]:
+    supported = SUPPORTED_VERSIONS["nanobot"]
+    if not row or row["adapter_version"] not in supported:
         return None
     try:
         spec = route_specs_for("nanobot").get(row["route_ref"]) or {}
@@ -49,25 +50,30 @@ def deployment_token(db, subject, instance, bot):
         return None
     if not registered(db, subject, "nanobot", ("nanobot", instance), None):
         return None
-    candidates = db.execute("""SELECT DISTINCT r.token_id FROM agent_host_registrations r
+    candidates = db.execute("""SELECT DISTINCT r.token_id, t.label FROM agent_host_registrations r
         JOIN mcp_identity_tokens t ON t.token_id=r.token_id AND t.user_subject=r.user_subject
-        WHERE r.user_subject=? AND r.agent_host='nanobot' AND r.host_instance_id=? AND r.host_version=?
+        WHERE r.user_subject=? AND r.agent_host='nanobot' AND r.host_instance_id=?
+        AND r.host_version IN (SELECT value FROM json_each(?))
         AND r.accepted_level='L3' AND r.compatibility_status='approved' AND t.state='active'
-        AND julianday(t.expires_at)>julianday('now')""", (subject, instance, VERSIONS["nanobot"])).fetchall()
+        AND julianday(t.expires_at)>julianday('now')""", (subject, instance, json.dumps(supported))).fetchall()
     if len(candidates) != 1:
         return None
-    token = candidates[0][0]
-    if token == row["token_id"]:
+    token, label = candidates[0][0], candidates[0][1]
+    if token == row["token_id"] or label == f"workspace-nanobot:{instance}:{row['credential_ref']}":
         return token
     # Provisioned installations can assign different personal identities to the Web and Telegram endpoints.
     for endpoint in db.execute("""SELECT external_subject,endpoint_key,conversation_ref,route_json FROM client_endpoints
             WHERE user_subject=? AND agent_host='nanobot' AND token_id=? AND client_type='telegram' AND account_id=?
             AND state='active'""", (subject, token, bot)):
         sender = endpoint["external_subject"]
-        if (isinstance(sender, str) and sender.isdecimal()
-                and endpoint["endpoint_key"] == f"telegram:{bot}:{sender}"
-                and endpoint["conversation_ref"] == telegram_conversation_ref(instance, subject, row["endpoint_id"], bot, sender)
-                and json.loads(endpoint["route_json"]) == {"channel": "telegram", "accountId": bot, "to": sender}):
+        expected_route = {"channel": "telegram", "accountId": bot, "to": sender}
+        if not (isinstance(sender, str) and sender.isdecimal() and json.loads(endpoint["route_json"]) == expected_route):
+            continue
+        if (endpoint["endpoint_key"] == f"telegram:{bot}:{sender}"
+                and endpoint["conversation_ref"] == telegram_conversation_ref(instance, subject, row["endpoint_id"], bot, sender)):
+            return token
+        enrollment_key = f"enrollment:{instance}:{bot}:{sender}"
+        if endpoint["endpoint_key"] == enrollment_key and endpoint["conversation_ref"] == enrollment_key:
             return token
     return None
 

@@ -33,7 +33,7 @@ async def checks(fixture, binding, instance, python):
     )
     directory = fixture.service.workspace.hosts
     directory.save_instance(instance, host_type="nanobot", display_name="隔离协调实例", route_ref=instance,
-                            adapter_version="0.3.1", state="enabled", subjects=[OWNER],
+                            adapter_version="0.3.2", state="enabled", subjects=[OWNER],
                             expected_revision=0, actor="fixture", reason="验证原实例的已绑定端点")
     directory.bind(fixture.account["account_id"], instance, endpoint_id=binding["endpoint_id"],
                    credential_ref=binding["credential_ref"])

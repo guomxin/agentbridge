@@ -174,7 +174,7 @@ class Host:
             for key in self.verified_bindings:
                 self.commands.recover_queries(self.bindings[key])
 
-    async def execute(self, record, run, history, emit, message, images, *, trial=None, request_key=None):
+    async def execute(self, record, run, history, emit, message, images, *, trial=None, request_key=None, documents=""):
         if record["endpoint_key"].startswith("telegram:") and not await self.telegram.verified(binding_key(record)):
             raise PermissionError("Telegram pairing is no longer active")
         async with self.bound_session(record) as central:
@@ -196,9 +196,17 @@ class Host:
                 emit("delta", answer)
                 return answer
             from nanobot_agentbridge.cross_endpoint_reference import parse, answer as reference_answer
-            reference = parse(message, "telegram" if record["endpoint_key"].startswith("telegram:") else "workspace")
+            channel = "telegram" if record["endpoint_key"].startswith("telegram:") else "workspace"
+            opposite = "workspace" if channel == "telegram" else "telegram"
+            reference = parse(message, channel)
+            wrong_source = reference is None and parse(message, opposite) is not None
+            if wrong_source:
+                await central.require_binding()
+                answer = "请在另一端引用这条消息。"
+                emit("delta", answer)
+                return answer
             if reference is not None:
-                if images or central.level != "L3":
+                if images or documents or central.level != "L3":
                     raise PermissionError("Explicit public reference requires level three and text only")
                 await central.require_binding()
                 async def complete_reference(system, prompt):
@@ -213,6 +221,7 @@ class Host:
                 await central.require_binding()
                 emit("delta", answer)
                 return answer
+            model_message = message + ("\n\n" + documents if documents else "")
             if central.level in {"L2", "L3"}:
                 central.handle_card = partial(self.cards.resume_credential, central, record, run)
             if central.level == "L3" and self.coordinator:
@@ -257,7 +266,7 @@ class Host:
                         central.contextual_reads.intersection(central.definitions), central.governed, host_type="pi", govern=govern)
                     central.repair = PlanningRepair(central)
             event = await self.invoke_model("chat", run=run, subject=record["user_subject"], history=history,
-                                            emit=emit, central=central, message=message, images=images)
+                                            emit=emit, central=central, message=model_message, images=images)
             if central.task_context:
                 await central.task_context.finish_confirmed_read()
             self.ledger.record_usage(run, event.get("usage"))
@@ -361,6 +370,9 @@ class Host:
             except web.HTTPException as exc:
                 raise HTTPException(exc.status) from None
         if action in DELIVERY_ACTIONS:
+            if action == "telegram-received-source" and self.level in {"L2", "L3"} and key[2].startswith("telegram:"):
+                from .channel_delivery import dispatch
+                return await dispatch(self, record, action, body)
             if action == "telegram-task" and body.get("operation") == "card_state" and self.level in {"L2", "L3"}:
                 from .channel_delivery import dispatch
                 return await dispatch(self, record, action, body)
@@ -422,8 +434,8 @@ class Host:
             digest_parts = [message, ids] if trial is None else [message, ids, trial]
             digest = hashlib.sha256(json.dumps(digest_parts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             row = self.ledger.accept(key[0], binding, request_key, digest, message,
-                    lambda run, history, emit: self.execute(record, run, history, emit, message + ("\n\n" + documents if documents else ""), images,
-                                                          trial=trial, request_key=request_key))
+                    lambda run, history, emit: self.execute(record, run, history, emit, message, images,
+                                                          trial=trial, request_key=request_key, documents=documents))
             return {"runId": row["id"], "state": row["state"]}
         row = self.ledger.lookup(binding, request_key)
         waiting = self.cards.waiting(row["id"]) if row and row["state"] == "accepted" else None

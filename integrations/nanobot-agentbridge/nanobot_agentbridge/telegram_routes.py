@@ -57,6 +57,13 @@ class TelegramRoutes:
             "credential_ref": "tg-" + credential,
         }
 
+    def evict_sender(self, sender, *, keep=None):
+        if not self.bot:
+            return
+        endpoint_key = f"telegram:{self.bot}:{sender}"
+        for existing in [k for k in self.known if k[2] == endpoint_key and k != keep]:
+            self.known.pop(existing, None)
+
     def get(self, key):
         if not self.bot or key[0] not in self.web:
             return None
@@ -171,6 +178,8 @@ class TelegramRoutes:
                                 if not re.fullmatch(r"[a-f0-9]{64}",str(paired.get("pairingRef",""))):
                                     return None
                                 record["credential_ref"]="tg-"+paired["pairingRef"]
+                            if re.fullmatch(r"[a-f0-9]{64}", str(paired.get("pairingRef", ""))):
+                                record["pairingRef"] = paired["pairingRef"]
                             record["endpoint_id"] = paired["endpointId"]
                             record.update(
                                 workspaceEndpointId=paired["workspaceEndpointId"],
@@ -202,11 +211,14 @@ class TelegramRoutes:
         if action == "telegram-route":
             matches = [item for item in outcomes if isinstance(item, dict)]
             if len(matches) != 1:
+                self.evict_sender(sender)
                 return {"binding": None}
             from .server import binding_key
 
             record = matches[0]
-            self.known[binding_key(record)] = record
+            key = binding_key(record)
+            self.evict_sender(sender, keep=key)
+            self.known[key] = record
             return {"binding": {key: record[key] for key in BINDING_KEYS}}
         for proof in outcomes:
             if isinstance(proof, str):

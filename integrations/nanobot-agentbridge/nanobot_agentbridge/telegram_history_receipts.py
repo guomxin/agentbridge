@@ -38,14 +38,13 @@ async def recover_route(host, body, *, host_type):
     from .session_pool import open_host_session
     from .telegram_media_receipts import source_key
     from .telegram_timeline import _central_publish
+    from .workspace_query_delivery import ensure_web_owners
     binding = body.get('binding')
     if (not isinstance(binding, dict) or set(binding) != set(BINDING_FIELDS)
             or body.get('projectionMode') not in {'telegram_received_v2', 'host_result_v2'}
             or body.get('role') not in {'user', 'assistant'} or not isinstance(body.get('text'), str)):
         raise web.HTTPForbidden()
-    for owner in host.bindings.values():
-        if owner.get('user_subject') != binding['user_subject'] or owner.get('endpoint_key', '').startswith('telegram:'):
-            continue
+    for owner in await ensure_web_owners(host, binding['user_subject']):
         path = _path(host, owner)
         if not path.is_file() or path.is_symlink():
             continue

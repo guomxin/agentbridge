@@ -146,11 +146,11 @@ def run(python, lost, browser=False, restart=False, twice=False,plan=False,*,exe
         # A candidate-only compatibility entry in this throw-away database permits exercising the gate.
         with sqlite3.connect(fixture.service.db_path) as db:
             db.execute(
-                "INSERT OR IGNORE INTO agent_host_compatibility VALUES('nanobot','0.3.1','L3','isolated-candidate-conformance','isolated-fixture',CURRENT_TIMESTAMP)"
+                "INSERT OR IGNORE INTO agent_host_compatibility VALUES('nanobot','0.3.2','L3','isolated-candidate-conformance','isolated-fixture',CURRENT_TIMESTAMP)"
             )
             assert db.execute(
                 "SELECT accepted_level FROM agent_host_compatibility WHERE implementation_name=? AND implementation_version=?",
-                ("nanobot","0.3.1"),
+                ("nanobot","0.3.2"),
             ).fetchone()==("L3",)
         cfg = validate_central_mcp_server_config(
             host="127.0.0.1",

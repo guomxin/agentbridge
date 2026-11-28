@@ -168,6 +168,8 @@ class Host:
         )
         if "workspaceEndpointId" in record and "workspaceEndpointKey" in record:
             payload.update(workspaceEndpointId=record["workspaceEndpointId"], workspaceEndpointKey=record["workspaceEndpointKey"])
+        if "pairingRef" in record:
+            payload["pairingRef"] = record["pairingRef"]
         return payload
 
     def worker_environment(self, directory: Path) -> dict[str,str]:
@@ -287,7 +289,7 @@ class Host:
             from .workspace_query_delivery import acknowledge_receipt
             return await acknowledge_receipt(self, body, host_type="nanobot")
         if action == "ready":
-            return {"available":bool(self.bindings or self.enrollment.identities),"adapterVersion":"0.3.1" if self.coordinator else "0.2.0",
+            return {"available":bool(self.bindings or self.enrollment.identities),"adapterVersion":"0.3.2" if self.coordinator else "0.2.0",
                     "capabilities":["chat", "attachments", *(["credential_card"] if self.card_origins else []), *(["skill_trial"] if self.skill_trials else []), *(["skills","skill_model"] if self.skills else [])]}
         if action == "telegram-enroll":
             return {"confirmed":await self.enrollment.confirm(body["botId"],body["senderId"],body["code"])}
@@ -343,6 +345,8 @@ class Host:
                 if not identity_denial(exc):
                     raise
                 verified = False
+            if not verified:
+                self.telegram_routes.known.pop(key, None)
             return {"verified":verified}
         request_key = body["requestKey"]
         if (
@@ -434,7 +438,15 @@ class Host:
                     if channel_for(record["endpoint_key"]) == "telegram":
                         from .telegram_identity import verify_telegram_binding
                         if not await verify_telegram_binding(session, self.instance, key[0], meta, record["endpoint_key"]):
+                            self.telegram_routes.known.pop(key, None)
                             return {"available": False}
+                        if record.get("pairingRef"):
+                            from .telegram_reception import scope
+                            try:
+                                await scope(session, meta, record)
+                            except web.HTTPForbidden:
+                                self.telegram_routes.known.pop(key, None)
+                                return {"available": False}
                     if task_card and level=="L3":
                         card = await present_coordinated(session,work,meta,task_card)
                     elif waiting and level in {"L2", "L3"} and (not waiting["task"] or level == "L3"):
@@ -456,7 +468,15 @@ class Host:
                 from .telegram_presentation import normalize_result_view
                 async with open_host_session(self, work, lane="control") as (session, meta, level):
                     if level != "L3" or not await verify_telegram_binding(session, self.instance, key[0], meta, record["endpoint_key"]):
+                        self.telegram_routes.known.pop(key, None)
                         return {"available": False}
+                    if record.get("pairingRef"):
+                        from .telegram_reception import scope
+                        try:
+                            await scope(session, meta, record)
+                        except web.HTTPForbidden:
+                            self.telegram_routes.known.pop(key, None)
+                            return {"available": False}
                     task_meta = {
                         **meta,
                         "io.agentbridge/task": {

@@ -87,7 +87,7 @@ def scenario(capability):
         assert effects(fixture) == 1
         with sqlite3.connect(fixture.service.db_path) as db:
             signals = db.execute(
-                "SELECT COUNT(*) FROM agent_host_runtime_snapshots WHERE user_subject=? AND host_instance_id=? AND host_version='0.3.1' AND status='healthy'",
+                "SELECT COUNT(*) FROM agent_host_runtime_snapshots WHERE user_subject=? AND host_instance_id=? AND host_version='0.3.2' AND status='healthy'",
                 (OWNER, instance),
             ).fetchone()[0]
             assert signals

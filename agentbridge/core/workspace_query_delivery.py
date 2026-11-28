@@ -11,8 +11,8 @@ from .store_transactions import store_transaction
 MODE = "workspace_query_v2"
 SUPPORTED_VERSIONS = {
     "openclaw": ("0.4.134", "0.4.135", "0.4.136"),
-    "nanobot": ("0.3.1",),
-    "pi": ("0.1.8",),
+    "nanobot": ("0.3.1", "0.3.2"),
+    "pi": ("0.1.8", "0.1.9"),
 }
 VERSIONS = {host: versions[-1] for host, versions in SUPPORTED_VERSIONS.items()}
 CAPABILITY = "oa.workflow.pending.list"

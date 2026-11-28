@@ -1,8 +1,8 @@
 {
   "schemaVersion": "agentbridge.release-policy.v1",
   "compatibleFrom": [
-    "efb52fdcfd55"
+    "dccc2963386a"
   ],
   "dataCompatibility": "no-migration",
-  "reason": "Harden OpenClaw 0.4.136 sync/reference/card/storage paths, Central delivery state-machine leases and revocation/protocol fences, and Workspace error/reference UI reconciliation. Preserve the deployed efb52fdcfd55 four-database SQL schemas, existing delivery and history receipts, pairing identities, and data semantics with no schema migration or historical replay."
+  "reason": "Harden NanoBot 0.3.2, Pi 0.1.9, Reference-Host bound coordinator, and Central migration/reception/media paths (protocol-v2 ensure_host_task, rolling version and token-rotation migration support, enrollmentSenders receipt recovery, stale pairing eviction, inbound media retries and path/extension validation, L2 reception epoch support, Pi reference parsing before document concatenation, pi_timeline_media rotated-token skip, and redisplayed card closure watching). Preserve the deployed dccc2963386a SQL schemas, existing receipts, and pairing identities with no data migration or historical replay."
 }

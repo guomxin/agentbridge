@@ -2369,6 +2369,7 @@ class CentralCapabilityService:
         planning_report_plan_id: str | None = None,
         host_instance_id: str | None = None,
         host_version: str | None = None,
+        pairing_protocol: Any = None,
     ) -> dict:
         task_scope = str(task_scope or "host_run").strip()
         if task_scope not in {"host_run", "user_turn", "independent"}:
@@ -2381,7 +2382,14 @@ class CentralCapabilityService:
             if (len(parts) != 3 or parts[0] != "telegram" or client_type != "telegram"
                     or parts[1] != account_id or parts[2] != external_subject or not host_instance_id):
                 raise TaskIntegrityError("Telegram task requires the original private endpoint")
-            paired = TelegramPilotLinks(self).ensure_endpoint(user_subject,token_id,host_instance_id,parts[1],parts[2])
+            paired = TelegramPilotLinks(self).ensure_endpoint(
+                user_subject,
+                token_id,
+                host_instance_id,
+                parts[1],
+                parts[2],
+                protocol=pairing_protocol,
+            )
             if paired["conversationRef"] != conversation_ref:
                 raise TaskIntegrityError("Telegram task conversation has changed")
             endpoint = self.tasks.get_endpoint(paired["endpointId"],user_subject=user_subject)
